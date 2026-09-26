@@ -8,12 +8,12 @@ from tests.support import GitTestCase
 
 class NameFromUrlTest(unittest.TestCase):
     def test_https(self) -> None:
-        self.assertEqual(repos.name_from_url("https://github.com/gradle/gradle.git"), "gradle")
-        self.assertEqual(repos.name_from_url("https://github.com/gradle/gradle"), "gradle")
+        self.assertEqual(repos.name_from_url("https://github.com/example/project.git"), "project")
+        self.assertEqual(repos.name_from_url("https://github.com/example/project"), "project")
 
     def test_scp_style(self) -> None:
-        self.assertEqual(repos.name_from_url("git@github.com:gradle/gradle.git"), "gradle")
-        self.assertEqual(repos.name_from_url("host:gradle.git"), "gradle")
+        self.assertEqual(repos.name_from_url("git@github.com:example/project.git"), "project")
+        self.assertEqual(repos.name_from_url("host:project.git"), "project")
 
     def test_trailing_slash(self) -> None:
         self.assertEqual(repos.name_from_url("https://example.com/org/repo/"), "repo")
@@ -43,15 +43,15 @@ class WrapTest(GitTestCase):
         self.assertEqual([p.name for p in self.bottle_home.iterdir()], ["repos.json"])
 
     def test_name_from_origin(self) -> None:
-        repo = self.make_repo("checkout", origin="git@github.com:gradle/gradle.git")
-        self.assertEqual(repos.wrap(repo).repo.name, "gradle")
+        repo = self.make_repo("checkout", origin="git@github.com:example/project.git")
+        self.assertEqual(repos.wrap(repo).repo.name, "project")
 
     def test_name_falls_back_to_directory(self) -> None:
         repo = self.make_repo("my-tool")
         self.assertEqual(repos.wrap(repo).repo.name, "my-tool")
 
     def test_explicit_name(self) -> None:
-        repo = self.make_repo(origin="git@github.com:gradle/gradle.git")
+        repo = self.make_repo(origin="git@github.com:example/project.git")
         self.assertEqual(repos.wrap(repo, "custom").repo.name, "custom")
 
     def test_rejects_subdirectory(self) -> None:

@@ -46,5 +46,15 @@ class WrapCommandTest(GitTestCase):
         self.assertIn("takes [NAME] PATH", err)
 
 
+
+class BuildCommandTest(unittest.TestCase):
+    def test_image_is_required(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit_:
+            main(["build"])
+        self.assertEqual(exit_.exception.code, 2)
+        self.assertIn("the following arguments are required: image", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
