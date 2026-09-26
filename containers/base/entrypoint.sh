@@ -5,7 +5,7 @@ set -eu
 
 # Generate an SSH key on first boot only.
 [ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
-
-# Start SSH in the foreground.
 mkdir -p /run/sshd
-exec /usr/sbin/sshd -D -e
+
+# Run the command: sshd by default (see CMD), or whatever was passed to `run`.
+exec "$@"
