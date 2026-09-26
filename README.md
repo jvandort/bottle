@@ -26,6 +26,27 @@ bin/bottle wrap customname ~/path/to/reponame
 
 Set `BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
+### `bottle build IMAGE [--no-cache]`
+
+Builds the image defined in `containers/IMAGE` and tags it `bottle/IMAGE:latest`.
+
+```sh
+bin/bottle build base
+```
+
+### `bottle egress NAME --listen HOST:PORT [--allow PATTERN]...`
+
+Runs a bottle's egress proxy: an HTTP proxy (CONNECT and plain HTTP) that makes
+connections from the host, so they use the host's DNS and VPN routes. Public
+destinations are allowed. Private addresses are refused unless the hostname
+matches an `--allow` pattern; the host's own loopback and link-local addresses
+are always refused. Logs one line per connection. Bottle will start these
+itself; the command exists for testing.
+
+```sh
+bin/bottle egress mybottle --listen 192.168.128.1:3128 --allow '*.corp.example.com'
+```
+
 ## Development
 
 Run the tests from the repo root:
