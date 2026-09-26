@@ -1,4 +1,4 @@
-# bottle/base: Debian stable-slim plus the minimum every bottle needs.
+# bottle/base: the minimum to start a bottle and talk to it.
 
 # Pinned by digest so rebuilds are reproducible and the weekly upstream rebuild
 # never changes the image underneath us. Bump the digest deliberately.
@@ -17,24 +17,10 @@ RUN . /etc/os-release \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
-      fd-find \
-      git \
-      jq \
-      less \
-      openssh-client \
       openssh-server \
-      procps \
-      ripgrep \
       sudo \
       tini \
-      tmux \
-      unzip \
-      xz-utils \
-      vim \
- && rm -rf /var/lib/apt/lists/* \
- && ln -s /usr/bin/fdfind /usr/local/bin/fd
+ && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 genie \
  && useradd --uid 1000 --gid genie --create-home --shell /bin/bash genie \
@@ -50,15 +36,12 @@ RUN rm -f /etc/ssh/ssh_host_* \
 # Drop AcceptEnv to stop clients forwarding locales the image doesn't have.
  && sed -i '/^AcceptEnv/d' /etc/ssh/sshd_config
 
-COPY gitconfig /etc/gitconfig
-COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/bottle-entrypoint
 COPY profile.sh /etc/profile.d/bottle.sh
 
 # ENV reaches `container exec`; SSH sessions only see /etc/environment (via PAM).
-ENV LANG=C.UTF-8 \
-    EDITOR=vim
-RUN printf '%s\n' "LANG=$LANG" "EDITOR=$EDITOR" > /etc/environment
+ENV LANG=C.UTF-8
+RUN printf '%s\n' "LANG=$LANG" > /etc/environment
 
 # Default directory for `exec` sessions: the project.
 WORKDIR /workspace

@@ -30,8 +30,11 @@ Set `BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
 Builds the image defined in `containers/IMAGE` and tags it `bottle/IMAGE:latest`.
 
+Images build on each other, so build `base` before `tools`:
+
 ```sh
 bin/bottle build base
+bin/bottle build tools
 ```
 
 ### `bottle egress NAME --listen HOST:PORT [--allow PATTERN]...`
