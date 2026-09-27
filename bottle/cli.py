@@ -10,15 +10,30 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bottle", description="Sandboxed Linux environments for agents.")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    wrap = commands.add_parser(
-        "wrap",
-        help="register a local git repo with bottle",
-        usage="bottle wrap [NAME] PATH",
+    repo = commands.add_parser("repo", help="manage the repos bottles are created from")
+    repo_commands = repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
+    feature_help = "a default feature for its bottles, optionally with options, e.g. jvm:version=17 (repeatable)"
+    repo_add = repo_commands.add_parser(
+        "add",
+        help="register a local git repo",
+        usage="bottle repo add [NAME] PATH [--feature FEATURE]...",
         description="Register a local git repo so bottles can be created from it. "
         "NAME defaults to the origin remote's repo name, else the directory name.",
     )
-    wrap.add_argument("args", nargs="+", metavar="[NAME] PATH")
-    wrap.set_defaults(run=_wrap, parser=wrap)
+    repo_add.add_argument("args", nargs="+", metavar="[NAME] PATH")
+    repo_add.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+    repo_add.set_defaults(run=_repo_add, parser=repo_add)
+    repo_list = repo_commands.add_parser("list", help="list repos and their default features")
+    repo_list.set_defaults(run=_repo_list, parser=repo_list)
+    repo_set = repo_commands.add_parser(
+        "set",
+        help="replace a repo's settings",
+        description="Replace all of a repo's settings: its default features become exactly those given "
+        "(none, if none are given). Existing bottles keep the features they were created with.",
+    )
+    repo_set.add_argument("name", help="the repo")
+    repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+    repo_set.set_defaults(run=_repo_set, parser=repo_set)
 
     build = commands.add_parser(
         "build",
@@ -34,14 +49,15 @@ def main(argv: list[str] | None = None) -> int:
 
     new = commands.add_parser(
         "new",
-        help="create a bottle from a wrapped repo",
+        help="create a bottle from a repo",
         description="Create a bottle: REPO's branch checked out at /workspace, in its own VM. "
         "NAME defaults to the repo's name, then REPO-2, REPO-3, ...",
     )
-    new.add_argument("repo", help="a repo registered with `bottle wrap`")
+    new.add_argument("repo", help="a repo added with `bottle repo add`")
     new.add_argument(
         "--feature", action="append", default=[], metavar="FEATURE",
-        help="a feature to add, optionally with options, e.g. jvm:version=17 (repeatable); its dependencies come too",
+        help="a feature to add to the repo's defaults, optionally with options, e.g. jvm:version=17 "
+        "(repeatable); given for a default feature, it replaces that feature's options",
     )
     new.add_argument(
         "--branch",
@@ -62,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     fetch = git_commands.add_parser(
         "fetch",
         help="fetch a bottle's work into its repo",
-        description="Fetch a bottle's git work into the wrapped repo, as bottle-NAME/<branch>. "
+        description="Fetch a bottle's git work into its repo, as bottle-NAME/<branch>. "
         "Only adds and fast-forwards: history the bottle rewrote is refused, and nothing is deleted. "
         "With no REV: every branch, plus a detached HEAD. With a branch: just that branch. "
         "With a commit: that commit, into FETCH_HEAD.",
@@ -136,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _wrap(args: argparse.Namespace) -> int:
+def _repo_add(args: argparse.Namespace) -> int:
     match args.args:
         case [path]:
             name = None
@@ -145,10 +161,28 @@ def _wrap(args: argparse.Namespace) -> int:
         case _:
             args.parser.error("takes [NAME] PATH")
 
-    result = repos.wrap(Path(path).expanduser(), name)
-    status = "Wrapped" if result.created else "Already wrapped"
-    print(f"{status} {result.repo.name}: {result.repo.path}")
+    result = repos.add(Path(path).expanduser(), name, args.feature)
+    print(f"{'Added' if result.created else 'Already added'} {result.repo.name}: {result.repo.path}")
     return 0
+
+
+def _repo_list(args: argparse.Namespace) -> int:
+    rows = [("NAME", "PATH", "FEATURES")]
+    rows += [(r.name, str(r.path), " ".join(r.features) or "-") for r in sorted(repos.load().values(), key=lambda r: r.name)]
+    _table(rows)
+    return 0
+
+
+def _repo_set(args: argparse.Namespace) -> int:
+    repo = repos.set_settings(args.name, args.feature)
+    print(f"{repo.name}: features {' '.join(repo.features) or '(none)'}")
+    return 0
+
+
+def _table(rows: list[tuple[str, ...]]) -> None:
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
 
 
 def _new(args: argparse.Namespace) -> int:
@@ -177,9 +211,7 @@ def _list(args: argparse.Namespace) -> int:
 
     rows = [("NAME", "REPO", "BRANCH", "FEATURES", "STATE")]
     rows += [(b.name, b.repo, b.checkout, " ".join(sorted(b.features)) or "-", state) for b, state in bottles.list_all()]
-    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
-    for row in rows:
-        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    _table(rows)
     return 0
 
 

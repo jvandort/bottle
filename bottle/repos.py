@@ -1,11 +1,13 @@
-"""Wrapped repos: the user's local git repos that bottles can be created from.
+"""Repos: the user's local git repos that bottles can be created from.
 
-The registry at $BOTTLE_HOME/repos.json maps each repo's name to its location.
-Bottles later mount the repo's objects read-only; nothing is copied here.
+The registry at $BOTTLE_HOME/repos.json maps each repo's name to its location
+and its default features. It's plain JSON and fine to edit by hand; feature
+specs are checked again whenever a bottle is created. Bottles mount the repo's
+objects read-only; nothing is copied here.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bottle.errors import BottleError
@@ -23,51 +25,86 @@ def registry_path() -> Path:
 class Repo:
     name: str
     path: Path
+    # Features for this repo's bottles, as specs (e.g. jvm:version=17).
+    features: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class WrapResult:
+class AddResult:
     repo: Repo
     created: bool
 
 
-def wrap(path: Path, name: str | None = None) -> WrapResult:
-    """Register the repo at `path` under `name`. Re-wrapping the same repo is a no-op."""
+def add(path: Path, name: str | None = None, features: list[str] = ()) -> AddResult:
+    """Register the repo at `path` under `name`. Adding the same repo again is a no-op."""
     source = _toplevel(path)
     name = name or derive_name(source)
     if not NAME_PATTERN.fullmatch(name):
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
+    specs = canonical_features(features)
 
     repos = load()
     if name in repos:
-        if repos[name].path != source:
-            raise BottleError(f"{name!r} already wraps {repos[name].path}; choose another name")
-        return WrapResult(repos[name], created=False)
+        existing = repos[name]
+        if existing.path != source:
+            raise BottleError(f"{name!r} is already {existing.path}; choose another name")
+        if features and specs != existing.features:
+            raise BottleError(f"{name!r} is already added; change its features with `bottle repo set {name}`")
+        return AddResult(existing, created=False)
     for other in repos.values():
         if other.path == source:
-            raise BottleError(f"{source} is already wrapped as {other.name!r}")
+            raise BottleError(f"{source} is already added as {other.name!r}")
 
-    repo = Repo(name, source)
+    repo = Repo(name, source, specs)
     repos[name] = repo
     _save(repos)
-    return WrapResult(repo, created=True)
+    return AddResult(repo, created=True)
+
+
+def set_settings(name: str, features: list[str]) -> Repo:
+    """Replace every setting of the repo (today: its features). Existing bottles keep theirs."""
+    repo = replace(get(name), features=canonical_features(features))
+    repos = load()
+    repos[name] = repo
+    _save(repos)
+    return repo
+
+
+def canonical_features(specs: list[str]) -> tuple[str, ...]:
+    """Validate feature specs and put each in canonical form, keeping their order."""
+    from bottle import features  # imports images and runtime, which repos doesn't otherwise need
+
+    result: dict[str, str] = {}
+    for spec in specs:
+        feature_id, settings = features.parse_spec(spec)
+        canonical = features.load(feature_id).configured(settings).spec
+        if feature_id in result and result[feature_id] != canonical:
+            raise BottleError(f"feature {feature_id} given twice with different options")
+        result[feature_id] = canonical
+    return tuple(result.values())
 
 
 def load() -> dict[str, Repo]:
     data = read_json(registry_path()) or {"repos": {}}
-    return {name: Repo(name, Path(entry["path"])) for name, entry in data["repos"].items()}
+    return {
+        name: Repo(name, Path(entry["path"]), tuple(entry.get("features", ())))
+        for name, entry in data["repos"].items()
+    }
 
 
 def get(name: str) -> Repo:
     repos = load()
     if name not in repos:
-        known = ", ".join(sorted(repos)) or "none; add one with `bottle wrap`"
-        raise BottleError(f"no wrapped repo named {name!r} (wrapped: {known})")
+        known = ", ".join(sorted(repos)) or "none; add one with `bottle repo add`"
+        raise BottleError(f"no repo named {name!r} (repos: {known})")
     return repos[name]
 
 
 def _save(repos: dict[str, Repo]) -> None:
-    write_json(registry_path(), {"version": 1, "repos": {r.name: {"path": str(r.path)} for r in repos.values()}})
+    write_json(registry_path(), {
+        "version": 1,
+        "repos": {r.name: {"path": str(r.path), "features": list(r.features)} for r in repos.values()},
+    })
 
 
 @dataclass(frozen=True)
@@ -141,5 +178,5 @@ def _toplevel(path: Path) -> Path:
         raise BottleError(f"{path} is not a git repo") from None
     # git reports the resolved path, so resolve ours (symlinks, /var -> /private/var) to compare.
     if path.resolve() != toplevel:
-        raise BottleError(f"{path} is inside a git repo; wrap its root instead: {toplevel}")
+        raise BottleError(f"{path} is inside a git repo; add its root instead: {toplevel}")
     return toplevel
