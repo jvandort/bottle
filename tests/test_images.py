@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -48,6 +49,72 @@ class BuildCommandTest(unittest.IsolatedAsyncioTestCase):
     async def test_failure(self) -> None:
         with self.assertRaisesRegex(BottleError, "building bottle/base:latest failed"):
             await self.run_build(returncode=1)
+
+
+class DependencyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.containers = Path(tmp.name)
+        patcher = mock.patch.object(images, "CONTAINERS", self.containers)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def image(self, name: str, dockerfile: str) -> None:
+        (self.containers / name).mkdir()
+        (self.containers / name / "Dockerfile").write_text(dockerfile)
+
+    def test_real_images(self) -> None:
+        with mock.patch.object(images, "CONTAINERS", Path(images.__file__).resolve().parent.parent / "containers"):
+            self.assertEqual(images.build_order("tools"), ["base", "tools"])
+            self.assertEqual(images.dependencies("base"), [])
+
+    def test_from_lines(self) -> None:
+        self.image("base", "FROM debian:13\n")
+        self.image("a", "FROM --platform=linux/arm64 bottle/base:latest AS builder\nFROM bottle/base\n")
+        self.assertEqual(images.dependencies("a"), ["base"])
+        self.assertEqual(images.dependencies("base"), [])
+
+    def test_order_is_dependencies_first(self) -> None:
+        self.image("base", "FROM debian:13\n")
+        self.image("tools", "FROM bottle/base:latest\n")
+        self.image("agent", "FROM bottle/tools:latest\n")
+        self.image("multi", "FROM bottle/agent:latest AS a\nFROM bottle/tools:latest\n")
+        self.assertEqual(images.build_order("multi"), ["base", "tools", "agent", "multi"])
+
+    def test_cycle(self) -> None:
+        self.image("a", "FROM bottle/b\n")
+        self.image("b", "FROM bottle/a\n")
+        with self.assertRaisesRegex(BottleError, "cycle: a -> b -> a"):
+            images.build_order("a")
+
+    def test_missing_dependency(self) -> None:
+        self.image("a", "FROM bottle/ghost\n")
+        with self.assertRaisesRegex(BottleError, "a is built from bottle/ghost, but there's no containers/ghost"):
+            images.build_order("a")
+
+    def test_ensure_built_builds_only_whats_missing(self) -> None:
+        self.image("base", "FROM debian:13\n")
+        self.image("tools", "FROM bottle/base:latest\n")
+        built = []
+        for exists, expected in ((set(), ["base", "tools"]), ({"bottle/base:latest"}, ["tools"]),
+                                 ({"bottle/base:latest", "bottle/tools:latest"}, [])):
+            built.clear()
+            with self.subTest(exists=exists), \
+                    mock.patch.object(images.runtime, "image_exists", side_effect=lambda t: t in exists), \
+                    mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append(n)), \
+                    mock.patch("sys.stderr"):
+                images.ensure_built("tools")
+                self.assertEqual(built, expected)
+
+    def test_build_rebuilds_the_image_but_not_built_dependencies(self) -> None:
+        self.image("base", "FROM debian:13\n")
+        self.image("tools", "FROM bottle/base:latest\n")
+        built = []
+        with mock.patch.object(images.runtime, "image_exists", return_value=True), \
+                mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append((n, no_cache))):
+            self.assertEqual(images.build("tools", no_cache=True), "bottle/tools:latest")
+        self.assertEqual(built, [("tools", True)])
 
 
 class BuildImageTest(unittest.TestCase):

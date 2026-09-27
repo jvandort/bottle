@@ -8,12 +8,16 @@ Going through the host also gives builds the host's routes, e.g. a VPN.
 """
 
 import asyncio
+import re
+import sys
 from pathlib import Path
 
 from bottle import egress, prereqs, runtime
 from bottle.errors import BottleError
 
 CONTAINERS = Path(__file__).resolve().parent.parent / "containers"
+# A stage built on another bottle image, e.g. `FROM bottle/base:latest`.
+FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
 
 
 def available() -> list[str]:
@@ -24,16 +28,61 @@ def tag(name: str) -> str:
     return f"bottle/{name}:latest"
 
 
+def dependencies(name: str) -> list[str]:
+    """The bottle images `name` is built from, per its Dockerfile's FROM lines."""
+    _require(name)
+    return list(dict.fromkeys(FROM_BOTTLE.findall((CONTAINERS / name / "Dockerfile").read_text())))
+
+
+def build_order(name: str) -> list[str]:
+    """`name` and everything it's built from, dependencies first."""
+    order: list[str] = []
+
+    def visit(image: str, path: list[str]) -> None:
+        if image in path:
+            raise BottleError(f"images depend on each other in a cycle: {' -> '.join([*path, image])}")
+        if image in order:
+            return
+        if image not in available():
+            if not path:
+                _require(image)
+            raise BottleError(f"{path[-1]} is built from bottle/{image}, but there's no containers/{image}")
+        for dependency in dependencies(image):
+            visit(dependency, [*path, image])
+        order.append(image)
+
+    visit(name, [])
+    return order
+
+
+def ensure_built(name: str) -> None:
+    """Build `name`, and whatever it's built from, if not built yet."""
+    for image in build_order(name):
+        if not runtime.image_exists(tag(image)):
+            print(f"Building {tag(image)}...", file=sys.stderr)
+            _build_one(image)
+
+
 def build(name: str, no_cache: bool = False) -> str:
-    """Build the named image and return its tag."""
+    """Build the named image, first building anything it's built from that isn't built yet."""
+    for dependency in build_order(name)[:-1]:
+        ensure_built(dependency)
+    _build_one(name, no_cache)
+    return tag(name)
+
+
+def _require(name: str) -> None:
     if name not in available():
         raise BottleError(f"no image named {name!r}; available: {', '.join(available())}")
+
+
+def _build_one(name: str, no_cache: bool = False) -> None:
+    _require(name)
     prereqs.ensure_container()
     # The builder VM must be running before its network's gateway exists on the host.
     runtime.builder_start()
     gateway = runtime.network_gateway()
     asyncio.run(_build_via_proxy(CONTAINERS / name, tag(name), gateway, no_cache))
-    return tag(name)
 
 
 async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bool) -> None:
