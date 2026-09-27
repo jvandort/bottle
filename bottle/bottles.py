@@ -19,7 +19,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 
-from bottle import daemon, images, prereqs, repos, runtime
+from bottle import daemon, features as features_, images, prereqs, repos, runtime
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, read_json, write_json
@@ -28,6 +28,18 @@ OBJECTS_MOUNT = "/mnt/repo/objects"
 WORKSPACE = "/workspace"
 USER = "genie"
 NO_PROXY = "localhost,127.0.0.1"
+
+# What bottle relies on inside every bottle, checked (as genie) whenever one
+# starts. Documented in containers/images/base/Dockerfile; keep them in sync.
+CONTRACT = (
+    ("tini is PID 1", '[ "$(cat /proc/1/comm)" = tini ]'),
+    ("bottle-entrypoint is installed", "test -x /usr/local/bin/bottle-entrypoint"),
+    ("the genie user has UID 1000", '[ "$(id -un)" = genie ] && [ "$(id -u)" = 1000 ]'),
+    ("genie has passwordless sudo", "sudo -n true"),
+    ("/workspace exists and genie can write to it", "test -d /workspace && test -w /workspace"),
+    ("git is installed", "command -v git"),
+    ("sshd is installed", "test -x /usr/sbin/sshd"),
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +53,16 @@ class Bottle:
     created: float
     # "creating" until setup finishes, "ready" after; "broken" if cleanup failed.
     status: str = "creating"
+    # Features installed on top of the image, as specs (e.g. jvm:version=17), including dependencies.
+    features: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
+
+    @property
+    def environment(self) -> str:
+        """The image and its features, for display: base+claude+jvm."""
+        return "+".join([self.image, *sorted(self.features)])
 
     @property
     def checkout(self) -> str:
@@ -103,7 +125,9 @@ def default_name(repo: str, taken: set[str]) -> str:
     return f"{repo}-{n}"
 
 
-def create(repo_name: str, image: str, branch: str | None = None, name: str | None = None) -> Bottle:
+def create(
+    repo_name: str, image: str = images.BASE, branch: str | None = None, name: str | None = None, features: list[str] = ()
+) -> Bottle:
     repo = repos.get(repo_name)
     start = repos.Start(branch, repos.resolve_branch(repo, branch)) if branch else repos.default_start(repo)
     existing = load()
@@ -113,19 +137,23 @@ def create(repo_name: str, image: str, branch: str | None = None, name: str | No
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
     prereqs.ensure_container()
-    images.ensure_built(image)
+    installed = [f.spec for f in features_.resolve(list(features))]
+    tag = features_.ensure_built(image, installed)
 
-    bottle = Bottle(name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time())
+    bottle = Bottle(
+        name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(), features=tuple(installed)
+    )
     _save(bottle)
     try:
         git("update-ref", bottle.ref, bottle.commit, "", repo=repo.path)
         runtime.network_create(bottle.network)
         proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
         runtime.container_run(
-            bottle.container, images.tag(image), bottle.network,
+            bottle.container, tag, bottle.network,
             env=_proxy_env(proxy),
             mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
         )
+        verify_contract(bottle)
         # The gateway only exists once the container is on the network, so egress comes second.
         daemon.ensure_egress(bottle.name, bottle.network)
         _init_workspace(bottle)
@@ -150,7 +178,7 @@ def _proxy_env(proxy: str) -> dict[str, str]:
 
 def _init_workspace(bottle: Bottle) -> None:
     """Check out the bottle's branch (or detached commit) at /workspace, borrowing the mounted objects."""
-    image, commit = shlex.quote(bottle.image), shlex.quote(bottle.commit)
+    commit = shlex.quote(bottle.commit)
     if bottle.branch:
         branch = shlex.quote(bottle.branch)
         init, point_head = f"git init -q -b {branch} {WORKSPACE}", f"update-ref refs/heads/{branch} {commit}"
@@ -158,7 +186,6 @@ def _init_workspace(bottle: Bottle) -> None:
         init, point_head = f"git init -q {WORKSPACE}", f"update-ref --no-deref HEAD {commit}"
     script = f"""
         set -e
-        command -v git >/dev/null || {{ echo "image "{image}" has no git" >&2; exit 1; }}
         {init}
         echo {OBJECTS_MOUNT} > {WORKSPACE}/.git/objects/info/alternates
         git -C {WORKSPACE} {point_head}
@@ -203,8 +230,21 @@ def ensure_running(name: str) -> Bottle:
     if state != "running":
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
+        verify_contract(bottle)
     daemon.ensure_egress(bottle.name, bottle.network)
     return bottle
+
+
+def verify_contract(bottle: Bottle) -> None:
+    """Fail loudly unless the running bottle provides everything bottle relies on (CONTRACT)."""
+    checks = "\n".join(f"sh -c {shlex.quote(test)} >/dev/null 2>&1 || echo {shlex.quote(what)}" for what, test in CONTRACT)
+    try:
+        missing = _in_bottle(bottle, ["sh", "-c", f"# bottle contract\n{checks}"])
+    except BottleError as e:
+        missing = f"couldn't run the checks as {USER} ({e})"
+    if missing:
+        problems = "; ".join(missing.splitlines())
+        raise BottleError(f"{bottle.environment} doesn't meet the bottle contract: {problems}")
 
 
 def shell(name: str):

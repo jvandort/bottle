@@ -1,6 +1,7 @@
 import contextlib
 import io
 import unittest
+from unittest import mock
 
 from bottle.cli import main
 from tests.support import GitTestCase
@@ -48,12 +49,11 @@ class WrapCommandTest(GitTestCase):
 
 
 class BuildCommandTest(unittest.TestCase):
-    def test_image_is_required(self) -> None:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit_:
-            main(["build"])
-        self.assertEqual(exit_.exception.code, 2)
-        self.assertIn("the following arguments are required: image", err.getvalue())
+    def test_image_defaults_to_base(self) -> None:
+        with mock.patch("bottle.features.build", return_value="bottle/base:latest") as build, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["build", "--feature", "tools"]), 0)
+        build.assert_called_once_with("base", ["tools"], False)
 
 
 if __name__ == "__main__":

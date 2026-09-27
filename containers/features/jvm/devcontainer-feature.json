@@ -1,0 +1,33 @@
+{
+  "id": "jvm",
+  "version": "1.0.0",
+  "name": "JVM",
+  "description": "Eclipse Temurin JDKs (default 25; more with additionalVersions), from Adoptium's signed apt repository.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "25",
+      "proposals": [
+        "8",
+        "11",
+        "17",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27"
+      ],
+      "description": "JDK feature release to install; any that Adoptium publishes for this Debian release."
+    },
+    "additionalVersions": {
+      "type": "string",
+      "default": "",
+      "description": "More JDK feature releases to install alongside, comma-separated, e.g. 17,21. The primary version stays the default java."
+    }
+  },
+  "containerEnv": {
+    "JAVA_HOME": "/usr/lib/jvm/default-jdk"
+  }
+}

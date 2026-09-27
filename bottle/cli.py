@@ -23,9 +23,12 @@ def main(argv: list[str] | None = None) -> int:
     build = commands.add_parser(
         "build",
         help="build a bottle image",
-        description="Build the bottle image defined in containers/IMAGE.",
+        description="Build the bottle image, with any features from containers/features installed on top.",
     )
-    build.add_argument("image", help="image to build, e.g. base")
+    build.add_argument(
+        "--feature", action="append", default=[], metavar="FEATURE",
+        help="a feature to add, optionally with options, e.g. jvm:version=17 (repeatable)",
+    )
     build.add_argument("--no-cache", action="store_true", help="rebuild every step")
     build.set_defaults(run=_build, parser=build)
 
@@ -36,7 +39,10 @@ def main(argv: list[str] | None = None) -> int:
         "NAME defaults to the repo's name, then REPO-2, REPO-3, ...",
     )
     new.add_argument("repo", help="a repo registered with `bottle wrap`")
-    new.add_argument("--image", required=True, help="image to run, e.g. tools")
+    new.add_argument(
+        "--feature", action="append", default=[], metavar="FEATURE",
+        help="a feature to add, optionally with options, e.g. jvm:version=17 (repeatable); its dependencies come too",
+    )
     new.add_argument(
         "--branch",
         help="branch to check out (default: origin's default branch, else what the repo has checked out)",
@@ -149,9 +155,12 @@ def _new(args: argparse.Namespace) -> int:
     from bottle import bottles
 
     print(f"Creating a bottle from {args.repo}...", file=sys.stderr)
-    bottle = bottles.create(args.repo, args.image, args.branch, args.name)
+    from bottle import images
+
+    bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature)
     at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
-    print(f"Created {bottle.name}: {bottle.repo} {at} in {bottle.image}")
+    with_features = f" with {', '.join(sorted(bottle.features))}" if bottle.features else ""
+    print(f"Created {bottle.name}: {bottle.repo} {at}{with_features}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
 
@@ -166,8 +175,8 @@ def _shell(args: argparse.Namespace) -> int:
 def _list(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    rows = [("NAME", "REPO", "BRANCH", "IMAGE", "STATE")]
-    rows += [(b.name, b.repo, b.checkout, b.image, state) for b, state in bottles.list_all()]
+    rows = [("NAME", "REPO", "BRANCH", "FEATURES", "STATE")]
+    rows += [(b.name, b.repo, b.checkout, " ".join(sorted(b.features)) or "-", state) for b, state in bottles.list_all()]
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     for row in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
@@ -185,11 +194,11 @@ def _delete(args: argparse.Namespace) -> int:
 def _build(args: argparse.Namespace) -> int:
     import logging
 
-    from bottle import images
+    from bottle import features, images
 
     # Show the proxy's denials and failures; they explain most network errors in a build.
     logging.basicConfig(level=logging.WARNING, format="bottle: %(message)s")
-    print(f"Built {images.build(args.image, args.no_cache)}")
+    print(f"Built {features.build(images.BASE, args.feature, args.no_cache)}")
     return 0
 
 

@@ -56,7 +56,7 @@ class DependencyTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.containers = Path(tmp.name)
-        patcher = mock.patch.object(images, "CONTAINERS", self.containers)
+        patcher = mock.patch.object(images, "IMAGES", self.containers)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -65,8 +65,9 @@ class DependencyTest(unittest.TestCase):
         (self.containers / name / "Dockerfile").write_text(dockerfile)
 
     def test_real_images(self) -> None:
-        with mock.patch.object(images, "CONTAINERS", Path(images.__file__).resolve().parent.parent / "containers"):
-            self.assertEqual(images.build_order("tools"), ["base", "tools"])
+        self.assertEqual(images.available.__module__, "bottle.images")
+        with mock.patch.object(images, "IMAGES", Path(images.__file__).resolve().parent.parent / "containers" / "images"):
+            self.assertIn("base", images.available())
             self.assertEqual(images.dependencies("base"), [])
 
     def test_from_lines(self) -> None:
@@ -90,7 +91,7 @@ class DependencyTest(unittest.TestCase):
 
     def test_missing_dependency(self) -> None:
         self.image("a", "FROM bottle/ghost\n")
-        with self.assertRaisesRegex(BottleError, "a is built from bottle/ghost, but there's no containers/ghost"):
+        with self.assertRaisesRegex(BottleError, "a is built from bottle/ghost, but there's no containers/images/ghost"):
             images.build_order("a")
 
     def test_ensure_built_builds_only_whats_missing(self) -> None:
@@ -138,7 +139,7 @@ class BuildImageTest(unittest.TestCase):
     def test_builds_through_a_live_proxy(self) -> None:
         seen = {}
 
-        async def fake_build(context, tag, build_args, no_cache):
+        async def fake_build(context, tag, build_args, no_cache, dockerfile):
             seen.update(context=context, tag=tag, args=build_args, no_cache=no_cache)
             # The proxy must be serving while the build runs: ask it for something it refuses.
             host, port = build_args["https_proxy"].removeprefix("http://").split(":")
@@ -152,7 +153,7 @@ class BuildImageTest(unittest.TestCase):
 
         self.ensure_container.assert_called_once()
         self.builder_start.assert_called_once()
-        self.assertEqual(seen["context"], images.CONTAINERS / "base")
+        self.assertEqual(seen["context"], images.IMAGES / "base")
         self.assertTrue(seen["no_cache"])
         self.assertEqual(set(seen["args"]), {"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"})
         self.assertEqual(len(set(seen["args"].values())), 1)

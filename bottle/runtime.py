@@ -107,9 +107,13 @@ def _exec_options(user: str | None, workdir: str | None) -> list[str]:
     return options
 
 
-async def build(context: Path, tag: str, build_args: dict[str, str], no_cache: bool = False) -> None:
-    """Build the image at `context`, streaming progress to the terminal."""
+async def build(
+    context: Path, tag: str, build_args: dict[str, str], no_cache: bool = False, dockerfile: Path | None = None
+) -> None:
+    """Build the image at `context` (from `dockerfile`, default its Dockerfile), streaming progress."""
     cmd = ["container", "build", "--tag", tag]
+    if dockerfile:
+        cmd += ["--file", str(dockerfile)]
     # Never --quiet: it hangs indefinitely in container 1.4.
     cmd += ["--progress", "auto"]
     if no_cache:
