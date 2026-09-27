@@ -88,6 +88,11 @@ def container_exec(name: str, argv: list[str], user: str | None = None, workdir:
     return _run("exec", *_exec_options(user, workdir), name, *argv)
 
 
+def exec_command(name: str, argv: list[str], user: str | None = None) -> list[str]:
+    """The command line that runs `argv` in a container with stdin attached, for other tools to run."""
+    return ["container", "exec", "--interactive", *_exec_options(user, None), name, *argv]
+
+
 def container_exec_interactive(name: str, argv: list[str], user: str | None = None, workdir: str | None = None) -> NoReturn:
     """Replace this process with an interactive command in the container, attached to the terminal."""
     os.execvp("container", ["container", "exec", "--interactive", "--tty", *_exec_options(user, workdir), name, *argv])
