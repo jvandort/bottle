@@ -18,9 +18,9 @@ permissions inside. Take back only the commits you want.
 
 ```sh
 bottle repo add ~/path/to/foo --feature tools --feature claude
-bottle new foo        # Create a bottle with foo's default features
-bottle shell foo      # Open a shell at /workspace; run `claude` here
-bottle git fetch foo  # Transfer the agent's branches to your local repo, as bottle-foo/*
+bottle new foo            # Create a bottle with foo's default features
+bottle shell foo          # Open a shell at /workspace; run `claude` here
+bottle git fetch foo      # Transfer the agent's branches to your local repo, as bottle-foo/*
 ```
 
 ## Prerequisites
@@ -57,6 +57,27 @@ given. Existing bottles keep the features they were created with.
 Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 `BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
+### `bottle auth login CREDENTIAL`
+
+Logs in once, for every bottle. Features declare the credentials they need (the
+`claude` feature needs `claude`, a Claude subscription token). `login` runs the
+feature's own login command (`claude setup-token`) in a throwaway bottle,
+attached to your terminal, captures the credential it prints and stores it in
+the macOS Keychain. Every bottle with that feature gets it, as an environment
+variable, when it next starts. The agent can read a credential delivered to it.
+
+`bottle new`, `shell`, `start` and `reset` log in for you when a bottle's
+features need a credential that isn't set yet.
+
+```sh
+bottle auth login claude
+```
+
+### `bottle auth list` / `bottle auth set CREDENTIAL` / `bottle auth logout CREDENTIAL`
+
+Lists declared credentials and which are set; stores one read from stdin (for
+scripts); removes one. Bottles pick up changes when they next start.
+
 ### `bottle build [--feature FEATURE]... [--no-cache]`
 
 Builds the bottle image with the given features installed; `bottle new` does
@@ -79,7 +100,8 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `/usr/lib/jvm` (also as `/usr/lib/jvm/jdk-<version>`), where tools like
   Gradle's toolchains find them.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
-  the bottle's `/workspace` is trusted, first-run setup is done, and it reads
+  the bottle's `/workspace` is trusted, first-run setup is done, it's logged in
+  with the `claude` credential (`bottle auth login claude`), and it reads
   bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Options:
   `permissionMode` (default `bypassPermissions`: the bottle is the sandbox) and
   `theme` (default `dark`).
@@ -90,7 +112,8 @@ their defaults.
 
 bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
-`containerEnv`, and `dependsOn` / `installsAfter` naming local features.
+`containerEnv`, `dependsOn` / `installsAfter` naming local features, and
+`customizations.bottle` (credentials the feature needs).
 Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`

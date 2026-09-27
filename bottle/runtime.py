@@ -121,19 +121,33 @@ def container_delete(name: str) -> None:
         _run("delete", "--force", name)
 
 
-def container_exec(name: str, argv: list[str], user: str | None = None, workdir: str | None = None) -> str:
-    """Run a command in a running container and return its output."""
-    return _run("exec", *_exec_options(user, workdir), name, *argv)
+def container_exec(
+    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, input: str | None = None
+) -> str:
+    """Run a command in a running container and return its output. `input` is sent to its stdin."""
+    if input is None:
+        return _run("exec", *_exec_options(user, workdir), name, *argv)
+    return _run("exec", "--interactive", *_exec_options(user, workdir), name, *argv, input=input)
 
 
-def exec_command(name: str, argv: list[str], user: str | None = None) -> list[str]:
-    """The command line that runs `argv` in a container with stdin attached, for other tools to run."""
-    return ["container", "exec", "--interactive", *_exec_options(user, None), name, *argv]
+def exec_command(name: str, argv: list[str], user: str | None = None, tty: bool = False) -> list[str]:
+    """The command line that runs `argv` in a container with stdin attached (and a TTY), for other tools to run."""
+    return ["container", "exec", "--interactive", *(["--tty"] if tty else []), *_exec_options(user, None), name, *argv]
 
 
-def container_exec_interactive(name: str, argv: list[str], user: str | None = None, workdir: str | None = None) -> NoReturn:
-    """Replace this process with an interactive command in the container, attached to the terminal."""
-    os.execvp("container", ["container", "exec", "--interactive", "--tty", *_exec_options(user, workdir), name, *argv])
+def container_exec_interactive(
+    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, env: dict[str, str] | None = None
+) -> NoReturn:
+    """Replace this process with an interactive command in the container, attached to the terminal.
+
+    `env` is passed by name only (`--env NAME`, the value taken from this
+    process's environment), so values never appear on a command line.
+    """
+    names = []
+    for key, value in (env or {}).items():
+        os.environ[key] = value
+        names += ["--env", key]
+    os.execvp("container", ["container", "exec", "--interactive", "--tty", *names, *_exec_options(user, workdir), name, *argv])
 
 
 def _exec_options(user: str | None, workdir: str | None) -> list[str]:
@@ -171,8 +185,8 @@ def _succeeds(*args: str) -> bool:
     return subprocess.run(["container", *args], capture_output=True).returncode == 0
 
 
-def _run(*args: str) -> str:
-    result = subprocess.run(["container", *args], capture_output=True, text=True)
+def _run(*args: str, input: str | None = None) -> str:
+    result = subprocess.run(["container", *args], capture_output=True, text=True, input=input)
     if result.returncode != 0:
         raise BottleError(result.stderr.strip() or f"container {' '.join(args)} failed")
     return result.stdout

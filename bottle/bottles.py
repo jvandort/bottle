@@ -18,9 +18,10 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 
-from bottle import daemon, features as features_, images, prereqs, repos, runtime
+from bottle import auth, daemon, features as features_, images, prereqs, repos, runtime
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, read_json, write_json
@@ -141,6 +142,7 @@ def create(
     prereqs.ensure_container()
     installed = [f.spec for f in features_.resolve(merge_features(repo.features, list(features)))]
     tag = features_.ensure_built(image, installed)
+    auth.ensure_logged_in(installed)
 
     bottle = Bottle(
         name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(), features=tuple(installed)
@@ -173,6 +175,52 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     # The gateway only exists once the container is on the network, so egress comes second.
     daemon.ensure_egress(bottle.name, bottle.network)
     _init_workspace(bottle)
+    deliver_credentials(bottle)
+
+
+def deliver_credentials(bottle: Bottle) -> None:
+    """Put the credentials the bottle's features declare into /etc/environment, for SSH sessions.
+
+    Runs whenever the bottle starts, so logging in or out reaches it on its
+    next start. Values go in on stdin, never on a command line; a credential
+    that isn't set (anymore) is removed.
+    """
+    env = auth.env_for(bottle.features)
+    if not env:
+        return
+    lines = "".join(f"{key}={value or ''}\n" for key, value in env.items())
+    script = (
+        'while IFS= read -r line; do name=${line%%=*}; sed -i "/^$name=/d" /etc/environment; '
+        '[ "$line" = "$name=" ] || printf "%s\\n" "$line" >> /etc/environment; done'
+    )
+    runtime.container_exec(bottle.container, ["sh", "-c", script], user="root", input=lines)
+
+
+@contextmanager
+def throwaway(feature_specs: list[str]):
+    """A short-lived bottle with just these features and network access, and no repo.
+
+    Yields a function turning a command into the command line that runs it in
+    the throwaway bottle, attached to a terminal. Everything is removed on exit.
+    """
+    tag = features_.ensure_built(images.BASE, feature_specs)
+    name = f"bottle-throwaway-{uuid.uuid4().hex[:12]}"
+    try:
+        runtime.network_create(name)
+        proxy = daemon.proxy_url(runtime.network_gateway(name), daemon.EGRESS_PORT)
+        runtime.container_run(name, tag, name, env=_proxy_env(proxy), mounts=[])
+        daemon.ensure_egress(name, name)
+        yield lambda argv: runtime.exec_command(name, argv, user=USER, tty=True)
+    finally:
+        for cleanup in (
+            lambda: daemon.release_egress(name),
+            lambda: runtime.container_delete(name),
+            lambda: runtime.network_delete(name),
+        ):
+            try:
+                cleanup()
+            except Exception as e:
+                print(f"bottle: cleaning up {name}: {e}", file=sys.stderr)
 
 
 def reset(name: str, force: bool = False) -> Bottle:
@@ -188,6 +236,7 @@ def reset(name: str, force: bool = False) -> Bottle:
     bottle = get(name)
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
+    auth.ensure_logged_in(bottle.features)
     state = runtime.container_state(bottle.container)
     if not force and state is not None:
         _refuse_to_lose_work(bottle, "reset")
@@ -270,6 +319,7 @@ def _init_workspace(bottle: Bottle) -> None:
 
 
 def start(name: str) -> Bottle:
+    auth.ensure_logged_in(get(name).features)
     return ensure_running(name)
 
 
@@ -303,6 +353,7 @@ def ensure_running(name: str) -> Bottle:
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
         verify_contract(bottle)
+        deliver_credentials(bottle)
     daemon.ensure_egress(bottle.name, bottle.network)
     return bottle
 
@@ -320,8 +371,10 @@ def verify_contract(bottle: Bottle) -> None:
 
 
 def shell(name: str):
+    auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    runtime.container_exec_interactive(bottle.container, ["bash", "-l"], user=USER, workdir=WORKSPACE)
+    env = {key: value for key, value in auth.env_for(bottle.features).items() if value}
+    runtime.container_exec_interactive(bottle.container, ["bash", "-l"], user=USER, workdir=WORKSPACE, env=env)
 
 
 def fetched_prefix(bottle: Bottle) -> str:

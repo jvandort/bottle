@@ -12,7 +12,21 @@ error, so a feature never silently loses behavior it asked for:
   id, version (required); name, description, documentationURL, licenseURL,
   keywords (metadata); options (string and boolean, with defaults);
   containerEnv; dependsOn (local feature ids, without options);
-  installsAfter (local feature ids).
+  installsAfter (local feature ids); customizations.bottle (below).
+
+customizations.bottle.credentials declares credentials the feature needs, e.g.
+a login token. bottle stores them on the host and delivers them to bottles
+with the feature (see bottle/auth.py):
+
+  "customizations": {"bottle": {"credentials": {"claude": {
+      "description": "Claude subscription token",
+      "login": {"command": ["claude", "setup-token"], "capture": "Your OAuth token[^:]*:(.*?)Store this token"},
+      "env": "CLAUDE_CODE_OAUTH_TOKEN"}}}}
+
+login is optional: without it, `bottle auth login` asks for the value. capture
+is a regular expression with one group, matched (across lines) against the
+command's output with terminal escape codes removed; whitespace is removed from
+the captured value, since a narrow terminal may wrap it.
 
 Features are requested as specs: an id, optionally with option values, e.g.
 `jvm:version=17` or `name:a=1,b=true`. Unset options take their defaults.
@@ -38,7 +52,9 @@ FEATURES_LABEL = "bottle.features"
 REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
-SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter"} | METADATA_KEYS
+SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
+CREDENTIAL_KEYS = {"description", "login", "env"}
+LOGIN_KEYS = {"command", "capture"}
 OPTION_KEYS = {"type", "default", "description", "proposals", "enum"}
 OPTION_TYPES = {"string": str, "boolean": bool}
 
@@ -51,6 +67,20 @@ class Option:
 
 
 @dataclass(frozen=True)
+class Login:
+    command: tuple[str, ...]
+    capture: str  # regex with one group
+
+
+@dataclass(frozen=True)
+class Credential:
+    name: str
+    description: str
+    env: str  # delivered as this environment variable
+    login: Login | None = None
+
+
+@dataclass(frozen=True)
 class Feature:
     id: str
     version: str
@@ -59,6 +89,7 @@ class Feature:
     container_env: dict[str, str]
     depends_on: tuple[str, ...]
     installs_after: tuple[str, ...]
+    credentials: tuple[Credential, ...] = ()
     # Option values set explicitly (not defaulted), from the feature's spec.
     overrides: tuple[tuple[str, str | bool], ...] = ()
 
@@ -136,6 +167,7 @@ def load(feature_id: str) -> Feature:
         container_env=_container_env(spec.get("containerEnv", {}), fail),
         depends_on=_depends_on(spec.get("dependsOn", {}), fail),
         installs_after=_id_list(spec.get("installsAfter", []), "installsAfter", fail),
+        credentials=_customizations(spec.get("customizations", {}), fail),
     )
 
 
@@ -161,6 +193,55 @@ def _options(options, fail) -> dict[str, Option]:
         enum = option.get("enum")
         parsed[name] = Option(option["type"], option["default"], tuple(enum) if enum is not None else None)
     return parsed
+
+
+def _customizations(customizations, fail) -> tuple[Credential, ...]:
+    if not isinstance(customizations, dict):
+        raise fail("customizations must be an object")
+    unsupported = sorted(set(customizations) - {"bottle"})
+    if unsupported:
+        raise fail(f"customizations: unsupported: {', '.join(unsupported)} (only bottle is supported)")
+    bottle = customizations.get("bottle", {})
+    if not isinstance(bottle, dict):
+        raise fail("customizations.bottle must be an object")
+    unsupported = sorted(set(bottle) - {"credentials"})
+    if unsupported:
+        raise fail(f"customizations.bottle: unsupported: {', '.join(unsupported)}")
+    credentials = bottle.get("credentials", {})
+    if not isinstance(credentials, dict):
+        raise fail("customizations.bottle.credentials must be an object")
+    return tuple(_credential(name, spec, fail) for name, spec in credentials.items())
+
+
+def _credential(name, spec, fail) -> Credential:
+    where = f"credential {name!r}"
+    if not ID_PATTERN.fullmatch(name):
+        raise fail(f"{where}: names use lowercase letters, digits and '-'")
+    if not isinstance(spec, dict):
+        raise fail(f"{where} must be an object")
+    unsupported = sorted(set(spec) - CREDENTIAL_KEYS)
+    if unsupported:
+        raise fail(f"{where}: unsupported: {', '.join(unsupported)}")
+    if not isinstance(spec.get("description"), str) or not spec["description"]:
+        raise fail(f"{where}: needs a description")
+    if not isinstance(spec.get("env"), str) or not ENV_NAME.fullmatch(spec["env"]):
+        raise fail(f"{where}: env must be an environment variable name")
+    login = None
+    if "login" in spec:
+        raw = spec["login"]
+        if not isinstance(raw, dict) or set(raw) != LOGIN_KEYS:
+            raise fail(f"{where}: login needs exactly command and capture")
+        command = raw["command"]
+        if not isinstance(command, list) or not command or not all(isinstance(c, str) and c for c in command):
+            raise fail(f"{where}: login command must be a non-empty list of strings")
+        try:
+            groups = re.compile(raw["capture"]).groups if isinstance(raw["capture"], str) else -1
+        except re.error as e:
+            raise fail(f"{where}: login capture isn't a valid regular expression: {e}") from None
+        if groups != 1:
+            raise fail(f"{where}: login capture must be a regular expression with exactly one group")
+        login = Login(tuple(command), raw["capture"])
+    return Credential(name, spec["description"], spec["env"], login)
 
 
 def _container_env(env, fail) -> dict[str, str]:
