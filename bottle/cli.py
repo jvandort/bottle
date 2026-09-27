@@ -51,6 +51,23 @@ def main(argv: list[str] | None = None) -> int:
     shell.add_argument("name", help="the bottle")
     shell.set_defaults(run=_shell, parser=shell)
 
+    git = commands.add_parser("git", help="move git work between bottles and their repos")
+    git_commands = git.add_subparsers(dest="git_command", required=True, metavar="COMMAND")
+    fetch = git_commands.add_parser(
+        "fetch",
+        help="fetch a bottle's work into its repo",
+        description="Fetch a bottle's git work into the wrapped repo, as bottle-NAME/<branch>. "
+        "Only adds and fast-forwards: history the bottle rewrote is refused, and nothing is deleted. "
+        "With no REV: every branch, plus a detached HEAD. With a branch: just that branch. "
+        "With a commit: that commit, into FETCH_HEAD.",
+    )
+    fetch.add_argument("name", help="the bottle")
+    fetch.add_argument("rev", nargs="?", help="a branch or commit in the bottle (default: every branch)")
+    fetch.add_argument(
+        "-f", "--force", action="store_true", help="overwrite a branch the bottle rewrote (needs a single BRANCH)"
+    )
+    fetch.set_defaults(run=_fetch, parser=fetch)
+
     start = commands.add_parser("start", help="start a bottle", description="Start a stopped bottle and its network access.")
     start.add_argument("name", help="the bottle")
     start.set_defaults(run=_start, parser=start)
@@ -67,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Delete a bottle and everything it created. Also cleans up a bottle left half-made.",
     )
     delete.add_argument("name", help="the bottle")
+    delete.add_argument(
+        "-f", "--force", action="store_true",
+        help="delete even if the bottle has unfetched commits or uncommitted changes",
+    )
     delete.set_defaults(run=_delete, parser=delete)
 
     shutdown = commands.add_parser(
@@ -156,7 +177,7 @@ def _list(args: argparse.Namespace) -> int:
 def _delete(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    bottles.delete(args.name)
+    bottles.delete(args.name, args.force)
     print(f"Deleted {args.name}")
     return 0
 
@@ -169,6 +190,22 @@ def _build(args: argparse.Namespace) -> int:
     # Show the proxy's denials and failures; they explain most network errors in a build.
     logging.basicConfig(level=logging.WARNING, format="bottle: %(message)s")
     print(f"Built {images.build(args.image, args.no_cache)}")
+    return 0
+
+
+def _fetch(args: argparse.Namespace) -> int:
+    from bottle import bottles
+
+    result = bottles.fetch(args.name, args.rev, args.force)
+    if result.commit:
+        print(f"Fetched {result.commit[:12]} into FETCH_HEAD; keep it with: git branch <name> {result.commit[:12]}")
+    for u in result.updates:
+        change = u.new[:12] if u.old is None else f"{u.old[:12]} -> {u.new[:12]}"
+        print(f"  {u.kind:<8} {u.ref.removeprefix('refs/remotes/')}  {change}")
+    for branch in result.gone:
+        print(f"  gone     bottle-{args.name}/{branch}  (deleted in the bottle; kept here)")
+    if not result.commit and not result.updates and not result.gone:
+        print("Already up to date")
     return 0
 
 

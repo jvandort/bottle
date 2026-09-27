@@ -26,9 +26,36 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   aren't pinned: if the host deletes or rewrites the branch they're on and the
   repo is gc'd, they disappear from under the bottle and its checkout breaks.
   Work the agent commits itself is safe; its objects live in the bottle.
-- **Getting work back out.** Fetch the bottle's commits into the host repo
-  without SSH, e.g. a git transport over `container exec`
-  (`git-upload-pack` inside the bottle), or bundles.
+- **Fetched refs outlive their bottle.** `bottle git fetch` writes
+  `refs/remotes/bottle-NAME/*`, and `bottle delete` leaves them, since they may
+  be the only copy of the work. A later bottle with the same name fetches into the
+  same refs; fetches are additive, so a clash is refused rather than overwriting,
+  but it's confusing. Consider treating names with leftover fetched refs as
+  taken, or namespacing by bottle id.
+- **Fetch tags and pushing in.** `bottle git fetch` skips tags, and there's no way yet
+  to send new host commits into an existing bottle.
+- **Keeping the wrapped repo tidy.** Fetched refs (`bottle-NAME/*`) are never
+  deleted automatically: they stay after `bottle delete`, and after the bottle
+  deletes a branch (`fetch` reports these as gone). Pins (`refs/bottle/<id>`)
+  are removed only by `bottle delete`; never by any cleanup command, since a
+  pin that looks orphaned may belong to another `BOTTLE_HOME`. Commands:
+  - `bottle git refs [REPO]`: every bottle-owned ref, grouped by bottle, marked
+    live, deleted, or gone from the bottle.
+  - `bottle git prune [BOTTLE]`: delete fetched refs of deleted bottles and gone
+    branches, by default only those already reachable from the host's own
+    branches; `--force` for the rest, after listing them.
+  - `bottle git status NAME`: per bottle branch, ahead of what was fetched, and
+    whether it's merged into a host branch.
+  - `bottle git log NAME` / `bottle git diff NAME`: the bottle's work since its
+    starting commit, for review.
+- **`bottle git adopt NAME BRANCH [LOCAL]`.** Turn a fetched branch into a real
+  local branch (never overwriting one), optionally adding `Signed-off-by` and
+  re-signing commits on the host. Fetched refs stay visible to
+  `git branch -r` for now; adopt should become the usual way in.
+- **A git remote helper.** A `git-remote-bottle` executable would let plain git
+  (and IDEs) fetch with URLs like `bottle::gradle`, starting the bottle and
+  applying the additive rules, without enabling the `ext::` transport in the
+  repo's config.
 - **Commit identity and signing.** Bottles have no git identity; decide who
   commits (agent identity, `Signed-off-by`), and sign on the host after
   fetching, so signing keys never enter the bottle.
@@ -56,12 +83,46 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Credentials via the proxy.** Inject API keys and tokens as request
   headers at the egress proxy, so they never enter a bottle.
 
+## Host commands for the genie
+
+A channel for the bottle to ask the host to do specific things, e.g. a socket
+bottle injects into the bottle (vsock, or a published Unix socket), served by
+bottled. bottle decides which commands exist; the bottle can only request them,
+and the host can require approval. Candidates:
+
+- **Hand back work:** push a branch to the host repo (as `bottle-NAME/*`, the
+  same additive rules as `bottle git fetch`), so the agent can say "done" itself.
+- **Ask the human:** request approval, or a decision, and wait for the answer.
+- **Notify:** "finished", "blocked", "needs review", surfaced on the host.
+- **Open something on the host:** a URL in the host browser, e.g. an OAuth or
+  review page.
+- **Request a credential:** a short-lived token, scoped and logged, rather
+  than a long-lived secret in the bottle's environment.
+- **Host-only tools:** run an allowlisted command on the host, e.g. one that
+  needs host credentials or hardware.
+- **Bottle status:** time or resource budget left, egress policy, which hosts
+  are allowed.
+
+## Context for the genie
+
+Generate a description of its environment for the agent, e.g. an agent
+instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
+
+- It's in a sandboxed Linux VM (bottle), as `genie`, with passwordless sudo.
+- Network access is only via the HTTP proxy in `*_PROXY`; there's no DNS; which
+  destinations are allowed.
+- The repo at `/workspace`: which repo, branch and commit it started from; that
+  work reaches the host via `bottle git fetch` (or a host command), and branches are
+  fetched additively, so rewriting history gets refused.
+- What's installed (the image's tools), and what isn't available.
+- Which host commands exist, once they do.
+
 ## Agents
 
-- An image with agent CLIs installed.
 - Starting an agent in a bottle (in tmux, so it survives disconnects) and
   reattaching.
-- API key / login handling (see credentials via the proxy).
+- Authentication for agent CLIs (see credentials via the proxy).
+- Pre-seed agent config in images (e.g. Claude Code's first-run onboarding).
 
 ## Remote IDEs and SSH
 

@@ -57,15 +57,37 @@ Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped
 
 Lists bottles and their state.
 
+### `bottle git fetch NAME [REV] [--force]`
+
+Fetches the bottle's git work into the repo it was created from, as
+`bottle-NAME/<branch>` (listed by `git branch -r`). With no `REV`: every branch,
+plus the bottle's `HEAD` as `bottle-NAME/detached/<commit>` if it's detached.
+With a branch name: just that branch. With any other revision: that commit, into
+`FETCH_HEAD`.
+
+Fetching only adds: it creates and fast-forwards `bottle-NAME/*` refs, never
+deletes them (a branch deleted in the bottle stays, and is reported as gone), and
+never touches your own branches. If the bottle rewrote a branch's history, the
+fetch refuses to overwrite it and says so; `--force` overwrites one named branch.
+
+```sh
+bin/bottle git fetch gradle
+git log bottle-gradle/main
+```
+
 ### `bottle start NAME` / `bottle stop NAME`
 
 Starts or stops a bottle's VM. Stopping keeps the checkout and any changes;
 `shell` also starts a stopped bottle.
 
-### `bottle delete NAME`
+### `bottle delete NAME [--force]`
 
 Deletes the bottle and everything it created. If creating or deleting a bottle
 was interrupted, `delete` cleans up whatever is left.
+
+It refuses if the bottle has work its repo doesn't: commits that were never
+fetched, or uncommitted changes. Fetch them first, or pass `--force`. Branches
+already fetched into the repo (`bottle-NAME/*`) are kept.
 
 ### `bottle shutdown`
 
