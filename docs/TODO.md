@@ -21,7 +21,7 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 
 - **Pinning only covers the starting commit.** `refs/bottle/<id>` keeps the
   bottle's starting commit (and its history) from being garbage-collected in
-  the wrapped repo. The bottle can also reach any other object in the repo by
+  the repo. The bottle can also reach any other object in the repo by
   hash, e.g. by checking out another commit it learned about. Those objects
   aren't pinned: if the host deletes or rewrites the branch they're on and the
   repo is gc'd, they disappear from under the bottle and its checkout breaks.
@@ -34,7 +34,7 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   taken, or namespacing by bottle id.
 - **Fetch tags and pushing in.** `bottle git fetch` skips tags, and there's no way yet
   to send new host commits into an existing bottle.
-- **Keeping the wrapped repo tidy.** Fetched refs (`bottle-NAME/*`) are never
+- **Keeping the repo tidy.** Fetched refs (`bottle-NAME/*`) are never
   deleted automatically: they stay after `bottle delete`, and after the bottle
   deletes a branch (`fetch` reports these as gone). Pins (`refs/bottle/<id>`)
   are removed only by `bottle delete`; never by any cleanup command, since a
@@ -59,7 +59,10 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Commit identity and signing.** Bottles have no git identity; decide who
   commits (agent identity, `Signed-off-by`), and sign on the host after
   fetching, so signing keys never enter the bottle.
-- **Unwrap / moved repos.** No way to unwrap a repo or update its path.
+- **Removing and moving repos.** No `bottle repo remove`, and no way to update
+  a repo's path except editing `repos.json`.
+- **Global default features** (e.g. an agent for every repo), applied before a
+  repo's own.
 
 ## Network
 

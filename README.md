@@ -13,18 +13,28 @@ its services, a Linux kernel) as necessary and asks before installing anything.
 
 ## Commands
 
-### `bottle wrap [NAME] PATH`
+### `bottle repo add [NAME] PATH [--feature FEATURE]...`
 
-Registers the git repo rooted at `PATH` under `NAME` in `~/.bottle/repos.json`, so
-bottles can be created from it. Nothing is copied. `NAME` defaults to the origin
-remote's repo name, else the directory name. Re-wrapping the same repo is a no-op.
+Registers the git repo rooted at `PATH` under `NAME`, so bottles can be created
+from it. Nothing is copied. `NAME` defaults to the origin remote's repo name,
+else the directory name. The features become the defaults for the repo's
+bottles. Adding the same repo again is a no-op.
 
 ```sh
-bin/bottle wrap ~/path/to/reponame
-bin/bottle wrap customname ~/path/to/reponame
+bin/bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,additionalVersions=17,21 --feature claude
 ```
 
-Set `BOTTLE_HOME` to use a directory other than `~/.bottle`.
+### `bottle repo list`
+
+Lists repos and their default features.
+
+### `bottle repo set NAME [--feature FEATURE]...`
+
+Replaces all the repo's settings: its default features become exactly those
+given. Existing bottles keep the features they were created with.
+
+Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
+`BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
 ### `bottle build [--feature FEATURE]... [--no-cache]`
 
@@ -57,7 +67,8 @@ Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`
 
-Creates a bottle: a VM with the given features, with `REPO`'s `BRANCH` checked out at
+Creates a bottle: a VM with the repo's default features plus any given (a
+feature given again replaces that default's options), with `REPO`'s `BRANCH` checked out at
 `/workspace`. `BRANCH` defaults to the origin remote's default branch, or, if
 there's no origin, to whatever the repo has checked out (a branch or commit). The repo's history is
 mounted read-only, so nothing is cloned and the bottle can't change your repo.

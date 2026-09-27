@@ -19,30 +19,38 @@ class WrapCommandTest(GitTestCase):
 
     def test_path_only(self) -> None:
         repo = self.make_repo()
-        code, out, _ = self.run_cli("wrap", str(repo))
+        code, out, _ = self.run_cli("repo", "add", str(repo))
         self.assertEqual(code, 0)
-        self.assertIn("Wrapped project:", out)
+        self.assertIn("Added project:", out)
 
     def test_name_and_path(self) -> None:
         repo = self.make_repo()
-        code, out, _ = self.run_cli("wrap", "named", str(repo))
+        code, out, _ = self.run_cli("repo", "add", "named", str(repo))
         self.assertEqual(code, 0)
-        self.assertIn("Wrapped named:", out)
+        self.assertIn("Added named:", out)
 
     def test_rerun_reports_already_wrapped(self) -> None:
         repo = self.make_repo()
-        self.run_cli("wrap", str(repo))
-        code, out, _ = self.run_cli("wrap", str(repo))
+        self.run_cli("repo", "add", str(repo))
+        code, out, _ = self.run_cli("repo", "add", str(repo))
         self.assertEqual(code, 0)
-        self.assertEqual(out, f"Already wrapped project: {repo}\n")
+        self.assertEqual(out, f"Already added project: {repo}\n")
 
     def test_errors_exit_nonzero_without_traceback(self) -> None:
-        code, _, err = self.run_cli("wrap", str(self.tmp / "nope"))
+        code, _, err = self.run_cli("repo", "add", str(self.tmp / "nope"))
         self.assertEqual(code, 1)
         self.assertEqual(err, f"bottle: error: {self.tmp / 'nope'} is not a directory\n")
 
+    def test_add_with_features_then_list_and_set(self) -> None:
+        repo = self.make_repo()
+        self.run_cli("repo", "add", str(repo), "--feature", "tools", "--feature", "jvm:version=17")
+        _, out, _ = self.run_cli("repo", "list")
+        self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "jvm:version=17"])
+        code, out, _ = self.run_cli("repo", "set", "project")
+        self.assertEqual((code, out), (0, "project: features (none)\n"))
+
     def test_too_many_arguments(self) -> None:
-        code, _, err = self.run_cli("wrap", "a", "b", "c")
+        code, _, err = self.run_cli("repo", "add", "a", "b", "c")
         self.assertEqual(code, 2)
         self.assertIn("takes [NAME] PATH", err)
 

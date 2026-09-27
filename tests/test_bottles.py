@@ -117,7 +117,7 @@ class BottleTestCase(GitTestCase):
         super().setUp()
         self.repo_path = self.make_repo("gradle")
         self.head = run("git", "-C", self.repo_path, "rev-parse", "HEAD")
-        repos.wrap(self.repo_path)
+        repos.add(self.repo_path)
 
     def fake(self, **kwargs) -> FakeRuntime:
         fake = FakeRuntime(**kwargs)
@@ -230,7 +230,7 @@ class CreateTest(BottleTestCase):
         self.assertEqual(bottles.get("gradle").features, ())
 
     def test_unknown_repo(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no wrapped repo named 'nope'"):
+        with self.assertRaisesRegex(BottleError, "no repo named 'nope' \\(repos: gradle\\)"):
             bottles.create("nope", "tools")
 
     def test_unknown_branch(self) -> None:
@@ -376,6 +376,29 @@ class ContractTest(BottleTestCase):
         result = __import__("subprocess").run(script, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("tini is PID 1", result.stdout)  # this Mac isn't a bottle
+
+
+class RepoDefaultsTest(BottleTestCase):
+    def test_merge(self) -> None:
+        defaults = ("tools", "jvm:version=21", "claude")
+        self.assertEqual(bottles.merge_features(defaults, []), ["tools", "jvm:version=21", "claude"])
+        self.assertEqual(bottles.merge_features(defaults, ["node"]), ["tools", "jvm:version=21", "claude", "node"])
+        self.assertEqual(bottles.merge_features(defaults, ["jvm:version=17"]), ["tools", "jvm:version=17", "claude"])
+
+    def test_new_uses_the_repos_features(self) -> None:
+        self.fake()
+        repos.set_settings("gradle", ["tools", "jvm:version=21"])
+        with mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-x"):
+            bottle = bottles.create("gradle")
+        self.assertEqual(sorted(bottle.features), ["jvm:version=21", "tools"])
+
+    def test_existing_bottles_keep_their_features(self) -> None:
+        self.fake()
+        repos.set_settings("gradle", ["tools"])
+        with mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-x"):
+            bottles.create("gradle")
+        repos.set_settings("gradle", ["claude"])
+        self.assertEqual(bottles.get("gradle").features, ("tools",))
 
 
 class StartStopTest(BottleTestCase):

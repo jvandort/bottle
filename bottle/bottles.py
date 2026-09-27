@@ -1,4 +1,4 @@
-"""Bottles: a wrapped repo checked out in an image, running in its own VM.
+"""Bottles: a repo checked out in an image, running in its own VM.
 
 The registry at $BOTTLE_HOME/bottles.json is written before anything is
 created, so a failure at any point leaves a record of what may exist.
@@ -6,7 +6,7 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a ref, refs/bottle/<id>, in the wrapped repo, so its commit can't be gc'd
+  - a ref, refs/bottle/<id>, in the bottle's repo, so its commit can't be gc'd
   - a host-only network, bottle-<id>, reaching only the host
   - an egress proxy on that network's gateway, served by bottled
   - a container, bottle-<name>, with the repo's objects mounted read-only
@@ -137,7 +137,7 @@ def create(
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
     prereqs.ensure_container()
-    installed = [f.spec for f in features_.resolve(list(features))]
+    installed = [f.spec for f in features_.resolve(merge_features(repo.features, list(features)))]
     tag = features_.ensure_built(image, installed)
 
     bottle = Bottle(
@@ -166,6 +166,14 @@ def create(
     bottle = replace(bottle, status="ready")
     _save(bottle)
     return bottle
+
+
+def merge_features(defaults: tuple[str, ...] | list[str], extra: list[str]) -> list[str]:
+    """The repo's default features plus `extra`; an extra spec for a default feature replaces it."""
+    merged = {features_.parse_spec(spec)[0]: spec for spec in defaults}
+    for spec in extra:
+        merged[features_.parse_spec(spec)[0]] = spec
+    return list(merged.values())
 
 
 def _proxy_env(proxy: str) -> dict[str, str]:
@@ -253,13 +261,13 @@ def shell(name: str):
 
 
 def fetched_prefix(bottle: Bottle) -> str:
-    """Where fetched branches land in the wrapped repo; `git branch -r` shows them as bottle-NAME/..."""
+    """Where fetched branches land in the bottle's repo; `git branch -r` shows them as bottle-NAME/..."""
     return f"refs/remotes/bottle-{bottle.name}"
 
 
 @dataclass(frozen=True)
 class Update:
-    """One ref `bottle git fetch` wrote, or refused to write, in the wrapped repo."""
+    """One ref `bottle git fetch` wrote, or refused to write, in the bottle's repo."""
 
     ref: str  # e.g. refs/remotes/bottle-gradle/main
     kind: str  # "new", "updated", "forced" or "rejected"
@@ -271,7 +279,7 @@ class Update:
 class FetchResult:
     updates: list[Update]
     commit: str | None = None  # set when a bare commit was fetched into FETCH_HEAD
-    # Branches fetched before that the bottle no longer has; kept in the wrapped repo.
+    # Branches fetched before that the bottle no longer has; kept in the bottle's repo.
     gone: list[str] = field(default_factory=list)
 
 
@@ -280,7 +288,7 @@ _PORCELAIN_KINDS = {"*": "new", " ": "updated", "+": "forced", "!": "rejected"}
 
 
 def fetch(name: str, rev: str | None = None, force: bool = False) -> FetchResult:
-    """Fetch the bottle's work into the wrapped repo, without ever losing anything there.
+    """Fetch the bottle's work into the bottle's repo, without ever losing anything there.
 
     Only adds or fast-forwards bottle-NAME/* refs: history the bottle rewrote
     is refused (unless `force`, which needs a single branch), and branches
@@ -321,7 +329,7 @@ def fetch(name: str, rev: str | None = None, force: bool = False) -> FetchResult
 
 def unfetched_work(bottle: Bottle) -> list[str]:
     """What deleting the bottle would lose: branches (or a detached HEAD) whose
-    commits the wrapped repo doesn't have, and uncommitted changes."""
+    commits the bottle's repo doesn't have, and uncommitted changes."""
     repo = repos.get(bottle.repo)
     tips = _bottle_branches(bottle)
     head = _detached_head(bottle)
@@ -411,7 +419,7 @@ def list_all() -> list[tuple[Bottle, str]]:
 def delete(name: str, force: bool = False) -> None:
     """Remove every part of the bottle that exists, then its record.
 
-    Refuses, unless `force`, if the bottle has work the wrapped repo doesn't:
+    Refuses, unless `force`, if the bottle has work the bottle's repo doesn't:
     unfetched commits or uncommitted changes. A stopped bottle is started to
     check. Each step tolerates its part being absent, so this also finishes off
     a bottle left half-made or half-deleted. If a step fails, the record stays
@@ -455,7 +463,7 @@ def _delete_ref(bottle: Bottle) -> None:
     try:
         repo = repos.get(bottle.repo)
     except BottleError:
-        return  # repo was unwrapped; nothing left to clean in it
+        return  # repo was removed; nothing left to clean in it
     if repo.path.is_dir():
         git("update-ref", "-d", bottle.ref, repo=repo.path)
 
