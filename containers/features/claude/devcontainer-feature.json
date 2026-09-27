@@ -30,5 +30,22 @@
       ],
       "description": "Color theme, so first-run setup doesn't ask."
     }
+  },
+  "customizations": {
+    "bottle": {
+      "credentials": {
+        "claude": {
+          "description": "Claude subscription token, from `claude setup-token` (valid for a year)",
+          "login": {
+            "command": [
+              "claude",
+              "setup-token"
+            ],
+            "capture": "Your OAuth token[^:]*:(.*?)Store this token"
+          },
+          "env": "CLAUDE_CODE_OAUTH_TOKEN"
+        }
+      }
+    }
   }
 }

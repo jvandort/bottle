@@ -93,8 +93,13 @@ class FakeRuntime:
         self.containers.pop(name, None)
 
     contract_output = ""
+    credentials: dict = {}
 
-    def container_exec(self, name, argv, user=None, workdir=None):
+    def container_exec(self, name, argv, user=None, workdir=None, input=None):
+        if "/etc/environment" in argv[-1] and input is not None:
+            self._step("deliver_credentials")
+            self.delivered = input
+            return ""
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
@@ -125,6 +130,8 @@ class FakeRuntime:
             mock.patch.object(bottles.prereqs, "ensure_container"),
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
+            mock.patch.object(bottles.auth, "env_for", side_effect=lambda specs: dict(self.credentials)),
+            mock.patch.object(bottles.auth, "ensure_logged_in", side_effect=lambda specs: self.calls.append("ensure_logged_in")),
         ):
             patcher.start()
             test.addCleanup(patcher.stop)
@@ -162,7 +169,7 @@ class CreateTest(BottleTestCase):
     def test_order_container_before_egress(self) -> None:
         fake = self.fake()
         bottles.create("gradle", "base")
-        self.assertEqual(fake.calls, ["network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"])
+        self.assertEqual(fake.calls, ["ensure_logged_in", "network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
         fake = self.fake()
@@ -431,6 +438,50 @@ class RepoDefaultsTest(BottleTestCase):
             bottles.create("gradle")
         repos.set_settings("gradle", ["claude"])
         self.assertEqual(bottles.get("gradle").features, ("tools",))
+
+
+class CredentialDeliveryTest(BottleTestCase):
+    def test_bottles_without_credentials_get_nothing(self) -> None:
+        fake = self.fake()
+        bottles.create("gradle")
+        self.assertNotIn("deliver_credentials", fake.calls)
+
+    def test_delivered_at_creation_via_stdin(self) -> None:
+        fake = self.fake()
+        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "OTHER": None}
+        bottles.create("gradle")
+        self.assertEqual(fake.calls[-1], "deliver_credentials")
+        self.assertEqual(fake.delivered, "CLAUDE_CODE_OAUTH_TOKEN=tok\nOTHER=\n")  # unset ones are cleared
+
+    def test_delivered_again_when_a_stopped_bottle_starts(self) -> None:
+        fake = self.fake()
+        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+        bottle = bottles.create("gradle")
+        fake.containers[bottle.container] = "stopped"
+        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "new"}
+        bottles.ensure_running("gradle")
+        self.assertEqual(fake.delivered, "CLAUDE_CODE_OAUTH_TOKEN=new\n")
+
+    def test_new_start_reset_and_shell_log_in_first(self) -> None:
+        fake = self.fake()
+        bottles.create("gradle")
+        self.assertEqual(fake.calls[0], "ensure_logged_in")
+        for action in (bottles.start, bottles.reset):
+            fake.calls.clear()
+            action("gradle")
+            self.assertEqual(fake.calls[0], "ensure_logged_in", action.__name__)
+        fake.calls.clear()
+        with mock.patch.object(bottles.runtime, "container_exec_interactive"):
+            bottles.shell("gradle")
+        self.assertEqual(fake.calls[0], "ensure_logged_in")
+
+    def test_shell_passes_set_credentials_by_name(self) -> None:
+        fake = self.fake()
+        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "OTHER": None}
+        bottles.create("gradle")
+        with mock.patch.object(bottles.runtime, "container_exec_interactive") as interactive:
+            bottles.shell("gradle")
+        self.assertEqual(interactive.call_args.kwargs["env"], {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
 
 
 class DeleteImageTest(BottleTestCase):

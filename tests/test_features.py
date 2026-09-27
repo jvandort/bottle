@@ -114,6 +114,41 @@ class LoadTest(FeatureTestCase):
     def test_unknown_installs_after(self) -> None:
         self.assert_invalid("installsAfter: no feature named 'ghost'", installsAfter=["ghost"])
 
+    def credential(self, **spec) -> dict:
+        base = {"description": "A token", "env": "TOKEN"}
+        return {"bottle": {"credentials": {"tok": {**base, **spec}}}}
+
+    def test_credentials(self) -> None:
+        self.feature("a", customizations=self.credential(login={"command": ["cli", "login"], "capture": "token: (\\S+)"}))
+        [c] = features.load("a").credentials
+        self.assertEqual((c.name, c.env, c.login.command), ("tok", "TOKEN", ("cli", "login")))
+
+    def test_credential_without_a_login_flow(self) -> None:
+        self.feature("a", customizations=self.credential())
+        self.assertIsNone(features.load("a").credentials[0].login)
+
+    def test_other_tools_customizations_fail_loudly(self) -> None:
+        self.assert_invalid("customizations: unsupported: vscode", customizations={"vscode": {"extensions": []}})
+
+    def test_unknown_bottle_customizations(self) -> None:
+        self.assert_invalid("customizations.bottle: unsupported: ports", customizations={"bottle": {"ports": []}})
+
+    def test_credential_validation(self) -> None:
+        for spec, message in (
+            ({"description": ""}, "needs a description"),
+            ({"env": "1BAD"}, "env must be an environment variable name"),
+            ({"file": "/x"}, "unsupported: file"),
+            ({"login": {"command": ["x"]}}, "login needs exactly command and capture"),
+            ({"login": {"command": [], "capture": "(x)"}}, "non-empty list of strings"),
+            ({"login": {"command": ["x"], "capture": "no group"}}, "exactly one group"),
+            ({"login": {"command": ["x"], "capture": "(unclosed"}}, "isn't a valid regular expression"),
+        ):
+            with self.subTest(message):
+                self.feature("a", customizations=self.credential(**spec))
+                with self.assertRaisesRegex(BottleError, message):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
+
     def test_invalid_json(self) -> None:
         (self.root / "a").mkdir()
         (self.root / "a" / "devcontainer-feature.json").write_text("{nope")

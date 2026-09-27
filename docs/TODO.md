@@ -124,8 +124,17 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 
 - Starting an agent in a bottle (in tmux, so it survives disconnects) and
   reattaching.
-- Authentication for agent CLIs (see credentials via the proxy).
-- Pre-seed agent config in images (e.g. Claude Code's first-run onboarding).
+- **Open login URLs on the host.** A `$BROWSER` script in the base image that
+  asks bottled (e.g. via `http://bottle.host/open?url=...` through the egress
+  proxy) to `open` the URL on the Mac, so `bottle auth login` needs no copying.
+- **Keep credentials out of bottles.** Today a delivered credential is readable
+  by the agent. Deliver a stand-in instead and have bottled add the real one
+  (see credentials via the proxy).
+- **Leftover throwaway bottles.** `bottle auth login` removes its throwaway
+  bottle on exit, even when interrupted, but not if bottle itself is killed;
+  clean up `bottle-throwaway-*` containers and networks.
+- **Credential files.** Only environment variables are delivered; add file
+  delivery (and file capture at login) for tools that read credential files.
 
 ## Remote IDEs and SSH
 

@@ -35,6 +35,27 @@ def main(argv: list[str] | None = None) -> int:
     repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
     repo_set.set_defaults(run=_repo_set, parser=repo_set)
 
+    auth = commands.add_parser("auth", help="log in once; bottles get the credentials their features need")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True, metavar="COMMAND")
+    auth_list = auth_commands.add_parser("list", help="list credentials features declare, and which are set")
+    auth_list.set_defaults(run=_auth_list, parser=auth_list)
+    auth_login = auth_commands.add_parser(
+        "login",
+        help="log in, with the credential's own login flow",
+        description="Log in and store the credential in the Keychain. Runs the declaring feature's login "
+        "command in a throwaway bottle, attached to this terminal, and captures the credential it prints.",
+    )
+    auth_login.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    auth_login.set_defaults(run=_auth_login, parser=auth_login)
+    auth_set = auth_commands.add_parser(
+        "set", help="store a credential read from stdin", description="Store a credential read from stdin."
+    )
+    auth_set.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    auth_set.set_defaults(run=_auth_set, parser=auth_set)
+    auth_logout = auth_commands.add_parser("logout", help="remove a stored credential")
+    auth_logout.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    auth_logout.set_defaults(run=_auth_logout, parser=auth_logout)
+
     build = commands.add_parser(
         "build",
         help="build a bottle image",
@@ -196,6 +217,42 @@ def _table(rows: list[tuple[str, ...]]) -> None:
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     for row in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+
+
+def _auth_list(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    rows = [("CREDENTIAL", "FEATURE", "STATUS", "DESCRIPTION")]
+    rows += [(d.credential.name, d.feature, "set" if is_set else "not set", d.credential.description)
+             for d, is_set in auth.status()]
+    _table(rows)
+    return 0
+
+
+def _auth_login(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    auth.login(args.name)
+    print(f"Logged in: {args.name}. Bottles with it get it when they next start.")
+    return 0
+
+
+def _auth_set(args: argparse.Namespace) -> int:
+    import getpass
+
+    from bottle import auth
+
+    value = getpass.getpass(f"{args.name}: ") if sys.stdin.isatty() else sys.stdin.read()
+    auth.set_value(args.name, value)
+    print(f"Stored {args.name}. Bottles with it get it when they next start.")
+    return 0
+
+
+def _auth_logout(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    print(f"Removed {args.name}" if auth.logout(args.name) else f"{args.name} wasn't set")
+    return 0
 
 
 def _new(args: argparse.Namespace) -> int:
