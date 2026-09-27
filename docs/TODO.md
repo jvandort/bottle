@@ -136,8 +136,13 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 ## Images
 
 - **Rebuild stale images.** `bottle new` builds missing images but doesn't
-  notice outdated ones (a changed `containers/` dir, or a rebuilt parent).
-  Label images with a hash of their inputs and compare.
+  notice outdated ones (a changed `containers/images/` or
+  `containers/features/` dir, or a rebuilt base). Label images with a hash of
+  their inputs and compare.
+- **Composing without rebuilding.** Each new combination of features re-runs
+  every feature's install. If that gets slow, stack each feature's own layers
+  onto the base instead (no build), with conflict detection for files several
+  features change.
 - **Runtimes and more layers:** language runtimes as separate stages copied in
   (Node, Python via uv, a JDK, Go), mise for per-project versions, and
   read-only dependency caches (e.g. `GRADLE_RO_DEP_CACHE`).

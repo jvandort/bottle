@@ -1,0 +1,9 @@
+{
+  "id": "tools",
+  "version": "1.0.0",
+  "name": "Tools",
+  "description": "A minimal environment for doing useful work: ripgrep, fd, jq, curl, vim, tmux and friends.",
+  "containerEnv": {
+    "EDITOR": "vim"
+  }
+}

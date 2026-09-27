@@ -1,4 +1,4 @@
-"""Bottle images, built from containers/<name>/ in this repo.
+"""Bottle images, built from containers/images/<name>/ in this repo.
 
 Builds reach the network only through a temporary egress proxy on the host.
 The builder VM's own DNS goes through container's gateway forwarder, which
@@ -15,13 +15,16 @@ from pathlib import Path
 from bottle import egress, prereqs, runtime
 from bottle.errors import BottleError
 
-CONTAINERS = Path(__file__).resolve().parent.parent / "containers"
+IMAGES = Path(__file__).resolve().parent.parent / "containers" / "images"
+# The image every bottle starts from: the bottle contract. Not user-selectable;
+# other images here would be alternative foundations meeting the same contract.
+BASE = "base"
 # A stage built on another bottle image, e.g. `FROM bottle/base:latest`.
 FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
 
 
 def available() -> list[str]:
-    return sorted(p.parent.name for p in CONTAINERS.glob("*/Dockerfile"))
+    return sorted(p.parent.name for p in IMAGES.glob("*/Dockerfile"))
 
 
 def tag(name: str) -> str:
@@ -31,7 +34,7 @@ def tag(name: str) -> str:
 def dependencies(name: str) -> list[str]:
     """The bottle images `name` is built from, per its Dockerfile's FROM lines."""
     _require(name)
-    return list(dict.fromkeys(FROM_BOTTLE.findall((CONTAINERS / name / "Dockerfile").read_text())))
+    return list(dict.fromkeys(FROM_BOTTLE.findall((IMAGES / name / "Dockerfile").read_text())))
 
 
 def build_order(name: str) -> list[str]:
@@ -46,7 +49,7 @@ def build_order(name: str) -> list[str]:
         if image not in available():
             if not path:
                 _require(image)
-            raise BottleError(f"{path[-1]} is built from bottle/{image}, but there's no containers/{image}")
+            raise BottleError(f"{path[-1]} is built from bottle/{image}, but there's no containers/images/{image}")
         for dependency in dependencies(image):
             visit(dependency, [*path, image])
         order.append(image)
@@ -78,14 +81,19 @@ def _require(name: str) -> None:
 
 def _build_one(name: str, no_cache: bool = False) -> None:
     _require(name)
+    build_context(IMAGES / name, tag(name), no_cache)
+
+
+def build_context(context: Path, image: str, no_cache: bool = False, dockerfile: Path | None = None) -> None:
+    """Build `context` into `image`, reaching the network only through a temporary egress proxy."""
     prereqs.ensure_container()
     # The builder VM must be running before its network's gateway exists on the host.
     runtime.builder_start()
     gateway = runtime.network_gateway()
-    asyncio.run(_build_via_proxy(CONTAINERS / name, tag(name), gateway, no_cache))
+    asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile))
 
 
-async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bool) -> None:
+async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bool, dockerfile: Path | None) -> None:
     server = await egress.EgressProxy(f"build {image}", egress.Policy()).start(gateway, 0)
     port = server.sockets[0].getsockname()[1]
     proxy = f"http://{gateway}:{port}"
@@ -93,4 +101,4 @@ async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bo
     # and changing them (e.g. a new port per build) doesn't invalidate the cache.
     build_args = {key: proxy for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
     async with server:
-        await runtime.build(context, image, build_args, no_cache)
+        await runtime.build(context, image, build_args, no_cache, dockerfile)

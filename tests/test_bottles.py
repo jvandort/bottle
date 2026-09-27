@@ -1,5 +1,7 @@
+import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bottle import bottles, repos
@@ -73,7 +75,12 @@ class FakeRuntime:
     def container_delete(self, name):
         self.containers.pop(name, None)
 
+    contract_output = ""
+
     def container_exec(self, name, argv, user=None, workdir=None):
+        if "# bottle contract" in argv[-1]:
+            self._step("verify_contract")
+            return self.contract_output
         self._step("init_workspace")
         self.workspace_script = argv[-1]
         return ""
@@ -125,7 +132,7 @@ class CreateTest(BottleTestCase):
     def test_creates_every_part(self) -> None:
         fake = self.fake()
 
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
 
         self.assertEqual((bottle.name, bottle.branch, bottle.commit, bottle.status), ("gradle", "main", self.head, "ready"))
         self.assertEqual(bottles.get("gradle"), bottle)
@@ -136,18 +143,18 @@ class CreateTest(BottleTestCase):
 
     def test_order_container_before_egress(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
-        self.assertEqual(fake.calls, ["network_create", "container_run", "ensure_egress", "init_workspace"])
+        bottles.create("gradle", "base")
+        self.assertEqual(fake.calls, ["network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         self.assertEqual(fake.statuses_seen, ["creating"])
 
     def test_container_gets_image_proxy_and_read_only_objects(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
-        self.assertEqual(fake.run_args["image"], "bottle/tools:latest")
+        bottles.create("gradle", "base")
+        self.assertEqual(fake.run_args["image"], "bottle/base:latest")
         self.assertEqual(fake.run_args["env"]["HTTPS_PROXY"], "http://192.168.128.1:3128")
         self.assertEqual(fake.run_args["env"]["http_proxy"], "http://192.168.128.1:3128")
         [mount] = fake.run_args["mounts"]
@@ -156,19 +163,19 @@ class CreateTest(BottleTestCase):
     def test_workspace_script_quotes_values(self) -> None:
         run("git", "-C", self.repo_path, "branch", "we$rd;branch")
         fake = self.fake()
-        bottles.create("gradle", "tools", branch="we$rd;branch")
+        bottles.create("gradle", "base", branch="we$rd;branch")
         self.assertIn("git init -q -b 'we$rd;branch' /workspace", fake.workspace_script)
 
     def test_names_further_bottles(self) -> None:
         self.fake()
-        names = [bottles.create("gradle", "tools").name for _ in range(3)]
+        names = [bottles.create("gradle", "base").name for _ in range(3)]
         self.assertEqual(names, ["gradle", "gradle-2", "gradle-3"])
 
     def test_detached_start(self) -> None:
         self.commit(self.repo_path, "later")
         run("git", "-C", self.repo_path, "checkout", "-q", "--detach", self.head)
         fake = self.fake()
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
         self.assertEqual((bottle.branch, bottle.commit, bottle.checkout), (None, self.head, f"({self.head[:12]})"))
         self.assertIn(f"update-ref --no-deref HEAD {self.head}", fake.workspace_script)
         self.assertEqual(bottles.get("gradle"), bottle)  # survives the JSON round trip
@@ -176,14 +183,14 @@ class CreateTest(BottleTestCase):
     def test_explicit_name_and_branch(self) -> None:
         run("git", "-C", self.repo_path, "branch", "feature")
         self.fake()
-        bottle = bottles.create("gradle", "tools", branch="feature", name="mine")
+        bottle = bottles.create("gradle", "base", branch="feature", name="mine")
         self.assertEqual((bottle.name, bottle.branch), ("mine", "feature"))
 
     def test_duplicate_name(self) -> None:
         self.fake()
-        bottles.create("gradle", "tools", name="mine")
+        bottles.create("gradle", "base", name="mine")
         with self.assertRaisesRegex(BottleError, "already exists"):
-            bottles.create("gradle", "tools", name="mine")
+            bottles.create("gradle", "base", name="mine")
 
     def test_unknown_image(self) -> None:
         self.fake()
@@ -193,9 +200,34 @@ class CreateTest(BottleTestCase):
 
     def test_builds_the_image_first(self) -> None:
         fake = self.fake()
-        with mock.patch.object(bottles.images, "ensure_built", side_effect=lambda i: fake.calls.append(f"ensure_built {i}")):
-            bottles.create("gradle", "tools")
-        self.assertEqual(fake.calls[0], "ensure_built tools")
+
+        def ensure_built(image, feature_ids):
+            fake.calls.append(f"ensure_built {image} {feature_ids}")
+            return "bottle/base:with-tools"
+
+        with mock.patch.object(bottles.features_, "ensure_built", side_effect=ensure_built):
+            bottle = bottles.create("gradle", "base", features=["tools"])
+        self.assertEqual(fake.calls[0], "ensure_built base ['tools']")
+        self.assertEqual(fake.run_args["image"], "bottle/base:with-tools")
+        self.assertEqual((bottle.features, bottle.environment), (("tools",), "base+tools"))
+        self.assertEqual(bottles.get("gradle").features, ("tools",))  # survives the JSON round trip
+
+    def test_records_feature_dependencies(self) -> None:
+        self.fake()
+        resolved = [SimpleNamespace(spec="tools"), SimpleNamespace(spec="jvm")]
+        with mock.patch.object(bottles.features_, "resolve", return_value=resolved), \
+                mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-jvm.tools"):
+            bottle = bottles.create("gradle", "base", features=["jvm"])
+        self.assertEqual(bottle.features, ("tools", "jvm"))
+        self.assertEqual(bottle.environment, "base+jvm+tools")
+
+    def test_old_records_without_features_load(self) -> None:
+        self.fake()
+        bottles.create("gradle", "base")
+        data = json.loads(bottles.registry_path().read_text())
+        del data["bottles"]["gradle"]["features"]
+        bottles.registry_path().write_text(json.dumps(data))
+        self.assertEqual(bottles.get("gradle").features, ())
 
     def test_unknown_repo(self) -> None:
         with self.assertRaisesRegex(BottleError, "no wrapped repo named 'nope'"):
@@ -204,16 +236,16 @@ class CreateTest(BottleTestCase):
     def test_unknown_branch(self) -> None:
         self.fake()
         with self.assertRaisesRegex(BottleError, "has no branch 'nope'"):
-            bottles.create("gradle", "tools", branch="nope")
+            bottles.create("gradle", "base", branch="nope")
 
 
 class RollbackTest(BottleTestCase):
     def test_failure_at_each_step_leaves_nothing(self) -> None:
-        for step in ("network_create", "container_run", "ensure_egress", "init_workspace"):
+        for step in ("network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"):
             with self.subTest(step):
                 fake = self.fake(fail=step)
                 with self.assertRaisesRegex(BottleError, f"{step} failed"):
-                    bottles.create("gradle", "tools")
+                    bottles.create("gradle", "base")
                 self.assertEqual(bottles.load(), {})
                 self.assertEqual(self.bottle_refs(), "")
                 self.assertEqual((fake.networks, fake.containers, fake.egress), (set(), {}, set()))
@@ -222,21 +254,21 @@ class RollbackTest(BottleTestCase):
         fake = self.fake()
         with mock.patch.object(bottles.runtime, "container_run", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
-                bottles.create("gradle", "tools")
+                bottles.create("gradle", "base")
         self.assertEqual(bottles.load(), {})
         self.assertEqual(fake.networks, set())
 
     def test_failed_cleanup_keeps_a_broken_record(self) -> None:
         self.fake(fail="init_workspace", fail_cleanup="network")
         with self.assertRaisesRegex(BottleError, "init_workspace failed; cleanup also failed: .*network busy"):
-            bottles.create("gradle", "tools")
+            bottles.create("gradle", "base")
         self.assertEqual(bottles.get("gradle").status, "broken")
 
 
 class DeleteTest(BottleTestCase):
     def test_removes_every_part(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         bottles.delete("gradle")
         self.assertEqual(bottles.load(), {})
         self.assertEqual(self.bottle_refs(), "")
@@ -244,7 +276,7 @@ class DeleteTest(BottleTestCase):
 
     def test_finishes_off_a_half_made_bottle(self) -> None:
         fake = self.fake()
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
         # As if creation died after the network: no container, no egress.
         fake.containers.clear()
         fake.egress.clear()
@@ -254,7 +286,7 @@ class DeleteTest(BottleTestCase):
 
     def test_retry_after_a_failed_delete(self) -> None:
         fake = self.fake(fail_cleanup="network")
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         with self.assertRaisesRegex(BottleError, "rerun `bottle delete gradle`"):
             bottles.delete("gradle")
         self.assertEqual(bottles.get("gradle").status, "broken")
@@ -272,7 +304,7 @@ class DeleteTest(BottleTestCase):
 class EnsureRunningTest(BottleTestCase):
     def test_starts_a_stopped_bottle_and_its_egress(self) -> None:
         fake = self.fake()
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
         fake.containers[bottle.container] = "stopped"
         fake.egress.clear()
 
@@ -281,16 +313,24 @@ class EnsureRunningTest(BottleTestCase):
         self.assertEqual(fake.containers[bottle.container], "running")
         self.assertEqual(fake.egress, {"gradle"})
 
+    def test_starting_verifies_the_contract(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("gradle")
+        fake.containers[bottle.container] = "stopped"
+        fake.calls.clear()
+        bottles.ensure_running("gradle")
+        self.assertEqual(fake.calls, ["container_start", "verify_contract", "ensure_egress"])
+
     def test_running_bottle_only_ensures_egress(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         fake.calls.clear()
         bottles.ensure_running("gradle")
         self.assertEqual(fake.calls, ["ensure_egress"])
 
     def test_missing_container(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         fake.containers.clear()
         with self.assertRaisesRegex(BottleError, "container is gone; remove it with `bottle delete gradle`"):
             bottles.ensure_running("gradle")
@@ -298,15 +338,50 @@ class EnsureRunningTest(BottleTestCase):
     def test_unfinished_bottle(self) -> None:
         self.fake(fail="init_workspace", fail_cleanup="network")
         with self.assertRaises(BottleError):
-            bottles.create("gradle", "tools")
+            bottles.create("gradle", "base")
         with self.assertRaisesRegex(BottleError, "gradle is broken"):
             bottles.ensure_running("gradle")
+
+
+class ContractTest(BottleTestCase):
+    def test_every_check_has_a_description(self) -> None:
+        self.assertTrue(all(what and test for what, test in bottles.CONTRACT))
+
+    def test_a_broken_contract_fails_creation_and_rolls_back(self) -> None:
+        fake = self.fake()
+        fake.contract_output = "git is installed\n/workspace exists and genie can write to it\n"
+        with self.assertRaisesRegex(
+            BottleError, "base doesn't meet the bottle contract: git is installed; /workspace exists and genie can write to it"
+        ):
+            bottles.create("gradle")
+        self.assertEqual((bottles.load(), fake.containers), ({}, {}))
+
+    def test_image_defaults_to_base(self) -> None:
+        fake = self.fake()
+        self.assertEqual(bottles.create("gradle").image, "base")
+        self.assertEqual(fake.run_args["image"], "bottle/base:latest")
+
+    def test_checks_run_in_the_bottle(self) -> None:
+        # Run the real checks against this machine: the script itself must be well-formed.
+        script = None
+
+        def capture(name, argv, user=None, workdir=None):
+            nonlocal script
+            script = argv
+            return ""
+
+        bottle = bottles.Bottle("b", "id", "r", "base", "main", "c" * 40, 0.0)
+        with mock.patch.object(bottles.runtime, "container_exec", side_effect=capture):
+            bottles.verify_contract(bottle)
+        result = __import__("subprocess").run(script, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tini is PID 1", result.stdout)  # this Mac isn't a bottle
 
 
 class StartStopTest(BottleTestCase):
     def test_stop_stops_the_vm_and_egress(self) -> None:
         fake = self.fake()
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
         bottles.stop("gradle")
         self.assertEqual(fake.containers[bottle.container], "stopped")
         self.assertEqual(fake.egress, set())
@@ -314,7 +389,7 @@ class StartStopTest(BottleTestCase):
 
     def test_stop_a_stopped_bottle(self) -> None:
         fake = self.fake()
-        bottles.create("gradle", "tools")
+        bottles.create("gradle", "base")
         bottles.stop("gradle")
         fake.calls.clear()
         bottles.stop("gradle")
@@ -322,7 +397,7 @@ class StartStopTest(BottleTestCase):
 
     def test_start_after_stop(self) -> None:
         fake = self.fake()
-        bottle = bottles.create("gradle", "tools")
+        bottle = bottles.create("gradle", "base")
         bottles.stop("gradle")
         bottles.start("gradle")
         self.assertEqual(fake.containers[bottle.container], "running")
@@ -330,8 +405,8 @@ class StartStopTest(BottleTestCase):
 
     def test_shutdown_stops_running_bottles_then_bottled(self) -> None:
         fake = self.fake()
-        a = bottles.create("gradle", "tools")
-        b = bottles.create("gradle", "tools")
+        a = bottles.create("gradle", "base")
+        b = bottles.create("gradle", "base")
         bottles.stop(b.name)
         fake.calls.clear()
 
@@ -348,7 +423,7 @@ class WorkspaceTestCase(BottleTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.fake()
-        self.bottle = bottles.create("gradle", "tools")
+        self.bottle = bottles.create("gradle", "base")
         self.workspace = self.tmp / "workspace"
         run("git", "clone", "-q", self.repo_path, self.workspace)
 
@@ -525,8 +600,8 @@ class DeleteGuardTest(WorkspaceTestCase):
 class ListTest(BottleTestCase):
     def test_states(self) -> None:
         fake = self.fake()
-        a = bottles.create("gradle", "tools")
-        b = bottles.create("gradle", "tools")
+        a = bottles.create("gradle", "base")
+        b = bottles.create("gradle", "base")
         fake.containers[b.container] = "stopped"
         self.assertEqual([(x.name, state) for x, state in bottles.list_all()], [("gradle", "running"), ("gradle-2", "stopped")])
         fake.containers.pop(a.container)

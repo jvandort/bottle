@@ -1,4 +1,15 @@
-# bottle/base: the minimum to start a bottle and talk to it.
+# bottle/base: the bottle contract, and nothing else. Features add the rest.
+#
+# The contract is what bottle's own commands rely on inside a bottle:
+#   - tini as PID 1, running bottle-entrypoint, which mirrors proxy settings
+#     into /etc/environment and runs the command (sshd by default)
+#   - the genie user, UID 1000, with passwordless sudo
+#   - /workspace, owned by genie: the checkout
+#   - git: setting up /workspace, `bottle git fetch` (upload-pack), and
+#     `bottle delete`'s check for unfetched work
+#   - sshd, for IDEs
+# bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
+# keep the two in sync.
 
 # Pinned by digest so rebuilds are reproducible and the weekly upstream rebuild
 # never changes the image underneath us. Bump the digest deliberately.
@@ -17,6 +28,7 @@ RUN . /etc/os-release \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+      git \
       openssh-server \
       sudo \
       tini \

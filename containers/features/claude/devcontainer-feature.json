@@ -1,0 +1,9 @@
+{
+  "id": "claude",
+  "version": "1.0.0",
+  "name": "Claude Code",
+  "description": "Claude Code, from Anthropic's signed apt repository (stable channel).",
+  "containerEnv": {
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}

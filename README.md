@@ -26,27 +26,46 @@ bin/bottle wrap customname ~/path/to/reponame
 
 Set `BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
-### `bottle build IMAGE [--no-cache]`
+### `bottle build [--feature FEATURE]... [--no-cache]`
 
-Builds the image defined in `containers/IMAGE` and tags it `bottle/IMAGE:latest`.
-Images can build on each other (`FROM bottle/base:latest`); any dependency that `IMAGE`
-is built from and that aren't built yet are built first.
+Builds the bottle image with the given features installed; `bottle new` does
+this itself when needed.
 
 ```sh
-bin/bottle build tools
+bin/bottle build --feature tools --feature claude
 ```
 
-### `bottle new REPO --image IMAGE [--branch BRANCH] [--name NAME]`
+Features, in the [Dev Container feature](https://containers.dev/implementors/features/)
+format (a `devcontainer-feature.json` and an `install.sh` per directory):
 
-Creates a bottle: a VM running `IMAGE`, with `REPO`'s `BRANCH` checked out at
+- `tools`: a minimal working environment (ripgrep, fd, jq, curl, vim, tmux, ...).
+- `jvm`: Eclipse Temurin JDKs, from Adoptium's signed apt repository. Options:
+  `version` (default `25`), the default `java` and `JAVA_HOME`; and
+  `additionalVersions`, more JDKs alongside it, e.g. `17,21`. Every JDK is in
+  `/usr/lib/jvm` (also as `/usr/lib/jvm/jdk-<version>`), where tools like
+  Gradle's toolchains find them.
+- `claude`: Claude Code, from Anthropic's signed apt repository.
+
+A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.
+`--feature jvm:version=21,additionalVersions=17,11`. Options left out take
+their defaults.
+
+bottle runs features itself (no Dev Container tooling or Node) and supports a
+subset of the format: `id`, `version`, metadata, `options` (string and boolean),
+`containerEnv`, and `dependsOn` / `installsAfter` naming local features.
+Anything else in a definition is an error. Remote features aren't supported.
+
+### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`
+
+Creates a bottle: a VM with the given features, with `REPO`'s `BRANCH` checked out at
 `/workspace`. `BRANCH` defaults to the origin remote's default branch, or, if
 there's no origin, to whatever the repo has checked out (a branch or commit). The repo's history is
 mounted read-only, so nothing is cloned and the bottle can't change your repo.
-`NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. Builds
-`IMAGE` first if it isn't built yet.
+`NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
+with those features is built first if it isn't built yet.
 
 ```sh
-bin/bottle new gradle --image tools
+bin/bottle new reponame --feature tools --feature jvm --feature claude
 ```
 
 ### `bottle shell NAME`
