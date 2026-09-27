@@ -2,8 +2,33 @@
   "id": "claude",
   "version": "1.0.0",
   "name": "Claude Code",
-  "description": "Claude Code, from Anthropic's signed apt repository (stable channel).",
+  "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle.",
   "containerEnv": {
     "DISABLE_AUTOUPDATER": "1"
+  },
+  "options": {
+    "permissionMode": {
+      "type": "string",
+      "default": "bypassPermissions",
+      "enum": [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        "dontAsk",
+        "bypassPermissions"
+      ],
+      "description": "Permission mode new sessions start in (permissions.defaultMode). The bottle is the sandbox, so the default runs everything without asking."
+    },
+    "theme": {
+      "type": "string",
+      "default": "dark",
+      "proposals": [
+        "auto",
+        "dark",
+        "light"
+      ],
+      "description": "Color theme, so first-run setup doesn't ask."
+    }
   }
 }

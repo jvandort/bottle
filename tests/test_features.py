@@ -15,6 +15,11 @@ class RealFeaturesTest(unittest.TestCase):
             with self.subTest(feature_id):
                 features.load(feature_id)
 
+    def test_claude_options(self) -> None:
+        self.assertEqual(features.load("claude").option_env(), {"PERMISSIONMODE": "bypassPermissions", "THEME": "dark"})
+        with self.assertRaisesRegex(BottleError, "option permissionMode must be one of"):
+            features.resolve(["claude:permissionMode=yolo"])
+
     def test_jvm_options(self) -> None:
         self.assertEqual(features.load("jvm").option_env(), {"VERSION": "25", "ADDITIONALVERSIONS": ""})
         [jvm] = features.resolve(["jvm:version=21,additionalVersions=17,11"])
@@ -265,28 +270,65 @@ class BuildTest(FeatureTestCase):
         for patcher in (
             mock.patch.object(features.images, "ensure_built", side_effect=lambda i: self.built.append(f"image {i}")),
             mock.patch.object(features, "_build", side_effect=lambda i, fs, tag, no_cache=False: self.built.append(tag)),
+            mock.patch.object(features, "remove_stale", side_effect=lambda: self.built.append("remove stale") or []),
             mock.patch("sys.stderr"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_ensure_built_builds_base_then_the_combination(self) -> None:
-        with mock.patch.object(features.runtime, "image_exists", return_value=False):
+    def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
+        with mock.patch.object(features.images, "is_current", return_value=False):
             self.assertEqual(features.ensure_built("base", ["jvm"]), "bottle/base:with-jvm.tools")
-        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools"])
+        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools", "remove stale"])
 
-    def test_ensure_built_skips_an_existing_combination(self) -> None:
-        with mock.patch.object(features.runtime, "image_exists", return_value=True):
+    def test_ensure_built_skips_a_current_combination(self) -> None:
+        with mock.patch.object(features.images, "is_current", return_value=True):
             features.ensure_built("base", ["jvm"])
         self.assertEqual(self.built, ["image base"])
+
+    def test_feature_changes_make_the_combination_stale(self) -> None:
+        [jvm, tools] = features.resolve(["jvm"])[::-1]
+        before = features.inputs_hash("base", [tools, jvm])
+        (self.root / "jvm" / "install.sh").write_text("#!/bin/sh\necho changed\n")
+        self.assertNotEqual(features.inputs_hash("base", [tools, jvm]), before)
 
     def test_no_features_is_just_the_image(self) -> None:
         self.assertEqual(features.ensure_built("base", []), "bottle/base:latest")
         self.assertEqual(self.built, ["image base"])
 
     def test_build_always_rebuilds_the_combination(self) -> None:
-        features.build("base", ["jvm"])
-        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools"])
+        with mock.patch.object(features.images, "is_current", return_value=True):
+            features.build("base", ["jvm"])
+        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools", "remove stale"])
+
+
+class RemoveStaleTest(FeatureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.feature("tools")
+        [tools] = features.resolve(["tools"])
+        self.current = features.inputs_hash("base", [tools])
+        self.deleted: list[str] = []
+
+    def run_with(self, images: dict[str, tuple[str, dict]], in_use: set[str]) -> list[str]:
+        refs = [features.runtime.ImageRef(name, digest) for name, (digest, _) in images.items()]
+        with mock.patch.object(features.runtime, "images", return_value=refs), \
+                mock.patch.object(features.runtime, "images_in_use", return_value=in_use), \
+                mock.patch.object(features.runtime, "image_labels", side_effect=lambda n: images[n][1]), \
+                mock.patch.object(features.runtime, "image_delete", side_effect=self.deleted.append):
+            return features.remove_stale()
+
+    def test_deletes_stale_unused_bottle_images_only(self) -> None:
+        removed = self.run_with({
+            "bottle/base:with-tools": ("sha256:a", {"bottle.features": "tools", "bottle.inputs": self.current}),
+            "bottle/base:with-old": ("sha256:b", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
+            "bottle/base:with-in-use": ("sha256:c", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
+            "bottle/base:with-gone": ("sha256:d", {"bottle.features": "no-such-feature", "bottle.inputs": "x"}),
+            "bottle/base:with-unlabeled": ("sha256:e", {"bottle.features": "tools"}),
+            "debian:13": ("sha256:f", {}),
+        }, in_use={"sha256:c"})
+        self.assertEqual(removed, ["bottle/base:with-old", "bottle/base:with-gone", "bottle/base:with-unlabeled"])
+        self.assertEqual(self.deleted, removed)
 
 
 if __name__ == "__main__":

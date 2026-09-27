@@ -15,6 +15,7 @@ Each bottle has:
 
 import shlex
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -28,6 +29,7 @@ OBJECTS_MOUNT = "/mnt/repo/objects"
 WORKSPACE = "/workspace"
 USER = "genie"
 NO_PROXY = "localhost,127.0.0.1"
+CONTEXT_FILE = "BOTTLE.md"  # in genie's home
 
 # What bottle relies on inside every bottle, checked (as genie) whenever one
 # starts. Documented in containers/images/base/Dockerfile; keep them in sync.
@@ -147,24 +149,67 @@ def create(
     try:
         git("update-ref", bottle.ref, bottle.commit, "", repo=repo.path)
         runtime.network_create(bottle.network)
-        proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
-        runtime.container_run(
-            bottle.container, tag, bottle.network,
-            env=_proxy_env(proxy),
-            mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
-        )
-        verify_contract(bottle)
-        # The gateway only exists once the container is on the network, so egress comes second.
-        daemon.ensure_egress(bottle.name, bottle.network)
-        _init_workspace(bottle)
+        _run_container(bottle, repo, tag)
     except BaseException as failure:
         try:
-            delete(bottle.name, force=True)
+            delete(bottle.name, force=True, keep_image=True)
         except Exception as cleanup:
             raise BottleError(f"{_describe(failure)}; cleanup also failed: {cleanup}") from failure
         raise
     bottle = replace(bottle, status="ready")
     _save(bottle)
+    return bottle
+
+
+def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
+    """Start a fresh container for the bottle from `tag`, and set it up from scratch."""
+    proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
+    runtime.container_run(
+        bottle.container, tag, bottle.network,
+        env=_proxy_env(proxy),
+        mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
+    )
+    verify_contract(bottle)
+    # The gateway only exists once the container is on the network, so egress comes second.
+    daemon.ensure_egress(bottle.name, bottle.network)
+    _init_workspace(bottle)
+
+
+def reset(name: str, force: bool = False) -> Bottle:
+    """Start the bottle over: a fresh VM from its features' image, and /workspace
+    at the latest commit of its branch in the repo (a bottle started from a
+    detached commit stays at that commit). Its name and network stay; its pin
+    moves to the new commit.
+
+    Refuses, unless `force`, if the bottle has work its repo doesn't. Uses the
+    current image for its features, rebuilding it if stale. A stopped bottle is
+    stopped again afterwards. Also repairs a bottle whose container is gone.
+    """
+    bottle = get(name)
+    if bottle.status != "ready":
+        raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
+    state = runtime.container_state(bottle.container)
+    if not force and state is not None:
+        _refuse_to_lose_work(bottle, "reset")
+    repo = repos.get(bottle.repo)
+    commit = repos.resolve_branch(repo, bottle.branch) if bottle.branch else bottle.commit
+    prereqs.ensure_container()
+    tag = features_.ensure_built(bottle.image, list(bottle.features))
+    if commit != bottle.commit:
+        # Move the pin (only if it's still where the record says), then the record.
+        git("update-ref", bottle.ref, commit, bottle.commit, repo=repo.path)
+        bottle = replace(bottle, commit=commit)
+        _save(bottle)
+    daemon.release_egress(bottle.name)
+    runtime.container_delete(bottle.container)
+    try:
+        if not runtime.network_exists(bottle.network):
+            runtime.network_create(bottle.network)
+        _run_container(bottle, repo, tag)
+    except BottleError as e:
+        raise BottleError(f"resetting {name} failed: {e}; rerun `bottle reset {name}`, or delete it") from None
+    if state not in (None, "running"):
+        stop(name)
     return bottle
 
 
@@ -184,6 +229,24 @@ def _proxy_env(proxy: str) -> dict[str, str]:
     return env
 
 
+def context(bottle: Bottle) -> str:
+    """What the agent should know about its bottle, written to ~/BOTTLE.md when its workspace is set up.
+
+    Agent-neutral: agent features point their own instruction files at it
+    (the claude feature links ~/.claude/CLAUDE.md to it). Nothing in it changes
+    over the bottle's life (no commits), so it never goes stale.
+    """
+    at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
+    return (
+        "# Bottle\n\n"
+        "You're running in a bottle: a sandboxed Linux VM.\n\n"
+        f"- You're `{USER}`, with passwordless sudo.\n"
+        f"- `{WORKSPACE}` is a checkout of the `{bottle.repo}` repo, {at}.\n"
+        "- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY` (already set). "
+        "There's no DNS, and private addresses are blocked.\n"
+    )
+
+
 def _init_workspace(bottle: Bottle) -> None:
     """Check out the bottle's branch (or detached commit) at /workspace, borrowing the mounted objects."""
     commit = shlex.quote(bottle.commit)
@@ -198,6 +261,7 @@ def _init_workspace(bottle: Bottle) -> None:
         echo {OBJECTS_MOUNT} > {WORKSPACE}/.git/objects/info/alternates
         git -C {WORKSPACE} {point_head}
         git -C {WORKSPACE} reset -q --hard
+        printf '%s' {shlex.quote(context(bottle))} > "$HOME/{CONTEXT_FILE}"
     """
     try:
         runtime.container_exec(bottle.container, ["sh", "-c", script], user=USER)
@@ -234,7 +298,7 @@ def ensure_running(name: str) -> Bottle:
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
     state = runtime.container_state(bottle.container)
     if state is None:
-        raise BottleError(f"{name}'s container is gone; remove it with `bottle delete {name}`")
+        raise BottleError(f"{name}'s container is gone; recreate it with `bottle reset {name}`, or `bottle delete {name}`")
     if state != "running":
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
@@ -416,8 +480,28 @@ def list_all() -> list[tuple[Bottle, str]]:
     return result
 
 
-def delete(name: str, force: bool = False) -> None:
-    """Remove every part of the bottle that exists, then its record.
+def _refuse_to_lose_work(bottle: Bottle, action: str) -> None:
+    """Raise unless the bottle's work is all in its repo. Starts a stopped bottle to check."""
+    name = bottle.name
+    try:
+        ensure_running(name)
+        lost = unfetched_work(bottle)
+    except BottleError as e:
+        raise BottleError(f"couldn't check {name} for unfetched work ({e}); {action} anyway with --force") from None
+    if lost:
+        hints = []
+        if "uncommitted changes" in lost:
+            hints.append("commit the changes in the bottle")
+        if any(item != "uncommitted changes" for item in lost) or hints:
+            hints.append(f"fetch with `bottle git fetch {name}`")
+        raise BottleError(
+            f"{name} has work its repo doesn't: {', '.join(lost)}. "
+            f"To keep it, {' and '.join(hints)}; or {action} anyway with --force"
+        )
+
+
+def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
+    """Remove every part of the bottle that exists, then its record, and its image if no other bottle uses it.
 
     Refuses, unless `force`, if the bottle has work the bottle's repo doesn't:
     unfetched commits or uncommitted changes. A stopped bottle is started to
@@ -427,21 +511,7 @@ def delete(name: str, force: bool = False) -> None:
     """
     bottle = get(name)
     if not force and bottle.status == "ready" and runtime.container_state(bottle.container) is not None:
-        try:
-            ensure_running(name)
-            lost = unfetched_work(bottle)
-        except BottleError as e:
-            raise BottleError(f"couldn't check {name} for unfetched work ({e}); delete anyway with --force") from None
-        if lost:
-            hints = []
-            if "uncommitted changes" in lost:
-                hints.append("commit the changes in the bottle")
-            if any(item != "uncommitted changes" for item in lost) or hints:
-                hints.append(f"fetch with `bottle git fetch {name}`")
-            raise BottleError(
-                f"{name} has work its repo doesn't: {', '.join(lost)}. "
-                f"To keep it, {' and '.join(hints)}; or delete anyway with --force"
-            )
+        _refuse_to_lose_work(bottle, "delete")
     failures = []
     for step, action in (
         ("egress", lambda: daemon.release_egress(bottle.name)),
@@ -457,6 +527,25 @@ def delete(name: str, force: bool = False) -> None:
         _save(replace(bottle, status="broken"))
         raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `bottle delete {name}`")
     _forget(name)
+    if not keep_image:
+        _delete_image(bottle)
+
+
+def _delete_image(bottle: Bottle) -> None:
+    """Delete the bottle's features image if no container uses it, and any stale images.
+
+    Best effort: the bottle is already gone. The base image is kept, since every
+    bottle is built on it.
+    """
+    try:
+        if bottle.features:
+            tag = features_.image_tag(bottle.image, features_.resolve(list(bottle.features)))
+            in_use = runtime.images_in_use()
+            if any(ref.name == tag and ref.digest not in in_use for ref in runtime.images()):
+                runtime.image_delete(tag)
+        features_.remove_stale()
+    except BottleError as e:
+        print(f"bottle: couldn't remove {bottle.name}'s image: {e}", file=sys.stderr)
 
 
 def _delete_ref(bottle: Bottle) -> None:

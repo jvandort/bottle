@@ -34,6 +34,7 @@ FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
 ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 STAGING = "/tmp/bottle-features"
+FEATURES_LABEL = "bottle.features"
 REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
@@ -292,37 +293,84 @@ def dockerfile(image: str, features: list[Feature]) -> str:
                 for k in f.container_env
             )
             lines.append(f"RUN {mirror}")
-    lines += ["", f"LABEL bottle.features={json.dumps(' '.join(sorted(f.spec for f in features)))}", ""]
+    lines += ["", f"LABEL {FEATURES_LABEL}={json.dumps(' '.join(sorted(f.spec for f in features)))}", ""]
     return "\n".join(lines)
 
 
+def inputs_hash(image: str, features: list[Feature]) -> str:
+    """What an image with features is built from: the image's inputs, and each feature's directory and options."""
+    digest = hashlib.sha256(images.inputs_hash(image).encode())
+    for f in features:
+        digest.update(f"\0{f.spec}\0{images.tree_hash(f.path)}".encode())
+    return digest.hexdigest()
+
+
 def ensure_built(image: str, specs: list[str]) -> str:
-    """Build `image` with the features in `specs` if not built yet; return its tag."""
+    """Build `image` with the features in `specs` if missing or stale; return its tag."""
     features = resolve(specs)
     tag = image_tag(image, features)
-    images.ensure_built(image)
-    if features and not runtime.image_exists(tag):
+    built = images.ensure_built(image)
+    if features and not images.is_current(tag, inputs_hash(image, features)):
         print(f"Building {tag}...", file=sys.stderr)
         _build(image, features, tag)
+        built = True
+    if built:
+        _report_removed(remove_stale())
     return tag
+
+
+def remove_stale() -> list[str]:
+    """Delete bottle's images whose inputs have changed since they were built, unless a container uses one.
+
+    Returns the images deleted.
+    """
+    in_use = runtime.images_in_use()
+    removed = []
+    for ref in runtime.images():
+        if not ref.name.startswith("bottle/") or ref.digest in in_use:
+            continue
+        labels = runtime.image_labels(ref.name) or {}
+        if labels.get(images.INPUTS_LABEL) != _expected_inputs(ref.name, labels):
+            runtime.image_delete(ref.name)
+            removed.append(ref.name)
+    return removed
+
+
+def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
+    """The inputs hash an image with this tag and labels should have now; None if it can't be built any more."""
+    repository, _, _ = tag.partition(":")
+    image = repository.removeprefix("bottle/")
+    try:
+        if FEATURES_LABEL not in labels:
+            return images.inputs_hash(image)
+        return inputs_hash(image, resolve(labels[FEATURES_LABEL].split()))
+    except BottleError:
+        return None
 
 
 def build(image: str, specs: list[str], no_cache: bool = False) -> str:
     """Build `image` with the features in `specs`, first building anything missing underneath."""
     if not specs:
-        return images.build(image, no_cache)
-    features = resolve(specs)
-    tag = image_tag(image, features)
-    images.ensure_built(image)
-    _build(image, features, tag, no_cache)
+        tag = images.build(image, no_cache)
+    else:
+        features = resolve(specs)
+        tag = image_tag(image, features)
+        images.ensure_built(image)
+        _build(image, features, tag, no_cache)
+    _report_removed(remove_stale())
     return tag
+
+
+def _report_removed(removed: list[str]) -> None:
+    for name in removed:
+        print(f"Removed stale image {name}", file=sys.stderr)
 
 
 def _build(image: str, features: list[Feature], tag: str, no_cache: bool = False) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp) / "Dockerfile"
         generated.write_text(dockerfile(image, features))
-        images.build_context(FEATURES, tag, no_cache, dockerfile=generated)
+        images.build_context(FEATURES, tag, inputs_hash(image, features), no_cache, dockerfile=generated)
 
 
 def _option_env_name(option: str) -> str:

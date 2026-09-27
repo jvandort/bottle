@@ -1,4 +1,27 @@
-# bottle
+# Bottle
+
+*The perfect home for a genie.*
+
+Bottle manages sandboxed Linux VMs for coding agents, on macOS. Let the agent run with full
+permissions inside. Take back only the commits you want.
+
+- **A real VM per bottle.** Its own kernel, via [apple/container](https://github.com/apple/container). Starts in about a second.
+- **Your repo, read-only.** The repo's history is mounted read-only and checked out inside the VM. Your working copy is never mounted.
+- **Your files out of reach.** Only the repo's git objects are mounted, read-only.
+- **Controlled network.** Egress only through a proxy on your Mac, with your DNS and VPN routes. Your local network is blocked, even for root.
+- **Safe git hand-back.** `bottle git fetch` only adds branches (`bottle-NAME/*`): rewrites are refused, nothing is deleted.
+- **Composable features.** `tools`, `jvm`, `claude`, in the [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo defaults.
+- **Prebuilt.** Nothing installs at startup. Stale images are rebuilt and cleaned up automatically.
+- **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just Python and Homebrew.
+
+## Quick start
+
+```sh
+bottle repo add ~/path/to/foo --feature tools --feature claude
+bottle new foo        # Create a bottle with foo's default features
+bottle shell foo      # Open a shell at /workspace; run `claude` here
+bottle git fetch foo  # Transfer the agent's branches to your local repo, as bottle-foo/*
+```
 
 ## Prerequisites
 
@@ -6,10 +29,8 @@
 - [Homebrew](https://brew.sh)
 - Python 3.11+
 
-## Usage
-
-Run `bin/bottle`. It sets up what it depends on ([apple/container](https://github.com/apple/container),
-its services, a Linux kernel) as necessary and asks before installing anything.
+Bottle sets up what it depends on (apple/container, its services
+and a Linux kernel) as necessary, and asks before installing anything.
 
 ## Commands
 
@@ -21,14 +42,14 @@ else the directory name. The features become the defaults for the repo's
 bottles. Adding the same repo again is a no-op.
 
 ```sh
-bin/bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,additionalVersions=17,21 --feature claude
+bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,additionalVersions=17,21 --feature claude
 ```
 
 ### `bottle repo list`
 
 Lists repos and their default features.
 
-### `bottle repo set NAME [--feature FEATURE]...`
+### `bottle repo set REPO [--feature FEATURE]...`
 
 Replaces all the repo's settings: its default features become exactly those
 given. Existing bottles keep the features they were created with.
@@ -39,10 +60,13 @@ Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 ### `bottle build [--feature FEATURE]... [--no-cache]`
 
 Builds the bottle image with the given features installed; `bottle new` does
-this itself when needed.
+this itself when needed. Each image records what it was built from, so an image
+whose features (or the base underneath) have changed since is stale: `bottle
+new` rebuilds it, and after any build bottle deletes its stale images that no
+bottle uses.
 
 ```sh
-bin/bottle build --feature tools --feature claude
+bottle build --feature tools --feature claude
 ```
 
 Features, in the [Dev Container feature](https://containers.dev/implementors/features/)
@@ -54,7 +78,11 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `additionalVersions`, more JDKs alongside it, e.g. `17,21`. Every JDK is in
   `/usr/lib/jvm` (also as `/usr/lib/jvm/jdk-<version>`), where tools like
   Gradle's toolchains find them.
-- `claude`: Claude Code, from Anthropic's signed apt repository.
+- `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
+  the bottle's `/workspace` is trusted, first-run setup is done, and it reads
+  bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Options:
+  `permissionMode` (default `bypassPermissions`: the bottle is the sandbox) and
+  `theme` (default `dark`).
 
 A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.
 `--feature jvm:version=21,additionalVersions=17,11`. Options left out take
@@ -67,19 +95,20 @@ Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`
 
-Creates a bottle: a VM with the repo's default features plus any given (a
-feature given again replaces that default's options), with `REPO`'s `BRANCH` checked out at
-`/workspace`. `BRANCH` defaults to the origin remote's default branch, or, if
-there's no origin, to whatever the repo has checked out (a branch or commit). The repo's history is
-mounted read-only, so nothing is cloned and the bottle can't change your repo.
-`NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
-with those features is built first if it isn't built yet.
+Creates a bottle: a VM with `REPO`'s `BRANCH` checked out at `/workspace`,
+and the repo's default features plus any given (a feature given again replaces
+that default's options). `BRANCH` defaults to the origin remote's default
+branch, or, if there's no origin, to whatever the repo has checked out (a branch
+or commit). The repo's history is mounted read-only, so nothing is cloned and
+the bottle can't change your repo. `NAME` defaults to the repo's name, then
+`REPO-2`, `REPO-3`, and so on. The image with those features is built first if
+it isn't built yet.
 
 ```sh
-bin/bottle new reponame --feature tools --feature jvm --feature claude
+bottle new reponame --feature tools --feature jvm --feature claude
 ```
 
-### `bottle shell NAME`
+### `bottle shell BOTTLE`
 
 Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped.
 
@@ -87,7 +116,7 @@ Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped
 
 Lists bottles and their state.
 
-### `bottle git fetch NAME [REV] [--force]`
+### `bottle git fetch BOTTLE [REV] [--force]`
 
 Fetches the bottle's git work into the repo it was created from, as
 `bottle-NAME/<branch>` (listed by `git branch -r`). With no `REV`: every branch,
@@ -101,23 +130,33 @@ never touches your own branches. If the bottle rewrote a branch's history, the
 fetch refuses to overwrite it and says so; `--force` overwrites one named branch.
 
 ```sh
-bin/bottle git fetch gradle
-git log bottle-gradle/main
+bottle git fetch reponame
+git log bottle-reponame/main
 ```
 
-### `bottle start NAME` / `bottle stop NAME`
+### `bottle start BOTTLE` / `bottle stop BOTTLE`
 
 Starts or stops a bottle's VM. Stopping keeps the checkout and any changes;
 `shell` also starts a stopped bottle.
 
-### `bottle delete NAME [--force]`
+### `bottle delete BOTTLE [--force]`
 
 Deletes the bottle and everything it created. If creating or deleting a bottle
 was interrupted, `delete` cleans up whatever is left.
 
 It refuses if the bottle has work its repo doesn't: commits that were never
 fetched, or uncommitted changes. Fetch them first, or pass `--force`. Branches
-already fetched into the repo (`bottle-NAME/*`) are kept.
+already fetched into the repo (`bottle-NAME/*`) are kept. The bottle's image is
+deleted too, unless another bottle uses it.
+
+### `bottle reset BOTTLE [--force]`
+
+Starts the bottle over: a fresh VM from its features' image (rebuilt first if
+stale), and `/workspace` at the latest commit of its branch in the repo (a
+bottle started from a detached commit stays at that commit). Its name stays,
+and a stopped bottle stays stopped. Like `delete`, it refuses to lose
+unfetched commits or uncommitted changes without `--force`. Also recreates a
+bottle whose VM has gone missing.
 
 ### `bottle shutdown`
 
@@ -130,7 +169,7 @@ access. It starts automatically when a command needs it, and restores network
 access for every running bottle when it starts. While it's stopped, running
 bottles have no network access.
 
-### `bottle egress NAME --listen HOST:PORT [--allow PATTERN]...`
+### `bottle egress BOTTLE --listen HOST:PORT [--allow PATTERN]...`
 
 Runs a bottle's egress proxy: an HTTP proxy (CONNECT and plain HTTP) that makes
 connections from the host, so they use the host's DNS and VPN routes. Public
@@ -140,7 +179,7 @@ are always refused. Logs one line per connection. Bottle will start these
 itself; the command exists for testing.
 
 ```sh
-bin/bottle egress mybottle --listen 192.168.128.1:3128 --allow '*.corp.example.com'
+bottle egress mybottle --listen 192.168.128.1:3128 --allow '*.corp.example.com'
 ```
 
 ## Development

@@ -94,7 +94,7 @@ class DependencyTest(unittest.TestCase):
         with self.assertRaisesRegex(BottleError, "a is built from bottle/ghost, but there's no containers/images/ghost"):
             images.build_order("a")
 
-    def test_ensure_built_builds_only_whats_missing(self) -> None:
+    def test_ensure_built_builds_whats_missing_or_stale(self) -> None:
         self.image("base", "FROM debian:13\n")
         self.image("tools", "FROM bottle/base:latest\n")
         built = []
@@ -102,7 +102,7 @@ class DependencyTest(unittest.TestCase):
                                  ({"bottle/base:latest", "bottle/tools:latest"}, [])):
             built.clear()
             with self.subTest(exists=exists), \
-                    mock.patch.object(images.runtime, "image_exists", side_effect=lambda t: t in exists), \
+                    mock.patch.object(images, "is_current", side_effect=lambda t, inputs: t in exists), \
                     mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append(n)), \
                     mock.patch("sys.stderr"):
                 images.ensure_built("tools")
@@ -112,10 +112,37 @@ class DependencyTest(unittest.TestCase):
         self.image("base", "FROM debian:13\n")
         self.image("tools", "FROM bottle/base:latest\n")
         built = []
-        with mock.patch.object(images.runtime, "image_exists", return_value=True), \
+        with mock.patch.object(images, "is_current", return_value=True), \
                 mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append((n, no_cache))):
             self.assertEqual(images.build("tools", no_cache=True), "bottle/tools:latest")
         self.assertEqual(built, [("tools", True)])
+
+
+class StalenessTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        (self.dir / "Dockerfile").write_text("FROM debian:13\n")
+
+    def test_tree_hash_tracks_names_contents_and_the_executable_bit(self) -> None:
+        before = images.tree_hash(self.dir)
+        self.assertEqual(images.tree_hash(self.dir), before)
+        (self.dir / "Dockerfile").write_text("FROM debian:14\n")
+        after_edit = images.tree_hash(self.dir)
+        (self.dir / "Dockerfile").chmod(0o755)
+        after_chmod = images.tree_hash(self.dir)
+        (self.dir / "extra").write_text("")
+        self.assertEqual(len({before, after_edit, after_chmod, images.tree_hash(self.dir)}), 4)
+
+    def test_is_current_compares_the_label(self) -> None:
+        with mock.patch.object(images.runtime, "image_labels", return_value={"bottle.inputs": "abc"}):
+            self.assertTrue(images.is_current("bottle/base:latest", "abc"))
+            self.assertFalse(images.is_current("bottle/base:latest", "def"))
+        with mock.patch.object(images.runtime, "image_labels", return_value=None):
+            self.assertFalse(images.is_current("bottle/base:latest", "abc"))  # missing
+        with mock.patch.object(images.runtime, "image_labels", return_value={}):
+            self.assertFalse(images.is_current("bottle/base:latest", "abc"))  # built before labels
 
 
 class BuildImageTest(unittest.TestCase):
@@ -139,8 +166,8 @@ class BuildImageTest(unittest.TestCase):
     def test_builds_through_a_live_proxy(self) -> None:
         seen = {}
 
-        async def fake_build(context, tag, build_args, no_cache, dockerfile):
-            seen.update(context=context, tag=tag, args=build_args, no_cache=no_cache)
+        async def fake_build(context, tag, build_args, no_cache, dockerfile, labels):
+            seen.update(context=context, tag=tag, args=build_args, no_cache=no_cache, labels=labels)
             # The proxy must be serving while the build runs: ask it for something it refuses.
             host, port = build_args["https_proxy"].removeprefix("http://").split(":")
             reader, writer = await asyncio.open_connection(host, int(port))
@@ -159,6 +186,7 @@ class BuildImageTest(unittest.TestCase):
         self.assertEqual(len(set(seen["args"].values())), 1)
         self.assertRegex(seen["args"]["http_proxy"], r"^http://127\.0\.0\.1:\d+$")
         self.assertEqual(seen["proxy_answer"], b"HTTP/1.1 403 Forbidden")
+        self.assertEqual(seen["labels"], {"bottle.inputs": images.inputs_hash("base")})
 
     def test_builder_starts_before_the_gateway_is_read(self) -> None:
         order = []

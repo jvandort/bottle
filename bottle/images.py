@@ -8,6 +8,7 @@ Going through the host also gives builds the host's routes, e.g. a VPN.
 """
 
 import asyncio
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -27,8 +28,37 @@ def available() -> list[str]:
     return sorted(p.parent.name for p in IMAGES.glob("*/Dockerfile"))
 
 
+# Every image bottle builds records a hash of what it was built from. An image
+# whose inputs have changed since is stale: it's rebuilt when next needed, and
+# deleted once no container uses it.
+INPUTS_LABEL = "bottle.inputs"
+
+
 def tag(name: str) -> str:
     return f"bottle/{name}:latest"
+
+
+def tree_hash(path: Path) -> str:
+    """A hash of every file under `path`: names, contents and whether each is executable."""
+    digest = hashlib.sha256()
+    for file in sorted(p for p in path.rglob("*") if p.is_file()):
+        digest.update(f"{file.relative_to(path)}\0{file.stat().st_mode & 0o111:o}\0".encode())
+        digest.update(hashlib.sha256(file.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def inputs_hash(name: str) -> str:
+    """What the image `name` is built from: its directory, and the images it's built on."""
+    _require(name)
+    digest = hashlib.sha256(tree_hash(IMAGES / name).encode())
+    for dependency in dependencies(name):
+        digest.update(inputs_hash(dependency).encode())
+    return digest.hexdigest()
+
+
+def is_current(image: str, expected: str) -> bool:
+    labels = runtime.image_labels(image)
+    return labels is not None and labels.get(INPUTS_LABEL) == expected
 
 
 def dependencies(name: str) -> list[str]:
@@ -58,12 +88,15 @@ def build_order(name: str) -> list[str]:
     return order
 
 
-def ensure_built(name: str) -> None:
-    """Build `name`, and whatever it's built from, if not built yet."""
+def ensure_built(name: str) -> bool:
+    """Build `name`, and whatever it's built from, if missing or stale. True if anything was built."""
+    built = False
     for image in build_order(name):
-        if not runtime.image_exists(tag(image)):
+        if not is_current(tag(image), inputs_hash(image)):
             print(f"Building {tag(image)}...", file=sys.stderr)
             _build_one(image)
+            built = True
+    return built
 
 
 def build(name: str, no_cache: bool = False) -> str:
@@ -81,19 +114,26 @@ def _require(name: str) -> None:
 
 def _build_one(name: str, no_cache: bool = False) -> None:
     _require(name)
-    build_context(IMAGES / name, tag(name), no_cache)
+    build_context(IMAGES / name, tag(name), inputs_hash(name), no_cache)
 
 
-def build_context(context: Path, image: str, no_cache: bool = False, dockerfile: Path | None = None) -> None:
-    """Build `context` into `image`, reaching the network only through a temporary egress proxy."""
+def build_context(
+    context: Path, image: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None
+) -> None:
+    """Build `context` into `image`, reaching the network only through a temporary egress proxy.
+
+    `inputs` is the hash of what the image is built from, recorded as a label.
+    """
     prereqs.ensure_container()
     # The builder VM must be running before its network's gateway exists on the host.
     runtime.builder_start()
     gateway = runtime.network_gateway()
-    asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile))
+    asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile, {INPUTS_LABEL: inputs}))
 
 
-async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bool, dockerfile: Path | None) -> None:
+async def _build_via_proxy(
+    context: Path, image: str, gateway: str, no_cache: bool, dockerfile: Path | None, labels: dict[str, str]
+) -> None:
     server = await egress.EgressProxy(f"build {image}", egress.Policy()).start(gateway, 0)
     port = server.sockets[0].getsockname()[1]
     proxy = f"http://{gateway}:{port}"
@@ -101,4 +141,4 @@ async def _build_via_proxy(context: Path, image: str, gateway: str, no_cache: bo
     # and changing them (e.g. a new port per build) doesn't invalidate the cache.
     build_args = {key: proxy for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
     async with server:
-        await runtime.build(context, image, build_args, no_cache, dockerfile)
+        await runtime.build(context, image, build_args, no_cache, dockerfile, labels)
