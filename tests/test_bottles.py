@@ -31,6 +31,8 @@ class FakeRuntime:
         self.networks: set[str] = set()
         self.containers: dict[str, str] = {}
         self.egress: set[str] = set()
+        self.container_images: dict[str, str] = {}
+        self.built_images: dict[str, str] = {}
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
 
@@ -56,6 +58,21 @@ class FakeRuntime:
         self._step("container_run")
         self.run_args = dict(name=name, image=image, network=network, env=env, mounts=mounts)
         self.containers[name] = "running"
+        self.container_images[name] = image
+        self.built_images.setdefault(image, f"sha256:{image}")
+
+    def images(self):
+        return [bottles.runtime.ImageRef(tag, digest) for tag, digest in self.built_images.items()]
+
+    def images_in_use(self):
+        return {self.built_images[tag] for name, tag in self.container_images.items() if name in self.containers}
+
+    def image_delete(self, tag):
+        self.calls.append(f"image_delete {tag}")
+        del self.built_images[tag]
+
+    def network_exists(self, network):
+        return network in self.networks
 
     def container_state(self, name):
         return self.containers.get(name)
@@ -95,9 +112,9 @@ class FakeRuntime:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runtime, ("network_create", "network_gateway", "network_delete", "container_run",
-                               "container_state", "container_start", "container_stop", "container_delete",
-                               "container_exec")),
+            (bottles.runtime, ("network_create", "network_gateway", "network_delete", "network_exists",
+                               "container_run", "container_state", "container_start", "container_stop",
+                               "container_delete", "container_exec", "images", "images_in_use", "image_delete")),
             (bottles.daemon, ("ensure_egress", "release_egress", "stop")),
         ):
             for name in names:
@@ -106,7 +123,8 @@ class FakeRuntime:
                 test.addCleanup(patcher.stop)
         for patcher in (
             mock.patch.object(bottles.prereqs, "ensure_container"),
-            mock.patch.object(bottles.runtime, "image_exists", return_value=True),
+            mock.patch.object(bottles.images, "is_current", return_value=True),
+            mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
         ):
             patcher.start()
             test.addCleanup(patcher.stop)
@@ -159,6 +177,20 @@ class CreateTest(BottleTestCase):
         self.assertEqual(fake.run_args["env"]["http_proxy"], "http://192.168.128.1:3128")
         [mount] = fake.run_args["mounts"]
         self.assertEqual((mount.source, mount.target, mount.readonly), (self.repo_path / ".git/objects", "/mnt/repo/objects", True))
+
+    def test_workspace_setup_writes_the_agent_context(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("gradle")
+        self.assertIn('> "$HOME/BOTTLE.md"', fake.workspace_script)
+        context = bottles.context(bottle)
+        self.assertIn("checkout of the `gradle` repo, on the `main` branch.", context)
+        self.assertNotIn(self.head[:12], context)  # no commits: it never goes stale
+        self.assertIn("You're `genie`, with passwordless sudo.", context)
+        self.assertIn("only through the HTTP proxy", context)
+
+    def test_context_for_a_detached_commit(self) -> None:
+        bottle = bottles.Bottle("b", "id", "r", "base", None, "c" * 40, 0.0)
+        self.assertIn("checkout of the `r` repo, at a detached commit.", bottles.context(bottle))
 
     def test_workspace_script_quotes_values(self) -> None:
         run("git", "-C", self.repo_path, "branch", "we$rd;branch")
@@ -332,7 +364,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottles.create("gradle", "base")
         fake.containers.clear()
-        with self.assertRaisesRegex(BottleError, "container is gone; remove it with `bottle delete gradle`"):
+        with self.assertRaisesRegex(BottleError, "container is gone; recreate it with `bottle reset gradle`, or `bottle delete gradle`"):
             bottles.ensure_running("gradle")
 
     def test_unfinished_bottle(self) -> None:
@@ -401,6 +433,44 @@ class RepoDefaultsTest(BottleTestCase):
         self.assertEqual(bottles.get("gradle").features, ("tools",))
 
 
+class DeleteImageTest(BottleTestCase):
+    def create_with(self, fake, features, name=None):
+        tag = f"bottle/base:with-{'.'.join(sorted(features))}" if features else "bottle/base:latest"
+        with mock.patch.object(bottles.features_, "ensure_built", return_value=tag), \
+                mock.patch.object(bottles.features_, "resolve", side_effect=lambda specs: [SimpleNamespace(id=s, spec=s, overrides=()) for s in specs]), \
+                mock.patch.object(bottles.features_, "image_tag", return_value=tag):
+            return bottles.create("gradle", features=features, name=name), tag
+
+    def test_delete_removes_the_bottles_image(self) -> None:
+        fake = self.fake()
+        bottle, tag = self.create_with(fake, ["tools"])
+        with mock.patch.object(bottles.features_, "resolve", return_value=[]), \
+                mock.patch.object(bottles.features_, "image_tag", return_value=tag):
+            bottles.delete("gradle")
+        self.assertNotIn(tag, fake.built_images)
+
+    def test_keeps_an_image_another_bottle_uses(self) -> None:
+        fake = self.fake()
+        _, tag = self.create_with(fake, ["tools"])
+        self.create_with(fake, ["tools"], name="other")
+        with mock.patch.object(bottles.features_, "resolve", return_value=[]), \
+                mock.patch.object(bottles.features_, "image_tag", return_value=tag):
+            bottles.delete("gradle")
+        self.assertIn(tag, fake.built_images)
+
+    def test_keeps_the_base_image(self) -> None:
+        fake = self.fake()
+        self.create_with(fake, [])
+        bottles.delete("gradle")
+        self.assertIn("bottle/base:latest", fake.built_images)
+
+    def test_rollback_keeps_the_freshly_built_image(self) -> None:
+        fake = self.fake(fail="init_workspace")
+        with self.assertRaises(BottleError):
+            self.create_with(fake, ["tools"])
+        self.assertIn("bottle/base:with-tools", fake.built_images)
+
+
 class StartStopTest(BottleTestCase):
     def test_stop_stops_the_vm_and_egress(self) -> None:
         fake = self.fake()
@@ -445,7 +515,7 @@ class WorkspaceTestCase(BottleTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.fake()
+        self.fake_runtime = self.fake()
         self.bottle = bottles.create("gradle", "base")
         self.workspace = self.tmp / "workspace"
         run("git", "clone", "-q", self.repo_path, self.workspace)
@@ -675,6 +745,55 @@ class RepoBranchTest(GitTestCase):
         worktree = self.tmp / "wt"
         run("git", "-C", path, "worktree", "add", "-q", worktree)
         self.assertEqual(repos.objects_dir(repos.Repo("wt", worktree)), path / ".git/objects")
+
+
+class ResetTest(WorkspaceTestCase):
+    def test_recreates_the_container_and_workspace(self) -> None:
+        fake_run = mock.patch.object(bottles, "_run_container")
+        with fake_run as run_container:
+            bottles.reset("gradle")
+        run_container.assert_called_once()
+        self.assertEqual(bottles.get("gradle").status, "ready")
+
+    def test_refuses_to_lose_work(self) -> None:
+        self.agent_commit("unfetched")
+        with self.assertRaisesRegex(BottleError, "has work its repo doesn't: branch main.*reset anyway with --force"):
+            bottles.reset("gradle")
+        with mock.patch.object(bottles, "_run_container"):
+            bottles.reset("gradle", force=True)
+
+    def test_a_stopped_bottle_stays_stopped(self) -> None:
+        bottle = bottles.get("gradle")
+        bottles.stop("gradle")
+        # Checking for unfetched work starts the bottle; the contract check would run on this machine.
+        with mock.patch.object(bottles, "verify_contract"), \
+                mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
+            bottles.reset("gradle")
+        self.assertEqual(bottles.runtime.container_state(bottle.container), "stopped")
+
+    def test_moves_to_the_latest_commit_of_its_branch(self) -> None:
+        bottle = bottles.get("gradle")
+        latest = self.commit(self.repo_path, "new host work")
+        with mock.patch.object(bottles, "_run_container") as run_container:
+            reset = bottles.reset("gradle")
+        self.assertEqual(reset.commit, latest)
+        self.assertEqual(bottles.get("gradle").commit, latest)
+        self.assertEqual(self.host("rev-parse", bottle.ref), latest)  # the pin moved too
+        self.assertEqual(run_container.call_args.args[0].commit, latest)
+
+    def test_a_branch_gone_from_the_repo_fails_before_anything_changes(self) -> None:
+        run("git", "-C", self.repo_path, "switch", "-q", "-c", "other")
+        run("git", "-C", self.repo_path, "branch", "-D", "main")
+        with self.assertRaisesRegex(BottleError, "has no branch 'main'"):
+            bottles.reset("gradle")
+        self.assertIn(bottles.get("gradle").container, self.fake_runtime.containers)
+
+    def test_repairs_a_missing_container(self) -> None:
+        bottle = bottles.get("gradle")
+        del self.fake_runtime.containers[bottle.container]
+        with mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
+            bottles.reset("gradle")  # no work check: nothing to check
+        self.assertEqual(bottles.runtime.container_state(bottle.container), "running")
 
 
 if __name__ == "__main__":

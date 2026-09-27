@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Replace all of a repo's settings: its default features become exactly those given "
         "(none, if none are given). Existing bottles keep the features they were created with.",
     )
-    repo_set.add_argument("name", help="the repo")
+    repo_set.add_argument("name", metavar="REPO", help="the repo to change")
     repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
     repo_set.set_defaults(run=_repo_set, parser=repo_set)
 
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Create a bottle: REPO's branch checked out at /workspace, in its own VM. "
         "NAME defaults to the repo's name, then REPO-2, REPO-3, ...",
     )
-    new.add_argument("repo", help="a repo added with `bottle repo add`")
+    new.add_argument("repo", metavar="REPO", help="the repo to create a bottle from (added with `bottle repo add`)")
     new.add_argument(
         "--feature", action="append", default=[], metavar="FEATURE",
         help="a feature to add to the repo's defaults, optionally with options, e.g. jvm:version=17 "
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     list_.set_defaults(run=_list, parser=list_)
 
     shell = commands.add_parser("shell", help="open a shell in a bottle", description="Open a shell in a bottle, starting it if needed.")
-    shell.add_argument("name", help="the bottle")
+    shell.add_argument("name", metavar="BOTTLE", help="the bottle to open a shell in")
     shell.set_defaults(run=_shell, parser=shell)
 
     git = commands.add_parser("git", help="move git work between bottles and their repos")
@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         "With no REV: every branch, plus a detached HEAD. With a branch: just that branch. "
         "With a commit: that commit, into FETCH_HEAD.",
     )
-    fetch.add_argument("name", help="the bottle")
+    fetch.add_argument("name", metavar="BOTTLE", help="the bottle to fetch from")
     fetch.add_argument("rev", nargs="?", help="a branch or commit in the bottle (default: every branch)")
     fetch.add_argument(
         "-f", "--force", action="store_true", help="overwrite a branch the bottle rewrote (needs a single BRANCH)"
@@ -91,13 +91,13 @@ def main(argv: list[str] | None = None) -> int:
     fetch.set_defaults(run=_fetch, parser=fetch)
 
     start = commands.add_parser("start", help="start a bottle", description="Start a stopped bottle and its network access.")
-    start.add_argument("name", help="the bottle")
+    start.add_argument("name", metavar="BOTTLE", help="the bottle to start")
     start.set_defaults(run=_start, parser=start)
 
     stop = commands.add_parser(
         "stop", help="stop a bottle", description="Stop a bottle's VM. Its checkout and changes are kept."
     )
-    stop.add_argument("name", help="the bottle")
+    stop.add_argument("name", metavar="BOTTLE", help="the bottle to stop")
     stop.set_defaults(run=_stop, parser=stop)
 
     delete = commands.add_parser(
@@ -105,12 +105,25 @@ def main(argv: list[str] | None = None) -> int:
         help="delete a bottle",
         description="Delete a bottle and everything it created. Also cleans up a bottle left half-made.",
     )
-    delete.add_argument("name", help="the bottle")
+    delete.add_argument("name", metavar="BOTTLE", help="the bottle to delete (not its repo)")
     delete.add_argument(
         "-f", "--force", action="store_true",
         help="delete even if the bottle has unfetched commits or uncommitted changes",
     )
     delete.set_defaults(run=_delete, parser=delete)
+
+    reset = commands.add_parser(
+        "reset",
+        help="start a bottle over, at the latest commit of its branch",
+        description="Start a bottle over: a fresh VM from its features' image, and /workspace at the "
+        "latest commit of its branch in the repo. Its name stays. A stopped bottle stays stopped.",
+    )
+    reset.add_argument("name", metavar="BOTTLE", help="the bottle to reset")
+    reset.add_argument(
+        "-f", "--force", action="store_true",
+        help="reset even if the bottle has unfetched commits or uncommitted changes",
+    )
+    reset.set_defaults(run=_reset, parser=reset)
 
     shutdown = commands.add_parser(
         "shutdown", help="stop every bottle and bottled", description="Stop every running bottle, then bottled."
@@ -136,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Run an HTTP proxy that makes connections on the host's behalf. "
         "Public destinations are allowed; private ones only via --allow hostnames.",
     )
-    egress.add_argument("name", help="the bottle this proxy serves, used in logs")
+    egress.add_argument("name", metavar="BOTTLE", help="the bottle this proxy serves, used in logs")
     egress.add_argument("--listen", required=True, metavar="HOST:PORT", help="address to listen on")
     egress.add_argument(
         "--allow", action="append", default=[], metavar="PATTERN",
@@ -263,6 +276,14 @@ def _stop(args: argparse.Namespace) -> int:
 
     bottles.stop(args.name)
     print(f"Stopped {args.name}")
+    return 0
+
+
+def _reset(args: argparse.Namespace) -> int:
+    from bottle import bottles
+
+    bottle = bottles.reset(args.name, args.force)
+    print(f"Reset {bottle.name}: {bottle.repo} {bottle.checkout} ({bottle.commit[:12]})")
     return 0
 
 

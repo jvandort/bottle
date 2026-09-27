@@ -26,6 +26,44 @@ def image_exists(image: str) -> bool:
     return _succeeds("image", "inspect", image)
 
 
+def image_labels(image: str) -> dict[str, str] | None:
+    """The image's labels, or None if there's no such image."""
+    result = subprocess.run(["container", "image", "inspect", image], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    [info] = json.loads(result.stdout)
+    labels: dict[str, str] = {}
+    for variant in info.get("variants", []):
+        labels.update(variant.get("config", {}).get("config", {}).get("Labels") or {})
+    return labels
+
+
+@dataclass(frozen=True)
+class ImageRef:
+    name: str  # e.g. bottle/base:latest
+    digest: str
+
+
+def images() -> list[ImageRef]:
+    """Every tagged image."""
+    refs = []
+    for image in json.loads(_run("image", "list", "--format", "json")):
+        descriptor = image["configuration"]["descriptor"]
+        name = descriptor.get("annotations", {}).get("com.apple.containerization.image.name")
+        if name:
+            refs.append(ImageRef(name, descriptor["digest"]))
+    return refs
+
+
+def images_in_use() -> set[str]:
+    """Digests of the images every container, running or not, was created from."""
+    return {c["configuration"]["image"]["descriptor"]["digest"] for c in json.loads(_run("list", "--all", "--format", "json"))}
+
+
+def image_delete(image: str) -> None:
+    _run("image", "delete", image)
+
+
 def network_exists(network: str) -> bool:
     return _succeeds("network", "inspect", network)
 
@@ -108,10 +146,13 @@ def _exec_options(user: str | None, workdir: str | None) -> list[str]:
 
 
 async def build(
-    context: Path, tag: str, build_args: dict[str, str], no_cache: bool = False, dockerfile: Path | None = None
+    context: Path, tag: str, build_args: dict[str, str], no_cache: bool = False, dockerfile: Path | None = None,
+    labels: dict[str, str] | None = None,
 ) -> None:
     """Build the image at `context` (from `dockerfile`, default its Dockerfile), streaming progress."""
     cmd = ["container", "build", "--tag", tag]
+    for key, value in (labels or {}).items():
+        cmd += ["--label", f"{key}={value}"]
     if dockerfile:
         cmd += ["--file", str(dockerfile)]
     # Never --quiet: it hangs indefinitely in container 1.4.
