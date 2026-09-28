@@ -1,3 +1,4 @@
+import sys
 import unittest
 from unittest import mock
 
@@ -15,6 +16,7 @@ class ContainerRunTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--memory") + 1], "65536M")
         self.assertEqual(argv[-1], "img")
 
+    @unittest.skipUnless(sys.platform == "darwin", "host_resources reads a macOS sysctl (hw.memsize)")
     def test_the_real_host(self) -> None:
         cpus, memory = runtime.host_resources()
         self.assertGreaterEqual(cpus, 1)

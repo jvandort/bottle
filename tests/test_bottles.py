@@ -419,8 +419,8 @@ class ContractTest(BottleTestCase):
         self.assertEqual(bottles.create("gradle").image, "base")
         self.assertEqual(fake.run_args["image"], "bottle/base:latest")
 
-    def test_checks_run_in_the_bottle(self) -> None:
-        # Run the real checks against this machine: the script itself must be well-formed.
+    def run_contract_script(self):
+        """Run the script verify_contract would have run in a bottle, on this machine instead."""
         script = None
 
         def capture(name, argv, user=None, workdir=None):
@@ -431,9 +431,23 @@ class ContractTest(BottleTestCase):
         bottle = bottles.Bottle("b", "id", "r", "base", "main", "c" * 40, 0.0)
         with mock.patch.object(bottles.runtime, "container_exec", side_effect=capture):
             bottles.verify_contract(bottle)
-        result = __import__("subprocess").run(script, capture_output=True, text=True)
+        return __import__("subprocess").run(script, capture_output=True, text=True)
+
+    def test_checks_run_in_the_bottle(self) -> None:
+        # Run the real checks against this machine: the script itself must be well-formed.
+        # Which of them fail depends on where the suite runs -- a Mac fails most, a bottle
+        # running the suite on itself fails none -- so only require that whatever it reports
+        # is contract names and nothing else (no shell errors, no half-quoted lines).
+        result = self.run_contract_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("tini is PID 1", result.stdout)  # this Mac isn't a bottle
+        self.assertLessEqual(set(result.stdout.splitlines()), {what for what, _ in bottles.CONTRACT})
+
+    def test_checks_name_what_failed(self) -> None:
+        # That the script can report at all, without depending on this machine failing a check.
+        with mock.patch.object(bottles, "CONTRACT", (("this passes", "true"), ("this fails", "false"))):
+            result = self.run_contract_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["this fails"])
 
 
 class RepoDefaultsTest(BottleTestCase):
