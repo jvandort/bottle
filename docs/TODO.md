@@ -75,9 +75,10 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Configurable egress policy.** Allowlisted private hostnames
   (`--allow`-style) from a config file, e.g. `~/.bottle/config.toml`, rather
   than flags; possibly per-bottle.
-- **Proxy configuration for tools that ignore `*_PROXY`:** apt config, JVM
-  system properties (Gradle, Maven), `NODE_USE_ENV_PROXY=1` for Node's fetch,
-  and a `ProxyCommand` (plus `netcat-openbsd`) for git over SSH.
+- **Proxy configuration for tools that ignore `*_PROXY`:** JVM system
+  properties (Gradle, Maven), `NODE_USE_ENV_PROXY=1` for Node's fetch, and a
+  `ProxyCommand` (plus `netcat-openbsd`) for git over SSH. Tools that do read
+  the variables see them under sudo now (the base image's sudoers env_keep).
 - **Fail fast without the proxy.** Bottles have no DNS server, so a tool that
   ignores the proxy waits for a DNS timeout. An empty or local resolver
   config would make it fail immediately.
