@@ -220,8 +220,8 @@ Five verbs. Everything else is git and your editor.
   entirely in the object database; `--continue` and `--abort` when it conflicts.
 - `resolve` -- open the current conflict in the merge tool git is already
   configured with.
-- `refresh` -- when the working line is someone else's, pull its new tip into
-  the working tree (below).
+There is deliberately no `refresh`: keeping up with a working line someone else
+is writing is `git pull` in write mode (below).
 
 Committing, staging hunks, editing and resolving are all the editor's, natively.
 In review mode the editor's own commit button does the right thing, because
@@ -240,23 +240,73 @@ finishing means deleting it from the working line rather than shipping around it
 ## When the working line is someone else's
 
 Nothing above cares who wrote the working line. If it arrived from a colleague,
-or from an agent in a sandbox, the model is identical -- they produce the stream,
-you curate.
+or from an agent in a sandbox, the model is identical -- they produce the
+stream, you curate.
 
-The one addition is `refresh`, for when the working line moves under you:
+And keeping up with it needs no mechanism at all. Switch to write mode and use
+git:
 
 ```sh
-GIT_INDEX_FILE=$H git read-tree -m -u "$OLD_TIP" "$NEW_TIP"
+review write
+git pull --rebase        # or fetch, or reset --hard, or whatever suits
+review review
 ```
 
-A two-way merge that updates the working tree and a helper index, leaving the
-review index alone. `$H` is persistent, so it keeps the stat cache. Tested
-against a commit that edited one file, deleted another and added a third:
-approvals survived, deletions propagated, and a file with one approved hunk and
-one new one showed as `MM`.
+In write mode HEAD is the working line and the index is the write index, so this
+is an ordinary repository doing an ordinary thing. **Conflicts are ordinary
+working-line conflicts**, in the working tree, resolved in your editor the way
+you always resolve them. None of the object-database machinery that `fixup`
+needs applies here, because the working line's tree *is* checked out.
 
-It refuses rather than clobbers when a file you edited also changed upstream,
-which is the right behaviour -- that is a real conflict and should stop.
+The review index is not involved and needs no adjustment, because it is a tree:
+it records approved *content*, and content does not care how it got there.
+Tested by rewriting the working line's history underneath a review -- a
+different commit, a different message, one line changed -- and toggling back:
+
+```
+approved earlier:  the change on line 1
+after the rewrite: status  M f.txt   ?? g.txt
+unapproved diff:   -b +B-new
+```
+
+Only the genuinely new change came back. The approved line did not reappear.
+
+So the answer to "is this a fast-forward, could I have just pulled?" is yes, and
+you literally do. If you have no commits of your own on the working line it is a
+plain update. If you do, it is a plain rebase, with plain conflicts. Either way
+only the working line and the working tree move; the clean line and the review
+index are untouched.
+
+### Never merge into uncommitted work
+
+The one rule: **commit your own edits to the working line before updating it.**
+
+Git already refuses by default -- `git rebase` with a dirty tree stops with
+"cannot rebase: your index contains uncommitted changes", and `rebase.autoStash`
+is off unless you turn it on. That default is right and the tool should not
+override it.
+
+The usual escape is `--autostash`, and it is the wrong one here. A stash is
+recoverable but it is a single global slot, an applied stash that conflicts
+leaves you holding two problems at once, and a dropped one exists only in the
+reflog. Meanwhile the working line is a history nobody reads, where an extra
+commit costs *nothing*.
+
+So when the tree is dirty, offer to commit rather than to stash:
+
+```
+review write --commit-first        # "wip: before update", then pull
+```
+
+A commit is named by a branch ref, survives a crash, survives a botched merge,
+and if the rebase goes wrong `git rebase --abort` puts it back exactly. **On a
+line whose history does not matter, autocommit strictly beats autostash** --
+there is no reason to reach for the fragile mechanism when the durable one is
+free.
+
+This is the same argument as `durability.md` makes for snapshots, in miniature:
+uncommitted work is the only state nothing can protect, so the answer is always
+to stop it being uncommitted rather than to handle it carefully.
 
 ## Rough edges
 
@@ -271,11 +321,17 @@ which is the right behaviour -- that is a real conflict and should stop.
   nothing outstanding to remember.
 - **Whole-file rewrites** in the working line return the whole file to
   unapproved. Correct, occasionally tedious.
-- **`refresh` does write files**, unavoidably -- it is the one operation that
-  genuinely moves the working tree, because the working line moved.
+- **Updating a working line someone else writes does move files**, unavoidably,
+  because the working line moved. It is the only operation that does.
 - **Editors may or may not notice HEAD and the index changing underneath them.**
   Both are watched files and external git operations are normally picked up, but
   this is the one assumption here that has not been tested.
+
+## Implementing it
+
+`two-lines-implementation.md` has the state layout, the algorithms, the exact
+plumbing, the edge cases, and a glossary of every git concept the implementation
+depends on.
 
 ## Prior art
 
