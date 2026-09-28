@@ -880,14 +880,23 @@ class ResetTest(WorkspaceTestCase):
         with mock.patch.object(bottles, "_run_container"):
             bottles.reset("gradle", force=True)
 
-    def test_a_stopped_bottle_stays_stopped(self) -> None:
+    def test_a_stopped_bottle_comes_back_running(self) -> None:
         bottle = bottles.get("gradle")
         bottles.stop("gradle")
         # Checking for unfetched work starts the bottle; the contract check would run on this machine.
         with mock.patch.object(bottles, "verify_contract"), \
                 mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
             bottles.reset("gradle")
-        self.assertEqual(bottles.runtime.container_state(bottle.container), "stopped")
+        self.assertEqual(bottles.runtime.container_state(bottle.container), "running")
+
+    def test_gets_the_repos_current_default_features_and_keeps_its_own(self) -> None:
+        with mock.patch.object(bottles, "_run_container"), mock.patch.object(bottles.features_, "ensure_built"):
+            bottles.delete("gradle", force=True)
+            bottles.create("gradle", features=["jvm"])
+            bottles.repos.set_settings("gradle", ["claude"])
+            reset = bottles.reset("gradle")
+        self.assertEqual(set(reset.features), {"claude", "jvm"})
+        self.assertEqual(bottles.get("gradle").features, reset.features)
 
     def test_moves_to_the_latest_commit_of_its_branch(self) -> None:
         bottle = bottles.get("gradle")
@@ -898,12 +907,21 @@ class ResetTest(WorkspaceTestCase):
         self.assertEqual(bottles.get("gradle").commit, latest)
         self.assertEqual(run_container.call_args.args[0].commit, latest)
 
-    def test_a_branch_gone_from_the_repo_fails_before_anything_changes(self) -> None:
+    def test_a_requested_branch_gone_from_the_repo_fails_before_anything_changes(self) -> None:
+        with mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
+            bottles.delete("gradle", force=True)
+            bottles.create("gradle", branch="main")
         run("git", "-C", self.repo_path, "switch", "-q", "-c", "other")
         run("git", "-C", self.repo_path, "branch", "-D", "main")
         with self.assertRaisesRegex(BottleError, "has no branch 'main'"):
             bottles.reset("gradle")
         self.assertIn(bottles.get("gradle").container, self.fake_runtime.containers)
+
+    def test_without_a_requested_branch_it_follows_the_repos_default(self) -> None:
+        run("git", "-C", self.repo_path, "switch", "-q", "-c", "other")
+        run("git", "-C", self.repo_path, "branch", "-D", "main")
+        with mock.patch.object(bottles, "_run_container"):
+            self.assertEqual(bottles.reset("gradle", force=True).branch, "other")
 
     def test_repairs_a_missing_container(self) -> None:
         bottle = bottles.get("gradle")

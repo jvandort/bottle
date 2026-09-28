@@ -39,7 +39,9 @@ RUN groupadd --gid 1000 genie \
  # Enable passwordless sudo
  && echo 'genie ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/genie \
  && chmod 0440 /etc/sudoers.d/genie \
- && install -d -o genie -g genie /workspace
+ && install -d -o genie -g genie /workspace \
+ # The agent commits as itself, never as you. bottle.host isn't a real domain.
+ && su genie -c 'git config --global user.name genie && git config --global user.email genie@bottle.host'
 
 COPY sshd_config /etc/ssh/sshd_config.d/bottle.conf
 # Installing openssh-server generates host keys. Delete the defaults to prevent
