@@ -81,46 +81,78 @@ working line, and you are appending "fix feature A" to a history whose whole
 point is not needing that.
 
 It is not append-only. The clean line is yours and unpublished, so it can be
-rewritten freely -- which is what `git commit --fixup` plus an autosquash rebase
-already does, and what many people already have as a shell alias. Approve the
-new hunks and put them where they belong:
+rewritten freely. Approve the new hunks and put them where they belong:
 
 ```sh
 review fixup <clean-commit>
 ```
 
-The catch is that a rebase checks out commits, and the working tree must stay
-where it is. So the rebase happens somewhere else:
+### It needs no working tree
 
-1. Write the approved tree from the index: `git write-tree`.
-2. Make a `fixup!` commit for it on the clean line's tip, with `commit-tree`.
-3. `git worktree add` a temporary detached worktree at that commit, and run
-   `GIT_SEQUENCE_EDITOR=true git rebase --autosquash -i <target>^` **there**.
-4. Point the clean branch at the result and remove the temporary worktree.
-5. Re-read the index from the new clean tip, refreshing stat info so the
-   working tree is left alone.
+The obvious implementation is `git commit --fixup` plus an autosquash rebase,
+which is what many people already have as a shell alias. It does not fit here,
+because a rebase checks out commits and the working tree is holding the working
+line's content.
+
+Stashing around it -- the usual trick -- is worse than it looks.
+`git stash push --keep-index` **rewrites the files on disk** to the index state,
+and `pop` rewrites them back: two full rewrites of every changed file in the
+directory you are working in, two reindexes in your editor, and a failure
+halfway leaves your real work in a stash. Handing the rebase a temporary
+worktree instead avoids the mess but checks out the entire repository to do it.
+
+Neither is necessary. Nothing here needs files on disk, because a three-way
+merge does not: `git merge-tree --write-tree` (git 2.38+) does the whole thing
+in the object database. Git agrees that rebasing should not need a worktree --
+`git replay` (2.44+) exists for exactly this -- and we do not need autosquash's
+help finding the target, because we were told it.
+
+So `fixup` is: write the approved tree, synthesise a commit for it, merge it
+into the target, replay the rest of the clean line, move the branch.
+
+```sh
+T=$(git write-tree)                                   # approved tree
+F=$(git commit-tree $T -p $CLEAN -m fixup)            # the approval, as a commit
+XT=$(git merge-tree --write-tree --merge-base=$CLEAN $TARGET $F)
+XNEW=$(git commit-tree $XT -p $TARGET^ -m "<target's message>")
+# ... replay each later clean commit the same way, then:
+git update-ref refs/heads/clean $NEW_TIP
+```
 
 Tested:
 
 ```
-clean line:  ecd07ca Add feature B   98d3a75 Add feature A   05746b5 start
-  'Add feature A' has a.txt = [A]
+clean:  cfa4c54 Add feature B   00fbff8 Add feature A   8f64ca4 start
+  'Add feature A' a.txt = [A]
 
   -> approve the rest of a.txt, fixup into 'Add feature A'
 
-clean line:  678ecd0 Add feature B   b0d79b7 Add feature A   05746b5 start
-  'Add feature A' has a.txt = [A, A more]
-working tree untouched: YES
+clean:  5f34d56 Add feature B   94178ab Add feature A   8f64ca4 start
+  'Add feature A' a.txt = [A, A more]
+working tree byte-identical:  YES
+file never rewritten (mtime unchanged):  YES
 still unapproved: ?? junk.txt
 ```
 
-Two commits before, two after -- the fixup was absorbed, not appended. The
-working tree never moved, and the remaining unapproved change is still
-outstanding.
+Two clean commits before and after -- absorbed, not appended -- and the working
+tree was not merely restored, it was never touched.
 
-The temporary worktree also gives conflicts a place to happen that is not your
-working tree. When the autosquash conflicts, the tool reports where it stopped
-instead of leaving your editor in a rebase.
+### Conflicts
+
+A fixup conflicts when a later clean commit changed the same lines you are
+folding into an earlier one: you approved something that depends on something
+you approved after it. Uncommon, but real.
+
+`merge-tree` is atomic, which makes this far better behaved than a failed
+rebase. It exits 1, prints the conflicted tree and all three stages for each
+conflicted path, and **writes nothing** -- no ref moves, no half-finished
+rebase, no files touched. The clean line is exactly as it was.
+
+The default response should be to say so and stop: name the commit it conflicts
+with, and suggest fixing up into a later one instead, which is usually the right
+answer. Resolution in an editor is possible if it turns out to be needed, since
+the three stages are right there and can be written into a temporary index for a
+merge tool -- but it should not be built before it is missed.
 
 ## The tool
 
@@ -128,7 +160,8 @@ Five verbs. Everything else is git and your editor.
 
 - `start` -- set up the clean line and the two index files.
 - `write` / `review` -- toggle.
-- `fixup <commit>` -- put the approved changes into an existing clean commit.
+- `fixup <commit>` -- fold the approved changes into an existing clean commit,
+  entirely in the object database.
 - `refresh` -- when the working line is someone else's, pull its new tip into
   the working tree (below).
 
@@ -172,14 +205,16 @@ which is the right behaviour -- that is a real conflict and should stop.
 - **Files added in the working line show as unversioned** in review mode, since
   HEAD is the clean line and does not know them. Staging fixes the display.
 - **Approving a deletion means staging the deletion**, which reads oddly once.
-- **There is no "never" bucket.** Debug junk stays on the review list until it
-  is deleted from the working line. A reject list would silence it, at the cost
-  of somewhere else to keep state.
-- **A fixup can conflict**, and then the clean line is mid-rebase in a temporary
-  worktree. Recoverable, but it needs a clear message.
+- **There is no "never" bucket, by design.** Debug junk stays on the review list
+  until it is deleted or commented out on the working line, which is where it
+  should have gone anyway.
+- **There is no record of rejection, by design.** Rejecting something means
+  editing it; the end state is a change set that is entirely approved, with
+  nothing outstanding to remember.
 - **Whole-file rewrites** in the working line return the whole file to
   unapproved. Correct, occasionally tedious.
-- **No record of what you rejected or why.** The index says what you accepted.
+- **`refresh` does write files**, unavoidably -- it is the one operation that
+  genuinely moves the working tree, because the working line moved.
 - **Editors may or may not notice HEAD and the index changing underneath them.**
   Both are watched files and external git operations are normally picked up, but
   this is the one assumption here that has not been tested.
@@ -190,8 +225,11 @@ Nothing does quite this. The neighbours:
 
 - **Stacked-diff tools** (`git-branchless`, Graphite) maintain a clean stack
   while you work, but assume you author the clean commits directly.
-- **`git absorb`** does the fixup-into-the-right-commit trick automatically, and
-  would be a good `fixup` implementation when the target is not obvious.
+- **`git absorb`** works out *which* commit a change belongs in, which is the
+  one thing `fixup` still asks you for.
+- **`git replay`** (2.44+) is git's own acknowledgement that rebasing should not
+  require a worktree. It has no autosquash, which is why `fixup` does the
+  surgery with `merge-tree` directly.
 - **Jujutsu** makes rewriting painless, but has one line rather than two.
 - **`git add -p` into a dirty working tree** is the manual ancestor of all of it.
   The new part is giving the dirty side a history of its own, so a day's work is
