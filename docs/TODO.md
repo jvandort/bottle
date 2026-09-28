@@ -7,8 +7,9 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Stop idle bottles.** A bottle runs until `bottle stop`, `bottle shutdown`
   or the host stops it. bottled could stop bottles that have been idle for a
   while, once "idle" is defined (no exec sessions, no egress traffic).
-- **Resource limits.** Bottles get `container`'s defaults (4 CPUs, 1 GB).
-  Make CPUs and memory configurable per bottle or per image.
+- **Resource limits.** Bottles get the whole Mac (every core, all memory), so
+  a busy bottle can slow the host. Make CPUs and memory configurable per
+  bottle if that becomes a problem.
 - **Reconcile egress periodically.** bottled restores egress for running
   bottles when it starts, but a bottle started outside bottle (e.g.
   `container start`) has no network until a bottle command touches it.
