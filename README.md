@@ -15,7 +15,7 @@ permissions inside. Take back only the commits you want.
   You review what you take.
 - **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
-- **Composable features.** `tools`, `jvm`, `claude`, in the
+- **Composable features.** `tools`, `jvm`, `python`, `claude`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
   defaults. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -134,6 +134,11 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `additionalVersions`, more JDKs alongside it, e.g. `17,21`. Every JDK is in
   `/usr/lib/jvm` (also as `/usr/lib/jvm/jdk-<version>`), where tools like
   Gradle's toolchains find them.
+- `python`: Debian's Python 3, with `venv`, `pip`, and `python` as a name for
+  it. `pip install` works without a virtualenv: Debian's PEP 668 marker is
+  removed, since a bottle is disposable and `bottle reset` undoes whatever an
+  install breaks. Option: `externallyManaged` (default `false`) keeps the
+  marker, and Debian's behaviour, if you'd rather work in a venv.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
   the bottle's `/workspace` is trusted, first-run setup is done, it's logged in
   with the `claude` credential (`bottle auth login claude`), and it reads

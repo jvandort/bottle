@@ -1,0 +1,16 @@
+{
+  "id": "python",
+  "version": "1.0.0",
+  "name": "Python",
+  "description": "Debian's Python 3, with venv, pip and `python` as a name for it, ready to install into.",
+  "containerEnv": {
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1"
+  },
+  "options": {
+    "externallyManaged": {
+      "type": "boolean",
+      "default": false,
+      "description": "Keep Debian's PEP 668 marker, so pip refuses to install outside a virtualenv."
+    }
+  }
+}
