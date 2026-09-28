@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["claude", "jvm", "tools"])
+        self.assertEqual(features.available(), ["claude", "jvm", "python", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
@@ -34,6 +34,13 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertEqual(features.load("jvm").option_env(), {"VERSION": "25", "ADDITIONALVERSIONS": ""})
         [jvm] = features.resolve(["jvm:version=21,additionalVersions=17,11"])
         self.assertEqual(jvm.option_env(), {"VERSION": "21", "ADDITIONALVERSIONS": "17,11"})
+
+    def test_python_options(self) -> None:
+        self.assertEqual(features.load("python").option_env(), {"EXTERNALLYMANAGED": "false"})
+        [python] = features.resolve(["python:externallyManaged=true"])
+        self.assertEqual(python.option_env(), {"EXTERNALLYMANAGED": "true"})
+        with self.assertRaisesRegex(BottleError, "option externallyManaged is true or false"):
+            features.resolve(["python:externallyManaged=yes"])
 
 
 class FeatureTestCase(unittest.TestCase):
