@@ -26,6 +26,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, replace
+from typing import NoReturn
 
 from bottle import auth, daemon, features as features_, host, images, prereqs, repos, runtime
 from bottle.errors import BottleError
@@ -333,15 +334,17 @@ def context(bottle: Bottle) -> str:
     over the bottle's life (no commits), so it never goes stale.
     """
     at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
+    ns = ref_namespace(bottle)
     return (
         "# Bottle\n\n"
         "You're running in a bottle: a sandboxed Linux VM.\n\n"
         f"- You're `{USER}`, with passwordless sudo.\n"
         f"- `{WORKSPACE}` is a checkout of the `{bottle.repo}` repo, {at}. It has two remotes:\n"
         "  - `origin`: the repo's upstream, up to date whenever you fetch. Read-only.\n"
-        "  - `host`: the repo's local branches on the host. You may push to it, but only to `agent/*` "
-        "branches, creating them or moving them forward: `git push host HEAD:agent/<name>`. "
-        "Force-pushes and deletes are refused.\n"
+        "  - `host`: the repo's local branches on the host. Hand your work back with `git push host`, "
+        f"which works as it would anywhere: your pushes land in `{ns}`, a git namespace of this "
+        "bottle's own, so you can't reach the host's branches and don't have to avoid them. "
+        "Deleting a ref is refused; force pushes are allowed, to be used as deliberately as ever.\n"
         "- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY` (already set). "
         "There's no DNS, and private addresses are blocked.\n"
     )
@@ -362,7 +365,9 @@ def _init_workspace(bottle: Bottle) -> None:
         git -C {WORKSPACE} {point_head}
         git -C {WORKSPACE} reset -q --hard
         # Two remotes, served live through the egress proxy (see host.py): origin is the
-        # repo's upstream (read-only), host is the repo's local branches (push to agent/* only).
+        # repo's upstream (read-only), host is the repo's local branches. Nothing to
+        # configure for pushing: the host puts receive-pack in this bottle's git
+        # namespace, so ordinary pushes land there and can't name anything else.
         git -C {WORKSPACE} remote add origin {GIT_URL}/origin
         git -C {WORKSPACE} remote add host {GIT_URL}/host
         git -C {WORKSPACE} config checkout.defaultRemote origin
@@ -427,81 +432,41 @@ def verify_contract(bottle: Bottle) -> None:
         raise BottleError(f"{bottle.environment} doesn't meet the bottle contract: {problems}")
 
 
-def shell(name: str):
+def shell(name: str) -> NoReturn:
+    """Open a login shell in the bottle, at /workspace."""
+    _attach(name, ["bash", "-l"], tty=True)
+
+
+def exec_(name: str, argv: list[str]) -> NoReturn:
+    """Run one command in the bottle, at /workspace, and exit with its status.
+
+    A TTY only when this process has one on both ends, so output stays clean
+    when it's piped or redirected.
+    """
+    if not argv:
+        raise BottleError("bottle exec needs a command: bottle exec NAME COMMAND [ARG...]")
+    _attach(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
+
+
+def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
+    """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
     env = {key: value for key, value in auth.env_for(bottle.features).items() if value}
-    runtime.container_exec_interactive(bottle.container, ["bash", "-l"], user=USER, workdir=WORKSPACE, env=env)
+    runtime.container_exec_interactive(bottle.container, argv, user=USER, workdir=WORKSPACE, env=env, tty=tty)
 
 
-def fetched_prefix(bottle: Bottle) -> str:
-    """Where fetched branches land in the bottle's repo; `git branch -r` shows them as bottle-NAME/..."""
-    return f"refs/remotes/bottle-{bottle.name}"
+def ref_namespace(bottle: Bottle) -> str:
+    """The git namespace a bottle's pushes are written into, on the host (see host.py).
 
-
-@dataclass(frozen=True)
-class Update:
-    """One ref `bottle git fetch` wrote, or refused to write, in the bottle's repo."""
-
-    ref: str  # e.g. refs/remotes/bottle-gradle/main
-    kind: str  # "new", "updated", "forced" or "rejected"
-    old: str | None
-    new: str
-
-
-@dataclass(frozen=True)
-class FetchResult:
-    updates: list[Update]
-    commit: str | None = None  # set when a bare commit was fetched into FETCH_HEAD
-    # Branches fetched before that the bottle no longer has; kept in the bottle's repo.
-    gone: list[str] = field(default_factory=list)
-
-
-# git fetch --porcelain flags: https://git-scm.com/docs/git-fetch#_output
-_PORCELAIN_KINDS = {"*": "new", " ": "updated", "+": "forced", "!": "rejected"}
-
-
-def fetch(name: str, rev: str | None = None, force: bool = False) -> FetchResult:
-    """Fetch the bottle's work into the bottle's repo, without ever losing anything there.
-
-    Only adds or fast-forwards bottle-NAME/* refs: history the bottle rewrote
-    is refused (unless `force`, which needs a single branch), and branches
-    deleted in the bottle stay (reported as gone). The host's own branches are
-    never touched.
-
-    No rev: every branch, plus a detached HEAD as bottle-NAME/detached/<commit>.
-    A branch: just that branch. Any other revision: that commit, into FETCH_HEAD.
+    receive-pack runs with GIT_NAMESPACE set to this, so the bottle reads and
+    writes refs/namespaces/<it>/ and nothing else; hooks/post-receive mirrors
+    what arrives to branches under the same name, for now.
     """
-    bottle = ensure_running(name)
-    repo = repos.get(bottle.repo)
-    prefix = fetched_prefix(bottle)
-    if rev is None:
-        if force:
-            raise BottleError("--force needs a single branch: bottle git fetch NAME BRANCH --force")
-        refspecs = [f"refs/heads/*:{prefix}/*"]
-        head = _detached_head(bottle)
-        if head:
-            refspecs.append(f"{head}:{prefix}/detached/{head[:12]}")
-        updates = _git_fetch(bottle, repo, refspecs)
-        gone = sorted(set(_fetched_branches(bottle, repo)) - {b for b, _ in _bottle_branches(bottle)})
-        return _checked(FetchResult(updates, gone=gone), name)
-
-    if _in_bottle_succeeds(bottle, ["git", "-C", WORKSPACE, "show-ref", "--verify", "--quiet", f"refs/heads/{rev}"]):
-        refspec = f"{'+' if force else ''}refs/heads/{rev}:{prefix}/{rev}"
-        return _checked(FetchResult(_git_fetch(bottle, repo, [refspec])), name)
-
-    if force:
-        raise BottleError(f"--force needs a branch; {rev!r} isn't a branch in {name}")
-    try:
-        commit = _in_bottle(bottle, ["git", "-C", WORKSPACE, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"])
-    except BottleError:
-        raise BottleError(f"{name} has no branch or commit {rev!r}") from None
-    # Only refs are advertised; fetching a bare commit needs upload-pack to allow it.
-    _git_fetch(bottle, repo, [commit], upload_pack=["git", "-c", "uploadpack.allowAnySHA1InWant=true", "upload-pack"])
-    return FetchResult([], commit)
+    return f"bottle-{bottle.name}"
 
 
-def unfetched_work(bottle: Bottle) -> list[str]:
+def unsaved_work(bottle: Bottle) -> list[str]:
     """What deleting the bottle would lose: branches (or a detached HEAD) whose
     commits the bottle's repo doesn't have, and uncommitted changes."""
     repo = repos.get(bottle.repo)
@@ -520,13 +485,6 @@ def _bottle_branches(bottle: Bottle) -> list[tuple[str, str]]:
     return [tuple(line.split(" ")) for line in out.splitlines()]
 
 
-def _fetched_branches(bottle: Bottle, repo: repos.Repo) -> list[str]:
-    prefix = fetched_prefix(bottle)
-    out = git("for-each-ref", "--format=%(refname)", f"{prefix}/", repo=repo.path)
-    names = [ref.removeprefix(f"{prefix}/") for ref in out.splitlines()]
-    return [n for n in names if not n.startswith("detached/")]
-
-
 def _host_has(repo: repos.Repo, commit: str) -> bool:
     try:
         git("cat-file", "-e", f"{commit}^{{commit}}", repo=repo.path)
@@ -539,34 +497,6 @@ def _detached_head(bottle: Bottle) -> str | None:
     if _in_bottle_succeeds(bottle, ["git", "-C", WORKSPACE, "symbolic-ref", "--quiet", "HEAD"]):
         return None  # on a branch, which refs/heads/* already covers
     return _in_bottle(bottle, ["git", "-C", WORKSPACE, "rev-parse", "HEAD"])
-
-
-def _checked(result: FetchResult, name: str) -> FetchResult:
-    rejected = [u for u in result.updates if u.kind == "rejected"]
-    if rejected:
-        lines = "\n".join(f"  {u.ref.removeprefix('refs/remotes/')}: {u.old[:12]} -> {u.new[:12]}" for u in rejected)
-        branch = rejected[0].ref.split("/", 3)[3]
-        raise BottleError(
-            f"{name} rewrote history; refusing to overwrite what was fetched before:\n{lines}\n"
-            f"Other refs were fetched. To overwrite one: bottle git fetch {name} {branch} --force"
-        )
-    return result
-
-
-def _git_fetch(bottle: Bottle, repo: repos.Repo, refspecs: list[str], upload_pack: list[str] | None = None) -> list[Update]:
-    # git's ext:: transport runs upload-pack in the bottle over `container exec`:
-    # no network or keys involved. %S is the service git asks for (git-upload-pack).
-    remote = "ext::" + " ".join(runtime.exec_command(bottle.container, [*(upload_pack or ["%S"]), WORKSPACE], user=USER))
-    cmd = ["git", "-C", str(repo.path), "-c", "protocol.ext.allow=always", "fetch", "--porcelain", "--no-tags", remote, *refspecs]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    updates = []
-    for line in result.stdout.splitlines():
-        flag, (old, new, ref) = line[0], line[2:].split(" ")
-        updates.append(Update(ref, _PORCELAIN_KINDS.get(flag, flag), None if set(old) == {"0"} else old, new))
-    # A rejected ref makes fetch exit non-zero; that's reported via the updates.
-    if result.returncode != 0 and not any(u.kind == "rejected" for u in updates):
-        raise BottleError(result.stderr.strip() or "git fetch failed")
-    return updates
 
 
 def _in_bottle(bottle: Bottle, argv: list[str]) -> str:
@@ -595,15 +525,15 @@ def _refuse_to_lose_work(bottle: Bottle, action: str) -> None:
     name = bottle.name
     try:
         ensure_running(name)
-        lost = unfetched_work(bottle)
+        lost = unsaved_work(bottle)
     except BottleError as e:
-        raise BottleError(f"couldn't check {name} for unfetched work ({e}); {action} anyway with --force") from None
+        raise BottleError(f"couldn't check {name} for unsaved work ({e}); {action} anyway with --force") from None
     if lost:
         hints = []
         if "uncommitted changes" in lost:
             hints.append("commit the changes in the bottle")
         if any(item != "uncommitted changes" for item in lost) or hints:
-            hints.append(f"push it to host agent/* in the bottle, or fetch it with `bottle git fetch {name}`")
+            hints.append(f"push it from the bottle (`git push host`), or `bottle exec {name} git push host`")
         raise BottleError(
             f"{name} has work its repo doesn't: {', '.join(lost)}. "
             f"To keep it, {' and '.join(hints)}; or {action} anyway with --force"
@@ -614,7 +544,7 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
     """Remove every part of the bottle that exists, then its record, and its image if no other bottle uses it.
 
     Refuses, unless `force`, if the bottle has work the bottle's repo doesn't:
-    unfetched commits or uncommitted changes. A stopped bottle is started to
+    unpushed commits or uncommitted changes. A stopped bottle is started to
     check. Each step tolerates its part being absent, so this also finishes off
     a bottle left half-made or half-deleted. If a step fails, the record stays
     (marked broken) so the next delete can retry.

@@ -94,22 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     shell.add_argument("name", metavar="BOTTLE", help="the bottle to open a shell in")
     shell.set_defaults(run=_shell, parser=shell)
 
-    git = commands.add_parser("git", help="move git work between bottles and their repos")
-    git_commands = git.add_subparsers(dest="git_command", required=True, metavar="COMMAND")
-    fetch = git_commands.add_parser(
-        "fetch",
-        help="fetch a bottle's work into its repo",
-        description="Fetch a bottle's git work into its repo, as bottle-NAME/<branch>. "
-        "Only adds and fast-forwards: history the bottle rewrote is refused, and nothing is deleted. "
-        "With no REV: every branch, plus a detached HEAD. With a branch: just that branch. "
-        "With a commit: that commit, into FETCH_HEAD.",
+    exec_ = commands.add_parser(
+        "exec",
+        help="run a command in a bottle",
+        description="Run one command in a bottle, at /workspace, and exit with its status. "
+        "Starts the bottle if it's stopped. Put -- before the command if it takes options of its own.",
     )
-    fetch.add_argument("name", metavar="BOTTLE", help="the bottle to fetch from")
-    fetch.add_argument("rev", nargs="?", help="a branch or commit in the bottle (default: every branch)")
-    fetch.add_argument(
-        "-f", "--force", action="store_true", help="overwrite a branch the bottle rewrote (needs a single BRANCH)"
-    )
-    fetch.set_defaults(run=_fetch, parser=fetch)
+    exec_.add_argument("name", metavar="BOTTLE", help="the bottle to run in")
+    exec_.add_argument("command", nargs=argparse.REMAINDER, metavar="COMMAND", help="the command and its arguments")
+    exec_.set_defaults(run=_exec, parser=exec_)
 
     start = commands.add_parser("start", help="start a bottle", description="Start a stopped bottle and its network access.")
     start.add_argument("name", metavar="BOTTLE", help="the bottle to start")
@@ -129,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("name", metavar="BOTTLE", help="the bottle to delete (not its repo)")
     delete.add_argument(
         "-f", "--force", action="store_true",
-        help="delete even if the bottle has unfetched commits or uncommitted changes",
+        help="delete even if the bottle has unpushed commits or uncommitted changes",
     )
     delete.set_defaults(run=_delete, parser=delete)
 
@@ -143,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     reset.add_argument("name", metavar="BOTTLE", help="the bottle to reset")
     reset.add_argument(
         "-f", "--force", action="store_true",
-        help="reset even if the bottle has unfetched commits or uncommitted changes",
+        help="reset even if the bottle has unpushed commits or uncommitted changes",
     )
     reset.set_defaults(run=_reset, parser=reset)
 
@@ -322,20 +315,10 @@ def _build(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fetch(args: argparse.Namespace) -> int:
+def _exec(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    result = bottles.fetch(args.name, args.rev, args.force)
-    if result.commit:
-        print(f"Fetched {result.commit[:12]} into FETCH_HEAD; keep it with: git branch <name> {result.commit[:12]}")
-    for u in result.updates:
-        change = u.new[:12] if u.old is None else f"{u.old[:12]} -> {u.new[:12]}"
-        print(f"  {u.kind:<8} {u.ref.removeprefix('refs/remotes/')}  {change}")
-    for branch in result.gone:
-        print(f"  gone     bottle-{args.name}/{branch}  (deleted in the bottle; kept here)")
-    if not result.commit and not result.updates and not result.gone:
-        print("Already up to date")
-    return 0
+    bottles.exec_(args.name, args.command)  # replaces this process
 
 
 def _start(args: argparse.Namespace) -> int:

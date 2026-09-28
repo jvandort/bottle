@@ -203,18 +203,22 @@ def exec_command(name: str, argv: list[str], user: str | None = None, tty: bool 
 
 
 def container_exec_interactive(
-    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, env: dict[str, str] | None = None
+    name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
+    env: dict[str, str] | None = None, tty: bool = True,
 ) -> NoReturn:
-    """Replace this process with an interactive command in the container, attached to the terminal.
+    """Replace this process with a command in the container, attached to this terminal.
 
     `env` is passed by name only (`--env NAME`, the value taken from this
-    process's environment), so values never appear on a command line.
+    process's environment), so values never appear on a command line. Without
+    `tty` the command's stdout is a pipe, which is what a caller redirecting
+    or piping the output wants.
     """
     names = []
     for key, value in (env or {}).items():
         os.environ[key] = value
         names += ["--env", key]
-    os.execvp("container", ["container", "exec", "--interactive", "--tty", *names, *_exec_options(user, workdir), name, *argv])
+    options = ["--interactive", *(["--tty"] if tty else [])]
+    os.execvp("container", ["container", "exec", *options, *names, *_exec_options(user, workdir), name, *argv])
 
 
 def _exec_options(user: str | None, workdir: str | None) -> list[str]:

@@ -643,7 +643,7 @@ class StartStopTest(BottleTestCase):
 
 
 class WorkspaceTestCase(BottleTestCase):
-    """Runs the real git fetch, with a local repo standing in for the bottle's /workspace."""
+    """A local repo stands in for the bottle's /workspace, with real git run against it."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -675,113 +675,71 @@ class WorkspaceTestCase(BottleTestCase):
         return self.commit(self.workspace, message)
 
     def ref(self, name: str) -> str:
-        return self.host("rev-parse", f"refs/remotes/bottle-gradle/{name}")
+        return self.host("rev-parse", f"refs/namespaces/bottle-gradle/refs/heads/{name}")
+
+    def agent_push(self, branch: str = "main") -> None:
+        """What `git push host` does in a bottle: an ordinary push, which the host
+        puts in the bottle's namespace by running receive-pack with GIT_NAMESPACE."""
+        namespace = bottles.ref_namespace(self.bottle)
+        receive_pack = f"git --namespace={namespace} -c receive.denyCurrentBranch=ignore receive-pack"
+        run("git", "-C", self.workspace, "push", "-q", "--receive-pack", receive_pack,
+            str(self.repo_path), f"HEAD:refs/heads/{branch}")
 
 
-class FetchTest(WorkspaceTestCase):
-    def test_fetches_every_branch(self) -> None:
-        run("git", "-C", self.workspace, "switch", "-q", "-c", "agent/feature")
-        feature = self.agent_commit("feature work")
+class WorkspaceSetupTest(WorkspaceTestCase):
+    def test_the_workspace_has_both_remotes_and_no_push_refspec(self) -> None:
+        script = self.fake_runtime.workspace_script
+        self.assertIn("remote add host http://bottle.host/git/host", script)
+        self.assertIn("remote add origin http://bottle.host/git/origin", script)
+        # The host puts receive-pack in the bottle's namespace, so pushing needs
+        # no configuration here and git behaves as git.
+        self.assertNotIn("remote.host.push", script)
 
-        result = bottles.fetch("gradle")
+    def test_the_context_tells_the_agent_where_its_work_goes(self) -> None:
+        context = bottles.context(self.bottle)
+        self.assertIn("`git push host`", context)
+        self.assertIn("bottle-gradle", context)
+        self.assertNotIn("agent/", context)
 
-        self.assertEqual(self.ref("agent/feature"), feature)
-        self.assertEqual(self.ref("main"), self.head)
-        self.assertEqual({(u.ref, u.kind) for u in result.updates}, {
-            ("refs/remotes/bottle-gradle/agent/feature", "new"), ("refs/remotes/bottle-gradle/main", "new")})
-        self.assertEqual(self.host("rev-parse", "main"), self.head)  # the host's own branches are untouched
-        self.assertNotIn("detached", self.host("branch", "-r"))  # on a branch: no detached ref
 
-    def test_detached_head_gets_its_own_ref(self) -> None:
-        run("git", "-C", self.workspace, "checkout", "-q", "--detach")
-        detached = self.agent_commit("detached work")
-        bottles.fetch("gradle")
-        self.assertEqual(self.ref(f"detached/{detached[:12]}"), detached)
+class ExecTest(BottleTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_runtime = self.fake()
+        bottles.create("gradle")
+        self.attached: dict = {}
+        patcher = mock.patch.object(
+            bottles.runtime, "container_exec_interactive",
+            side_effect=lambda name, argv, user=None, workdir=None, env=None, tty=True:
+                self.attached.update(name=name, argv=argv, user=user, workdir=workdir, tty=tty))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_fast_forwards_are_updates(self) -> None:
-        bottles.fetch("gradle")
-        new = self.agent_commit("more")
-        [update] = bottles.fetch("gradle").updates
-        self.assertEqual((update.kind, update.old, update.new), ("updated", self.head, new))
+    def test_runs_the_command_in_the_workspace(self) -> None:
+        bottles.exec_("gradle", ["git", "push", "host"])
+        self.assertEqual(self.attached["argv"], ["git", "push", "host"])
+        self.assertEqual((self.attached["user"], self.attached["workdir"]), ("genie", "/workspace"))
 
-    def test_up_to_date(self) -> None:
-        bottles.fetch("gradle")
-        self.assertEqual(bottles.fetch("gradle").updates, [])
+    def test_a_tty_only_when_this_process_has_one(self) -> None:
+        for isatty, expected in ((True, True), (False, False)):
+            with self.subTest(isatty=isatty), mock.patch("sys.stdin.isatty", return_value=isatty), \
+                    mock.patch("sys.stdout.isatty", return_value=isatty):
+                bottles.exec_("gradle", ["true"])
+                self.assertEqual(self.attached["tty"], expected)
 
-    def test_never_deletes(self) -> None:
-        run("git", "-C", self.workspace, "branch", "temp")
-        bottles.fetch("gradle")
-        run("git", "-C", self.workspace, "branch", "-D", "temp")
-        bottles.fetch("gradle")
-        self.assertEqual(self.ref("temp"), self.head)
+    def test_shell_always_gets_a_tty(self) -> None:
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            bottles.shell("gradle")
+        self.assertEqual((self.attached["argv"], self.attached["tty"]), (["bash", "-l"], True))
 
-    def test_refuses_rewritten_history(self) -> None:
-        self.agent_commit("first")
-        run("git", "-C", self.workspace, "switch", "-q", "-c", "other")
-        other = self.agent_commit("other work")
-        bottles.fetch("gradle")
-        fetched_main = self.ref("main")
-        run("git", "-C", self.workspace, "switch", "-q", "main")
-        run("git", "-C", self.workspace, "reset", "-q", "--hard", "HEAD~1")
-        self.agent_commit("rewritten")
-        run("git", "-C", self.workspace, "switch", "-q", "other")
-        other_next = self.agent_commit("more other work")
-
-        with self.assertRaisesRegex(BottleError, r"rewrote history(.|\n)*bottle-gradle/main(.|\n)*bottle git fetch gradle main --force"):
-            bottles.fetch("gradle")
-
-        self.assertEqual(self.ref("main"), fetched_main)  # kept
-        self.assertEqual(self.ref("other"), other_next)  # the rest still fetched
-        self.assertNotEqual(other, other_next)
-
-    def test_force_overwrites_a_single_branch(self) -> None:
-        self.agent_commit("first")
-        bottles.fetch("gradle")
-        run("git", "-C", self.workspace, "reset", "-q", "--hard", "HEAD~1")
-        rewritten = self.agent_commit("rewritten")
-        with self.assertRaises(BottleError):
-            bottles.fetch("gradle", "main")
-        [update] = bottles.fetch("gradle", "main", force=True).updates
-        self.assertEqual((update.kind, update.new), ("forced", rewritten))
-        self.assertEqual(self.ref("main"), rewritten)
-
-    def test_force_needs_a_branch(self) -> None:
-        with self.assertRaisesRegex(BottleError, "--force needs a single branch"):
-            bottles.fetch("gradle", force=True)
-        with self.assertRaisesRegex(BottleError, "--force needs a branch; 'HEAD' isn't a branch"):
-            bottles.fetch("gradle", "HEAD", force=True)
-
-    def test_fetches_one_branch(self) -> None:
-        run("git", "-C", self.workspace, "switch", "-q", "-c", "a")
-        a = self.agent_commit("a")
-        run("git", "-C", self.workspace, "switch", "-q", "-c", "b")
-        self.agent_commit("b")
-        bottles.fetch("gradle", "a")
-        self.assertEqual(self.ref("a"), a)
-        self.assertNotIn("bottle-gradle/b", self.host("branch", "-r"))
-
-    def test_fetches_a_commit(self) -> None:
-        wanted = self.agent_commit("wanted")
-        self.agent_commit("later")
-        self.assertEqual(bottles.fetch("gradle", wanted[:10]).commit, wanted)
-        self.assertEqual(self.host("cat-file", "-t", wanted), "commit")
-        self.assertEqual(self.host("rev-parse", "FETCH_HEAD"), wanted)
-
-    def test_unknown_rev(self) -> None:
-        with self.assertRaisesRegex(BottleError, "gradle has no branch or commit 'nope'"):
-            bottles.fetch("gradle", "nope")
+    def test_no_command_is_an_error(self) -> None:
+        with self.assertRaisesRegex(BottleError, "bottle exec needs a command"):
+            bottles.exec_("gradle", [])
 
     def test_starts_a_stopped_bottle(self) -> None:
-        with mock.patch.object(bottles, "ensure_running", wraps=bottles.ensure_running) as ensure:
-            bottles.fetch("gradle")
-        ensure.assert_called_once_with("gradle")
-
-    def test_reports_branches_gone_from_the_bottle(self) -> None:
-        run("git", "-C", self.workspace, "branch", "temp")
-        self.assertEqual(bottles.fetch("gradle").gone, [])
-        run("git", "-C", self.workspace, "branch", "-D", "temp")
-        self.assertEqual(bottles.fetch("gradle").gone, ["temp"])
-        self.assertEqual(self.ref("temp"), self.head)  # reported, not deleted
+        bottles.stop("gradle")
+        bottles.exec_("gradle", ["true"])
+        self.assertIn("container_start", self.fake_runtime.calls)
 
 
 class DeleteGuardTest(WorkspaceTestCase):
@@ -791,16 +749,16 @@ class DeleteGuardTest(WorkspaceTestCase):
         bottles.delete("gradle")
         self.assertEqual(bottles.load(), {})
 
-    def test_unfetched_commits_block_delete(self) -> None:
-        run("git", "-C", self.workspace, "switch", "-q", "-c", "agent/work")
-        self.agent_commit("unfetched")
-        with self.assertRaisesRegex(BottleError, "has work its repo doesn't: branch agent/work. To keep it, push it to host agent/\\* in the bottle, or fetch it with `bottle git fetch gradle`; or delete anyway with --force"):
+    def test_unpushed_commits_block_delete(self) -> None:
+        run("git", "-C", self.workspace, "switch", "-q", "-c", "work")
+        self.agent_commit("unpushed")
+        with self.assertRaisesRegex(BottleError, r"has work its repo doesn't: branch work\. To keep it, push it from the bottle \(`git push host`\), or `bottle exec gradle git push host`; or delete anyway with --force"):
             bottles.delete("gradle")
         self.assertIn("gradle", bottles.load())
 
-    def test_fetching_unblocks_delete(self) -> None:
+    def test_pushing_unblocks_delete(self) -> None:
         self.agent_commit("work")
-        bottles.fetch("gradle")
+        self.agent_push()
         bottles.delete("gradle")
         self.assertEqual(bottles.load(), {})
 
@@ -812,13 +770,13 @@ class DeleteGuardTest(WorkspaceTestCase):
             bottles.delete("gradle")
 
     def test_force_deletes_anyway(self) -> None:
-        self.agent_commit("unfetched")
+        self.agent_commit("unpushed")
         bottles.delete("gradle", force=True)
         self.assertEqual(bottles.load(), {})
 
     def test_unable_to_check_needs_force(self) -> None:
-        with mock.patch.object(bottles, "unfetched_work", side_effect=BottleError("exec failed")):
-            with self.assertRaisesRegex(BottleError, "couldn't check gradle for unfetched work .*--force"):
+        with mock.patch.object(bottles, "unsaved_work", side_effect=BottleError("exec failed")):
+            with self.assertRaisesRegex(BottleError, "couldn't check gradle for unsaved work .*--force"):
                 bottles.delete("gradle")
 
 
@@ -888,7 +846,7 @@ class ResetTest(WorkspaceTestCase):
         self.assertEqual(bottles.get("gradle").status, "ready")
 
     def test_refuses_to_lose_work(self) -> None:
-        self.agent_commit("unfetched")
+        self.agent_commit("unpushed")
         with self.assertRaisesRegex(BottleError, "has work its repo doesn't: branch main.*reset anyway with --force"):
             bottles.reset("gradle")
         with mock.patch.object(bottles, "_run_container"):
@@ -897,7 +855,7 @@ class ResetTest(WorkspaceTestCase):
     def test_a_stopped_bottle_comes_back_running(self) -> None:
         bottle = bottles.get("gradle")
         bottles.stop("gradle")
-        # Checking for unfetched work starts the bottle; the contract check would run on this machine.
+        # Checking for unsaved work starts the bottle; the contract check would run on this machine.
         with mock.patch.object(bottles, "verify_contract"), \
                 mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
             bottles.reset("gradle")
