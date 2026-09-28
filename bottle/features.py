@@ -390,11 +390,12 @@ def ensure_built(image: str, specs: list[str]) -> str:
     """Build `image` with the features in `specs` if missing or stale; return its tag."""
     features = resolve(specs)
     tag = image_tag(image, features)
-    built = images.ensure_built(image)
-    if features and not images.is_current(tag, inputs_hash(image, features)):
-        print(f"Building {tag}...", file=sys.stderr)
-        _build(image, features, tag)
-        built = True
+    with images.building():
+        built = images.ensure_built(image)
+        if features and not images.is_current(tag, inputs_hash(image, features)):
+            print(f"Building {tag}...", file=sys.stderr)
+            _build(image, features, tag)
+            built = True
     if built:
         _report_removed(remove_stale())
     return tag
@@ -431,13 +432,14 @@ def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
 
 def build(image: str, specs: list[str], no_cache: bool = False) -> str:
     """Build `image` with the features in `specs`, first building anything missing underneath."""
-    if not specs:
-        tag = images.build(image, no_cache)
-    else:
-        features = resolve(specs)
-        tag = image_tag(image, features)
-        images.ensure_built(image)
-        _build(image, features, tag, no_cache)
+    with images.building():
+        if not specs:
+            tag = images.build(image, no_cache)
+        else:
+            features = resolve(specs)
+            tag = image_tag(image, features)
+            images.ensure_built(image)
+            _build(image, features, tag, no_cache)
     _report_removed(remove_stale())
     return tag
 

@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from bottle import egress, prereqs, runtime
@@ -125,10 +126,45 @@ def build_context(
     `inputs` is the hash of what the image is built from, recorded as a label.
     """
     prereqs.ensure_container()
-    # The builder VM must be running before its network's gateway exists on the host.
+    with building():
+        # The builder VM must be running before its network's gateway exists on the host.
+        _start_builder()
+        gateway = runtime.network_gateway()
+        asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile, {INPUTS_LABEL: inputs}))
+
+
+# The builder VM holds its memory (about 2 GB) for as long as it runs, so bottle
+# stops it when it's done building, if bottle started it. A builder that was
+# already running (someone else's build) is left running.
+_building_depth = 0
+_started_builder = False
+
+
+@contextmanager
+def building():
+    """Keep the builder running for every build inside this block; stop it at the end if bottle started it.
+
+    Nests, so building an image and the images underneath it starts the builder once.
+    """
+    global _building_depth, _started_builder
+    _building_depth += 1
+    try:
+        yield
+    finally:
+        _building_depth -= 1
+        if _building_depth == 0 and _started_builder:
+            _started_builder = False
+            try:
+                runtime.builder_stop()
+            except BottleError as e:
+                print(f"bottle: couldn't stop the image builder: {e}", file=sys.stderr)
+
+
+def _start_builder() -> None:
+    global _started_builder
+    if not _started_builder and not runtime.builder_running():
+        _started_builder = True
     runtime.builder_start()
-    gateway = runtime.network_gateway()
-    asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile, {INPUTS_LABEL: inputs}))
 
 
 async def _build_via_proxy(
