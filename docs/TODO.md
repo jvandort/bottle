@@ -62,7 +62,7 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   Getting it out of a bottle at all, before anyone reviews it, is
   [docs/design/durability.md](design/durability.md), and the layer above
   bottle is sketched in
-  [docs/design/two-lines.md](design/two-lines.md). Until that's
+  [review/](../review/). Until that's
   settled, hooks/post-receive mirrors each pushed branch to
   `refs/heads/bottle-NAME/*` so there's something to look at; nothing should
   depend on those mirrored refs, and the mirror goes when the real answer

@@ -1,6 +1,6 @@
-# Two lines: implementation guide
+# Implementation guide
 
-Companion to `two-lines.md`, which has the model and the rationale. This has the
+Companion to `README.md`, which has the model and the rationale. This has the
 parts you need to actually write it: a glossary, the exact plumbing, the state
 on disk, the algorithms, and the edge cases that will bite.
 
@@ -331,7 +331,7 @@ moved and no file was written.
 
 There is no command. Switch to write mode and use git. If the tree is dirty,
 refuse, and offer `--commit-first` to make a `wip` commit on the working line --
-never an autostash. See `two-lines.md`.
+never an autostash. See `README.md`.
 
 ## Guardrails
 

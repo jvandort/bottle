@@ -1,4 +1,4 @@
-# Two lines
+# Two lines: a review tool
 
 Status: design, mechanism tested. Not built.
 
@@ -312,7 +312,7 @@ There is deliberately no `wip` verb. Doing it from review mode would only save a
 round trip through a mode switch that costs two renames, and the mistake it
 would guard against -- `git add -A` in review mode meaning "approve everything
 unread" -- is one the rule already prevents. For work you forget to commit at
-all, the answer is a snapshot taken from outside on a timer (`durability.md`),
+all, the answer is a snapshot taken from outside on a timer (`../docs/design/durability.md`),
 not a verb you have to remember.
 
 ## Going away and coming back
@@ -545,7 +545,7 @@ discovering this now and discovering it in a week.
 
 ## Implementing it
 
-`two-lines-implementation.md` has the state layout, the algorithms, the exact
+`IMPLEMENTATION.md` has the state layout, the algorithms, the exact
 plumbing, the edge cases, and a glossary of every git concept the implementation
 depends on.
 

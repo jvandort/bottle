@@ -19,7 +19,7 @@ stops two agents starting at once. Built alongside bottle, configurable, and off
 unless you ask for it.
 
 **A review tool** (name pending) is the human's, not the project's. It has to
-work well with the other two, and one design for it is in `two-lines.md` -- a
+work well with the other two, and one design for it is in `../../review/` -- a
 standalone tool that knows nothing about bottle, for which an agent's branch is
 just one possible source of work to review. Nothing in bottle should depend on
 it existing.
