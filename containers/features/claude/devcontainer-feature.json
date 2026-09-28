@@ -29,6 +29,15 @@
         "light"
       ],
       "description": "Color theme, so first-run setup doesn't ask."
+    },
+    "tui": {
+      "type": "string",
+      "default": "default",
+      "enum": [
+        "default",
+        "fullscreen"
+      ],
+      "description": "Renderer: default draws inline, fullscreen takes over the terminal."
     }
   },
   "customizations": {
