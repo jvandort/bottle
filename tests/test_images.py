@@ -150,6 +150,8 @@ class BuildImageTest(unittest.TestCase):
         for name, value in {
             "ensure_container": mock.patch.object(images.prereqs, "ensure_container"),
             "builder_start": mock.patch.object(images.runtime, "builder_start"),
+            "builder_running": mock.patch.object(images.runtime, "builder_running", return_value=False),
+            "builder_stop": mock.patch.object(images.runtime, "builder_stop"),
             "gateway": mock.patch.object(images.runtime, "network_gateway", return_value="127.0.0.1"),
         }.items():
             setattr(self, name, value.start())
@@ -195,6 +197,39 @@ class BuildImageTest(unittest.TestCase):
         with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
             images.build("base")
         self.assertEqual(order, ["builder", "gateway"])
+
+
+    def test_stops_the_builder_it_started(self) -> None:
+        with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
+            images.build("base")
+        self.builder_stop.assert_called_once()
+
+    def test_leaves_a_builder_that_was_already_running(self) -> None:
+        self.builder_running.return_value = True
+        with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
+            images.build("base")
+        self.builder_stop.assert_not_called()
+
+    def test_builds_inside_one_session_share_the_builder(self) -> None:
+        order = []
+        self.builder_stop.side_effect = lambda: order.append("stop")
+        with mock.patch.object(images.runtime, "build", mock.AsyncMock(side_effect=lambda *a: order.append("build"))):
+            with images.building():
+                images.build("base")
+                self.builder_running.return_value = True  # it's running now: bottle started it
+                images.build("base")
+        self.assertEqual(order, ["build", "build", "stop"])
+
+    def test_a_failed_build_still_stops_the_builder(self) -> None:
+        with mock.patch.object(images.runtime, "build", mock.AsyncMock(side_effect=BottleError("boom"))), \
+                self.assertRaises(BottleError):
+            images.build("base")
+        self.builder_stop.assert_called_once()
+
+    def test_failing_to_stop_the_builder_doesnt_fail_the_build(self) -> None:
+        self.builder_stop.side_effect = BottleError("nope")
+        with mock.patch.object(images.runtime, "build", mock.AsyncMock()), mock.patch("sys.stderr"):
+            self.assertEqual(images.build("base"), "bottle/base:latest")
 
 
 if __name__ == "__main__":

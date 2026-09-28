@@ -16,6 +16,20 @@ def builder_start() -> None:
     _run("builder", "start")
 
 
+def builder_running() -> bool:
+    result = subprocess.run(["container", "builder", "status", "--format", "json"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return False
+    try:
+        return any(b.get("status", {}).get("state") == "running" for b in json.loads(result.stdout or "[]"))
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def builder_stop() -> None:
+    _run("builder", "stop")
+
+
 def network_gateway(network: str = "default") -> str:
     """The host's address on `network`, where bottle serves the network's egress proxy."""
     [info] = json.loads(_run("network", "inspect", network))
