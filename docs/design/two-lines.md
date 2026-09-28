@@ -140,19 +140,75 @@ tree was not merely restored, it was never touched.
 ### Conflicts
 
 A fixup conflicts when a later clean commit changed the same lines you are
-folding into an earlier one: you approved something that depends on something
-you approved after it. Uncommon, but real.
+folding into an earlier one. This is not an edge case to tolerate; it is the
+normal cost of editing history you have already composed, and the tool has to
+be good at it.
 
-`merge-tree` is atomic, which makes this far better behaved than a failed
-rebase. It exits 1, prints the conflicted tree and all three stages for each
-conflicted path, and **writes nothing** -- no ref moves, no half-finished
-rebase, no files touched. The clean line is exactly as it was.
+**A fold conflict implies a replay conflict.** Folding into `A` can only
+conflict if some commit between `A` and the tip also touched those lines -- and
+that commit will therefore conflict again when it is replayed onto the new `A`.
+Two resolutions, not one. That is inherent, and `git rebase -i` has exactly the
+same property; the difference is that we can see it coming and say so:
 
-The default response should be to say so and stop: name the commit it conflicts
-with, and suggest fixing up into a later one instead, which is usually the right
-answer. Resolution in an editor is possible if it turns out to be needed, since
-the three stages are right there and can be written into a temporary index for a
-merge tool -- but it should not be built before it is missed.
+```
+fixup: conflict folding into "A: f=two"  (step 1 of 2)
+  f.txt
+
+  "B: f=three" also changes f.txt, so this will conflict again on replay.
+  If the change belongs there, abort and fix up "B: f=three" instead.
+
+  resolve:  review resolve
+  then:     review fixup --continue
+```
+
+That diagnostic is the useful part. Very often a fold conflict means the change
+belongs in the later commit, and the tool knows which one because it is about to
+replay it.
+
+### Resolving
+
+`merge-tree` hands back everything needed, in two forms: a tree in which the
+conflicted files already contain ordinary conflict markers, and the three stages
+as blobs. So `review resolve` can write
+
+```
+<scratch>/f.txt.BASE     <scratch>/f.txt.LOCAL     <scratch>/f.txt.REMOTE
+```
+
+and invoke the merge tool already configured in git (`mergetool.<tool>.cmd`).
+For an IDE with a command-line launcher this opens a merge tab **in the window
+already open** -- no second project, no worktree, no checkout. The resolved file
+is hashed straight into the object database and recorded.
+
+For anyone who prefers markers, the marked-up file is already in the conflicted
+tree and can be dropped in the scratch directory instead.
+
+### In progress
+
+The state lives in `.git/review/fixup/`, the same shape as `.git/rebase-merge`:
+the target, the list of commits still to replay, the partially rebuilt line, and
+the current step's stages and resolutions.
+
+Nothing is ever half-written. The clean branch moves once, by a single
+`update-ref`, after every step succeeds. Which gives three properties a real
+rebase cannot:
+
+- **`--abort` is free.** Delete the state directory. There is nothing to undo,
+  because nothing was written.
+- **A crash is free**, for the same reason.
+- **You can keep working.** The conflict lives in a scratch directory, not your
+  working tree, so you can switch to write mode mid-fixup, write code, commit on
+  the working line, and come back to it tomorrow. A repository in the middle of
+  a rebase is a repository you cannot use; this one you can.
+
+Tested end to end: a fixup into an earlier commit that conflicted at the fold
+*and* on replay, resolved at both steps, produced the right clean line -- and
+the working tree was not merely restored afterwards, its mtime never changed.
+
+Recurring conflicts are likely, since the working line keeps moving and the same
+fold gets retried. Resolutions are keyed by (base, ours, theirs), which is what
+`git rerere` already caches, so reusing it is the obvious next step and should
+wait until the repetition is actually felt.
 
 ## The tool
 
@@ -161,7 +217,9 @@ Five verbs. Everything else is git and your editor.
 - `start` -- set up the clean line and the two index files.
 - `write` / `review` -- toggle.
 - `fixup <commit>` -- fold the approved changes into an existing clean commit,
-  entirely in the object database.
+  entirely in the object database; `--continue` and `--abort` when it conflicts.
+- `resolve` -- open the current conflict in the merge tool git is already
+  configured with.
 - `refresh` -- when the working line is someone else's, pull its new tip into
   the working tree (below).
 
