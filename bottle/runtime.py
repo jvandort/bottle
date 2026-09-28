@@ -68,9 +68,9 @@ def network_exists(network: str) -> bool:
     return _succeeds("network", "inspect", network)
 
 
-def network_create(network: str) -> None:
+def network_create(network: str, labels: dict[str, str] | None = None) -> None:
     """Create a host-only network: it reaches the host and nothing else."""
-    _run("network", "create", "--internal", network)
+    _run("network", "create", "--internal", *_label_options(labels), network)
 
 
 def network_delete(network: str) -> None:
@@ -87,10 +87,10 @@ class Mount:
 
 
 def container_run(
-    name: str, image: str, network: str, env: dict[str, str], mounts: list[Mount]
+    name: str, image: str, network: str, env: dict[str, str], mounts: list[Mount], labels: dict[str, str] | None = None
 ) -> None:
     """Create and start a detached container running the image's default command."""
-    cmd = ["run", "--detach", "--name", name, "--network", network]
+    cmd = ["run", "--detach", "--name", name, "--network", network, *_label_options(labels)]
     for key, value in env.items():
         cmd += ["--env", f"{key}={value}"]
     for m in mounts:
@@ -115,10 +115,50 @@ def container_stop(name: str) -> None:
     _run("stop", name)
 
 
-def container_delete(name: str) -> None:
-    """Stop and delete `name`; a no-op if it doesn't exist."""
-    if container_state(name) is not None:
-        _run("delete", "--force", name)
+@dataclass(frozen=True)
+class ContainerInfo:
+    state: str
+    labels: dict[str, str]
+    networks: list[str]
+
+
+def container_info(name: str) -> ContainerInfo | None:
+    result = subprocess.run(["container", "inspect", name], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    [info] = json.loads(result.stdout)
+    config = info["configuration"]
+    return ContainerInfo(
+        info["status"]["state"], config.get("labels") or {}, [n["network"] for n in config.get("networks") or []]
+    )
+
+
+def container_delete(name: str, owner: tuple[str, str] | None = None) -> None:
+    """Stop and delete `name`; a no-op if it doesn't exist.
+
+    With `owner` (label value, network), delete only a container that's
+    provably that owner's: labelled with it, or (made before labels) attached
+    to its network. Anything else is left alone and reported.
+    """
+    info = container_info(name)
+    if info is None:
+        return
+    if owner is not None and not _owned(info, *owner):
+        raise BottleError(f"container {name} isn't this bottle's; leaving it alone")
+    _run("delete", "--force", name)
+
+
+OWNER_LABEL = "bottle.id"
+
+
+def _owned(info: ContainerInfo, owner: str, network: str) -> bool:
+    if OWNER_LABEL in info.labels:
+        return info.labels[OWNER_LABEL] == owner
+    return network in info.networks
+
+
+def _label_options(labels: dict[str, str] | None) -> list[str]:
+    return [option for key, value in (labels or {}).items() for option in ("--label", f"{key}={value}")]
 
 
 def container_exec(

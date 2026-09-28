@@ -142,7 +142,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         path, port = Path(tmp) / "d.sock", free_port()
         d = Daemon(port=port)
         with mock.patch.object(daemon.runtime, "network_gateway", return_value="127.0.0.1"), \
-                mock.patch.object(daemon, "running_bottles", return_value=[("b", "bottle-b")]):
+                mock.patch.object(daemon, "running_bottles", return_value=[("b", "bottle-b", None)]):
             task = asyncio.create_task(daemon.serve(path, d))
             for _ in range(200):
                 if "b" in d.proxies:
@@ -165,7 +165,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         with mock.patch.object(daemon.runtime, "network_gateway", side_effect=gateway):
-            await d.restore([("x", "bad"), ("y", "good")])
+            await d.restore([("x", "bad", None), ("y", "good", None)])
         self.assertEqual(list(d.proxies), ["y"])
         await d.release("y")
 
