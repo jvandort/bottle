@@ -18,9 +18,18 @@ rm -rf /var/lib/apt/lists/*
 
 # Settings for the bottle's user, so Claude starts working straight away:
 # the permission mode (bypassPermissions by default: the bottle is the
-# sandbox), no confirmation before bypass mode, a theme, and no spinner tips.
-# PERMISSIONMODE and THEME are the feature's options; the enum keeps
-# PERMISSIONMODE safe to write into JSON, THEME is checked here.
+# sandbox), no confirmation before bypass mode, a theme, no spinner tips, and
+# the renderer.
+#
+# tui defaults to "default" rather than Claude Code's own "fullscreen".
+# Fullscreen captures the mouse and copies a selection to the system clipboard
+# instead of leaving it to the terminal -- via pbcopy, wl-copy, xclip or xsel,
+# and OSC 52 when there are none. A bottle has none, and the OSC 52 fallback
+# reaches a terminal that may not accept it (Terminal.app doesn't), so the
+# selection is highlighted, copied nowhere, and silently lost.
+#
+# PERMISSIONMODE, THEME and TUI are the feature's options; their enums keep
+# PERMISSIONMODE and TUI safe to write into JSON, THEME is checked here.
 case "$THEME" in *[!a-z-]*) echo "claude: theme must be a theme name like dark, not '$THEME'" >&2; exit 1 ;; esac
 home="$_REMOTE_USER_HOME"
 install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$home/.claude"
@@ -29,6 +38,7 @@ cat > "$home/.claude/settings.json" <<JSON
   "permissions": { "defaultMode": "$PERMISSIONMODE" },
   "skipDangerousModePermissionPrompt": true,
   "theme": "$THEME",
+  "tui": "$TUI",
   "spinnerTipsEnabled": false
 }
 JSON

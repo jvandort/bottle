@@ -138,8 +138,9 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   the bottle's `/workspace` is trusted, first-run setup is done, it's logged in
   with the `claude` credential (`bottle auth login claude`), and it reads
   bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Options:
-  `permissionMode` (default `bypassPermissions`: the bottle is the sandbox) and
-  `theme` (default `dark`).
+  `permissionMode` (default `bypassPermissions`: the bottle is the sandbox),
+  `theme` (default `dark`), and `tui` (default `default`: `fullscreen` would
+  capture the mouse, and a bottle has no clipboard to copy to instead).
 
 A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.
 `--feature jvm:version=21,additionalVersions=17,11`. Options left out take

@@ -16,9 +16,19 @@ class RealFeaturesTest(unittest.TestCase):
                 features.load(feature_id)
 
     def test_claude_options(self) -> None:
-        self.assertEqual(features.load("claude").option_env(), {"PERMISSIONMODE": "bypassPermissions", "THEME": "dark"})
+        self.assertEqual(
+            features.load("claude").option_env(),
+            {"PERMISSIONMODE": "bypassPermissions", "THEME": "dark", "TUI": "default"})
         with self.assertRaisesRegex(BottleError, "option permissionMode must be one of"):
             features.resolve(["claude:permissionMode=yolo"])
+
+    def test_claude_renders_without_capturing_the_mouse(self) -> None:
+        # Fullscreen would copy a selection to a clipboard a bottle hasn't got.
+        self.assertEqual(features.load("claude").option_env()["TUI"], "default")
+        [claude] = features.resolve(["claude:tui=fullscreen"])
+        self.assertEqual(claude.option_env()["TUI"], "fullscreen")
+        with self.assertRaisesRegex(BottleError, "option tui must be one of default, fullscreen"):
+            features.resolve(["claude:tui=full"])
 
     def test_jvm_options(self) -> None:
         self.assertEqual(features.load("jvm").option_env(), {"VERSION": "25", "ADDITIONALVERSIONS": ""})
