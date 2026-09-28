@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         "set",
         help="replace a repo's settings",
         description="Replace all of a repo's settings: its default features become exactly those given "
-        "(none, if none are given). Existing bottles keep the features they were created with.",
+        "(none, if none are given). Existing bottles get them when reset.",
     )
     repo_set.add_argument("name", metavar="REPO", help="the repo to change")
     repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
@@ -135,9 +135,10 @@ def main(argv: list[str] | None = None) -> int:
 
     reset = commands.add_parser(
         "reset",
-        help="start a bottle over, at the latest commit of its branch",
-        description="Start a bottle over: a fresh VM from its features' image, and /workspace at the "
-        "latest commit of its branch in the repo. Its name stays. A stopped bottle stays stopped.",
+        help="delete a bottle and create it again",
+        description="Delete a bottle and create it again with `bottle new`'s original arguments, in one "
+        "step: a fresh, running VM with the repo's current default features (plus any the bottle was "
+        "created with), and /workspace at the latest commit of its branch.",
     )
     reset.add_argument("name", metavar="BOTTLE", help="the bottle to reset")
     reset.add_argument(
@@ -196,8 +197,16 @@ def _repo_add(args: argparse.Namespace) -> int:
             args.parser.error("takes [NAME] PATH")
 
     result = repos.add(Path(path).expanduser(), name, args.feature)
-    print(f"{'Added' if result.created else 'Already added'} {result.repo.name}: {result.repo.path}")
+    repo = result.repo
+    if result.created:
+        print(f"Created repo '{repo.name}' ({repo.path}) with features {_features(repo.features)}")
+    else:
+        print(f"Repo '{repo.name}' already exists ({repo.path}) with features {_features(repo.features)}")
     return 0
+
+
+def _features(specs) -> str:
+    return f"[{', '.join(sorted(specs))}]"
 
 
 def _repo_list(args: argparse.Namespace) -> int:
@@ -208,8 +217,14 @@ def _repo_list(args: argparse.Namespace) -> int:
 
 
 def _repo_set(args: argparse.Namespace) -> int:
+    from bottle import bottles
+
     repo = repos.set_settings(args.name, args.feature)
-    print(f"{repo.name}: features {' '.join(repo.features) or '(none)'}")
+    print(f"Set repo '{repo.name}' features to {_features(repo.features)}")
+    stale = [b.name for b in bottles.load().values()
+             if b.repo == repo.name and set(bottles.features_on_reset(b)) != set(b.features)]
+    for name in stale:
+        print(f"Bottle '{name}' gets them when reset: bottle reset {name}")
     return 0
 
 
@@ -262,11 +277,14 @@ def _new(args: argparse.Namespace) -> int:
     from bottle import images
 
     bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature)
-    at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
-    with_features = f" with {', '.join(sorted(bottle.features))}" if bottle.features else ""
-    print(f"Created {bottle.name}: {bottle.repo} {at}{with_features}")
+    print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
+
+
+def _describe(bottle) -> str:
+    at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
+    return f"bottle '{bottle.name}' from repo '{bottle.repo}' at {at} with features {_features(bottle.features)}"
 
 
 def _shell(args: argparse.Namespace) -> int:
@@ -340,7 +358,7 @@ def _reset(args: argparse.Namespace) -> int:
     from bottle import bottles
 
     bottle = bottles.reset(args.name, args.force)
-    print(f"Reset {bottle.name}: {bottle.repo} {bottle.checkout} ({bottle.commit[:12]})")
+    print(f"Reset {_describe(bottle)}")
     return 0
 
 

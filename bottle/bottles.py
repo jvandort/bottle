@@ -53,6 +53,17 @@ CONTRACT = (
 
 
 @dataclass(frozen=True)
+class Request:
+    """What `bottle new` was asked for, so `bottle reset` can ask again."""
+
+    branch: str | None = None  # None: the repo's default branch, resolved again on reset
+    features: tuple[str, ...] = ()  # beyond the repo's defaults, as canonical specs
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "features", tuple(self.features))
+
+
+@dataclass(frozen=True)
 class Bottle:
     name: str
     id: str
@@ -65,9 +76,14 @@ class Bottle:
     status: str = "creating"
     # Features installed on top of the image, as specs (e.g. jvm:version=17), including dependencies.
     features: tuple[str, ...] = ()
+    request: Request | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
+        if isinstance(self.request, dict):
+            object.__setattr__(self, "request", Request(**self.request))
+        elif self.request is None:  # recorded before bottle kept requests
+            object.__setattr__(self, "request", Request(self.branch))
 
     @property
     def environment(self) -> str:
@@ -139,8 +155,8 @@ def default_name(repo: str, taken: set[str]) -> str:
 def create(
     repo_name: str, image: str = images.BASE, branch: str | None = None, name: str | None = None, features: list[str] = ()
 ) -> Bottle:
-    repo = repos.get(repo_name)
-    start = repos.Start(branch, repos.resolve_branch(repo, branch)) if branch else repos.default_start(repo)
+    request = Request(branch, repos.canonical_features(list(features)))
+    repo, start, installed = _plan(repo_name, request)
     existing = load()
     name = name or default_name(repo.name, set(existing))
     if not repos.NAME_PATTERN.fullmatch(name):
@@ -148,12 +164,12 @@ def create(
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
     prereqs.ensure_container()
-    installed = [f.spec for f in features_.resolve(merge_features(repo.features, list(features)))]
     tag = features_.ensure_built(image, installed)
     auth.ensure_logged_in(installed)
 
     bottle = Bottle(
-        name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(), features=tuple(installed)
+        name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(),
+        features=tuple(installed), request=request,
     )
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if runtime.container_info(bottle.container) is not None:
@@ -171,6 +187,20 @@ def create(
     bottle = replace(bottle, status="ready")
     _save(bottle)
     return bottle
+
+
+def _plan(repo_name: str, request: Request) -> tuple[repos.Repo, repos.Start, list[str]]:
+    """What `request` means right now: the repo, where to start, and every feature to install."""
+    repo = repos.get(repo_name)
+    branch = request.branch
+    start = repos.Start(branch, repos.resolve_branch(repo, branch)) if branch else repos.default_start(repo)
+    installed = [f.spec for f in features_.resolve(merge_features(repo.features, list(request.features)))]
+    return repo, start, installed
+
+
+def features_on_reset(bottle: Bottle) -> list[str]:
+    """The features `bottle reset` would give the bottle now: its repo's defaults plus its own."""
+    return _plan(bottle.repo, bottle.request)[2]
 
 
 def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
@@ -236,39 +266,39 @@ def throwaway(feature_specs: list[str]):
 
 
 def reset(name: str, force: bool = False) -> Bottle:
-    """Start the bottle over: a fresh VM from its features' image, and /workspace
-    at the latest commit of its branch in the repo (a bottle started from a
-    detached commit stays at that commit). Its name and network stay.
+    """`bottle delete NAME` then `bottle new` with the arguments it was created with, in one step.
 
-    Refuses, unless `force`, if the bottle has work its repo doesn't. Uses the
-    current image for its features, rebuilding it if stale. A stopped bottle is
-    stopped again afterwards. Also repairs a bottle whose container is gone.
+    So the bottle gets its repo's current default features (plus any it was
+    created with), the latest commit of its branch, and a fresh, running VM.
+    Refuses, unless `force`, if the bottle has work its repo doesn't. Unlike a
+    real delete and new, it keeps the bottle's id and network, and changes
+    nothing until the new image is built. Also repairs a bottle left half-made.
     """
     bottle = get(name)
-    if bottle.status != "ready":
-        raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
-    auth.ensure_logged_in(bottle.features)
-    state = runtime.container_state(bottle.container)
-    if not force and state is not None:
+    repo, start, installed = _plan(bottle.repo, bottle.request)
+    auth.ensure_logged_in(installed)
+    if not force and bottle.status == "ready" and runtime.container_state(bottle.container) is not None:
         _refuse_to_lose_work(bottle, "reset")
-    repo = repos.get(bottle.repo)
-    commit = repos.resolve_branch(repo, bottle.branch) if bottle.branch else bottle.commit
     prereqs.ensure_container()
-    tag = features_.ensure_built(bottle.image, list(bottle.features))
-    if commit != bottle.commit:
-        bottle = replace(bottle, commit=commit)
-        _save(bottle)
+    tag = features_.ensure_built(bottle.image, installed)
+    fresh = replace(
+        bottle, branch=start.branch, commit=start.commit, created=time.time(), status="creating",
+        features=tuple(installed),
+    )
     daemon.release_egress(bottle.name)
     runtime.container_delete(bottle.container, bottle.owner)
+    _save(fresh)
     try:
-        if not runtime.network_exists(bottle.network):
-            runtime.network_create(bottle.network, {runtime.OWNER_LABEL: bottle.id})
-        _run_container(bottle, repo, tag)
+        if not runtime.network_exists(fresh.network):
+            runtime.network_create(fresh.network, {runtime.OWNER_LABEL: fresh.id})
+        _run_container(fresh, repo, tag)
     except BottleError as e:
         raise BottleError(f"resetting {name} failed: {e}; rerun `bottle reset {name}`, or delete it") from None
-    if state not in (None, "running"):
-        stop(name)
-    return bottle
+    fresh = replace(fresh, status="ready")
+    _save(fresh)
+    if set(installed) != set(bottle.features):
+        _delete_image(bottle)  # the old features' image, unless another bottle uses it
+    return fresh
 
 
 def merge_features(defaults: tuple[str, ...] | list[str], extra: list[str]) -> list[str]:

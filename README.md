@@ -52,7 +52,7 @@ Lists repos and their default features.
 ### `bottle repo set REPO [--feature FEATURE]...`
 
 Replaces all the repo's settings: its default features become exactly those
-given. Existing bottles keep the features they were created with.
+given. Existing bottles get them when reset.
 
 Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 `BOTTLE_HOME` to use a directory other than `~/.bottle`.
@@ -182,12 +182,11 @@ deleted too, unless another bottle uses it.
 
 ### `bottle reset BOTTLE [--force]`
 
-Starts the bottle over: a fresh VM from its features' image (rebuilt first if
-stale), and `/workspace` at the latest commit of its branch in the repo (a
-bottle started from a detached commit stays at that commit). Its name stays,
-and a stopped bottle stays stopped. Like `delete`, it refuses to lose
-unfetched commits or uncommitted changes without `--force`. Also recreates a
-bottle whose VM has gone missing.
+Deletes the bottle and creates it again with the arguments `bottle new` was
+given: a fresh, running VM with the repo's current default features (plus any
+the bottle was created with), and `/workspace` at the latest commit of its
+branch. Like `delete`, it refuses to lose unfetched commits or uncommitted
+changes without `--force`. Also recreates a bottle whose VM has gone missing.
 
 ### `bottle shutdown`
 

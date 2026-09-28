@@ -62,7 +62,7 @@ def add(path: Path, name: str | None = None, features: list[str] = ()) -> AddRes
 
 
 def set_settings(name: str, features: list[str]) -> Repo:
-    """Replace every setting of the repo (today: its features). Existing bottles keep theirs."""
+    """Replace every setting of the repo (today: its features). Existing bottles get them when reset."""
     repo = replace(get(name), features=canonical_features(features))
     repos = load()
     repos[name] = repo

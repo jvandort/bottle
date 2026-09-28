@@ -21,20 +21,20 @@ class WrapCommandTest(GitTestCase):
         repo = self.make_repo()
         code, out, _ = self.run_cli("repo", "add", str(repo))
         self.assertEqual(code, 0)
-        self.assertIn("Added project:", out)
+        self.assertEqual(out, f"Created repo 'project' ({repo}) with features []\n")
 
     def test_name_and_path(self) -> None:
         repo = self.make_repo()
         code, out, _ = self.run_cli("repo", "add", "named", str(repo))
         self.assertEqual(code, 0)
-        self.assertIn("Added named:", out)
+        self.assertIn("Created repo 'named'", out)
 
     def test_rerun_reports_already_wrapped(self) -> None:
         repo = self.make_repo()
         self.run_cli("repo", "add", str(repo))
         code, out, _ = self.run_cli("repo", "add", str(repo))
         self.assertEqual(code, 0)
-        self.assertEqual(out, f"Already added project: {repo}\n")
+        self.assertEqual(out, f"Repo 'project' already exists ({repo}) with features []\n")
 
     def test_errors_exit_nonzero_without_traceback(self) -> None:
         code, _, err = self.run_cli("repo", "add", str(self.tmp / "nope"))
@@ -47,7 +47,7 @@ class WrapCommandTest(GitTestCase):
         _, out, _ = self.run_cli("repo", "list")
         self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "jvm:version=17"])
         code, out, _ = self.run_cli("repo", "set", "project")
-        self.assertEqual((code, out), (0, "project: features (none)\n"))
+        self.assertEqual((code, out), (0, "Set repo 'project' features to []\n"))
 
     def test_too_many_arguments(self) -> None:
         code, _, err = self.run_cli("repo", "add", "a", "b", "c")
