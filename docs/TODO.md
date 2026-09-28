@@ -19,13 +19,10 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 
 ## Repos and git
 
-- **Pinning only covers the starting commit.** `refs/bottle/<id>` keeps the
-  bottle's starting commit (and its history) from being garbage-collected in
-  the repo. The bottle can also reach any other object in the repo by
-  hash, e.g. by checking out another commit it learned about. Those objects
-  aren't pinned: if the host deletes or rewrites the branch they're on and the
-  repo is gc'd, they disappear from under the bottle and its checkout breaks.
-  Work the agent commits itself is safe; its objects live in the bottle.
+- **Objects a bottle uses aren't protected from gc.** A bottle reads the
+  repo's objects in place. If the host deletes a branch a bottle checked out
+  and `git gc` later prunes its commits (after git's grace periods, weeks to
+  months), that checkout breaks; `bottle reset` starts over. Accepted.
 - **Fetched refs outlive their bottle.** `bottle git fetch` writes
   `refs/remotes/bottle-NAME/*`, and `bottle delete` leaves them, since they may
   be the only copy of the work. A later bottle with the same name fetches into the
@@ -34,11 +31,10 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   taken, or namespacing by bottle id.
 - **Fetch tags and pushing in.** `bottle git fetch` skips tags, and there's no way yet
   to send new host commits into an existing bottle.
-- **Keeping the repo tidy.** Fetched refs (`bottle-NAME/*`) are never
-  deleted automatically: they stay after `bottle delete`, and after the bottle
-  deletes a branch (`fetch` reports these as gone). Pins (`refs/bottle/<id>`)
-  are removed only by `bottle delete`; never by any cleanup command, since a
-  pin that looks orphaned may belong to another `BOTTLE_HOME`. Commands:
+- **Keeping the repo tidy.** Agent branches (`agent/*`, pushed) and fetched
+  refs (`bottle-NAME/*`) are never deleted automatically: they stay after
+  `bottle delete`, and after the bottle deletes a branch (`fetch` reports these
+  as gone). Commands:
   - `bottle git refs [REPO]`: every bottle-owned ref, grouped by bottle, marked
     live, deleted, or gone from the bottle.
   - `bottle git prune [BOTTLE]`: delete fetched refs of deleted bottles and gone
@@ -48,10 +44,10 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
     whether it's merged into a host branch.
   - `bottle git log NAME` / `bottle git diff NAME`: the bottle's work since its
     starting commit, for review.
-- **`bottle git adopt NAME BRANCH [LOCAL]`.** Turn a fetched branch into a real
-  local branch (never overwriting one), optionally adding `Signed-off-by` and
-  re-signing commits on the host. Fetched refs stay visible to
-  `git branch -r` for now; adopt should become the usual way in.
+- **`bottle git adopt`.** Turn an agent's `agent/X` branch (pushed to the host)
+  into `X`: re-sign its commits on the host with your key (the agent never
+  signs as you), optionally add `Signed-off-by`, and never overwrite an
+  existing branch.
 - **A git remote helper.** A `git-remote-bottle` executable would let plain git
   (and IDEs) fetch with URLs like `bottle::gradle`, starting the bottle and
   applying the additive rules, without enabling the `ext::` transport in the
@@ -88,9 +84,9 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 
 ## Host commands for the genie
 
-A channel for the bottle to ask the host to do specific things, e.g. a socket
-bottle injects into the bottle (vsock, or a published Unix socket), served by
-bottled. bottle decides which commands exist; the bottle can only request them,
+The channel exists: requests to `http://bottle.host/` are answered by the
+bottle's egress proxy on the host (bottle/host.py), and the first service is
+the repo as a read-only git origin. More services can be added there, e.g.: bottle decides which services exist; the bottle can only request them,
 and the host can require approval. Candidates:
 
 - **Hand back work:** push a branch to the host repo (as `bottle-NAME/*`, the

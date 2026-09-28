@@ -32,6 +32,8 @@ class FakeRuntime:
         self.containers: dict[str, str] = {}
         self.egress: set[str] = set()
         self.container_images: dict[str, str] = {}
+        self.container_labels: dict[str, dict] = {}
+        self.container_networks: dict[str, str] = {}
         self.built_images: dict[str, str] = {}
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
@@ -41,7 +43,7 @@ class FakeRuntime:
         if self.fail == name:
             raise BottleError(f"{name} failed")
 
-    def network_create(self, network):
+    def network_create(self, network, labels=None):
         self.statuses_seen.append(bottles.load()[next(iter(bottles.load()))].status)
         self._step("network_create")
         self.networks.add(network)
@@ -54,10 +56,12 @@ class FakeRuntime:
             raise BottleError("network busy")
         self.networks.discard(network)
 
-    def container_run(self, name, image, network, env, mounts):
+    def container_run(self, name, image, network, env, mounts, labels=None):
         self._step("container_run")
-        self.run_args = dict(name=name, image=image, network=network, env=env, mounts=mounts)
+        self.run_args = dict(name=name, image=image, network=network, env=env, mounts=mounts, labels=labels)
         self.containers[name] = "running"
+        self.container_labels[name] = dict(labels or {})
+        self.container_networks[name] = network
         self.container_images[name] = image
         self.built_images.setdefault(image, f"sha256:{image}")
 
@@ -89,8 +93,19 @@ class FakeRuntime:
         self.calls.append("daemon_stop")
         return True
 
-    def container_delete(self, name):
-        self.containers.pop(name, None)
+    def container_info(self, name):
+        if name not in self.containers:
+            return None
+        return bottles.runtime.ContainerInfo(
+            self.containers[name], self.container_labels.get(name, {}), [self.container_networks.get(name, "")])
+
+    def container_delete(self, name, owner=None):
+        info = self.container_info(name)
+        if info is None:
+            return
+        if owner is not None and not bottles.runtime._owned(info, *owner):
+            raise BottleError(f"container {name} isn't this bottle's; leaving it alone")
+        self.containers.pop(name)
 
     contract_output = ""
     credentials: dict = {}
@@ -107,8 +122,9 @@ class FakeRuntime:
         self.workspace_script = argv[-1]
         return ""
 
-    def ensure_egress(self, bottle, network):
+    def ensure_egress(self, bottle, network, git_dir=None):
         self._step("ensure_egress")
+        self.egress_git_dir = git_dir
         self.egress.add(bottle)
         return "http://192.168.128.1:3128"
 
@@ -119,7 +135,8 @@ class FakeRuntime:
         for module, names in (
             (bottles.runtime, ("network_create", "network_gateway", "network_delete", "network_exists",
                                "container_run", "container_state", "container_start", "container_stop",
-                               "container_delete", "container_exec", "images", "images_in_use", "image_delete")),
+                               "container_delete", "container_info", "container_exec", "images", "images_in_use",
+                               "image_delete")),
             (bottles.daemon, ("ensure_egress", "release_egress", "stop")),
         ):
             for name in names:
@@ -149,9 +166,6 @@ class BottleTestCase(GitTestCase):
         fake.patch(self)
         return fake
 
-    def bottle_refs(self) -> str:
-        return run("git", "-C", self.repo_path, "for-each-ref", "refs/bottle/")
-
 
 class CreateTest(BottleTestCase):
     def test_creates_every_part(self) -> None:
@@ -161,10 +175,17 @@ class CreateTest(BottleTestCase):
 
         self.assertEqual((bottle.name, bottle.branch, bottle.commit, bottle.status), ("gradle", "main", self.head, "ready"))
         self.assertEqual(bottles.get("gradle"), bottle)
-        self.assertIn(f"{self.head} commit\trefs/bottle/{bottle.id}", self.bottle_refs())
         self.assertEqual(fake.networks, {bottle.network})
         self.assertEqual(fake.containers, {bottle.container: "running"})
         self.assertEqual(fake.egress, {"gradle"})
+
+    def test_egress_serves_the_repo_as_origin(self) -> None:
+        fake = self.fake()
+        bottles.create("gradle")
+        self.assertEqual(fake.egress_git_dir, self.repo_path / ".git")
+        self.assertIn("remote add origin http://bottle.host/git/origin", fake.workspace_script)
+        self.assertIn("remote add host http://bottle.host/git/host", fake.workspace_script)
+        self.assertIn("fetch -q --multiple origin host", fake.workspace_script)
 
     def test_order_container_before_egress(self) -> None:
         fake = self.fake()
@@ -286,7 +307,6 @@ class RollbackTest(BottleTestCase):
                 with self.assertRaisesRegex(BottleError, f"{step} failed"):
                     bottles.create("gradle", "base")
                 self.assertEqual(bottles.load(), {})
-                self.assertEqual(self.bottle_refs(), "")
                 self.assertEqual((fake.networks, fake.containers, fake.egress), (set(), {}, set()))
 
     def test_interrupt_rolls_back(self) -> None:
@@ -310,7 +330,6 @@ class DeleteTest(BottleTestCase):
         bottles.create("gradle", "base")
         bottles.delete("gradle")
         self.assertEqual(bottles.load(), {})
-        self.assertEqual(self.bottle_refs(), "")
         self.assertEqual((fake.networks, fake.containers, fake.egress), (set(), {}, set()))
 
     def test_finishes_off_a_half_made_bottle(self) -> None:
@@ -482,6 +501,54 @@ class CredentialDeliveryTest(BottleTestCase):
         with mock.patch.object(bottles.runtime, "container_exec_interactive") as interactive:
             bottles.shell("gradle")
         self.assertEqual(interactive.call_args.kwargs["env"], {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+
+
+class OwnershipTest(BottleTestCase):
+    """Bottle must never touch a container it didn't make (a scratch home's rollback once did)."""
+
+    def someone_elses(self, fake, name: str) -> None:
+        fake.containers[name] = "running"
+        fake.container_labels[name] = {"bottle.id": "someone-else"}
+        fake.container_networks[name] = "their-network"
+
+    def test_new_refuses_a_taken_name_and_leaves_it_alone(self) -> None:
+        fake = self.fake()
+        self.someone_elses(fake, "bottle-" + bottles.namespace() + "gradle")
+        with self.assertRaisesRegex(BottleError, "already exists; choose another name"):
+            bottles.create("gradle")
+        self.assertEqual(fake.containers, {"bottle-" + bottles.namespace() + "gradle": "running"})
+        self.assertEqual(bottles.load(), {})
+        self.assertEqual(fake.calls, ["ensure_logged_in"])  # nothing was created, so nothing rolled back
+
+    def test_delete_leaves_a_container_that_isnt_the_bottles(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("gradle")
+        self.someone_elses(fake, bottle.container)  # replaced behind bottle's back
+        with self.assertRaisesRegex(BottleError, "isn't this bottle's"):
+            bottles.delete("gradle", force=True)
+        self.assertIn(bottle.container, fake.containers)
+        self.assertEqual(bottles.get("gradle").status, "broken")
+
+    def test_containers_from_before_labels_are_recognised_by_network(self) -> None:
+        info = bottles.runtime.ContainerInfo("running", {}, ["bottle-abc"])
+        self.assertTrue(bottles.runtime._owned(info, "abc", "bottle-abc"))
+        self.assertFalse(bottles.runtime._owned(info, "abc", "bottle-other"))
+
+    def test_the_label_decides_when_present(self) -> None:
+        info = bottles.runtime.ContainerInfo("running", {"bottle.id": "abc"}, ["bottle-other"])
+        self.assertTrue(bottles.runtime._owned(info, "abc", "bottle-abc"))
+        self.assertFalse(bottles.runtime._owned(info, "xyz", "bottle-other"))
+
+    def test_containers_are_labelled(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("gradle")
+        self.assertEqual(fake.run_args["labels"], {"bottle.id": bottle.id})
+
+    def test_other_homes_get_their_own_container_names(self) -> None:
+        # The tests run in a scratch BOTTLE_HOME, so names are prefixed.
+        self.assertRegex(bottles.namespace(), r"^[0-9a-f]{6}-$")
+        with mock.patch.dict(__import__("os").environ, {"BOTTLE_HOME": ""}):
+            self.assertEqual(bottles.namespace(), "")  # empty means the default home
 
 
 class DeleteImageTest(BottleTestCase):
@@ -713,7 +780,7 @@ class DeleteGuardTest(WorkspaceTestCase):
     def test_unfetched_commits_block_delete(self) -> None:
         run("git", "-C", self.workspace, "switch", "-q", "-c", "agent/work")
         self.agent_commit("unfetched")
-        with self.assertRaisesRegex(BottleError, "has work its repo doesn't: branch agent/work. To keep it, fetch with `bottle git fetch gradle`; or delete anyway with --force"):
+        with self.assertRaisesRegex(BottleError, "has work its repo doesn't: branch agent/work. To keep it, push it to host agent/\\* in the bottle, or fetch it with `bottle git fetch gradle`; or delete anyway with --force"):
             bottles.delete("gradle")
         self.assertIn("gradle", bottles.load())
 
@@ -727,7 +794,7 @@ class DeleteGuardTest(WorkspaceTestCase):
         run("git", "-C", self.workspace, "checkout", "-q", "--detach")
         self.agent_commit("detached")
         (self.workspace / "scratch.txt").write_text("wip")
-        with self.assertRaisesRegex(BottleError, "detached HEAD, uncommitted changes. To keep it, commit the changes in the bottle and fetch"):
+        with self.assertRaisesRegex(BottleError, "detached HEAD, uncommitted changes. To keep it, commit the changes in the bottle and push it"):
             bottles.delete("gradle")
 
     def test_force_deletes_anyway(self) -> None:
@@ -829,7 +896,6 @@ class ResetTest(WorkspaceTestCase):
             reset = bottles.reset("gradle")
         self.assertEqual(reset.commit, latest)
         self.assertEqual(bottles.get("gradle").commit, latest)
-        self.assertEqual(self.host("rev-parse", bottle.ref), latest)  # the pin moved too
         self.assertEqual(run_container.call_args.args[0].commit, latest)
 
     def test_a_branch_gone_from_the_repo_fails_before_anything_changes(self) -> None:

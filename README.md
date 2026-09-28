@@ -6,10 +6,10 @@ Bottle manages sandboxed Linux VMs for coding agents, on macOS. Let the agent ru
 permissions inside. Take back only the commits you want.
 
 - **A real VM per bottle.** Its own kernel, via [apple/container](https://github.com/apple/container). Starts in about a second.
-- **Your repo, read-only.** The repo's history is mounted read-only and checked out inside the VM. Your working copy is never mounted.
+- **Your repo, live.** The repo's history is mounted read-only and checked out inside the VM. The agent can fetch your branches and your upstream's, and push to `agent/*` branches only. Your working copy is never mounted.
 - **Your files out of reach.** Only the repo's git objects are mounted, read-only.
 - **Controlled network.** Egress only through a proxy on your Mac, with your DNS and VPN routes. Your local network is blocked, even for root.
-- **Safe git hand-back.** `bottle git fetch` only adds branches (`bottle-NAME/*`): rewrites are refused, nothing is deleted.
+- **Safe git hand-back.** The agent pushes only to `agent/*` branches, forward only; `bottle git fetch` only ever adds branches.
 - **Composable features.** `tools`, `jvm`, `claude`, in the [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo defaults.
 - **Prebuilt.** Nothing installs at startup. Stale images are rebuilt and cleaned up automatically.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just Python and Homebrew.
@@ -123,7 +123,15 @@ and the repo's default features plus any given (a feature given again replaces
 that default's options). `BRANCH` defaults to the origin remote's default
 branch, or, if there's no origin, to whatever the repo has checked out (a branch
 or commit). The repo's history is mounted read-only, so nothing is cloned and
-the bottle can't change your repo. `NAME` defaults to the repo's name, then
+the bottle can't change your repo, except through `host` below. The bottle has
+two remotes, served live by bottle through its egress proxy:
+
+- `origin`: your repo's upstream (its `origin/*` branches), read-only. Fetching
+  first fetches your repo's `origin` on the host (at most once a minute), so
+  the bottle gets the upstream's latest even if you haven't fetched.
+- `host`: your repo's local branches. The agent may push to it, but only to
+  `agent/*` branches, creating them or moving them forward; force-pushes and
+  deletes are refused, and your repo's own hooks don't run. `NAME` defaults to the repo's name, then
 `REPO-2`, `REPO-3`, and so on. The image with those features is built first if
 it isn't built yet.
 

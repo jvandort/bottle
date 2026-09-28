@@ -19,6 +19,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from bottle import host
+
 log = logging.getLogger("bottle.egress")
 # Silent unless the application configures logging (the CLI does).
 log.addHandler(logging.NullHandler())
@@ -72,13 +74,21 @@ class Request:
     port: int
     # For plain HTTP: the request head to send upstream. None for CONNECT.
     upstream_head: bytes | None
+    # For plain HTTP: the path, query and headers (lowercase names), for host services.
+    path: str = ""
+    query: str = ""
+    headers: dict[str, str] | None = None
 
 
 class EgressProxy:
-    def __init__(self, name: str, policy: Policy, resolve: Resolver | None = None) -> None:
+    def __init__(
+        self, name: str, policy: Policy, resolve: Resolver | None = None, services: "host.HostServices | None" = None
+    ) -> None:
         self.name = name
         self.policy = policy
         self.resolve = resolve or _resolve
+        # Requests to http://bottle.host/ are answered here, never forwarded.
+        self.services = services
 
     async def start(self, host: str, port: int) -> asyncio.Server:
         return await asyncio.start_server(self._handle, host, port, limit=MAX_HEADER_BYTES)
@@ -90,6 +100,10 @@ class EgressProxy:
         upstream_writer = None
         try:
             request = await self._read_request(reader)
+            if request.host == host.HOST:
+                ip = "host"
+                outcome = await self._host(request, reader, writer)
+                return
             ip, upstream_reader, upstream_writer = await self._open(request.host, request.port)
             if request.upstream_head is None:
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -113,6 +127,17 @@ class EgressProxy:
                 "%s %s -> %s %s up=%d down=%d %.2fs",
                 self.name, target, ip or "-", outcome, up[0], down[0], time.monotonic() - started,
             )
+
+    async def _host(self, request: Request, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
+        if self.services is None or request.upstream_head is None:  # no services, or a CONNECT
+            raise Refused(403, "Forbidden: no host services here", "denied")
+        try:
+            body = await host.read_body(reader, request.headers)
+        except (ValueError, asyncio.IncompleteReadError):
+            raise Refused(400, "Bad Request", "bad-request") from None
+        return await self.services.handle(
+            host.HttpRequest(request.method, request.path, request.query, request.headers, body), writer
+        )
 
     async def _read_request(self, reader: asyncio.StreamReader) -> Request:
         try:
@@ -143,7 +168,11 @@ class EgressProxy:
         # One request per connection keeps relaying simple: the upstream closes when done.
         headers.append("Connection: close")
         upstream_head = "\r\n".join([f"{method} {path} {version}", *headers, "", ""]).encode("latin-1")
-        return Request(method, url.hostname, url.port or 80, upstream_head)
+        parsed = {}
+        for line in header_lines:
+            name, _, value = line.partition(":")
+            parsed[name.strip().lower()] = value.strip()
+        return Request(method, url.hostname, url.port or 80, upstream_head, url.path or "/", url.query, parsed)
 
     async def _open(self, host: str, port: int) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
         try:

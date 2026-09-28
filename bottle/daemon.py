@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from bottle import egress, runtime
+from bottle.host import HostServices
 from bottle.errors import BottleError
 from bottle.store import bottle_home
 
@@ -48,9 +49,13 @@ def log_path() -> Path:
 # --- client -------------------------------------------------------------------
 
 
-def ensure_egress(bottle: str, network: str) -> str:
-    """Make sure `bottle`'s egress proxy is serving; return its URL."""
-    return _request({"op": "ensure", "bottle": bottle, "network": network}, start=True)["proxy"]
+def ensure_egress(bottle: str, network: str, git_dir: Path | None = None) -> str:
+    """Make sure `bottle`'s egress proxy is serving; return its URL.
+
+    `git_dir` is the repo the proxy serves the bottle as origin (see host.py).
+    """
+    message = {"op": "ensure", "bottle": bottle, "network": network, "git_dir": str(git_dir) if git_dir else None}
+    return _request(message, start=True)["proxy"]
 
 
 def release_egress(bottle: str) -> None:
@@ -142,7 +147,8 @@ class Daemon:
                 case "ping":
                     reply = {"ok": True}
                 case "ensure":
-                    reply = {"ok": True, "proxy": await self.ensure(message["bottle"], message["network"])}
+                    git_dir = Path(message["git_dir"]) if message.get("git_dir") else None
+                    reply = {"ok": True, "proxy": await self.ensure(message["bottle"], message["network"], git_dir)}
                 case "release":
                     await self.release(message["bottle"])
                     reply = {"ok": True}
@@ -160,11 +166,11 @@ class Daemon:
         await writer.drain()
         writer.close()
 
-    async def ensure(self, bottle: str, network: str) -> str:
+    async def ensure(self, bottle: str, network: str, git_dir: Path | None = None) -> str:
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            return await self._ensure(bottle, network)
+            return await self._ensure(bottle, network, git_dir)
 
-    async def _ensure(self, bottle: str, network: str) -> str:
+    async def _ensure(self, bottle: str, network: str, git_dir: Path | None) -> str:
         gateway = await asyncio.to_thread(runtime.network_gateway, network)
         if bottle in self.proxies:
             served, server = self.proxies[bottle]
@@ -173,7 +179,8 @@ class Daemon:
                 return proxy_url(gateway, self.port)
             self._close(bottle)
         try:
-            server = await egress.EgressProxy(bottle, self.policy).start(gateway, self.port)
+            services = HostServices(git_dir)
+            server = await egress.EgressProxy(bottle, self.policy, services=services).start(gateway, self.port)
         except OSError as e:
             raise BottleError(f"can't serve {bottle}'s egress on {gateway}:{self.port}: {e.strerror}") from None
         self.proxies[bottle] = (gateway, server)
@@ -190,20 +197,20 @@ class Daemon:
             server.close()
             log.info("%s: egress stopped", bottle)
 
-    async def restore(self, running: list[tuple[str, str]]) -> None:
+    async def restore(self, running: list[tuple[str, str, Path | None]]) -> None:
         """Serve egress for bottles that are already running, e.g. after a restart."""
-        for bottle, network in running:
+        for bottle, network, git_dir in running:
             try:
-                await self.ensure(bottle, network)
+                await self.ensure(bottle, network, git_dir)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore egress: %s", bottle, e)
 
 
-def running_bottles() -> list[tuple[str, str]]:
-    """(name, network) of every ready bottle whose container is running."""
+def running_bottles() -> list[tuple[str, str, Path | None]]:
+    """(name, network, repo git dir) of every ready bottle whose container is running."""
     from bottle import bottles  # bottles imports this module
 
-    return [(b.name, b.network) for b in bottles.load().values()
+    return [(b.name, b.network, bottles.git_dir(b)) for b in bottles.load().values()
             if b.status == "ready" and runtime.container_state(b.container) == "running"]
 
 

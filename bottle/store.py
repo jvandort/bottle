@@ -1,12 +1,26 @@
 """bottle's on-disk state under $BOTTLE_HOME (default ~/.bottle)."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
 
 def bottle_home() -> Path:
-    return Path(os.environ.get("BOTTLE_HOME", Path.home() / ".bottle"))
+    # An empty BOTTLE_HOME means the default, not the current directory.
+    return Path(os.environ.get("BOTTLE_HOME") or Path.home() / ".bottle")
+
+
+def namespace() -> str:
+    """A prefix for names that are global on the host (containers), per BOTTLE_HOME.
+
+    Empty for the default home; otherwise a short hash, so bottles in another
+    home (e.g. tests) can never collide with the default home's.
+    """
+    home = bottle_home().expanduser().resolve()
+    if home == (Path.home() / ".bottle").resolve():
+        return ""
+    return hashlib.sha256(str(home).encode()).hexdigest()[:6] + "-"
 
 
 def read_json(path: Path) -> dict | None:
