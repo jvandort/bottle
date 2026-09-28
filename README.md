@@ -5,14 +5,33 @@
 Bottle manages sandboxed Linux VMs for coding agents, on macOS. Let the agent run with full
 permissions inside. Take back only the commits you want.
 
-- **A real VM per bottle.** Its own kernel, via [apple/container](https://github.com/apple/container). Starts in about a second.
-- **Your repo, live.** The repo's history is mounted read-only and checked out inside the VM. The agent can fetch your branches and your upstream's, and push to `agent/*` branches only. Your working copy is never mounted.
-- **Your files out of reach.** Only the repo's git objects are mounted, read-only.
-- **Controlled network.** Egress only through a proxy on your Mac, with your DNS and VPN routes. Your local network is blocked, even for root.
-- **Safe git hand-back.** The agent pushes only to `agent/*` branches, forward only; `bottle git fetch` only ever adds branches.
-- **Composable features.** `tools`, `jvm`, `claude`, in the [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo defaults.
-- **Prebuilt.** Nothing installs at startup. Stale images are rebuilt and cleaned up automatically.
-- **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just Python and Homebrew.
+- **A real VM per bottle.** Its own kernel, via [apple/container](https://github.com/apple/container),
+  with everything it needs already installed. Starts in about a second.
+- **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
+  read-only mount of the repo's git objects, and fetches your upstream through the host. Your
+  working copy, and the rest of your Mac, are never mounted.
+- **One way out, and it only adds.** Git is the only channel back to your Mac, and an agent can
+  push but never rewrite: nothing in a bottle can change or remove what's already in your repo.
+  You review what you take.
+- **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
+  VPN routes but not your local network, even as root.
+- **Composable features.** `tools`, `jvm`, `claude`, in the
+  [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
+  defaults. Images are prebuilt, and rebuilt when they go stale.
+- **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
+  Python and Homebrew.
+
+## What a bottle is for
+
+A bottle contains an agent's **mistakes**. A stray `rm -rf`, a bad merge, a build script that
+rewrites a home directory, an agent that wanders out of its repo: none of it reaches your Mac,
+your other projects, or your branches. That's the boundary bottle is built to hold, and it holds
+it without you watching.
+
+A bottle is **not** a box for a hostile agent. Egress allows any public destination, so anything
+inside a bottle — the repo, and any credential delivered to it — can leave. Treat a bottle's
+contents as the agent's to read and to send: don't put a secret in one you wouldn't hand to the
+agent directly.
 
 ## Quick start
 
@@ -33,6 +52,22 @@ Bottle sets up what it depends on (apple/container, its services
 and a Linux kernel) as necessary, and asks before installing anything.
 
 ## Commands
+
+| Command | |
+| --- | --- |
+| `bottle repo add` / `list` / `set` | Register a repo, and set its bottles' default features |
+| `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
+| `bottle new` | Create a bottle from a repo |
+| `bottle shell` | Open a shell in a bottle, at `/workspace` |
+| `bottle list` | List bottles and their state |
+| `bottle git fetch` | Take a bottle's branches back into its source repo |
+| `bottle start` / `stop` / `reset` / `delete` | Control a bottle's lifecycle |
+| `bottle build` | Build an image with the given features |
+| `bottle daemon start` / `stop`, `bottle shutdown` | Manage `bottled`, the background network process |
+| `bottle egress` | Run a bottle's egress proxy by hand, for testing |
+
+<details>
+<summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
 
 ### `bottle repo add [NAME] PATH [--feature FEATURE]...`
 
@@ -131,9 +166,10 @@ two remotes, served live by bottle through its egress proxy:
   the bottle gets the upstream's latest even if you haven't fetched.
 - `host`: your repo's local branches. The agent may push to it, but only to
   `agent/*` branches, creating them or moving them forward; force-pushes and
-  deletes are refused, and your repo's own hooks don't run. `NAME` defaults to the repo's name, then
-`REPO-2`, `REPO-3`, and so on. The image with those features is built first if
-it isn't built yet.
+  deletes are refused, and your repo's own hooks don't run.
+
+`NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
+with those features is built first if it isn't built yet.
 
 ```sh
 bottle new reponame --feature tools --feature jvm --feature claude
@@ -211,6 +247,8 @@ itself; the command exists for testing.
 ```sh
 bottle egress mybottle --listen 192.168.128.1:3128 --allow '*.corp.example.com'
 ```
+
+</details>
 
 ## Development
 

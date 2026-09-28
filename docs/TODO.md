@@ -7,9 +7,18 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Stop idle bottles.** A bottle runs until `bottle stop`, `bottle shutdown`
   or the host stops it. bottled could stop bottles that have been idle for a
   while, once "idle" is defined (no exec sessions, no egress traffic).
+- **`bottle exec BOTTLE COMMAND...`.** `shell` is interactive only, so there's
+  no way to run one command in a bottle and get its output and exit status:
+  no scripting several bottles, no CI, no `bottle exec x claude -p '...'`.
+  Wants the same start-if-stopped behaviour as `shell`, stdio passed through
+  (a TTY only when one is attached), and the command's exit status as bottle's.
 - **Resource limits.** Bottles get the whole Mac (every core, all memory), so
-  a busy bottle can slow the host. Make CPUs and memory configurable per
-  bottle if that becomes a problem.
+  a busy bottle can slow the host, and memory a guest has touched isn't
+  returned to the host until the bottle stops, so a bottle holds its
+  high-water mark for as long as it runs. Make CPUs and memory configurable,
+  per bottle and as a repo default; consider a lower default than "everything"
+  once several bottles at once is normal. Worth measuring what `container`
+  actually returns first (no free-page reporting or ballooning is assumed).
 - **Reconcile egress periodically.** bottled restores egress for running
   bottles when it starts, but a bottle started outside bottle (e.g.
   `container start`) has no network until a bottle command touches it.
@@ -155,6 +164,17 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
   layers aren't shared once unpacked. Worth watching as layers multiply.
 - **Faster checkouts** for large repos, e.g. an APFS-cloned, pre-checked-out
   volume per repo.
+
+## Portability
+
+- **Another VM runtime.** bottle is macOS and apple/container only, which is
+  all this team needs. If others want it, the same model (a microVM per
+  bottle, a read-only object mount, an egress proxy on the host) fits Linux
+  microVM runtimes over KVM. Keep the `container` calls behind
+  `bottle/runtime.py` so a second backend can be grafted on rather than
+  threaded through: today that means no `container`-shaped assumptions
+  leaking into `bottles.py`, `images.py` or `daemon.py`, and host-specific
+  bits (`sysctl hw.memsize`, Homebrew, the Keychain, launchd) named as such.
 
 ## Diagnostics
 
