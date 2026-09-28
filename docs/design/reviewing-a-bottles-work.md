@@ -2,6 +2,29 @@
 
 Status: design. Nothing here is built except the stopgap in `hooks/post-receive`.
 
+## Three layers
+
+Keeping these separate is what stops bottle growing a review workflow it has no
+business owning.
+
+**bottle** isolates an agent and bridges it to the host. It moves commits in
+both directions and knows nothing about what they contain. It does not diff, it
+does not review, and it does not read the contents of what it carries -- a rule
+enforced by inspecting a commit's text is a rule bottle should not have.
+
+**bottle-workflow** (name pending) is the opinionated layer: the host-side hook
+that fires when you commit a review pass, the extra context handed to the agent,
+the conventions for how comments are written and answered, and the queue that
+stops two agents starting at once. Built alongside bottle, configurable, and off
+unless you ask for it.
+
+**A review tool** (name pending) is the human's, not the project's. It has to
+work well with the other two, and it is designed in `review-worktree.md`, but
+nothing in bottle should depend on it existing.
+
+The rest of this document is the first layer: what bottle must provide so the
+other two are possible.
+
 ## The model
 
 A bottle and its host are two peers working on the same repo. Git was built for
@@ -88,17 +111,16 @@ It also matches the gesture. You are already in the file, reading the line. You
 type, and it shows up in the diff as an added line, next to the code it is
 about, with no path or line number to write down.
 
-The rules that make it safe:
+The convention that makes it work: the agent removes each marker in the same
+commit that addresses it, so a marker still present means still outstanding.
 
-- The agent removes each marker in the same commit that addresses it. A marker
-  still present means it is still outstanding.
-- A marker left in a branch is an error. `bottle adopt` should refuse a branch
-  containing one, so review comments can never reach a branch of yours.
-- Markers are for review, not for TODOs. A thing worth keeping goes in
-  `docs/TODO.md` or an issue, not in the source.
+Enforcement is deliberately not bottle's. Refusing to carry a commit because of
+what its text contains would make bottle parse the things it transports, and a
+bridge that inspects its cargo is the wrong shape. Whatever keeps markers out of
+a finished branch -- a lint rule, a pre-commit hook, a habit -- belongs to the
+project being worked on or to bottle-workflow.
 
-This needs nothing from bottle but a line in the context file telling the agent
-the convention exists.
+This whole convention needs nothing from bottle at all.
 
 ### Waking the agent
 
@@ -113,13 +135,17 @@ bottle exec gradle -- claude -p 'fetch host, rebase onto host/work, address the
 ```
 
 Wrapped, that is **`bottle tell NAME "message"`**: hand a prompt to the bottle's
-agent and let it work. It is the host-to-bottle direction of the bridge, the
-counterpart to the agent's push, and it is the one piece of this that is
-properly bottle's job -- `docs/TODO.md` already sketches the reverse direction
-under host commands for the genie.
+agent and let it work. The host-to-bottle direction of the bridge, the
+counterpart to the agent's push, and the only part of this that is bottle's --
+`docs/TODO.md` already sketches the reverse direction under host commands for
+the genie.
 
-A `post-commit` hook on your side could fire it automatically, so committing a
-review pass *is* the handoff.
+The `post-commit` hook that fires it, so that committing a review pass *is* the
+handoff, belongs to bottle-workflow. So does the thing that stops two agents
+running at once, and it should be a **queue rather than a lock**: a review pass
+arriving while the agent is busy should wait its turn, not be dropped. What
+bottle owes that layer is `bottle exec` and a way to ask whether an agent is
+currently running.
 
 ## Surfacing the refs
 
@@ -188,6 +214,8 @@ agent, which dissolves the surfacing problem entirely. It was rejected:
 - **Diffing or reviewing.** Not bottle's job. Your editor does this better than
   any command bottle could ship, and a review workflow that requires leaving the
   editor to approve something is worse than either pure alternative.
+- **Reading what it carries.** bottle moves commits; it does not inspect their
+  contents to enforce anything.
 - **Preventing concurrent edits.** Conflicts are a normal outcome, and the agent
   resolves them.
 
