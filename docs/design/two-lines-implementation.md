@@ -181,6 +181,20 @@ which is correct because HEAD is the clean line).
 Exactly one of `index.write` / `index.review` exists at a time; the other one is
 live as `.git/index`.
 
+Index files are caches. The durable record of the approved set is a ref,
+`refs/review/<clean branch>`, pointing at a commit whose tree is the approved
+tree, rewritten on every invocation:
+
+```
+T := git write-tree                       # from whichever index is the review one
+c := git commit-tree T -p <clean tip> -m "approved"
+git update-ref refs/review/<clean> c
+```
+
+Rebuild a lost or clobbered index with `git read-tree refs/review/<clean>` then
+`git update-index --refresh`. The ref's reflog is the history of approval
+passes, which is worth having for free.
+
 ## Algorithms
 
 ### `start --from <base>`

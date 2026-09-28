@@ -333,6 +333,77 @@ your work saved, and save it, without losing your place. It is the same
 primitive as the snapshot in `durability.md`: a tree written from the working
 directory and committed somewhere harmless.
 
+## Going away and coming back
+
+A common workaround, without two lines, is to make one temporary commit of the
+staged changes and a second of the unstaged ones -- preserving the
+reviewed/unreviewed split through a branch switch -- then undo both on return.
+
+That trick is unnecessary here, because **the split is not in the working tree
+to begin with**. It lives in two places, neither of which a branch switch
+touches:
+
+- what you have approved is the review index, a file;
+- everything else is the difference between that and the working tree, and the
+  working tree's content is a commit on the working line as soon as you
+  `review wip`.
+
+So there is nothing to encode in temporary commits, and nothing to undo on
+return. A `wip` commit is just more history on a line whose history nobody
+reads.
+
+```sh
+review wip        # working tree onto the working line
+review write      # park the approved set
+git switch elsewhere
+# ... later ...
+git switch <working line>
+review review     # approved set back, exactly as it was
+```
+
+**Leave review mode before switching branches.** In review mode the live
+`.git/index` *is* the approved set, and a checkout writes the index. What
+happens then is undefined in the worst way -- it depends on the branch you are
+switching to:
+
+```
+target branch has the same content:   Switched to branch 'elsewhere'
+                                      (approvals silently carried over, now
+                                       recorded against an unrelated branch)
+target branch differs:                error: Your local changes to the following
+                                      files would be overwritten by checkout
+```
+
+Refusing is the good case. Silently succeeding leaves you with an approved set
+that means nothing, and no sign anything happened.
+
+### The approved set belongs in a ref
+
+The index file is the working copy of the approved set, and the reason it exists
+is the stat cache that makes the editor fast. It should not be the only copy.
+
+Record it as a ref too -- `refs/review/<clean branch>`, a commit whose tree is
+the approved tree -- written whenever the tool runs. Then the index file is a
+cache that can be rebuilt:
+
+```sh
+git read-tree refs/review/clean
+git update-index --refresh
+```
+
+Verified: deleting the index entirely and rebuilding it from the ref gives back
+the identical approved tree.
+
+That also makes approval history real, because a ref has a reflog: what you had
+approved before lunch is `refs/review/clean@{1}`. The same rule as everywhere
+else in these documents -- **state that matters goes in a ref**, and anything
+else is a cache.
+
+The gap is approvals made in the editor between tool invocations, which are not
+captured until the next one. A mode switch captures them, and a mode switch is
+what you do before leaving, so the exposure is small; a `post-checkout` hook
+that notices the previous HEAD was the clean line could close it entirely.
+
 ## Rough edges
 
 - **Files added in the working line show as unversioned** in review mode, since
