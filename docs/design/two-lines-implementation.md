@@ -161,21 +161,26 @@ which is correct because HEAD is the clean line).
 
 ## State on disk
 
+One session per reviewed branch. `<slug>` is the clean branch's name with `%`
+and `/` percent-encoded, so a session is always one ref path segment and
+`refs/review/agent/foo` cannot collide with `refs/review/agent`.
+
 ```
 .git/review/
-  clean               clean line's ref name, e.g. refs/heads/clean
-  working             working line's ref name
   mode                "write" or "review"
-  index.write         the write mode index, when not live
-  index.review        the review mode index, when not live
-  fixup/              present only while a fixup is in progress
-    target            oid of the commit being fixed up
-    approved          oid of the approved tree, captured when the fixup started
-    todo              one oid per line, commits still to replay, oldest first
-    done              oid of the rebuilt clean tip so far
-    conflicted_tree   oid of the tree merge-tree produced, with markers
-    stages/           <path>.BASE / .LOCAL / .REMOTE scratch files
-    resolved          "<path>\\t<oid>" lines, resolutions for the current step
+  sessions/<slug>/
+    clean             clean line's ref name, e.g. refs/heads/clean
+    working           working line's ref name
+    index.write       the write mode index, when not live
+    index.review      the review mode index, when not live
+    fixup/            present only while a fixup is in progress
+      target            oid of the commit being fixed up
+      approved          oid of the approved tree, captured when the fixup started
+      todo              one oid per line, commits still to replay, oldest first
+      done              oid of the rebuilt clean tip so far
+      conflicted_tree   oid of the tree merge-tree produced, with markers
+      stages/           <path>.BASE / .LOCAL / .REMOTE scratch files
+      resolved          "<path>\\t<oid>" lines, resolutions for the current step
 ```
 
 Exactly one of `index.write` / `index.review` exists at a time; the other one is

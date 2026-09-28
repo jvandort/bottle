@@ -408,6 +408,47 @@ captured until the next one. A mode switch captures them, and a mode switch is
 what you do before leaving, so the exposure is small; a `post-checkout` hook
 that notices the previous HEAD was the clean line could close it entirely.
 
+## One review per branch
+
+A single review index is a limitation, and an odd one, because the durable half
+of the state is already per-branch: `refs/review/<clean branch>` is keyed by the
+branch it belongs to. Only the index *cache* is singular. Making it per-session
+is aligning the cache with the record rather than adding a concept.
+
+**It buys resumability, not concurrency.** The working tree is shared, so you can
+only ever be looking at one branch's content; two reviews at once would need a
+worktree each, which is the two-window design that was rejected. What per-branch
+state gives you is that switching away does not lose your place in either
+review -- which matters as soon as more than one agent is pushing branches.
+
+A session is a (working line, clean line, review index) triple, keyed by branch:
+
+```
+.git/review/sessions/<encoded clean branch>/
+    working            the working line's ref name
+    index.review
+    index.write
+```
+
+Looking up the current session needs no "which one is active" pointer, because
+HEAD already says: in review mode it is the clean branch, in write mode the
+working line, and each names exactly one session. Switching branches in write
+mode therefore moves to a different session by itself.
+
+**The index files are a pure cache.** If one is missing or stale, rebuild it from
+the ref with `read-tree` and `update-index --refresh`; the only thing lost is the
+stat cache, which costs one re-stat -- the same scan `git status` does. So
+sessions degrade gracefully and old index files can be deleted freely.
+
+Two things this needs:
+
+- **Encode the branch name.** `refs/review/agent/foo` and `refs/review/agent`
+  cannot both exist -- git refuses with "cannot create; 'refs/review/agent/foo'
+  exists" -- and both are legal branch names. Percent-encode `/` (and `%`) so
+  every session is one ref path segment.
+- **`review list` and `review drop`**, because branches get deleted and reviews
+  get abandoned, and nothing else will ever clean them up.
+
 ## Guardrails
 
 ### The hazard peaks when the review is finished
