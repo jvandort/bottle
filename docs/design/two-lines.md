@@ -216,6 +216,7 @@ Five verbs. Everything else is git and your editor.
 
 - `start` -- set up the clean line and the two index files.
 - `write` / `review` -- toggle.
+- `wip` -- commit the working tree onto the working line, from either mode.
 - `fixup <commit>` -- fold the approved changes into an existing clean commit,
   entirely in the object database; `--continue` and `--abort` when it conflicts.
 - `resolve` -- open the current conflict in the merge tool git is already
@@ -279,34 +280,58 @@ index are untouched.
 
 ### Never merge into uncommitted work
 
-The one rule: **commit your own edits to the working line before updating it.**
+Git already refuses: `git rebase` with a dirty tree stops with "cannot rebase:
+your index contains uncommitted changes", and `rebase.autoStash` is off unless
+you turn it on. That default is right and the tool should not override it.
 
-Git already refuses by default -- `git rebase` with a dirty tree stops with
-"cannot rebase: your index contains uncommitted changes", and `rebase.autoStash`
-is off unless you turn it on. That default is right and the tool should not
-override it.
+The escape is to **commit, not to stash**. A stash is recoverable but it is a
+single global slot, an applied stash that conflicts hands you two problems at
+once, and a dropped one exists only in the reflog. The working line, meanwhile,
+is a history nobody reads, where an extra commit costs nothing, is named by a
+branch ref, survives a crash, and comes back exactly from `git rebase --abort`.
+On a line whose history does not matter, autocommit beats autostash.
 
-The usual escape is `--autostash`, and it is the wrong one here. A stash is
-recoverable but it is a single global slot, an applied stash that conflicts
-leaves you holding two problems at once, and a dropped one exists only in the
-reflog. Meanwhile the working line is a history nobody reads, where an extra
-commit costs *nothing*.
+So the sequence is `wip`, then pull:
 
-So when the tree is dirty, offer to commit rather than to stash:
+```sh
+review wip
+git pull --rebase
+```
+
+The tool has no business owning `pull`, and it does not.
+
+### `wip`
+
+`review wip` commits the whole working tree onto the working line.
+
+From write mode that is exactly `git add -A && git commit -m wip`, and if that
+were all it did it would not deserve to exist. It earns its place by working
+**from review mode too** -- where the same two git commands mean something
+completely different and wrong.
+
+In review mode the index is the approved set and HEAD is the clean line, so
+`git add -A` approves everything you have not read and `git commit` puts it on
+the branch you ship. Muscle memory from write mode, and the result is a clean
+line full of unreviewed code. Recoverable -- unstage, reset, restore the review
+index -- but it is exactly the kind of mistake worth not being able to make.
+
+`wip` sidesteps it by not caring which mode you are in. From review mode it
+builds the commit in a scratch index and moves the working line's ref, touching
+neither HEAD, nor the review index, nor a single file:
 
 ```
-review write --commit-first        # "wip: before update", then pull
+working line: 7f093c0 wip   fecff92 their work   1c9a960 start
+  contains my edit, and the untracked file
+still in review mode:  YES
+review index untouched: YES
+working tree untouched: YES
+review status:         MM f.txt   ?? new.txt
 ```
 
-A commit is named by a branch ref, survives a crash, survives a botched merge,
-and if the rebase goes wrong `git rebase --abort` puts it back exactly. **On a
-line whose history does not matter, autocommit strictly beats autostash** --
-there is no reason to reach for the fragile mechanism when the durable one is
-free.
-
-This is the same argument as `durability.md` makes for snapshots, in miniature:
-uncommitted work is the only state nothing can protect, so the answer is always
-to stop it being uncommitted rather than to handle it carefully.
+Which means you can be halfway through reading someone's branch, notice you want
+your work saved, and save it, without losing your place. It is the same
+primitive as the snapshot in `durability.md`: a tree written from the working
+directory and committed somewhere harmless.
 
 ## Rough edges
 

@@ -22,6 +22,20 @@ compiled dependency for no benefit.
 Rewrite in Go only if it is ever distributed to people who do not already have
 Python. Nothing in the design would change -- it would still shell out to git.
 
+## Packaging it
+
+Git's extension mechanism is that any executable named `git-<name>` on `PATH`
+becomes `git <name>`, with `GIT_DIR` and friends already set. There is no
+in-process plugin API -- every extension point git has (merge tools, diff tools,
+credential helpers, remote helpers, clean/smudge filters, textconv, hooks) is
+"run this program", which is why a single Python file is a first-class citizen
+here and a library binding is not.
+
+So the tool can be invoked as `git <name>` for free. Mind the naming:
+`git-review` is already the OpenStack project's Gerrit client, and `git-absorb`,
+`git-branchless` and `git-machete` are all taken. Pick something else before
+the muscle memory sets.
+
 ## Glossary
 
 Everything below is a git concept the implementation depends on. If any of these
@@ -293,6 +307,23 @@ tree := GIT_INDEX_FILE=<tmp> git write-tree
 
 `rm -rf .git/review/fixup`. There is genuinely nothing else to undo: no ref was
 moved and no file was written.
+
+### `wip`
+
+From write mode, `git add -A` then `git commit`. From review mode, the same
+thing without disturbing anything:
+
+```
+GIT_INDEX_FILE=<tmp> git read-tree <working line tip>
+GIT_INDEX_FILE=<tmp> git add -A            # respects .gitignore
+tree := GIT_INDEX_FILE=<tmp> git write-tree
+c    := git commit-tree <tree> -p <working line tip> -m "wip"
+git update-ref <working> <c>
+```
+
+HEAD, the review index and the working tree are all untouched. This is the
+snapshot primitive from `durability.md`, pointed at a branch instead of a
+parking ref.
 
 ### Keeping up with a working line someone else writes
 
