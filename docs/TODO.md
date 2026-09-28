@@ -58,8 +58,9 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
     branches; `--force` for the rest, after listing them.
 - **Reviewing a bottle's work.** Where work surfaces on the host, where you
   edit it, and how you track what you've already read:
-  [docs/design/reviewing-a-bottles-work.md](design/reviewing-a-bottles-work.md)
-  and [docs/design/review-state.md](design/review-state.md). Until that's
+  [docs/design/reviewing-a-bottles-work.md](design/reviewing-a-bottles-work.md).
+  Getting it out of a bottle at all, before anyone reviews it, is
+  [docs/design/durability.md](design/durability.md). Until that's
   settled, hooks/post-receive mirrors each pushed branch to
   `refs/heads/bottle-NAME/*` so there's something to look at; nothing should
   depend on those mirrored refs, and the mirror goes when the real answer
