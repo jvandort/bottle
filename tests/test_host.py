@@ -15,6 +15,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     host repo, a clone of it with local branches of its own.
     """
 
+    MINE = "refs/namespaces/bottle-b"  # the git namespace this bottle pushes into
+
     async def asyncSetUp(self) -> None:
         host._last_pull.clear()
         self.upstream = self.make_repo("upstream")
@@ -23,7 +25,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.repo = self.tmp / "repo"
         run("git", "clone", "-q", self.upstream, self.repo)
         run("git", "-C", self.repo, "branch", "mine")
-        services = host.HostServices(self.repo / ".git", self.tmp / "view.git")
+        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", bottle="b")
+        self.services = services
         proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
         self.addAsyncCleanup(self._close, proxy)
         self.env = {**os.environ, "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
@@ -89,7 +92,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_origin_is_read_only(self) -> None:
         await self.fetch()
         await self.git("checkout", "-q", "release")
-        result = await self.git("push", "origin", "HEAD:refs/heads/agent/x")
+        result = await self.git("push", "origin", "HEAD:refs/heads/x")
         self.assertIn("403", result.stderr)
 
     # --- host ---------------------------------------------------------------------
@@ -98,49 +101,88 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         await self.fetch()
         self.assertTrue({"host/main", "host/mine"} <= self.branches())
 
-    async def push(self, refspec: str) -> subprocess.CompletedProcess:
-        return await self.git("push", "host", refspec)
+    async def push(self, refspec: str | None = None) -> subprocess.CompletedProcess:
+        return await self.git("push", "host", *([refspec] if refspec else []))
 
-    async def test_push_creates_and_fast_forwards_agent_branches(self) -> None:
+    async def work(self, message: str = "agent work") -> str:
         await self.fetch()
         await self.git("checkout", "-q", "-b", "work", "host/main")
-        self.commit(self.workspace, "agent work")
-        self.assertEqual((await self.push("HEAD:agent/work")).returncode, 0)
-        more = self.commit(self.workspace, "more agent work")
-        self.assertEqual((await self.push("HEAD:agent/work")).returncode, 0)
-        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "agent/work"), more)  # a local branch on the host
+        return self.commit(self.workspace, message)
 
-    async def test_push_refuses_other_branches(self) -> None:
-        await self.fetch()
-        await self.git("checkout", "-q", "-b", "work", "host/main")
-        self.commit(self.workspace, "agent work")
-        for target in ("HEAD:main", "HEAD:mine", "HEAD:feature/x", "HEAD:refs/tags/t"):
+    def pushed(self, branch: str = "work") -> str:
+        return run("git", "-C", self.repo, "rev-parse", f"{self.MINE}/refs/heads/{branch}")
+
+    def host_refs(self) -> set[str]:
+        return set(run("git", "-C", self.repo, "for-each-ref", "--format=%(refname)").split())
+
+    async def test_push_writes_the_bottles_namespace(self) -> None:
+        await self.work()
+        self.assertEqual((await self.push("work")).returncode, 0)
+        # An ordinary `git push host work` lands under the bottle's namespace,
+        # with no refspec to configure and nothing for the agent to know.
+        self.assertEqual(self.pushed(), run("git", "-C", self.workspace, "rev-parse", "work"))
+
+    async def test_push_mirrors_to_a_branch_the_host_can_see(self) -> None:
+        # Temporary, until how a bottle's work surfaces on the host is decided:
+        # namespaced refs are listed by nothing an IDE shows.
+        await self.work()
+        await self.push("work")
+        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "bottle-b/work"), self.pushed())
+
+    async def test_the_hosts_refs_are_out_of_the_bottles_reach(self) -> None:
+        # Not refused, unreachable: every ref receive-pack resolves is inside
+        # the namespace, so naming main writes the bottle's main, not the host's.
+        before = self.host_refs()
+        await self.work()
+        for target in ("HEAD:main", "HEAD:mine", "HEAD:refs/tags/v1", "HEAD:refs/remotes/origin/main"):
             with self.subTest(target):
                 result = await self.push(target)
-                self.assertNotEqual(result.returncode, 0)
-        self.assertIn("only create or update agent/* branches", (await self.push("HEAD:main")).stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(run("git", "-C", self.repo, "rev-parse", "main"), run("git", "-C", self.upstream, "rev-parse", "main"))
+        # Only namespaced refs and their mirrors appeared.
+        for ref in self.host_refs() - before:
+            self.assertTrue(ref.startswith((f"{self.MINE}/", "refs/heads/bottle-b/")), ref)
 
-    async def test_push_refuses_force_and_delete(self) -> None:
-        await self.fetch()
-        await self.git("checkout", "-q", "-b", "work", "host/main")
-        self.commit(self.workspace, "first")
-        await self.push("HEAD:agent/work")
-        pushed = run("git", "-C", self.repo, "rev-parse", "agent/work")
+    async def test_push_force_updates_its_own_namespace(self) -> None:
+        await self.work("first")
+        await self.push("work")
+        first = self.pushed()
         run("git", "-C", self.workspace, "reset", "-q", "--hard", "HEAD~1")
-        self.commit(self.workspace, "rewritten")
-        self.assertNotEqual((await self.push("+HEAD:agent/work")).returncode, 0)
-        self.assertNotEqual((await self.push(":agent/work")).returncode, 0)
-        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "agent/work"), pushed)
+        rewritten = self.commit(self.workspace, "rewritten")
+        # git's own fast-forward check, measured against the bottle's last push.
+        self.assertNotEqual((await self.push("work")).returncode, 0, "a rebased branch shouldn't push by itself")
+        self.assertEqual(self.pushed(), first)
+        self.assertEqual((await self.git("push", "--force", "host", "work")).returncode, 0)
+        self.assertEqual(self.pushed(), rewritten)
+        # The old tip is still reachable: a force-update is undoable on the host.
+        self.assertIn(first, run("git", "-C", self.repo, "reflog", "show", f"{self.MINE}/refs/heads/work", "--format=%H").split())
+
+    async def test_push_refuses_deletes(self) -> None:
+        # A force-update is undoable through the ref's reflog; a delete takes
+        # the reflog with the ref, so the host alone retires a name.
+        await self.work()
+        await self.push("work")
+        pushed = self.pushed()
+        result = await self.push(":work")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deletion prohibited", result.stderr)
+        self.assertEqual(self.pushed(), pushed)
+
+    async def test_push_without_a_bottle_is_refused(self) -> None:
+        # Fail closed: with no namespace a push would write the host's own refs.
+        await self.work()
+        self.services.bottle = None
+        result = await self.push("work")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no namespace", result.stderr)
+        self.assertNotIn("refs/heads/work", self.host_refs())
 
     async def test_the_repos_own_hooks_never_run(self) -> None:
         hook = self.repo / ".git" / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\necho repo hook ran >&2\nexit 1\n")
         hook.chmod(0o755)
-        await self.fetch()
-        await self.git("checkout", "-q", "-b", "work", "host/main")
-        self.commit(self.workspace, "agent work")
-        result = await self.push("HEAD:agent/work")
+        await self.work()
+        result = await self.push("work")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("repo hook ran", result.stderr)
 

@@ -7,11 +7,6 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Stop idle bottles.** A bottle runs until `bottle stop`, `bottle shutdown`
   or the host stops it. bottled could stop bottles that have been idle for a
   while, once "idle" is defined (no exec sessions, no egress traffic).
-- **`bottle exec BOTTLE COMMAND...`.** `shell` is interactive only, so there's
-  no way to run one command in a bottle and get its output and exit status:
-  no scripting several bottles, no CI, no `bottle exec x claude -p '...'`.
-  Wants the same start-if-stopped behaviour as `shell`, stdio passed through
-  (a TTY only when one is attached), and the command's exit status as bottle's.
 - **Resource limits.** Bottles get the whole Mac (every core, all memory), so
   a busy bottle can slow the host, and memory a guest has touched isn't
   returned to the host until the bottle stops, so a bottle holds its
@@ -23,45 +18,60 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   bottles when it starts, but a bottle started outside bottle (e.g.
   `container start`) has no network until a bottle command touches it.
 - **bottled after an upgrade** keeps running the old code until
-  `bottle shutdown`. Detect a version mismatch and restart it.
+  `bottle shutdown`. Detect a version mismatch and restart it. Worse than it
+  sounds: an old bottled serving the current hooks/pre-receive passes no
+  `BOTTLE_NAME`, so the hook fails closed and every push from every bottle is
+  refused, with an error that blames the push.
+- **No `bottle daemon restart`.** Picking up new bottled code means
+  `bottle shutdown`, which stops every running bottle first. Restarting bottled
+  alone would do: it restores egress for running bottles when it starts.
 - **Supervision.** Optionally run bottled as a launchd user agent (no sudo) for
   restart-on-crash and start-at-login.
 
 ## Repos and git
 
+- **Unsaved-work check counts unreachable commits as saved.** `bottle delete`
+  and `reset` ask whether the repo has each branch tip, with `git cat-file -e`,
+  which succeeds for an object no ref names. So a branch pushed to
+  `bottle-NAME/*` and then deleted on the host still reads as saved, and the
+  commits go when the host next gcs. Check reachability instead.
 - **Objects a bottle uses aren't protected from gc.** A bottle reads the
   repo's objects in place. If the host deletes a branch a bottle checked out
   and `git gc` later prunes its commits (after git's grace periods, weeks to
   months), that checkout breaks; `bottle reset` starts over. Accepted.
-- **Fetched refs outlive their bottle.** `bottle git fetch` writes
-  `refs/remotes/bottle-NAME/*`, and `bottle delete` leaves them, since they may
-  be the only copy of the work. A later bottle with the same name fetches into the
-  same refs; fetches are additive, so a clash is refused rather than overwriting,
-  but it's confusing. Consider treating names with leftover fetched refs as
-  taken, or namespacing by bottle id.
-- **Fetch tags and pushing in.** `bottle git fetch` skips tags, and there's no way yet
-  to send new host commits into an existing bottle.
-- **Keeping the repo tidy.** Agent branches (`agent/*`, pushed) and fetched
-  refs (`bottle-NAME/*`) are never deleted automatically: they stay after
-  `bottle delete`, and after the bottle deletes a branch (`fetch` reports these
-  as gone). Commands:
-  - `bottle git refs [REPO]`: every bottle-owned ref, grouped by bottle, marked
+- **A bottle's refs outlive it.** `bottle delete` leaves
+  `refs/namespaces/bottle-NAME/*` behind (and their mirrors), since they may be
+  the only copy of the work. A later bottle with the same name owns the same
+  namespace, and may force-update those refs without anything warning it.
+  Consider treating names with leftover refs as taken, or keying the namespace
+  by bottle id.
+- **Sending work in.** There's no way to send new host commits into an existing
+  bottle short of fetching `host` from inside it.
+- **Keeping the repo tidy.** A bottle's refs are never deleted automatically:
+  they stay after `bottle delete`, and after the bottle deletes the branch
+  behind one (the mirror is never removed either, since the bottle can't
+  delete). Commands:
+  - `bottle refs [REPO]`: every bottle-owned ref, grouped by bottle, marked
     live, deleted, or gone from the bottle.
-  - `bottle git prune [BOTTLE]`: delete fetched refs of deleted bottles and gone
+  - `bottle prune [BOTTLE]`: delete the refs of deleted bottles and gone
     branches, by default only those already reachable from the host's own
     branches; `--force` for the rest, after listing them.
-  - `bottle git status NAME`: per bottle branch, ahead of what was fetched, and
-    whether it's merged into a host branch.
-  - `bottle git log NAME` / `bottle git diff NAME`: the bottle's work since its
-    starting commit, for review.
-- **`bottle git adopt`.** Turn an agent's `agent/X` branch (pushed to the host)
-  into `X`: re-sign its commits on the host with your key (the agent never
-  signs as you), optionally add `Signed-off-by`, and never overwrite an
-  existing branch.
-- **A git remote helper.** A `git-remote-bottle` executable would let plain git
-  (and IDEs) fetch with URLs like `bottle::gradle`, starting the bottle and
-  applying the additive rules, without enabling the `ext::` transport in the
-  repo's config.
+- **How a bottle's work should surface on the host.** Its refs live in a git
+  namespace, `refs/namespaces/bottle-NAME/`, which nothing lists: not
+  `git branch`, not `git branch -r`, not an IDE. hooks/post-receive mirrors each
+  pushed branch to `refs/heads/bottle-NAME/*` so there's something to look at,
+  but that puts agent work in the host's own branch namespace, which is what
+  the git namespace was for. Decide the real answer -- mirror to
+  `refs/remotes/*` instead, teach bottle's own commands to read the namespace,
+  or make `bottle adopt` the only way work becomes visible -- and drop the
+  mirror. Nothing should depend on the mirrored refs until then.
+- **`bottle adopt`.** Turn a bottle's `bottle-NAME/X` into your own branch `X`:
+  re-sign its commits on the host with your key (the agent never signs as
+  you), optionally add `Signed-off-by`, and never overwrite an existing branch.
+- **Pulling from a bottle.** Work only reaches the host when something inside
+  pushes. A bottle that died mid-task, or an agent that never pushes, leaves
+  commits that `bottle exec NAME git push host` can still rescue -- but only
+  while the bottle starts. A host-initiated pull would not need that.
 - **Commit identity and signing.** Bottles have no git identity; decide who
   commits (agent identity, `Signed-off-by`), and sign on the host after
   fetching, so signing keys never enter the bottle.
@@ -100,8 +110,6 @@ bottle's egress proxy on the host (bottle/host.py), and the first service is
 the repo as a read-only git origin. More services can be added there, e.g.: bottle decides which services exist; the bottle can only request them,
 and the host can require approval. Candidates:
 
-- **Hand back work:** push a branch to the host repo (as `bottle-NAME/*`, the
-  same additive rules as `bottle git fetch`), so the agent can say "done" itself.
 - **Ask the human:** request approval, or a decision, and wait for the answer.
 - **Notify:** "finished", "blocked", "needs review", surfaced on the host.
 - **Open something on the host:** a URL in the host browser, e.g. an OAuth or
@@ -121,9 +129,9 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 - It's in a sandboxed Linux VM (bottle), as `genie`, with passwordless sudo.
 - Network access is only via the HTTP proxy in `*_PROXY`; there's no DNS; which
   destinations are allowed.
-- The repo at `/workspace`: which repo, branch and commit it started from; that
-  work reaches the host via `bottle git fetch` (or a host command), and branches are
-  fetched additively, so rewriting history gets refused.
+- The repo at `/workspace`: which repo, branch and commit it started from, and
+  that `git push host` hands work back. (The push rules are in ~/BOTTLE.md
+  already; the rest of this list isn't.)
 - What's installed (the image's tools), and what isn't available.
 - Which host commands exist, once they do.
 

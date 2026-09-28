@@ -13,10 +13,14 @@ with `git http-backend`. A bottle has two remotes, each exactly what it says:
 
   host    http://bottle.host/git/host
       The host repo itself: its local branches. The bottle may fetch anything,
-      and push only to agent/* branches, creating them or moving them forward.
-      That's enforced on the host: `git receive-pack` runs bottle's
-      hooks/pre-receive here, in the host repo, before any ref moves. The
-      repo's own hooks never run for these pushes.
+      and pushes land in a git namespace of its own (gitnamespaces(7)):
+      receive-pack runs with GIT_NAMESPACE=bottle-<name>, so a branch pushed as
+      refs/heads/work is written to refs/namespaces/bottle-<name>/refs/heads/work
+      and the host's own refs aren't even advertised. Git does the confining, so
+      git behaves like git inside the bottle: a push is a fast-forward unless
+      forced, and it's the bottle's earlier push it's measured against. bottle's
+      hooks/pre-receive only refuses a push that arrives with no namespace; the
+      repo's own hooks never run.
 
 Nothing is mirrored or watched: every request sees the repo as it is right now.
 """
@@ -58,6 +62,7 @@ class HostServices:
 
     git_dir: Path | None = None  # the repo served as origin and host, or None for no repo
     view_dir: Path | None = None  # where the origin view is written (default: under BOTTLE_HOME)
+    bottle: str | None = None  # whose git namespace pushes are written into
 
     async def handle(self, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         """Answer a request to bottle.host; returns an outcome for the log."""
@@ -70,7 +75,7 @@ class HostServices:
     async def _git(self, remote: str, path_info: str, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         push = "git-receive-pack" in path_info or "service=git-receive-pack" in request.query
         if push and remote == ORIGIN:
-            await _respond(writer, 403, "Forbidden", b"origin is read-only; push agent/* branches to host\n")
+            await _respond(writer, 403, "Forbidden", b"origin is read-only; push to host instead\n")
             return "denied"
         config: dict[str, str] = {}
         if remote == ORIGIN:
@@ -83,9 +88,20 @@ class HostServices:
                 config = {
                     "http.receivepack": "true",
                     "core.hooksPath": str(HOOKS),  # bottle's rules; the repo's own hooks never run
-                    "receive.denyDeletes": "true",
-                    "receive.denyNonFastForwards": "true",
                     "receive.fsckObjects": "true",
+                    # No push may remove a ref: a delete takes the ref's reflog
+                    # with it, so only the host retires a name. Force-updates are
+                    # allowed (no denyNonFastForwards), and stay undoable because
+                    # refs outside refs/heads and refs/remotes have no reflog
+                    # unless asked for.
+                    "receive.denyDeletes": "true",
+                    "core.logAllRefUpdates": "always",
+                    # A bottle pushing `main` writes its namespace's main, but
+                    # git compares the unnamespaced name against the host's
+                    # checked-out branch and refuses it. Nothing here can reach
+                    # that branch (the push is refused outright without a
+                    # namespace), so the check has nothing left to protect.
+                    "receive.denyCurrentBranch": "ignore",
                 }
         body = request.body
         if request.headers.get("content-encoding") == "gzip":
@@ -102,6 +118,10 @@ class HostServices:
             "CONTENT_LENGTH": str(len(body)),
             "REMOTE_ADDR": "bottle",
             "REMOTE_USER": "bottle",
+            # What confines the push: every ref receive-pack reads or writes is
+            # under refs/namespaces/<this>/. hooks/pre-receive refuses a push
+            # without it, so never pass an empty one.
+            **({"GIT_NAMESPACE": f"bottle-{self.bottle}"} if push and self.bottle else {}),
             **({"GIT_PROTOCOL": request.headers["git-protocol"]} if "git-protocol" in request.headers else {}),
             **_config_env(config),
         }

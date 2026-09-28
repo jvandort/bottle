@@ -179,7 +179,7 @@ class Daemon:
                 return proxy_url(gateway, self.port)
             self._close(bottle)
         try:
-            services = HostServices(git_dir)
+            services = HostServices(git_dir, bottle=bottle)
             server = await egress.EgressProxy(bottle, self.policy, services=services).start(gateway, self.port)
         except OSError as e:
             raise BottleError(f"can't serve {bottle}'s egress on {gateway}:{self.port}: {e.strerror}") from None

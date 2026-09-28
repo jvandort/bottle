@@ -10,9 +10,9 @@ permissions inside. Take back only the commits you want.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through the host. Your
   working copy, and the rest of your Mac, are never mounted.
-- **One way out, and it only adds.** Git is the only channel back to your Mac, and an agent can
-  push but never rewrite: nothing in a bottle can change or remove what's already in your repo.
-  You review what you take.
+- **Git in, git out.** The repo is mounted read-only, and work can only be pushed, into a
+  [git namespace](https://git-scm.com/docs/gitnamespaces) of the bottle's own, surfacing as
+  branches under `bottle-<name>/`. A bottle can't touch your branches. You review what you take.
 - **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
 - **Composable features.** `tools`, `jvm`, `python`, `claude`, in the
@@ -39,7 +39,6 @@ agent directly.
 bottle repo add ~/path/to/foo --feature tools --feature claude
 bottle new foo            # Create a bottle with foo's default features
 bottle shell foo          # Open a shell at /workspace; run `claude` here
-bottle git fetch foo      # Transfer the agent's branches to your local repo, as bottle-foo/*
 ```
 
 ## Prerequisites
@@ -59,11 +58,12 @@ and a Linux kernel) as necessary, and asks before installing anything.
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
 | `bottle new` | Create a bottle from a repo |
 | `bottle shell` | Open a shell in a bottle, at `/workspace` |
+| `bottle exec` | Run one command in a bottle |
 | `bottle list` | List bottles and their state |
-| `bottle git fetch` | Take a bottle's branches back into its source repo |
 | `bottle start` / `stop` / `reset` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
-| `bottle daemon start` / `stop`, `bottle shutdown` | Manage `bottled`, the background network process |
+| `bottle daemon start` / `stop` | Manage `bottled`, the background network process |
+| `bottle shutdown` | Stop every running bottle, then `bottled` |
 | `bottle egress` | Run a bottle's egress proxy by hand, for testing |
 
 <details>
@@ -170,9 +170,19 @@ two remotes, served live by bottle through its egress proxy:
 - `origin`: your repo's upstream (its `origin/*` branches), read-only. Fetching
   first fetches your repo's `origin` on the host (at most once a minute), so
   the bottle gets the upstream's latest even if you haven't fetched.
-- `host`: your repo's local branches. The agent may push to it, but only to
-  `agent/*` branches, creating them or moving them forward; force-pushes and
-  deletes are refused, and your repo's own hooks don't run.
+- `host`: your repo's local branches. The agent may fetch anything, and pushes
+  land in a [git namespace](https://git-scm.com/docs/gitnamespaces) of the
+  bottle's own: bottle serves `git receive-pack` with `GIT_NAMESPACE` set, so a
+  branch pushed as `work` is written to
+  `refs/namespaces/bottle-NAME/refs/heads/work`, and your own refs are never
+  advertised to the bottle in the first place. Git does the confining, so git
+  behaves like git inside the bottle — `git push host work`, fast-forward
+  unless forced, measured against the bottle's own last push. Deletes are
+  refused, so a name a bottle has used is yours to retire, and a force-push
+  stays undoable through the ref's reflog. Your repo's own hooks don't run.
+
+  A namespaced ref isn't listed by `git branch`, so bottle also mirrors each one
+  to a branch under `bottle-NAME/`, where you and your editor will find it.
 
 `NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
 with those features is built first if it isn't built yet.
@@ -185,27 +195,21 @@ bottle new reponame --feature tools --feature jvm --feature claude
 
 Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped.
 
+### `bottle exec BOTTLE COMMAND [ARG]...`
+
+Runs one command in the bottle, at `/workspace`, and exits with its status,
+starting the bottle if it's stopped. Put `--` before the command if it takes
+options of its own. Its output is a terminal only if bottle's is, so piping and
+redirecting work.
+
+```sh
+bottle exec reponame -- claude -p 'fix the failing test'
+bottle exec reponame cat /workspace/report.json | jq .failures
+```
+
 ### `bottle list`
 
 Lists bottles and their state.
-
-### `bottle git fetch BOTTLE [REV] [--force]`
-
-Fetches the bottle's git work into the repo it was created from, as
-`bottle-NAME/<branch>` (listed by `git branch -r`). With no `REV`: every branch,
-plus the bottle's `HEAD` as `bottle-NAME/detached/<commit>` if it's detached.
-With a branch name: just that branch. With any other revision: that commit, into
-`FETCH_HEAD`.
-
-Fetching only adds: it creates and fast-forwards `bottle-NAME/*` refs, never
-deletes them (a branch deleted in the bottle stays, and is reported as gone), and
-never touches your own branches. If the bottle rewrote a branch's history, the
-fetch refuses to overwrite it and says so; `--force` overwrites one named branch.
-
-```sh
-bottle git fetch reponame
-git log bottle-reponame/main
-```
 
 ### `bottle start BOTTLE` / `bottle stop BOTTLE`
 
@@ -218,16 +222,16 @@ Deletes the bottle and everything it created. If creating or deleting a bottle
 was interrupted, `delete` cleans up whatever is left.
 
 It refuses if the bottle has work its repo doesn't: commits that were never
-fetched, or uncommitted changes. Fetch them first, or pass `--force`. Branches
-already fetched into the repo (`bottle-NAME/*`) are kept. The bottle's image is
-deleted too, unless another bottle uses it.
+pushed, or uncommitted changes. Push them first (`bottle exec NAME git push
+host`), or pass `--force`. Branches already in the repo (`bottle-NAME/*`) are
+kept. The bottle's image is deleted too, unless another bottle uses it.
 
 ### `bottle reset BOTTLE [--force]`
 
 Deletes the bottle and creates it again with the arguments `bottle new` was
 given: a fresh, running VM with the repo's current default features (plus any
 the bottle was created with), and `/workspace` at the latest commit of its
-branch. Like `delete`, it refuses to lose unfetched commits or uncommitted
+branch. Like `delete`, it refuses to lose unpushed commits or uncommitted
 changes without `--force`. Also recreates a bottle whose VM has gone missing.
 
 ### `bottle shutdown`

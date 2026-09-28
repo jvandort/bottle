@@ -5,8 +5,8 @@
 #     into /etc/environment and runs the command (sshd by default)
 #   - the genie user, UID 1000, with passwordless sudo
 #   - /workspace, owned by genie: the checkout
-#   - git: setting up /workspace, `bottle git fetch` (upload-pack), and
-#     `bottle delete`'s check for unfetched work
+#   - git: setting up /workspace, pushing work back to the host, and
+#     `bottle delete`'s check for unpushed work
 #   - sshd, for IDEs
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.

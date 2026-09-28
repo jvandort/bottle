@@ -1,24 +1,15 @@
 #!/bin/sh
-# Bottle's rules for pushes from a bottle to the host repo (see bottle/host.py).
+# Bottle's one rule for pushes from a bottle to the host repo (see bottle/host.py).
 # Runs on the host, never in the bottle: `git receive-pack`, serving the push in
 # the host repo, runs it after the pushed objects arrive and before any ref
 # moves. A non-zero exit refuses the whole push. The bottle can't skip it.
-# A bottle may create agent/* branches and move them forward: nothing else,
-# and never a force-push or a delete.
-status=0
-while read -r old new ref; do
-  name=${ref#refs/heads/}
-  case "$ref" in
-    refs/heads/agent/*) ;;
-    *) echo "bottle: pushes may only create or update agent/* branches, not $name" >&2; status=1; continue ;;
-  esac
-  case "$new" in
-    *[!0]*) ;;
-    *) echo "bottle: deleting $name isn't allowed" >&2; status=1; continue ;;
-  esac
-  case "$old" in
-    *[!0]*) git merge-base --is-ancestor "$old" "$new" \
-              || { echo "bottle: $name can only move forward (no force-pushes)" >&2; status=1; } ;;
-  esac
-done
-exit $status
+#
+# What confines a push is GIT_NAMESPACE, not this hook: receive-pack reads and
+# writes only refs/namespaces/<it>/, so the host's own refs are neither
+# advertised to the bottle nor reachable by it, and git's ordinary rules
+# (fast-forward unless forced, receive.denyDeletes) apply within the namespace.
+# All that's left to check is that a namespace arrived at all.
+if [ -z "${GIT_NAMESPACE:-}" ]; then
+  echo "bottle: this push has no namespace; refusing it" >&2
+  exit 1
+fi
