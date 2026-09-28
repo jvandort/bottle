@@ -39,6 +39,14 @@ RUN groupadd --gid 1000 genie \
  # Enable passwordless sudo
  && echo 'genie ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/genie \
  && chmod 0440 /etc/sudoers.d/genie \
+ # A bottle's proxy is the only way out and arrives as environment, but sudo
+ # resets the environment, so `sudo apt-get install` runs with no proxy and no
+ # DNS to fall back on. Carry the proxy settings across, and nothing else.
+ && echo 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"' \
+      > /etc/sudoers.d/proxy \
+ && chmod 0440 /etc/sudoers.d/proxy \
+ # Verify the sudoers files are valid
+ && visudo -c -q \
  && install -d -o genie -g genie /workspace \
  # The agent commits as itself, never as you. bottle.host isn't a real domain.
  && su genie -c 'git config --global user.name genie && git config --global user.email genie@bottle.host'
