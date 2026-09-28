@@ -333,6 +333,33 @@ your work saved, and save it, without losing your place. It is the same
 primitive as the snapshot in `durability.md`: a tree written from the working
 directory and committed somewhere harmless.
 
+## What the editor is doing
+
+Nothing special, which is the point.
+
+**Staging.** The editor's staging UI runs git against `.git/index` -- a whole
+file with `git add`, a single hunk by applying that hunk's patch with
+`git apply --cached`. In review mode `.git/index` *is* the review index, so
+every stage updates the approved tree. The editor needs no adaptation and does
+not know anything has changed; it is doing what it always does, pointed at a
+different index.
+
+**Committing.** In review mode HEAD is attached to the clean branch, so the
+commit button commits the approved set onto the clean line -- with the editor's
+message editor, diff preview and everything else. There is no `review commit`,
+because there is nothing for it to do.
+
+```
+clean line:        e73da05 Add the A change   1bdff4b start
+commit's content:  A/b/          <- the approved hunk only, not the rest
+status after:       M f.txt      <- the unapproved remainder, still outstanding
+```
+
+Worth verifying once in your editor: that its commit action commits the staged
+set rather than running `commit -a` or passing pathspecs. With a staging area
+enabled it should, but it is the difference between committing what you approved
+and committing everything.
+
 ## Going away and coming back
 
 A common workaround, without two lines, is to make one temporary commit of the
@@ -361,10 +388,32 @@ git switch <working line>
 review review     # approved set back, exactly as it was
 ```
 
-**Leave review mode before switching branches.** In review mode the live
-`.git/index` *is* the approved set, and a checkout writes the index. What
-happens then is undefined in the worst way -- it depends on the branch you are
-switching to:
+**Leaving review mode is not optional, and committing does not substitute for
+it.** In review mode the working tree deliberately differs from HEAD -- that
+difference is exactly what "unstaged means unreviewed" is made of. So the tree
+is never clean in review mode, not because there is uncommitted work lying
+around, but by construction. Committing the approved half to the clean line and
+`wip`-ing the other half to the working line still leaves it:
+
+```
+both halves committed, still in review mode:
+  status:  M f.txt
+  git switch elsewhere
+  -> error: Your local changes to the following files would be overwritten
+
+switch to write mode first:
+  status:  (clean)
+  git switch elsewhere
+  -> Switched to branch 'elsewhere'
+```
+
+In write mode HEAD is the working line, the working tree matches it, and a
+checkout is an ordinary checkout. Getting there is two renames and a
+`symbolic-ref`, so it costs nothing.
+
+There is a second reason, worse than inconvenience. The live `.git/index` *is*
+the approved set, and a checkout writes the index, so what happens depends on
+the branch you are switching to:
 
 ```
 target branch has the same content:   Switched to branch 'elsewhere'
