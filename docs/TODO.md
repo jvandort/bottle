@@ -56,15 +56,14 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   - `bottle prune [BOTTLE]`: delete the refs of deleted bottles and gone
     branches, by default only those already reachable from the host's own
     branches; `--force` for the rest, after listing them.
-- **How a bottle's work should surface on the host.** Its refs live in a git
-  namespace, `refs/namespaces/bottle-NAME/`, which nothing lists: not
-  `git branch`, not `git branch -r`, not an IDE. hooks/post-receive mirrors each
-  pushed branch to `refs/heads/bottle-NAME/*` so there's something to look at,
-  but that puts agent work in the host's own branch namespace, which is what
-  the git namespace was for. Decide the real answer -- mirror to
-  `refs/remotes/*` instead, teach bottle's own commands to read the namespace,
-  or make `bottle adopt` the only way work becomes visible -- and drop the
-  mirror. Nothing should depend on the mirrored refs until then.
+- **Reviewing a bottle's work.** Where work surfaces on the host, where you
+  edit it, and how you track what you've already read:
+  [docs/design/reviewing-a-bottles-work.md](design/reviewing-a-bottles-work.md)
+  and [docs/design/review-state.md](design/review-state.md). Until that's
+  settled, hooks/post-receive mirrors each pushed branch to
+  `refs/heads/bottle-NAME/*` so there's something to look at; nothing should
+  depend on those mirrored refs, and the mirror goes when the real answer
+  lands.
 - **`bottle adopt`.** Turn a bottle's `bottle-NAME/X` into your own branch `X`:
   re-sign its commits on the host with your key (the agent never signs as
   you), optionally add `Signed-off-by`, and never overwrite an existing branch.
