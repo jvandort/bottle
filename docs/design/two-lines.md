@@ -212,17 +212,21 @@ wait until the repetition is actually felt.
 
 ## The tool
 
-Five verbs. Everything else is git and your editor.
+Four verbs. Everything else is git and your editor.
 
 - `start` -- set up the clean line and the two index files.
 - `write` / `review` -- toggle.
-- `wip` -- commit the working tree onto the working line, from either mode.
 - `fixup <commit>` -- fold the approved changes into an existing clean commit,
   entirely in the object database; `--continue` and `--abort` when it conflicts.
 - `resolve` -- open the current conflict in the merge tool git is already
   configured with.
-There is deliberately no `refresh`: keeping up with a working line someone else
-is writing is `git pull` in write mode (below).
+
+That is the whole surface, and it is worth defending. Anything a user can do by
+switching to write mode and typing ordinary git does not need a verb here --
+which rules out keeping up with someone else's working line (`git pull`),
+committing work in progress (`git commit`), and committing what you have
+approved (the editor's commit button, since HEAD is the clean line). The tool
+exists to arrange the trees; git does the rest.
 
 Committing, staging hunks, editing and resolving are all the editor's, natively.
 In review mode the editor's own commit button does the right thing, because
@@ -291,74 +295,25 @@ is a history nobody reads, where an extra commit costs nothing, is named by a
 branch ref, survives a crash, and comes back exactly from `git rebase --abort`.
 On a line whose history does not matter, autocommit beats autostash.
 
-So the sequence is `wip`, then pull:
+So when the tree is dirty, commit on the working line and then pull -- in write
+mode, where both are ordinary git:
 
 ```sh
-review wip
+review write
+git add -A && git commit -m wip
 git pull --rebase
 ```
 
-The tool has no business owning `pull`, and it does not.
+The tool owns none of that, and should not. Every route out of review mode goes
+through write mode anyway, and from write mode this is a repository doing
+ordinary things.
 
-### `wip`
-
-`review wip` commits the whole working tree onto the working line.
-
-From write mode that is exactly `git add -A && git commit -m wip`, and if that
-were all it did it would not deserve to exist. It earns its place by working
-**from review mode too** -- where the same two git commands mean something
-completely different and wrong.
-
-In review mode the index is the approved set and HEAD is the clean line, so
-`git add -A` approves everything you have not read and `git commit` puts it on
-the branch you ship. Muscle memory from write mode, and the result is a clean
-line full of unreviewed code. Recoverable -- unstage, reset, restore the review
-index -- but it is exactly the kind of mistake worth not being able to make.
-
-`wip` sidesteps it by not caring which mode you are in. From review mode it
-builds the commit in a scratch index and moves the working line's ref, touching
-neither HEAD, nor the review index, nor a single file:
-
-```
-working line: 7f093c0 wip   fecff92 their work   1c9a960 start
-  contains my edit, and the untracked file
-still in review mode:  YES
-review index untouched: YES
-working tree untouched: YES
-review status:         MM f.txt   ?? new.txt
-```
-
-Which means you can be halfway through reading someone's branch, notice you want
-your work saved, and save it, without losing your place. It is the same
-primitive as the snapshot in `durability.md`: a tree written from the working
-directory and committed somewhere harmless.
-
-## What the editor is doing
-
-Nothing special, which is the point.
-
-**Staging.** The editor's staging UI runs git against `.git/index` -- a whole
-file with `git add`, a single hunk by applying that hunk's patch with
-`git apply --cached`. In review mode `.git/index` *is* the review index, so
-every stage updates the approved tree. The editor needs no adaptation and does
-not know anything has changed; it is doing what it always does, pointed at a
-different index.
-
-**Committing.** In review mode HEAD is attached to the clean branch, so the
-commit button commits the approved set onto the clean line -- with the editor's
-message editor, diff preview and everything else. There is no `review commit`,
-because there is nothing for it to do.
-
-```
-clean line:        e73da05 Add the A change   1bdff4b start
-commit's content:  A/b/          <- the approved hunk only, not the rest
-status after:       M f.txt      <- the unapproved remainder, still outstanding
-```
-
-Worth verifying once in your editor: that its commit action commits the staged
-set rather than running `commit -a` or passing pathspecs. With a staging area
-enabled it should, but it is the difference between committing what you approved
-and committing everything.
+There is deliberately no `wip` verb. Doing it from review mode would only save a
+round trip through a mode switch that costs two renames, and the mistake it
+would guard against -- `git add -A` in review mode meaning "approve everything
+unread" -- is one the rule already prevents. For work you forget to commit at
+all, the answer is a snapshot taken from outside on a timer (`durability.md`),
+not a verb you have to remember.
 
 ## Going away and coming back
 
@@ -371,17 +326,17 @@ to begin with**. It lives in two places, neither of which a branch switch
 touches:
 
 - what you have approved is the review index, a file;
-- everything else is the difference between that and the working tree, and the
-  working tree's content is a commit on the working line as soon as you
-  `review wip`.
+- everything else is the difference between that and the working tree, and once
+  you are in write mode the working tree's content is committed on the working
+  line like any other work.
 
 So there is nothing to encode in temporary commits, and nothing to undo on
 return. A `wip` commit is just more history on a line whose history nobody
 reads.
 
 ```sh
-review wip        # working tree onto the working line
-review write      # park the approved set
+review write      # park the approved set; now an ordinary repository
+git commit -am wip    # if the tree is dirty
 git switch elsewhere
 # ... later ...
 git switch <working line>

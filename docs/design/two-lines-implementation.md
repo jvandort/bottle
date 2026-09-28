@@ -322,23 +322,6 @@ tree := GIT_INDEX_FILE=<tmp> git write-tree
 `rm -rf .git/review/fixup`. There is genuinely nothing else to undo: no ref was
 moved and no file was written.
 
-### `wip`
-
-From write mode, `git add -A` then `git commit`. From review mode, the same
-thing without disturbing anything:
-
-```
-GIT_INDEX_FILE=<tmp> git read-tree <working line tip>
-GIT_INDEX_FILE=<tmp> git add -A            # respects .gitignore
-tree := GIT_INDEX_FILE=<tmp> git write-tree
-c    := git commit-tree <tree> -p <working line tip> -m "wip"
-git update-ref <working> <c>
-```
-
-HEAD, the review index and the working tree are all untouched. This is the
-snapshot primitive from `durability.md`, pointed at a branch instead of a
-parking ref.
-
 ### Keeping up with a working line someone else writes
 
 There is no command. Switch to write mode and use git. If the tree is dirty,
