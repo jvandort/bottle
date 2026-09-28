@@ -408,6 +408,81 @@ captured until the next one. A mode switch captures them, and a mode switch is
 what you do before leaving, so the exposure is small; a `post-checkout` hook
 that notices the previous HEAD was the clean line could close it entirely.
 
+## Guardrails
+
+### The hazard peaks when the review is finished
+
+Git protects you from switching branches in review mode by accident, but only as
+a side effect: the working tree differs from HEAD, so a checkout that would
+overwrite it refuses. **That protection exists because there is unreviewed work,
+so it disappears at the exact moment there is none.** Approve and commit the last
+hunk and the tree is clean, and `git switch` succeeds without a word -- which is
+also the moment you are most likely to switch away, because you are done.
+
+So the one place to say something out loud is when a review completes.
+
+### What actually breaks
+
+The checkout itself is survivable. The damage happens afterwards:
+
+```
+review complete, status clean, still in review mode
+  git switch elsewhere        -> Switched to branch 'elsewhere'
+  HEAD:          refs/heads/elsewhere
+  tool thinks:   mode=review
+  live index is: elsewhere's tree, not the approved one
+
+  then a mode switch, done blindly:
+  index.review now holds elsewhere's tree      <- the approved set is gone
+  worktree holds elsewhere's content, HEAD says working line
+```
+
+Losing the approved set happens when the *tool* renames the live index over
+`index.review`, not when git checks out. Which means it is entirely preventable.
+
+### The invariant
+
+Every command checks one thing before touching anything:
+
+> HEAD is the branch the recorded mode says it should be.
+
+If it is not, we were moved out from under the tool. Refuse to rename any index
+file, say what happened, and offer to recover. This single check converts silent
+data loss into a clear error, and it costs one `symbolic-ref`.
+
+### Recording approvals as they happen
+
+`refs/review/<clean branch>` should be written continuously, not just when the
+tool runs, or approvals made in the editor since the last invocation are the
+thing that gets lost.
+
+Git's `post-index-change` hook fires on every index write -- verified firing for
+`git add` *and* for `git apply --cached`, which is how an editor stages a single
+hunk. Guarded by "mode is review and HEAD is the clean branch", it records the
+approved tree on every stage, so an approval is durable the instant it is made.
+
+One ordering subtlety the implementation has to get right and verify: during a
+checkout, `post-index-change` fires too, and HEAD may already have moved or not.
+The safety net is that the ref has a reflog, so `post-checkout` -- which knows
+the old and new HEAD -- can detect the yank and roll the ref back one entry.
+
+### `post-checkout`
+
+The only hook that fires on `git switch`. It cannot prevent anything, since it
+runs afterwards, but it can notice that the old HEAD was the clean branch while
+the mode said review, mark the state `away`, restore the review index from the
+ref, and print what happened and how to get back. The difference between
+discovering this now and discovering it in a week.
+
+### Smaller things
+
+- **`review status`** -- mode, both lines, how much is outstanding, and whether
+  the invariant holds. The command you run when something feels off.
+- **`review end`** -- an explicit exit to write mode, so leaving is a thing you
+  do rather than a thing you forget.
+- **Name the clean branch distinctively.** The editor's branch widget is already
+  a mode indicator, for free, if the two names are not easily confused.
+
 ## Rough edges
 
 - **Files added in the working line show as unversioned** in review mode, since

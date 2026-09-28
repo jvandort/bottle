@@ -328,6 +328,35 @@ There is no command. Switch to write mode and use git. If the tree is dirty,
 refuse, and offer `--commit-first` to make a `wip` commit on the working line --
 never an autostash. See `two-lines.md`.
 
+## Guardrails
+
+Checked before anything else, in every command:
+
+```
+mode := read(.git/review/mode)
+expected := clean branch if mode == review else working branch
+if git symbolic-ref HEAD != expected:
+    refuse; do not rename any index file; report and offer recovery
+```
+
+Hooks the tool installs:
+
+| hook | fires on | does |
+| --- | --- | --- |
+| `post-index-change` | every index write, including `git add` and `git apply --cached` | if mode is review and HEAD is the clean branch, record `refs/review/<clean>` |
+| `post-checkout` | `git switch` / `git checkout` | if the old HEAD was the clean branch and mode was review, mark state `away`, restore `index.review` from the ref, warn |
+| `post-commit` | every commit | if mode is review and nothing is outstanding, say the review is complete and that `review write` comes before switching branches |
+
+Recovery, when the invariant is violated:
+
+```
+GIT_INDEX_FILE=.git/review/index.review git read-tree refs/review/<clean>
+GIT_INDEX_FILE=.git/review/index.review git update-index --refresh
+```
+
+If the ref itself was written during a yank, `refs/review/<clean>@{1}` is the
+last good value; the reflog is why recording to a ref beats recording to a file.
+
 ## Edge cases
 
 - **Root commits.** `target^` does not exist if `target` is the first commit;
