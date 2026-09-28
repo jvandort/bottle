@@ -89,13 +89,26 @@ class Mount:
 def container_run(
     name: str, image: str, network: str, env: dict[str, str], mounts: list[Mount], labels: dict[str, str] | None = None
 ) -> None:
-    """Create and start a detached container running the image's default command."""
-    cmd = ["run", "--detach", "--name", name, "--network", network, *_label_options(labels)]
+    """Create and start a detached container running the image's default command.
+
+    It gets the whole Mac: every CPU core and all of its memory. The VM only
+    takes memory from the host as the guest uses it, so this costs nothing up
+    front, but memory the guest has used isn't given back until it stops.
+    """
+    cpus, memory = host_resources()
+    cmd = ["run", "--detach", "--name", name, "--network", network, "--cpus", str(cpus), "--memory", memory]
+    cmd += _label_options(labels)
     for key, value in env.items():
         cmd += ["--env", f"{key}={value}"]
     for m in mounts:
         cmd += ["--mount", f"type=bind,source={m.source},target={m.target}" + (",readonly" if m.readonly else "")]
     _run(*cmd, image)
+
+
+def host_resources() -> tuple[int, str]:
+    """The Mac's CPU cores and memory, as `container run --cpus` and `--memory` values."""
+    memsize = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True).stdout)
+    return os.cpu_count() or 1, f"{memsize // (1024 * 1024)}M"
 
 
 def container_state(name: str) -> str | None:
