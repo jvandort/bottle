@@ -33,14 +33,22 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Unsaved-work check counts unreachable commits as saved.** `bottle delete`
   and `reset` ask whether the repo has each branch tip, with `git cat-file -e`,
   which succeeds for an object no ref names. So a branch pushed to
-  `bottle-NAME/*` and then deleted on the host still reads as saved, and the
+  a bottle's lane and then deleted on the host still reads as saved, and the
   commits go when the host next gcs. Check reachability instead.
 - **Objects a bottle uses aren't protected from gc.** A bottle reads the
   repo's objects in place. If the host deletes a branch a bottle checked out
   and `git gc` later prunes its commits (after git's grace periods, weeks to
   months), that checkout breaks; `bottle reset` starts over. Accepted.
+- **A namespace per bottle, where a namespace per repo may be what's wanted.**
+  Lanes are keyed by bottle name, so each bottle's work is reachable only
+  through its own remote, and a bottle reads another's only because the `host`
+  remote happens to advertise every ref in the repo -- including every other
+  bottle's lanes and your `refs/remotes/*`. Both the README and host.py
+  describe `host` as your own branches, so what's served is wider than what's
+  documented. Bottles on one repo commonly build on each other's work, so the
+  question is whether lanes should be keyed by repo instead.
 - **A bottle's refs outlive it.** `bottle delete` leaves
-  `refs/namespaces/bottle-NAME/*` behind (and their mirrors), since they may be
+  a bottle's lanes behind, since they may be
   the only copy of the work. A later bottle with the same name owns the same
   namespace, and may force-update those refs without anything warning it.
   Consider treating names with leftover refs as taken, or keying the namespace
@@ -56,21 +64,12 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   - `bottle prune [BOTTLE]`: delete the refs of deleted bottles and gone
     branches, by default only those already reachable from the host's own
     branches; `--force` for the rest, after listing them.
-- **How a bottle's work should surface on the host.** Its refs live in a git
-  namespace, `refs/namespaces/bottle-NAME/`, which nothing lists: not
-  `git branch`, not `git branch -r`, not an IDE. hooks/post-receive mirrors each
-  pushed branch to `refs/heads/bottle-NAME/*` so there's something to look at,
-  but that puts agent work in the host's own branch namespace, which is what
-  the git namespace was for. Decide the real answer -- mirror to
-  `refs/remotes/*` instead, teach bottle's own commands to read the namespace,
-  or make `bottle adopt` the only way work becomes visible -- and drop the
-  mirror. Nothing should depend on the mirrored refs until then.
-- **`bottle adopt`.** Turn a bottle's `bottle-NAME/X` into your own branch `X`:
-  re-sign its commits on the host with your key (the agent never signs as
-  you), optionally add `Signed-off-by`, and never overwrite an existing branch.
+- **`bottle status`.** What's in each lane, how far ahead of your copy the
+  bottle is, and whether you have commits it hasn't seen. Both directions,
+  because the loop has two.
 - **Pulling from a bottle.** Work only reaches the host when something inside
   pushes. A bottle that died mid-task, or an agent that never pushes, leaves
-  commits that `bottle exec NAME git push host` can still rescue -- but only
+  commits that `bottle exec NAME git push work` can still rescue -- but only
   while the bottle starts. A host-initiated pull would not need that.
 - **Commit identity and signing.** Bottles have no git identity; decide who
   commits (agent identity, `Signed-off-by`), and sign on the host after
@@ -110,7 +109,7 @@ bottle's egress proxy on the host (bottle/host.py), and the first service is
 the repo as a read-only git origin. More services can be added there, e.g.: bottle decides which services exist; the bottle can only request them,
 and the host can require approval. Candidates:
 
-- **Ask the human:** request approval, or a decision, and wait for the answer.
+- **Ask the user:** request approval, or a decision, and wait for the answer.
 - **Notify:** "finished", "blocked", "needs review", surfaced on the host.
 - **Open something on the host:** a URL in the host browser, e.g. an OAuth or
   review page.
@@ -130,7 +129,7 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 - Network access is only via the HTTP proxy in `*_PROXY`; there's no DNS; which
   destinations are allowed.
 - The repo at `/workspace`: which repo, branch and commit it started from, and
-  that `git push host` hands work back. (The push rules are in ~/BOTTLE.md
+  that `git push work` hands work back. (The push rules are in ~/BOTTLE.md
   already; the rest of this list isn't.)
 - What's installed (the image's tools), and what isn't available.
 - Which host commands exist, once they do.

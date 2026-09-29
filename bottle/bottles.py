@@ -179,6 +179,7 @@ def create(
     try:
         runtime.network_create(bottle.network, {runtime.OWNER_LABEL: bottle.id})
         _run_container(bottle, repo, tag)
+        register_remote(repo, bottle)  # so the repo can fetch what the bottle pushes
     except BaseException as failure:
         try:
             delete(bottle.name, force=True, keep_image=True)
@@ -293,6 +294,7 @@ def reset(name: str, force: bool = False) -> Bottle:
         if not runtime.network_exists(fresh.network):
             runtime.network_create(fresh.network, {runtime.OWNER_LABEL: fresh.id})
         _run_container(fresh, repo, tag)
+        register_remote(repo, fresh)  # also repairs a bottle made before its repo had lanes
     except BottleError as e:
         raise BottleError(f"resetting {name} failed: {e}; rerun `bottle reset {name}`, or delete it") from None
     fresh = replace(fresh, status="ready")
@@ -326,36 +328,101 @@ def _proxy_env(proxy: str) -> dict[str, str]:
     return env
 
 
+CONTEXT = """\
+# Bottle
+
+You're `{user}`, running in a bottle: a sandboxed Linux VM with passwordless sudo.
+
+- `{workspace}` is a checkout of the `{repo}` repo, {at}. It has three remotes:
+  - `origin`: the repo's upstream, up to date whenever you fetch. Read-only.
+  - `host`: the user's own branches, as they stand in their repo. Read-only;
+    fetch it to see what they've integrated.
+  - `work`: how you and the user exchange commits. `git push work` writes your
+    lane and `git pull work` reads theirs -- one writer each, so neither side's
+    push is ever refused for what the other did. You don't read your own pushes
+    back from it; what you fetch is always the user's.
+- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY`
+  (already set). There's no DNS, and private addresses are blocked.
+
+## Starting work
+
+A bottle is often started on the branch the work belongs on, and committing
+there is expected. However, when beginning a new line of work, or when what's
+checked out is a branch unrelated to the new work, create a new branch first.
+Name it yourself -- you don't need to ask -- and once you've pushed it, tell
+the user what it's called and how to pick it up:
+
+    git fetch {remote} && git switch <your branch>
+
+## Working with the user
+
+You and the user both work that branch, from separate repos and sharing no
+disk. The two lanes are a conversation, and the history they leave is the
+record of it. That record is not intended to be a tidy log, but a transcript
+of the collaboration between you and the user.
+
+- **Pull when you're given a prompt**, and again before you push, in case
+  something arrived while you were working.
+- **Push as you go, not when you're finished.** Every push is also the only
+  backup this work has.
+- **The merges are yours.** The user may commit from a base older than your
+  last push, deliberately: it hands you the merge. Resolve it, say what you
+  decided, and carry on.
+- **Messy history is expected here.** Merge commits, typos in messages, commits
+  that undo earlier ones -- that's the shape of a real exchange, not something
+  to apologise for or offer to tidy up.
+
+## What can't be rewritten
+
+- **Your lane is append-only**: force-pushes and deletes are refused. To undo
+  anything you've pushed -- a bad commit, a stray file, something the user asks
+  you to remove -- commit the undo on top. Here, removing something means adding
+  a commit that removes it, never retracting what's already there.
+- **The user's commits are theirs.** Your work goes on top of them. Once you've
+  pushed, merge their commits rather than rebasing onto them; rebase only what
+  you haven't handed over yet.
+- **A new branch is always open to you**, because its name is new. Start one
+  whenever you begin a separate line of work -- it costs nothing, and it's also
+  the way out of a history you'd rather stop building on. Final delivered work
+  also belongs on a fresh branch.
+
+## Delivering finished work
+
+Develop on your working branch, messy history and all. When the user explicitly
+asks for it -- never on your own initiative -- squash the work into a clean
+history and push it to a **new** branch with `git push work`: the name they
+give you, or `<your branch>-clean` if they didn't name one. Your working branch
+stays exactly as it is -- the clean branch is built beside it, never in place.
+"""
+
+
 def context(bottle: Bottle) -> str:
     """What the agent should know about its bottle, written to ~/BOTTLE.md when its workspace is set up.
+
+    Often the only thing an agent is ever told about the protocol, so it says
+    what the lanes are for and not just what they refuse: the messy history is
+    the point, the merges are the agent's, and undoing means committing forward.
 
     Agent-neutral: agent features point their own instruction files at it
     (the claude feature links ~/.claude/CLAUDE.md to it). Nothing in it changes
     over the bottle's life (no commits), so it never goes stale.
     """
     at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
-    ns = ref_namespace(bottle)
-    return (
-        "# Bottle\n\n"
-        "You're running in a bottle: a sandboxed Linux VM.\n\n"
-        f"- You're `{USER}`, with passwordless sudo.\n"
-        f"- `{WORKSPACE}` is a checkout of the `{bottle.repo}` repo, {at}. It has two remotes:\n"
-        "  - `origin`: the repo's upstream, up to date whenever you fetch. Read-only.\n"
-        "  - `host`: the repo's local branches on the host. Hand your work back with `git push host`, "
-        f"which works as it would anywhere: your pushes land in `{ns}`, a git namespace of this "
-        "bottle's own, so you can't reach the host's branches and don't have to avoid them. "
-        "Deleting a ref is refused; force pushes are allowed, to be used as deliberately as ever.\n"
-        "- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY` (already set). "
-        "There's no DNS, and private addresses are blocked.\n"
-    )
+    return CONTEXT.format(user=USER, workspace=WORKSPACE, repo=bottle.repo, at=at, remote=host_remote(bottle))
 
 
 def _init_workspace(bottle: Bottle) -> None:
     """Check out the bottle's branch (or detached commit) at /workspace, borrowing the mounted objects."""
     commit = shlex.quote(bottle.commit)
+    upstream = ":"
     if bottle.branch:
         branch = shlex.quote(bottle.branch)
         init, point_head = f"git init -q -b {branch} {WORKSPACE}", f"update-ref refs/heads/{branch} {commit}"
+        # So bare `git push` and `git pull` reach the right lane. Set by hand
+        # rather than by --set-upstream: work/<branch> doesn't exist until
+        # somebody pushes, and this has to work before anybody has.
+        upstream = (f"git -C {WORKSPACE} config branch.{branch}.remote work\n"
+                    f"        git -C {WORKSPACE} config branch.{branch}.merge refs/heads/{branch}")
     else:
         init, point_head = f"git init -q {WORKSPACE}", f"update-ref --no-deref HEAD {commit}"
     script = f"""
@@ -364,14 +431,17 @@ def _init_workspace(bottle: Bottle) -> None:
         echo {OBJECTS_MOUNT} > {WORKSPACE}/.git/objects/info/alternates
         git -C {WORKSPACE} {point_head}
         git -C {WORKSPACE} reset -q --hard
-        # Two remotes, served live through the egress proxy (see host.py): origin is the
-        # repo's upstream (read-only), host is the repo's local branches. Nothing to
-        # configure for pushing: the host puts receive-pack in this bottle's git
-        # namespace, so ordinary pushes land there and can't name anything else.
+        # Three remotes, served live through the egress proxy (see host.py): origin is
+        # the repo's upstream and host the user's branches, both read-only; work is
+        # where the two sides exchange commits. Nothing to configure for pushing --
+        # the host serves each direction from a different git namespace, so ordinary
+        # pushes land in this bottle's lane and can't name anything else.
         git -C {WORKSPACE} remote add origin {GIT_URL}/origin
         git -C {WORKSPACE} remote add host {GIT_URL}/host
+        git -C {WORKSPACE} remote add work {GIT_URL}/work
         git -C {WORKSPACE} config checkout.defaultRemote origin
-        git -C {WORKSPACE} fetch -q --multiple origin host
+        {upstream}
+        git -C {WORKSPACE} fetch -q --multiple origin host work
         printf '%s' {shlex.quote(context(bottle))} > "$HOME/{CONTEXT_FILE}"
     """
     try:
@@ -456,14 +526,50 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     runtime.container_exec_interactive(bottle.container, argv, user=USER, workdir=WORKSPACE, env=env, tty=tty)
 
 
-def ref_namespace(bottle: Bottle) -> str:
-    """The git namespace a bottle's pushes are written into, on the host (see host.py).
-
-    receive-pack runs with GIT_NAMESPACE set to this, so the bottle reads and
-    writes refs/namespaces/<it>/ and nothing else; hooks/post-receive mirrors
-    what arrives to branches under the same name, for now.
-    """
+def host_remote(bottle: Bottle) -> str:
+    """What the host repo calls this bottle, as a git remote."""
     return f"bottle-{bottle.name}"
+
+
+def register_remote(repo: repos.Repo, bottle: Bottle) -> None:
+    """Make the bottle a remote of its repo: fetch its lane, push to the host's.
+
+    One remote, two lanes. `uploadpack` and `receivepack` name the command git
+    runs on the remote side, so pointing them at different namespaces means
+    `git fetch` reads what the bottle wrote and `git push` writes what it reads,
+    with nothing else to configure: `git switch BRANCH` creates a tracking
+    branch by itself, because exactly one remote has that name.
+
+    Safe to call on a bottle that already has one, so it can repair a remote
+    that's missing or edited: every setting is written with --replace-all,
+    which collapses however many values a key has to the one value here.
+    """
+    name = host_remote(bottle)
+    out, in_ = host.lane(bottle.name, host.OUT), host.lane(bottle.name, host.IN)
+    settings = {
+        "url": str(repo.path),
+        "fetch": f"+refs/heads/*:refs/remotes/{name}/*",
+        "uploadpack": f"git --namespace={out} upload-pack",
+        # The host's own lane, so no restrictions: this is your repo, and
+        # rewriting what you haven't handed over yet is yours to do.
+        "receivepack": f"git -c receive.denyCurrentBranch=ignore --namespace={in_} receive-pack",
+    }
+    for key, value in settings.items():
+        git("config", "--replace-all", f"remote.{name}.{key}", value, repo=repo.path)
+
+
+def forget_remote(bottle: Bottle) -> None:
+    """Drop the remote; the lanes' refs stay, since they may be the only copy.
+
+    Resolves the repo itself so that it, too, is allowed to be missing: this
+    runs as a step of delete, which has to be able to finish whatever state it
+    finds, and a bottle that couldn't clean up its remote would be one nothing
+    could remove.
+    """
+    try:
+        git("remote", "remove", host_remote(bottle), repo=repos.get(bottle.repo).path)
+    except BottleError:
+        pass  # the repo is gone, or the remote was never registered, or already dropped
 
 
 def unsaved_work(bottle: Bottle) -> list[str]:
@@ -533,7 +639,7 @@ def _refuse_to_lose_work(bottle: Bottle, action: str) -> None:
         if "uncommitted changes" in lost:
             hints.append("commit the changes in the bottle")
         if any(item != "uncommitted changes" for item in lost) or hints:
-            hints.append(f"push it from the bottle (`git push host`), or `bottle exec {name} git push host`")
+            hints.append(f"push it from the bottle (`git push work`), or `bottle exec {name} git push work`")
         raise BottleError(
             f"{name} has work its repo doesn't: {', '.join(lost)}. "
             f"To keep it, {' and '.join(hints)}; or {action} anyway with --force"
@@ -557,6 +663,7 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
         ("egress", lambda: daemon.release_egress(bottle.name)),
         ("container", lambda: runtime.container_delete(bottle.container, bottle.owner)),
         ("network", lambda: runtime.network_delete(bottle.network)),
+        ("remote", lambda: forget_remote(bottle)),
     ):
         try:
             action()

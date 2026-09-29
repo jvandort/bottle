@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from bottle import bottles, repos
+from bottle import bottles, host, repos
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
 
@@ -213,7 +213,8 @@ class CreateTest(BottleTestCase):
         context = bottles.context(bottle)
         self.assertIn("checkout of the `gradle` repo, on the `main` branch.", context)
         self.assertNotIn(self.head[:12], context)  # no commits: it never goes stale
-        self.assertIn("You're `genie`, with passwordless sudo.", context)
+        self.assertIn("You're `genie`, running in a bottle", context)
+        self.assertIn("passwordless sudo", context)
         self.assertIn("only through the HTTP proxy", context)
 
     def test_context_for_a_detached_commit(self) -> None:
@@ -675,31 +676,131 @@ class WorkspaceTestCase(BottleTestCase):
         return self.commit(self.workspace, message)
 
     def ref(self, name: str) -> str:
-        return self.host("rev-parse", f"refs/namespaces/bottle-gradle/refs/heads/{name}")
+        lane = host.lane(self.bottle.name, host.OUT)
+        return self.host("rev-parse", f"refs/namespaces/{lane}/refs/heads/{name}")
 
     def agent_push(self, branch: str = "main") -> None:
-        """What `git push host` does in a bottle: an ordinary push, which the host
-        puts in the bottle's namespace by running receive-pack with GIT_NAMESPACE."""
-        namespace = bottles.ref_namespace(self.bottle)
-        receive_pack = f"git --namespace={namespace} -c receive.denyCurrentBranch=ignore receive-pack"
+        """What `git push work` does in a bottle: an ordinary push, which the host
+        puts in the bottle's lane by running receive-pack with GIT_NAMESPACE."""
+        lane = host.lane(self.bottle.name, host.OUT)
+        receive_pack = f"git --namespace={lane} -c receive.denyCurrentBranch=ignore receive-pack"
         run("git", "-C", self.workspace, "push", "-q", "--receive-pack", receive_pack,
             str(self.repo_path), f"HEAD:refs/heads/{branch}")
 
 
-class WorkspaceSetupTest(WorkspaceTestCase):
-    def test_the_workspace_has_both_remotes_and_no_push_refspec(self) -> None:
-        script = self.fake_runtime.workspace_script
-        self.assertIn("remote add host http://bottle.host/git/host", script)
-        self.assertIn("remote add origin http://bottle.host/git/origin", script)
-        # The host puts receive-pack in the bottle's namespace, so pushing needs
-        # no configuration here and git behaves as git.
-        self.assertNotIn("remote.host.push", script)
+class HostRemoteTest(WorkspaceTestCase):
+    """The bottle, from the repo's side: one remote, reading one lane and writing the other."""
 
-    def test_the_context_tells_the_agent_where_its_work_goes(self) -> None:
+    def remote(self) -> str:
+        return bottles.host_remote(self.bottle)
+
+    def test_creating_a_bottle_registers_it_as_a_remote(self) -> None:
+        self.assertIn(self.remote(), self.host("remote").split())
+
+    def test_fetching_reads_what_the_bottle_pushed(self) -> None:
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        self.host("fetch", "-q", self.remote())
+        self.assertEqual(self.host("rev-parse", f"{self.remote()}/feature"), self.ref("feature"))
+
+    def test_switching_to_it_needs_no_adopt_command(self) -> None:
+        """git's own DWIM: one remote has the name, so it makes the branch and tracks it."""
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        self.host("fetch", "-q", self.remote())
+        self.host("switch", "-q", "feature")
+        self.assertEqual(self.host("rev-parse", "--abbrev-ref", "feature@{upstream}"),
+                         f"{self.remote()}/feature")
+
+    def test_the_hosts_own_branches_are_not_advertised(self) -> None:
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        listed = {line.split("\t")[1] for line in self.host("ls-remote", self.remote()).splitlines()}
+        self.assertEqual(listed, {"refs/heads/feature"})
+
+    def test_pushing_writes_the_hosts_own_lane(self) -> None:
+        """And is never rejected for what the bottle did, because nothing else writes it."""
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        self.host("fetch", "-q", self.remote())
+        self.host("switch", "-q", "feature")
+        self.agent_commit("agent: diverging work")
+        self.agent_push("feature")           # the lane the host reads moves on
+        review = self.commit(self.repo_path, "host: address this please")
+        self.host("push", "-q", self.remote(), "feature")
+        lane = host.lane(self.bottle.name, host.IN)
+        self.assertEqual(self.host("rev-parse", f"refs/namespaces/{lane}/refs/heads/feature"), review)
+
+    def test_registering_twice_leaves_one_of_each_setting(self) -> None:
+        """--replace-all, so a second call repairs rather than piling up refspecs."""
+        self.host("config", "--add", f"remote.{self.remote()}.fetch", "+refs/heads/*:refs/remotes/stale/*")
+        bottles.register_remote(repos.get(self.bottle.repo), self.bottle)
+        self.assertEqual(self.host("config", "--get-all", f"remote.{self.remote()}.fetch"),
+                         f"+refs/heads/*:refs/remotes/{self.remote()}/*")
+        self.assertEqual(self.host("remote").split().count(self.remote()), 1)
+
+    def test_deleting_a_bottle_whose_repo_is_gone_still_finishes(self) -> None:
+        """Every delete step tolerates its part being absent, this one included:
+        a bottle that can't drop its remote would be one nothing can remove."""
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        repos._save({})  # the repo is no longer registered
+        bottles.delete("gradle", force=True)
+        self.assertNotIn("gradle", bottles.load())
+
+    def test_deleting_a_bottle_drops_the_remote_but_keeps_the_work(self) -> None:
+        self.agent_commit("agent work")
+        self.agent_push("feature")
+        pushed = self.ref("feature")
+        bottles.delete("gradle", force=True)
+        self.assertNotIn(self.remote(), self.host("remote").split())
+        self.assertEqual(self.ref("feature"), pushed, "the lane's refs should outlive the bottle")
+
+
+class WorkspaceSetupTest(WorkspaceTestCase):
+    def test_the_workspace_has_three_remotes_and_no_push_refspec(self) -> None:
+        script = self.fake_runtime.workspace_script
+        for remote in ("origin", "host", "work"):
+            self.assertIn(f"remote add {remote} http://bottle.host/git/{remote}", script)
+        # The host serves each direction from a different namespace, so pushing
+        # needs no refspec here and git behaves as git.
+        self.assertNotIn(".push ", script)
+
+    def test_the_workspace_tracks_the_exchange_lane(self) -> None:
+        """So bare `git push` and `git pull` reach it, before anything is in it."""
+        script = self.fake_runtime.workspace_script
+        self.assertIn("config branch.main.remote work", script)
+        self.assertIn("config branch.main.merge refs/heads/main", script)
+
+    def test_the_context_tells_the_agent_the_rules(self) -> None:
         context = bottles.context(self.bottle)
-        self.assertIn("`git push host`", context)
-        self.assertIn("bottle-gradle", context)
+        self.assertIn("`git push work`", context)
+        self.assertIn("append-only", context)
+        self.assertIn("Push as you go", context)
         self.assertNotIn("agent/", context)
+
+    def test_the_context_says_what_the_lanes_are_for(self) -> None:
+        """The rules alone read as a cage, and an agent that can't see the point
+        of them tidies the history it's meant to be leaving behind."""
+        context = bottles.context(self.bottle)
+        self.assertIn("Messy history is expected", context)
+        self.assertIn("The merges are yours", context)
+
+    def test_the_context_says_to_branch_before_committing(self) -> None:
+        """Including the fetch the user runs, which names this bottle's remote
+        in their repo -- an agent has no other way to know what it's called."""
+        context = bottles.context(self.bottle)
+        self.assertIn("beginning a new line of work", context)
+        self.assertIn("Name it yourself -- you don't need to ask", context)
+        self.assertIn(f"git fetch {bottles.host_remote(self.bottle)} && git switch", context)
+
+    def test_the_context_says_how_to_undo_and_how_to_deliver(self) -> None:
+        """The two moves an append-only lane needs and doesn't imply: you take
+        something back by committing on top, and you deliver on a new branch."""
+        context = bottles.context(self.bottle)
+        self.assertIn("commit the undo on top", context)
+        self.assertIn("-clean", context)
+        self.assertIn("never on your own initiative", context)
 
 
 class ExecTest(BottleTestCase):
@@ -752,7 +853,7 @@ class DeleteGuardTest(WorkspaceTestCase):
     def test_unpushed_commits_block_delete(self) -> None:
         run("git", "-C", self.workspace, "switch", "-q", "-c", "work")
         self.agent_commit("unpushed")
-        with self.assertRaisesRegex(BottleError, r"has work its repo doesn't: branch work\. To keep it, push it from the bottle \(`git push host`\), or `bottle exec gradle git push host`; or delete anyway with --force"):
+        with self.assertRaisesRegex(BottleError, r"has work its repo doesn't: branch work\. To keep it, push it from the bottle \(`git push work`\), or `bottle exec gradle git push work`; or delete anyway with --force"):
             bottles.delete("gradle")
         self.assertIn("gradle", bottles.load())
 
@@ -860,6 +961,16 @@ class ResetTest(WorkspaceTestCase):
                 mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
             bottles.reset("gradle")
         self.assertEqual(bottles.runtime.container_state(bottle.container), "running")
+
+    def test_registers_the_remote_again(self) -> None:
+        """So a bottle from before its repo had lanes gets one by being reset."""
+        remote = bottles.host_remote(self.bottle)
+        self.host("remote", "remove", remote)
+        with mock.patch.object(bottles, "_run_container"):
+            bottles.reset("gradle")
+        self.assertIn(remote, self.host("remote").split())
+        self.assertEqual(self.host("config", f"remote.{remote}.uploadpack"),
+                         f"git --namespace={host.lane(self.bottle.name, host.OUT)} upload-pack")
 
     def test_gets_the_repos_current_default_features_and_keeps_its_own(self) -> None:
         with mock.patch.object(bottles, "_run_container"), mock.patch.object(bottles.features_, "ensure_built"):
