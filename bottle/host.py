@@ -39,12 +39,14 @@ Nothing is mirrored or watched: every request sees the repo as it is right now.
 
 import asyncio
 import hashlib
+import io
 import logging
 import os
 import subprocess
 import time
 import zlib
 from dataclasses import dataclass
+from http.client import parse_headers
 from pathlib import Path
 
 log = logging.getLogger("bottle.egress")
@@ -265,20 +267,27 @@ async def read_body(reader: asyncio.StreamReader, headers: dict[str, str]) -> by
     return await reader.readexactly(length) if length else b""
 
 
+# Framing headers this relay sets itself, so a copy from the CGI program would
+# duplicate them. `Status` is the CGI way of setting the HTTP status line and
+# becomes one here, so it is not forwarded as a header either.
+CGI_DROP = {"status", "content-length", "connection", "transfer-encoding"}
+
+
 async def _relay_cgi(output: bytes, writer: asyncio.StreamWriter) -> None:
-    """Turn a CGI response (headers, blank line, body) into an HTTP one."""
-    head, _, body = output.partition(b"\r\n\r\n")
-    if not _:
-        head, _, body = output.partition(b"\n\n")
-    status = b"200 OK"
-    lines = []
-    for line in head.replace(b"\r\n", b"\n").split(b"\n"):
-        name, _, value = line.partition(b":")
-        if name.strip().lower() == b"status":
-            status = value.strip()
-        elif line:
-            lines.append(line)
-    writer.write(b"HTTP/1.1 " + status + b"\r\n" + b"".join(l + b"\r\n" for l in lines))
+    """Turn a CGI response (headers, blank line, body) into an HTTP one.
+
+    parse_headers reads the header block -- both CRLF and bare LF, and folded
+    continuation lines -- and stops at the blank line, so what is left in the
+    stream is the body, byte for byte, packfile and all. Better than splitting
+    by hand: the body is never re-parsed, and header casing survives.
+    """
+    stream = io.BytesIO(output)
+    message = parse_headers(stream)
+    body = stream.read()
+    status = (message.get("Status") or "200 OK").strip()
+    headers = "".join(f"{name}: {value}\r\n" for name, value in message.items()
+                      if name.lower() not in CGI_DROP)
+    writer.write(f"HTTP/1.1 {status}\r\n{headers}".encode("latin-1"))
     writer.write(f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
     await writer.drain()
 
