@@ -217,6 +217,12 @@ To get back:  git switch branch && curate review
 Nothing is lost. The approved set is durable in `refs/curate/<clean branch>`,
 written on every stage by a `post-index-change` hook, and that ref has a reflog.
 
+In write mode there is nothing to move out from under: the approved set is
+parked, and the live index is git's own. So switching to a branch with no
+review of its own is ordinary -- curate says there is none here, `curate start`
+begins one, and coming back to the working line picks the first one up again
+with your approvals intact. HEAD is what says which review you are in.
+
 ## Several reviews at once
 
 One review per branch, kept separately, so switching away does not lose your
