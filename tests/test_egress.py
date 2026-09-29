@@ -179,7 +179,31 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
             reader, _ = await self.send(f"GET http://upstream.test:{self.upstream_port}/ HTTP/1.1\r\n\r\n".encode())
             await asyncio.wait_for(reader.read(), 5)
             await asyncio.sleep(0.05)
-        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port} -> 127.0.0.1 ok up=\d+ down=\d+")
+        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/ -> 127.0.0.1 ok 200 up=\d+ down=\d+")
+
+    async def test_a_tunnel_is_logged_without_a_status(self) -> None:
+        with self.assertLogs("bottle.egress") as logs:
+            reader, writer = await self.send(f"CONNECT upstream.test:{self.upstream_port} HTTP/1.1\r\n\r\n".encode())
+            await reader.readline()
+            writer.write(b"GET / HTTP/1.1\r\n\r\n")
+            await asyncio.wait_for(reader.read(), 5)
+            await asyncio.sleep(0.05)
+        self.assertRegex(logs.output[-1], rf"test CONNECT upstream.test:{self.upstream_port} -> 127.0.0.1 ok up=")
+
+
+class StatusTest(unittest.TestCase):
+    def test_the_status_code(self) -> None:
+        self.assertEqual(egress._status(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n"), "401")
+
+    def test_an_interim_response_gives_way_to_the_final_one(self) -> None:
+        self.assertEqual(egress._status(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\n"), "201")
+
+    def test_an_interim_response_alone_is_all_there_is_to_report(self) -> None:
+        self.assertEqual(egress._status(b"HTTP/1.1 100 Continue\r\n"), "100")
+
+    def test_not_http(self) -> None:
+        self.assertIsNone(egress._status(b""))
+        self.assertIsNone(egress._status(b"SSH-2.0-OpenSSH_9.6\r\n"))
 
 
 @unittest.skipUnless(shutil.which("openssl"), "needs openssl to make a certificate")
@@ -252,6 +276,13 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.endswith(b"hello"))
         self.assertIn("Authorization: Bearer real-token", head.decode())
         self.assertIn("Accept: */*", head.decode())
+
+    async def test_the_log_says_a_credential_was_attached_and_what_the_server_answered(self) -> None:
+        with self.assertLogs("bottle.egress") as logs:
+            await self.head_of(b"GET http://upstream.test/v1/models HTTP/1.1\r\n\r\n")
+            await asyncio.sleep(0.05)
+        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/v1/models \+credential -> 127.0.0.1 ok 200 ")
+        self.assertNotIn("real-token", "\n".join(logs.output))
 
     async def test_what_the_bottle_sent_under_that_name_never_leaves(self) -> None:
         head = await self.head_of(

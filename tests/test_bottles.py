@@ -37,6 +37,7 @@ class FakeRuntime:
         self.built_images: dict[str, str] = {}
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
+        self.bridged = True
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -50,6 +51,9 @@ class FakeRuntime:
 
     def network_gateway(self, network):
         return "192.168.128.1"
+
+    def host_has_address(self, address):
+        return self.bridged
 
     def network_delete(self, network):
         if self.fail_cleanup == "network":
@@ -129,7 +133,7 @@ class FakeRuntime:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runtime, ("network_create", "network_gateway", "network_delete", "network_exists",
+            (bottles.runtime, ("network_create", "network_gateway", "host_has_address", "network_delete", "network_exists",
                                "container_run", "container_state", "container_start", "container_stop",
                                "container_delete", "container_info", "container_exec", "images", "images_in_use",
                                "image_delete")),
@@ -383,6 +387,15 @@ class EnsureRunningTest(BottleTestCase):
         bottles.ensure_running("gradle")
         self.assertEqual(fake.calls, ["ensure_egress"])
 
+    def test_running_bottle_without_its_bridge_is_restarted(self) -> None:
+        fake = self.fake()
+        bottles.create("gradle", "base")
+        fake.bridged = False
+        fake.calls.clear()
+        with mock.patch("sys.stderr"):
+            bottles.ensure_running("gradle")
+        self.assertEqual(fake.calls, ["container_stop", "container_start", "verify_contract", "ensure_egress"])
+
     def test_missing_container(self) -> None:
         fake = self.fake()
         bottles.create("gradle", "base")
@@ -432,7 +445,7 @@ class ContractTest(BottleTestCase):
 
     def test_checks_run_in_the_bottle(self) -> None:
         # Run the real checks against this machine: the script itself must be well-formed.
-        # Which of them fail depends on where the suite runs -- a Mac fails most, a bottle
+        # Which of them fail depends on where the suite runs -- the host machine fails most, a bottle
         # running the suite on itself fails none -- so only require that whatever it reports
         # is contract names and nothing else (no shell errors, no half-quoted lines).
         result = self.run_contract_script()

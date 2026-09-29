@@ -7,7 +7,7 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Stop idle bottles.** A bottle runs until `bottle stop`, `bottle shutdown`
   or the host stops it. bottled could stop bottles that have been idle for a
   while, once "idle" is defined (no exec sessions, no egress traffic).
-- **Resource limits.** Bottles get the whole Mac (every core, all memory), so
+- **Resource limits.** Bottles get the whole machine (every core, all memory), so
   a busy bottle can slow the host, and memory a guest has touched isn't
   returned to the host until the bottle stops, so a bottle holds its
   high-water mark for as long as it runs. Make CPUs and memory configurable,
@@ -103,19 +103,21 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   a credential belongs to and have the egress proxy attach it (`claude` and
   `teamcity` both do), but it only works for a tool that can be pointed at a
   plain `http://` address, since a CONNECT tunnel is opaque. A proxy that terminated
-  TLS for named hosts (a CA generated per Mac, trusted in the bottle) would
+  TLS for named hosts (a CA generated per machine, trusted in the bottle) would
   cover tools that insist on https, and would end the bottle-side plaintext
   hop. Also: a bottle picks up a re-login only when it next starts, and an
   injected host is allowed even when private, which is wider than the
   `--allow` list it bypasses.
-- **`claude` through the proxy, against the real API.** The `claude` feature
-  now points Claude Code at `http://api.anthropic.com` and lets the proxy
-  attach the subscription token, but that path hasn't been run against the
-  real API yet: worth confirming that the CLI accepts a plain-http base URL and
-  that the stand-in token is enough for it to start. If it turns out to check
-  the shape of a token, bottle's one value for every stand-in
-  (`features.STANDIN`) won't do, and the feature will have to say what its
-  stand-in should look like.
+- **`claude` through the proxy: the calls that bypass it.** Run against the
+  real API, Claude Code starts on the stand-in, and inference goes to
+  `http://api.anthropic.com` with the token attached (`/v1/messages
+  +credential ... 200` in the log). Other calls ignore `ANTHROPIC_BASE_URL`
+  and go to `https://api.anthropic.com` through a CONNECT tunnel with the
+  stand-in, so they're refused: at startup, the remote managed settings fetch
+  (org policy) gets a 401, and the features that wait for org policy stay off
+  (Remote Control, cloud sessions, `/feedback`). Terminating TLS for named
+  hosts (above) is the fix. Pointing the base URL at another name would make
+  Claude Code skip the fetch instead, and with it the organization's policy.
 
 ## Host commands for the genie
 
@@ -155,7 +157,7 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
   reattaching.
 - **Open login URLs on the host.** A `$BROWSER` script in the base image that
   asks bottled (e.g. via `http://bottle.host/open?url=...` through the egress
-  proxy) to `open` the URL on the Mac, so `bottle auth login` needs no copying.
+  proxy) to `open` the URL on the machine, so `bottle auth login` needs no copying.
 - **Leftover throwaway bottles.** `bottle auth login` removes its throwaway
   bottle on exit, even when interrupted, but not if bottle itself is killed;
   clean up `bottle-throwaway-*` containers and networks.

@@ -123,6 +123,14 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reply["ok"])
         self.assertIn(f"can't serve b's egress on 127.0.0.1:{self.port}", reply["error"])
 
+    async def test_a_gateway_the_mac_has_lost_is_reported(self) -> None:
+        # TEST-NET-1: never one of this machine's addresses, so bind fails with EADDRNOTAVAIL.
+        with mock.patch.object(daemon.runtime, "network_gateway", return_value="192.0.2.1"):
+            reply = await self.request({"op": "ensure", "bottle": "b", "network": "bottle-x"})
+        self.assertFalse(reply["ok"])
+        self.assertIn("this machine has no address 192.0.2.1 on bottle-x, so its bridge is gone", reply["error"])
+        self.assertIn("`bottle stop b` and `bottle start b`", reply["error"])
+
     async def test_shutdown_stops_proxies_and_removes_the_socket(self) -> None:
         await self.request({"op": "ensure", "bottle": "b", "network": "bottle-x"})
         self.assertEqual(await self.request({"op": "shutdown"}), {"ok": True})

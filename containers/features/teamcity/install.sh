@@ -37,7 +37,7 @@ rm -rf /var/lib/apt/lists/*
 #   The address is the server's host over plain http, because that is what the
 #   bottle must send for the egress proxy to be able to attach the access
 #   token (see bottle/egress.py). The proxy makes the HTTPS connection to the
-#   server itself, from the Mac.
+#   server itself, from the machine.
 #
 #   The token is a placeholder, and no secret: the CLI refuses to make a
 #   request until it has been logged in to a server, and the proxy replaces
