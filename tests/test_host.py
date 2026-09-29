@@ -1,6 +1,7 @@
 import asyncio
 import os
 import subprocess
+import zlib
 import unittest
 from unittest import mock
 
@@ -238,6 +239,19 @@ class NoServicesTest(unittest.IsolatedAsyncioTestCase):
         proxy.close()
 
 
+class FakeWriter:
+    """The little of asyncio.StreamWriter that _relay_cgi uses: write and drain."""
+
+    def __init__(self) -> None:
+        self.written = b""
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def drain(self) -> None:
+        pass
+
+
 class ReadBodyTest(unittest.IsolatedAsyncioTestCase):
     async def body(self, raw: bytes, headers: dict[str, str]) -> bytes:
         reader = asyncio.StreamReader()
@@ -254,6 +268,82 @@ class ReadBodyTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_body(self) -> None:
         self.assertEqual(await self.body(b"", {}), b"")
+
+    async def test_chunked_carries_a_binary_body_intact(self) -> None:
+        """A packfile is binary, and dechunking must not touch a byte of it."""
+        payload = bytes(range(256)) * 4
+        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(payload), payload)
+        self.assertEqual(await self.body(raw, {"transfer-encoding": "chunked"}), payload)
+
+    async def test_gzip_stays_compressed_here(self) -> None:
+        """read_body only frames; the gzip apt sends is decompressed in _git,
+        after dechunking, so read_body hands back the compressed bytes as they
+        arrived rather than looking inside them."""
+        blob = zlib.compress(b"payload")
+        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(blob), blob)
+        self.assertEqual(await self.body(raw, {"transfer-encoding": "chunked",
+                                               "content-encoding": "gzip"}), blob)
+
+    async def test_chunked_over_the_limit_is_refused(self) -> None:
+        big = b"x" * (host.MAX_BODY + 1)
+        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(big), big)
+        with self.assertRaises(ValueError):
+            await self.body(raw, {"transfer-encoding": "chunked"})
+
+    async def test_content_length_over_the_limit_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.body(b"", {"content-length": str(host.MAX_BODY + 1)})
+
+
+class RelayCgiTest(unittest.IsolatedAsyncioTestCase):
+    """git http-backend speaks CGI; _relay_cgi turns that into an HTTP response.
+
+    The corner it has to get right is the boundary between the CGI header block
+    and a binary body: parse it wrong and either the status is lost or the
+    packfile is corrupted.
+    """
+
+    async def relay(self, output: bytes) -> bytes:
+        writer = FakeWriter()
+        await host._relay_cgi(output, writer)
+        return writer.written
+
+    async def head_and_body(self, output: bytes) -> tuple[bytes, bytes]:
+        head, _, body = (await self.relay(output)).partition(b"\r\n\r\n")
+        return head, body
+
+    async def test_status_becomes_the_http_status_line(self) -> None:
+        head, _ = await self.head_and_body(
+            b"Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnope")
+        self.assertTrue(head.startswith(b"HTTP/1.1 404 Not Found\r\n"))
+
+    async def test_a_missing_status_defaults_to_200(self) -> None:
+        head, _ = await self.head_and_body(b"Content-Type: text/plain\r\n\r\nhi")
+        self.assertTrue(head.startswith(b"HTTP/1.1 200 OK\r\n"))
+
+    async def test_bare_lf_separators_are_accepted(self) -> None:
+        """CGI programs may use LF where HTTP wants CRLF."""
+        head, body = await self.head_and_body(
+            b"Content-Type: text/plain\nStatus: 201 Created\n\nmade")
+        self.assertTrue(head.startswith(b"HTTP/1.1 201 Created\r\n"))
+        self.assertEqual(body, b"made")
+
+    async def test_a_binary_body_survives_byte_for_byte(self) -> None:
+        payload = bytes(range(256)) * 8      # every byte, including CR, LF, NUL
+        head, body = await self.head_and_body(
+            b"Content-Type: application/x-git-upload-pack-result\r\n\r\n" + payload)
+        self.assertEqual(body, payload)
+        self.assertIn(b"Content-Length: %d\r\n" % len(payload), head)
+
+    async def test_framing_headers_are_not_duplicated(self) -> None:
+        """If http-backend sets its own Content-Length or Connection, the relay
+        must not emit a second copy -- one framing is set here."""
+        response = await self.relay(
+            b"Content-Type: text/plain\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\nok")
+        self.assertEqual(response.count(b"Content-Length:"), 1)
+        self.assertEqual(response.count(b"Connection:"), 1)
+        self.assertIn(b"Content-Length: 2\r\n", response)   # ours, the real length
+        self.assertIn(b"Connection: close\r\n", response)
 
 
 if __name__ == "__main__":
