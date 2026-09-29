@@ -33,7 +33,8 @@ class Versions(CurateTestCase):
         result = self.repo.curate("list")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("upgraded from version 0", result.stderr)
-        self.assertEqual((self.state / "version").read_text().strip(), "1")
+        self.assertEqual((self.state / "version").read_text().strip(),
+                         self.repo.state_version())
 
     def test_and_migrating_costs_the_caches_but_not_the_approvals(self) -> None:
         """The whole basis of the migration: index files are derived."""

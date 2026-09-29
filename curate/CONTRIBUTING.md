@@ -39,6 +39,18 @@ depends on what happens to be in the working tree.
 for a whole file, a crafted blob for one hunk. If the tool ever needs its own
 approve command, the model has gone wrong.
 
+**File content is bytes, all the way through.** `git()` strips its output,
+which is right for an oid and wrong for a file: it silently reindents the first
+line and eats trailing blank lines. Use `gitcmd.blob` for content, and
+`Repo.git_raw` in the tests. A conflict resolution goes straight onto the clean
+line, so a strip there is a commit that does not say what you resolved.
+
+**A test that resolves a conflict configures a merge tool** (`use_merge_tool`)
+and asserts on the content that lands. Without one `curate resolve` has nothing
+to run, so a test that calls it and then `--continue` is testing that curate
+gives up, which is not the same claim and used to pass while markers went onto
+the clean line.
+
 Several tests assert on `mtimes()` rather than on file contents. That is
 deliberate: "the working tree was restored afterwards" and "the working tree
 was never touched" are different claims, and the second one is the design.

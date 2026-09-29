@@ -135,13 +135,21 @@ line on top, **entirely in the object database**. No checkout, no stash, no temp
 worktree -- your working tree is not restored afterwards, it is never touched. All
 unapproved changes remain unapproved.
 
-When `fixup` conflicts:
+When `fixup` conflicts, the conflict is written as files under
+`.git/curate/sessions/<clean>/fixup/stages/` -- the three sides and a marked-up
+file -- and you resolve it there, not in your working tree.
 
 ```sh
-curate resolve               # opens git's configured merge tool
+curate resolve               # opens git's configured merge tool on them
 curate fixup --continue
 curate fixup --abort         # free: nothing had been written
 ```
+
+With no merge tool configured, `resolve` still writes those files and tells you
+where; edit the marked-up one by hand and `--continue` reads it back. Either
+way `--continue` refuses while any of them still has conflict markers in it,
+and names the files -- the clean line is the one branch that exists to have
+none.
 
 Folding into an old commit conflicts when a later one touched the same lines,
 which means it will conflict again on replay. That is two resolutions, not one.
@@ -227,7 +235,10 @@ refs/curate/<clean branch>        the approved set, as a real commit, with a ref
 The index files are a cache. Delete them and the next command rebuilds them
 from the ref; all you lose is a re-stat. curate installs three hooks
 (`post-index-change`, `post-checkout`, `post-commit`) and leaves any you
-already have alone, telling you how to chain it.
+already have alone -- `curate status` then reports that one is in the way,
+every time, and prints the line to add to it. It says so every time rather than
+once, because git-lfs and friends put a hook here as a matter of course, and
+what you lose is invisible until you need it.
 
 Each hook holds an absolute path to curate, so moving or renaming your checkout
 leaves it naming nothing. The hook checks before running, so a stale one is

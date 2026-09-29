@@ -44,12 +44,14 @@ tools that duplicate them.
 
 - **`resolve` with no merge tool configured** writes the three sides and the
   marked-up file into `.git/curate/sessions/<clean>/fixup/stages/` and says
-  where. Honest, but not useful at a terminal. Falling back to `$EDITOR` on the
-  marked-up file would be.
+  where, and `--continue` now reads a hand edit back out of them. Opening
+  `$EDITOR` on the marked-up file would still save a step.
 
 - **Binary files in a fixup conflict.** `merge-tree` reports them as conflicts
-  with no useful markers. The three stages still work for a merge tool that
-  handles binaries; a text one will not.
+  with no useful markers. The three stages are written as bytes, so a merge
+  tool that handles binaries works; a text one will not. `--continue` asks
+  only that you changed the file, since there are no markers to remove, which
+  catches walking away but not resolving it badly.
 
 ## Rough edges
 
