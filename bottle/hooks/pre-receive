@@ -7,8 +7,9 @@
 # What confines a push is GIT_NAMESPACE, not this hook: receive-pack reads and
 # writes only refs/namespaces/<it>/, so the host's own refs are neither
 # advertised to the bottle nor reachable by it, and git's ordinary rules
-# (fast-forward unless forced, receive.denyDeletes) apply within the namespace.
-# All that's left to check is that a namespace arrived at all.
+# (fast-forward only, no deletes -- see the config in host.py) apply within the
+# lane. All that's left to check is that a namespace arrived at all, since a
+# push without one would write the host's own refs.
 if [ -z "${GIT_NAMESPACE:-}" ]; then
   echo "bottle: this push has no namespace; refusing it" >&2
   exit 1

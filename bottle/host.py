@@ -2,7 +2,7 @@
 
 Requests to http://bottle.host/ never leave the host: the bottle's egress proxy
 answers them itself, serving the bottle's repo over git's smart HTTP protocol
-with `git http-backend`. A bottle has two remotes, each exactly what it says:
+with `git http-backend`. A bottle has three remotes, each exactly what it says:
 
   origin  http://bottle.host/git/origin
       The repo's upstream: the host repo's refs/remotes/origin/*, served as
@@ -12,15 +12,27 @@ with `git http-backend`. A bottle has two remotes, each exactly what it says:
       upstream's latest even if nobody fetched on the host.
 
   host    http://bottle.host/git/host
-      The host repo itself: its local branches. The bottle may fetch anything,
-      and pushes land in a git namespace of its own (gitnamespaces(7)):
-      receive-pack runs with GIT_NAMESPACE=bottle-<name>, so a branch pushed as
-      refs/heads/work is written to refs/namespaces/bottle-<name>/refs/heads/work
-      and the host's own refs aren't even advertised. Git does the confining, so
-      git behaves like git inside the bottle: a push is a fast-forward unless
-      forced, and it's the bottle's earlier push it's measured against. bottle's
-      hooks/pre-receive only refuses a push that arrives with no namespace; the
-      repo's own hooks never run.
+      The host repo's own branches. Read-only: the bottle reads them to build on
+      what the user has (`git rebase host/main`) and writes nothing here.
+
+  work    http://bottle.host/git/work
+      The bottle's half of a two-lane exchange with the host, in git namespaces
+      (gitnamespaces(7)). Each lane has exactly one writer, so neither side's
+      push is ever rejected for what the other did:
+
+          fetch  GIT_NAMESPACE=bottle-<name>-in    written by the host
+          push   GIT_NAMESPACE=bottle-<name>-out   written by the bottle
+
+      A namespace is what confines the push -- every ref receive-pack resolves
+      is inside it, and the host's own refs aren't advertised -- so git behaves
+      like git in the bottle while being unable to name anything else. The out
+      lane also refuses force-pushes and deletes, so what a reviewer has already
+      read never changes underneath them. bottle's hooks/pre-receive only
+      refuses a push that arrives with no namespace at all; the repo's own hooks
+      never run.
+
+      The host writes the in lane itself, through an ordinary git remote in its
+      own repo; bottled never serves that direction.
 
 Nothing is mirrored or watched: every request sees the repo as it is right now.
 """
@@ -39,9 +51,19 @@ log = logging.getLogger("bottle.egress")
 
 HOST = "bottle.host"
 GIT_PATH = "/git"
-ORIGIN, HOST_REMOTE = "origin", "host"
+ORIGIN, HOST_REMOTE, WORK_REMOTE = "origin", "host", "work"
+OUT, IN = "out", "in"
 MAX_BODY = 64 * 1024 * 1024
 HOOKS = Path(__file__).resolve().parent / "hooks"
+
+
+def lane(bottle: str, direction: str) -> str:
+    """The git namespace for one direction of a bottle's exchange with its host.
+
+    Flat by necessity: namespaces nest rather than concatenate, so `a/b` would
+    mean refs/namespaces/a/refs/namespaces/b/ and not what anyone expects.
+    """
+    return f"bottle-{bottle}-{direction}"
 # At most one pull-through fetch per repo per this many seconds.
 PULL_THROUGH_INTERVAL = 60
 PULL_THROUGH_TIMEOUT = 120
@@ -67,40 +89,43 @@ class HostServices:
     async def handle(self, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         """Answer a request to bottle.host; returns an outcome for the log."""
         remote, _, path_info = request.path.removeprefix(GIT_PATH + "/").partition("/")
-        if self.git_dir is not None and request.path.startswith(GIT_PATH + "/") and remote in (ORIGIN, HOST_REMOTE):
+        known = (ORIGIN, HOST_REMOTE, WORK_REMOTE)
+        if self.git_dir is not None and request.path.startswith(GIT_PATH + "/") and remote in known:
             return await self._git(remote, "/" + path_info, request, writer)
         await _respond(writer, 404, "Not Found", b"no such bottle.host service\n")
         return "not-found"
 
     async def _git(self, remote: str, path_info: str, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         push = "git-receive-pack" in path_info or "service=git-receive-pack" in request.query
-        if push and remote == ORIGIN:
-            await _respond(writer, 403, "Forbidden", b"origin is read-only; push to host instead\n")
+        if push and remote != WORK_REMOTE:
+            await _respond(writer, 403, "Forbidden", b"read-only; push to work instead\n")
             return "denied"
         config: dict[str, str] = {}
+        namespace = None
         if remote == ORIGIN:
             if not push and "info/refs" in path_info:  # once per fetch, at its start
                 await pull_through(self.git_dir)
             root = await asyncio.to_thread(write_view, self.git_dir, self.view_dir or default_view_dir(self.git_dir))
         else:
             root = self.git_dir
+            if remote == WORK_REMOTE:
+                # Read the lane the host writes; write the lane this bottle writes.
+                namespace = lane(self.bottle, OUT if push else IN) if self.bottle else None
             if push:
                 config = {
                     "http.receivepack": "true",
                     "core.hooksPath": str(HOOKS),  # bottle's rules; the repo's own hooks never run
                     "receive.fsckObjects": "true",
-                    # No push may remove a ref: a delete takes the ref's reflog
-                    # with it, so only the host retires a name. Force-updates are
-                    # allowed (no denyNonFastForwards), and stay undoable because
-                    # refs outside refs/heads and refs/remotes have no reflog
-                    # unless asked for.
+                    # Nothing a reviewer has read may change underneath them, so
+                    # the out lane is append-only. A bottle with a stream to
+                    # abandon pushes a new branch; rewriting is the host's, in
+                    # its own repo, where every git command is available.
+                    "receive.denyNonFastForwards": "true",
                     "receive.denyDeletes": "true",
-                    "core.logAllRefUpdates": "always",
-                    # A bottle pushing `main` writes its namespace's main, but
-                    # git compares the unnamespaced name against the host's
-                    # checked-out branch and refuses it. Nothing here can reach
-                    # that branch (the push is refused outright without a
-                    # namespace), so the check has nothing left to protect.
+                    "core.logAllRefUpdates": "always",  # refs outside refs/heads get no reflog by default
+                    # A bottle pushing `main` writes its lane's main, but git
+                    # compares the unnamespaced name against the host's
+                    # checked-out branch and would refuse it.
                     "receive.denyCurrentBranch": "ignore",
                 }
         body = request.body
@@ -118,10 +143,10 @@ class HostServices:
             "CONTENT_LENGTH": str(len(body)),
             "REMOTE_ADDR": "bottle",
             "REMOTE_USER": "bottle",
-            # What confines the push: every ref receive-pack reads or writes is
-            # under refs/namespaces/<this>/. hooks/pre-receive refuses a push
-            # without it, so never pass an empty one.
-            **({"GIT_NAMESPACE": f"bottle-{self.bottle}"} if push and self.bottle else {}),
+            # What confines a push: every ref receive-pack resolves is under
+            # refs/namespaces/<this>/. hooks/pre-receive refuses a push without
+            # one, so never pass an empty one.
+            **({"GIT_NAMESPACE": namespace} if namespace else {}),
             **({"GIT_PROTOCOL": request.headers["git-protocol"]} if "git-protocol" in request.headers else {}),
             **_config_env(config),
         }

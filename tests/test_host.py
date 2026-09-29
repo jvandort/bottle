@@ -15,7 +15,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     host repo, a clone of it with local branches of its own.
     """
 
-    MINE = "refs/namespaces/bottle-b"  # the git namespace this bottle pushes into
+    OUT = "refs/namespaces/bottle-b-out"  # the lane this bottle writes and the host reads
+    IN = "refs/namespaces/bottle-b-in"    # the lane the host writes and this bottle reads
 
     async def asyncSetUp(self) -> None:
         host._last_pull.clear()
@@ -33,7 +34,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         # The same setup as a bottle's /workspace.
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)
-        for remote in ("origin", "host"):
+        for remote in ("origin", "host", "work"):
             run("git", "-C", self.workspace, "remote", "add", remote, f"http://bottle.host/git/{remote}")
         run("git", "-C", self.workspace, "config", "checkout.defaultRemote", "origin")
 
@@ -95,14 +96,22 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         result = await self.git("push", "origin", "HEAD:refs/heads/x")
         self.assertIn("403", result.stderr)
 
-    # --- host ---------------------------------------------------------------------
+    # --- host: read-only ------------------------------------------------------------
 
     async def test_host_is_the_repos_local_branches(self) -> None:
         await self.fetch()
         self.assertTrue({"host/main", "host/mine"} <= self.branches())
 
-    async def push(self, refspec: str | None = None) -> subprocess.CompletedProcess:
-        return await self.git("push", "host", *([refspec] if refspec else []))
+    async def test_host_is_read_only(self) -> None:
+        await self.work()
+        result = await self.git("push", "host", "work")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("403", result.stderr)
+
+    # --- work: two lanes ------------------------------------------------------------
+
+    async def push(self, refspec: str | None = None, *extra: str) -> subprocess.CompletedProcess:
+        return await self.git("push", *extra, "work", *([refspec] if refspec else []))
 
     async def work(self, message: str = "agent work") -> str:
         await self.fetch()
@@ -110,28 +119,43 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         return self.commit(self.workspace, message)
 
     def pushed(self, branch: str = "work") -> str:
-        return run("git", "-C", self.repo, "rev-parse", f"{self.MINE}/refs/heads/{branch}")
+        return run("git", "-C", self.repo, "rev-parse", f"{self.OUT}/refs/heads/{branch}")
+
+    def host_writes(self, branch: str, commit: str) -> None:
+        """What the host's own remote does: write its lane, which the bottle reads."""
+        run("git", "-C", self.repo, "update-ref", f"{self.IN}/refs/heads/{branch}", commit)
 
     def host_refs(self) -> set[str]:
         return set(run("git", "-C", self.repo, "for-each-ref", "--format=%(refname)").split())
 
-    async def test_push_writes_the_bottles_namespace(self) -> None:
+    async def test_push_writes_the_bottles_own_lane(self) -> None:
         await self.work()
         self.assertEqual((await self.push("work")).returncode, 0)
-        # An ordinary `git push host work` lands under the bottle's namespace,
-        # with no refspec to configure and nothing for the agent to know.
+        # An ordinary `git push work work` lands in the lane, with no refspec to
+        # configure and nothing for the agent to know.
         self.assertEqual(self.pushed(), run("git", "-C", self.workspace, "rev-parse", "work"))
 
-    async def test_push_mirrors_to_a_branch_the_host_can_see(self) -> None:
-        # Temporary, until how a bottle's work surfaces on the host is decided:
-        # namespaced refs are listed by nothing an IDE shows.
+    async def test_fetch_reads_the_lane_the_host_writes(self) -> None:
+        await self.work()
+        mine = run("git", "-C", self.repo, "rev-parse", "mine")
+        self.host_writes("review", mine)
+        self.assertEqual((await self.git("fetch", "-q", "work")).returncode, 0)
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "work/review"), mine)
+
+    async def test_the_lanes_are_separate(self) -> None:
+        """What the bottle pushes is not what it reads back, or the loop is a mirror."""
         await self.work()
         await self.push("work")
-        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "bottle-b/work"), self.pushed())
+        self.assertTrue(any(r.startswith(f"{self.OUT}/") for r in self.host_refs()))
+        self.assertFalse(any(r.startswith(f"{self.IN}/") for r in self.host_refs()))
+        # `git push` optimistically updates the remote-tracking ref, which is
+        # read from the other lane, so it disagrees until a pruning fetch.
+        await self.git("fetch", "-q", "--prune", "work")
+        self.assertNotIn("work/work", self.branches())
 
     async def test_the_hosts_refs_are_out_of_the_bottles_reach(self) -> None:
         # Not refused, unreachable: every ref receive-pack resolves is inside
-        # the namespace, so naming main writes the bottle's main, not the host's.
+        # the lane, so naming main writes the lane's main, not the host's.
         before = self.host_refs()
         await self.work()
         for target in ("HEAD:main", "HEAD:mine", "HEAD:refs/tags/v1", "HEAD:refs/remotes/origin/main"):
@@ -139,27 +163,26 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
                 result = await self.push(target)
                 self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(run("git", "-C", self.repo, "rev-parse", "main"), run("git", "-C", self.upstream, "rev-parse", "main"))
-        # Only namespaced refs and their mirrors appeared.
         for ref in self.host_refs() - before:
-            self.assertTrue(ref.startswith((f"{self.MINE}/", "refs/heads/bottle-b/")), ref)
+            self.assertTrue(ref.startswith(f"{self.OUT}/"), ref)
 
-    async def test_push_force_updates_its_own_namespace(self) -> None:
+    async def test_push_refuses_to_rewrite_what_it_has_pushed(self) -> None:
+        # The user's view of the branch stays append-only: every fetch of it
+        # fast-forwards, and nothing they have read changes underneath them.
         await self.work("first")
         await self.push("work")
         first = self.pushed()
         run("git", "-C", self.workspace, "reset", "-q", "--hard", "HEAD~1")
-        rewritten = self.commit(self.workspace, "rewritten")
-        # git's own fast-forward check, measured against the bottle's last push.
-        self.assertNotEqual((await self.push("work")).returncode, 0, "a rebased branch shouldn't push by itself")
-        self.assertEqual(self.pushed(), first)
-        self.assertEqual((await self.git("push", "--force", "host", "work")).returncode, 0)
-        self.assertEqual(self.pushed(), rewritten)
-        # The old tip is still reachable: a force-update is undoable on the host.
-        self.assertIn(first, run("git", "-C", self.repo, "reflog", "show", f"{self.MINE}/refs/heads/work", "--format=%H").split())
+        self.commit(self.workspace, "rewritten")
+        for extra in ((), ("--force",)):
+            with self.subTest(force=bool(extra)):
+                result = await self.push("work", *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.pushed(), first)
+        self.assertIn("non-fast-forward", (await self.push("work", "--force")).stderr.lower())
 
     async def test_push_refuses_deletes(self) -> None:
-        # A force-update is undoable through the ref's reflog; a delete takes
-        # the reflog with the ref, so the host alone retires a name.
+        # Only the host retires a name, since a delete takes the ref's reflog with it.
         await self.work()
         await self.push("work")
         pushed = self.pushed()
@@ -169,7 +192,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pushed(), pushed)
 
     async def test_push_without_a_bottle_is_refused(self) -> None:
-        # Fail closed: with no namespace a push would write the host's own refs.
+        # Fail closed: with no lane a push would write the host's own refs.
         await self.work()
         self.services.bottle = None
         result = await self.push("work")

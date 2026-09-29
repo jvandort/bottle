@@ -10,9 +10,9 @@ permissions inside. Take back only the commits you want.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through the host. Your
   working copy, and the rest of your Mac, are never mounted.
-- **Git in, git out.** The repo is mounted read-only, and work can only be pushed, into a
-  [git namespace](https://git-scm.com/docs/gitnamespaces) of the bottle's own, surfacing as
-  branches under `bottle-<name>/`. A bottle can't touch your branches. You review what you take.
+- **Git in, git out.** The repo is mounted read-only, and each bottle is a git remote you
+  fetch from and push to. A bottle writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
+  and nothing else, can't touch your branches, and can't rewrite what you've already read.
 - **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
 - **Composable features.** `tools`, `jvm`, `python`, `claude`, in the
@@ -39,6 +39,7 @@ agent directly.
 bottle repo add ~/path/to/foo --feature tools --feature claude
 bottle new foo            # Create a bottle with foo's default features
 bottle shell foo          # Open a shell at /workspace; run `claude` here
+git fetch bottle-foo      # In your repo: see what the agent pushed
 ```
 
 ## Prerequisites
@@ -165,24 +166,26 @@ that default's options). `BRANCH` defaults to the origin remote's default
 branch, or, if there's no origin, to whatever the repo has checked out (a branch
 or commit). The repo's history is mounted read-only, so nothing is cloned and
 the bottle can't change your repo, except through `host` below. The bottle has
-two remotes, served live by bottle through its egress proxy:
+three remotes, served live by bottle through its egress proxy:
 
 - `origin`: your repo's upstream (its `origin/*` branches), read-only. Fetching
   first fetches your repo's `origin` on the host (at most once a minute), so
   the bottle gets the upstream's latest even if you haven't fetched.
-- `host`: your repo's local branches. The agent may fetch anything, and pushes
-  land in a [git namespace](https://git-scm.com/docs/gitnamespaces) of the
-  bottle's own: bottle serves `git receive-pack` with `GIT_NAMESPACE` set, so a
-  branch pushed as `work` is written to
-  `refs/namespaces/bottle-NAME/refs/heads/work`, and your own refs are never
-  advertised to the bottle in the first place. Git does the confining, so git
-  behaves like git inside the bottle — `git push host work`, fast-forward
-  unless forced, measured against the bottle's own last push. Deletes are
-  refused, so a name a bottle has used is yours to retire, and a force-push
-  stays undoable through the ref's reflog. Your repo's own hooks don't run.
+- `host`: your repo's own branches, read-only. How the agent sees what you've
+  integrated: `git fetch host && git rebase host/main`.
+- `work`: where you and the agent exchange commits. Each of you writes a
+  separate [git namespace](https://git-scm.com/docs/gitnamespaces) and reads the
+  other's, so neither side's push is ever refused because of what the other
+  did — you can commit an edit, find the agent has since pushed something that
+  conflicts, and push anyway. The agent resolves the conflict and your next pull is a
+  fast-forward. A namespace is also what confines the bottle: every ref its
+  `receive-pack` resolves is inside one, and your own refs aren't advertised to
+  it at all. Its lane refuses force-pushes and deletes, so nothing you've
+  already read changes underneath you. Your repo's own hooks don't run.
 
-  A namespaced ref isn't listed by `git branch`, so bottle also mirrors each one
-  to a branch under `bottle-NAME/`, where you and your editor will find it.
+`bottle new` registers the bottle in your repo as a remote called
+`bottle-NAME`, so from your side it is an ordinary one: `git fetch bottle-NAME`,
+`git switch BRANCH` to start tracking what it pushed, `git pull`, `git push`.
 
 `NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
 with those features is built first if it isn't built yet.
@@ -223,8 +226,9 @@ was interrupted, `delete` cleans up whatever is left.
 
 It refuses if the bottle has work its repo doesn't: commits that were never
 pushed, or uncommitted changes. Push them first (`bottle exec NAME git push
-host`), or pass `--force`. Branches already in the repo (`bottle-NAME/*`) are
-kept. The bottle's image is deleted too, unless another bottle uses it.
+work`), or pass `--force`. Whatever the bottle pushed is kept, since it may be
+the only copy; the remote is removed. The bottle's image is deleted too, unless
+another bottle uses it.
 
 ### `bottle reset BOTTLE [--force]`
 
@@ -232,7 +236,8 @@ Deletes the bottle and creates it again with the arguments `bottle new` was
 given: a fresh, running VM with the repo's current default features (plus any
 the bottle was created with), and `/workspace` at the latest commit of its
 branch. Like `delete`, it refuses to lose unpushed commits or uncommitted
-changes without `--force`. Also recreates a bottle whose VM has gone missing.
+changes without `--force`. Also recreates a bottle whose VM has gone missing,
+and registers its `bottle-NAME` remote again if the repo has lost it.
 
 ### `bottle shutdown`
 
