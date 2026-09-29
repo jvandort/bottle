@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+# Thin launcher: check the interpreter, then hand off to the curate package.
+# Keep this file Python 3.9-compatible so macOS's /usr/bin/python3 gets a clear error.
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit(f"curate requires Python 3.11+ (found {sys.version.split()[0]} at {sys.executable})")
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "curate"))
+
+from curate.cli import main
+
+sys.exit(main(sys.argv[1:]))
