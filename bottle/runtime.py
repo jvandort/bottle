@@ -203,22 +203,17 @@ def exec_command(name: str, argv: list[str], user: str | None = None, tty: bool 
 
 
 def container_exec_interactive(
-    name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-    env: dict[str, str] | None = None, tty: bool = True,
+    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, tty: bool = True,
 ) -> NoReturn:
     """Replace this process with a command in the container, attached to this terminal.
 
-    `env` is passed by name only (`--env NAME`, the value taken from this
-    process's environment), so values never appear on a command line. Without
-    `tty` the command's stdout is a pipe, which is what a caller redirecting
-    or piping the output wants.
+    Nothing is passed in from the host: the bottle's environment is the image's
+    (a feature's containerEnv), and credentials never enter a bottle at all
+    (see auth.py). Without `tty` the command's stdout is a pipe, which is what
+    a caller redirecting or piping the output wants.
     """
-    names = []
-    for key, value in (env or {}).items():
-        os.environ[key] = value
-        names += ["--env", key]
     options = ["--interactive", *(["--tty"] if tty else [])]
-    os.execvp("container", ["container", "exec", *options, *names, *_exec_options(user, workdir), name, *argv])
+    os.execvp("container", ["container", "exec", *options, *_exec_options(user, workdir), name, *argv])
 
 
 def _exec_options(user: str | None, workdir: str | None) -> list[str]:

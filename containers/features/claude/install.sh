@@ -16,6 +16,21 @@ apt-get update
 apt-get install -y --no-install-recommends claude-code
 rm -rf /var/lib/apt/lists/*
 
+# How this feature is authenticated, since JSON has no room for a comment:
+#
+#   ANTHROPIC_BASE_URL (containerEnv) is the API's host over plain http,
+#   because that is what the bottle must send for the egress proxy to be able
+#   to attach the subscription token (see bottle/egress.py). The proxy makes
+#   the HTTPS connection to api.anthropic.com itself, from the Mac.
+#
+#   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
+#   a fake token there when it creates a bottle -- and nowhere in the image, so
+#   the throwaway bottle `bottle auth login claude` runs `claude setup-token`
+#   in finds nothing to mistake for a login. The stand-in is what puts Claude
+#   Code in subscription-token mode, so it sends the Authorization header (and
+#   the OAuth beta header the API wants with such a token) that the proxy then
+#   replaces on the way out.
+
 # Settings for the bottle's user, so Claude starts working straight away:
 # the permission mode (bypassPermissions by default: the bottle is the
 # sandbox), no confirmation before bypass mode, a theme, no spinner tips, and

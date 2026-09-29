@@ -11,7 +11,9 @@ if [ "$(id -u)" = 0 ]; then
 
   # Proxy settings arrive as container env (`run --env`); SSH sessions only see
   # /etc/environment, so mirror them there. Rewritten on every start.
-  for var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+  # BOTTLE_MIRROR_ENV names anything else bottle set that way, currently the
+  # stand-in tokens a feature asked for (see bottle/auth.py).
+  for var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ${BOTTLE_MIRROR_ENV:-}; do
     sed -i "/^$var=/d" /etc/environment
     eval "value=\${$var:-}"
     [ -z "$value" ] || echo "$var=$value" >> /etc/environment

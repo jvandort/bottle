@@ -100,14 +100,22 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Build-time egress exposure.** During `bottle build`, the temporary proxy
   on the default network is usable by any container on that network.
 - **Credentials via the proxy: what's left.** Features can now name the hosts
-  a credential belongs to and have the egress proxy attach it (the `teamcity`
-  feature does), but it only works for a tool that can be pointed at a plain
-  `http://` address, since a CONNECT tunnel is opaque. A proxy that terminated
+  a credential belongs to and have the egress proxy attach it (`claude` and
+  `teamcity` both do), but it only works for a tool that can be pointed at a
+  plain `http://` address, since a CONNECT tunnel is opaque. A proxy that terminated
   TLS for named hosts (a CA generated per Mac, trusted in the bottle) would
   cover tools that insist on https, and would end the bottle-side plaintext
   hop. Also: a bottle picks up a re-login only when it next starts, and an
   injected host is allowed even when private, which is wider than the
   `--allow` list it bypasses.
+- **`claude` through the proxy, against the real API.** The `claude` feature
+  now points Claude Code at `http://api.anthropic.com` and lets the proxy
+  attach the subscription token, but that path hasn't been run against the
+  real API yet: worth confirming that the CLI accepts a plain-http base URL and
+  that the stand-in token is enough for it to start. If it turns out to check
+  the shape of a token, bottle's one value for every stand-in
+  (`features.STANDIN`) won't do, and the feature will have to say what its
+  stand-in should look like.
 
 ## Host commands for the genie
 
@@ -148,16 +156,15 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 - **Open login URLs on the host.** A `$BROWSER` script in the base image that
   asks bottled (e.g. via `http://bottle.host/open?url=...` through the egress
   proxy) to `open` the URL on the Mac, so `bottle auth login` needs no copying.
-- **Claude's token via the proxy.** Claude Code reads `ANTHROPIC_BASE_URL`, so
-  the `claude` feature could declare its credential injected at
-  `api.anthropic.com` the way `teamcity` does, and stop delivering a token to
-  the bottle at all. Worth checking what else the CLI talks to (statsig,
-  Sentry, the updater) and whether its own auth flow copes.
 - **Leftover throwaway bottles.** `bottle auth login` removes its throwaway
   bottle on exit, even when interrupted, but not if bottle itself is killed;
   clean up `bottle-throwaway-*` containers and networks.
-- **Credential files.** Only environment variables are delivered; add file
-  delivery (and file capture at login) for tools that read credential files.
+- **Credentials a proxy can't attach.** A credential is spent as a request
+  header the egress proxy attaches, which suits token-in-a-header APIs and
+  nothing else. A tool that signs its requests, or one reached over a protocol
+  the proxy can't read (ssh, a CONNECT tunnel), has no way to use one. Whether
+  those are worth supporting -- and how, without handing the bottle the secret
+  -- is open.
 
 ## Remote IDEs and SSH
 

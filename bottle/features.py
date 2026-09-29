@@ -18,47 +18,46 @@ customizations.bottle declares what a feature needs from bottle itself:
 credentials, and options a user has to set.
 
 A credential is a secret bottle keeps on the host and a bottle's tools need
-(see bottle/auth.py). Each says where it goes, in one of two ways, and never
-both:
+(see bottle/auth.py). It never enters a bottle: a credential says which hosts
+it belongs to, and the egress proxy attaches it to the bottle's requests to
+those hosts (see bottle/egress.py).
 
-  env       The bottle gets it in this environment variable, and the agent in
-            the bottle can read it.
+  "customizations": {"bottle": {"credentials": {"teamcity": {
+      "description": "TeamCity access token",
+      "inject": {"hosts": ["${server}"], "header": "Authorization",
+                 "value": "Bearer ${credential}"}}}}}
 
-            "customizations": {"bottle": {"credentials": {"claude": {
-                "description": "Claude subscription token",
-                "login": {"command": ["claude", "setup-token"],
-                          "capture": "Your OAuth token[^:]*:(.*?)Store this token"},
-                "env": "CLAUDE_CODE_OAUTH_TOKEN"}}}}
-
-  inject    The bottle never gets it: the egress proxy attaches it to the
-            bottle's requests to the hosts named here (see bottle/egress.py).
-
-            "customizations": {"bottle": {"credentials": {"teamcity": {
-                "description": "TeamCity access token",
-                "inject": {"hosts": ["${server}"], "header": "Authorization",
-                           "value": "Bearer ${credential}"}}}}}
-
-    hosts   Where the credential is sent: `host` or `host:port`, always
-            reached over https -- a credential is never put on a request the
-            proxy sends in the clear. `${option}` is the value of one of this
-            feature's options, so the server a user configures is the server
-            the credential is attached to; and a host may be a pattern
-            (`*.example.com`). A request matching several patterns gets one
-            header, from the first credential that claims it, and two
-            credentials claiming the same host is an error.
-    header  The header it goes in; Authorization by default.
-    value   The whole header value, with ${credential} where the real one goes.
+    hosts    Where the credential is sent: `host` or `host:port`, always
+             reached over https -- a credential is never put on a request the
+             proxy sends in the clear. `${option}` is the value of one of this
+             feature's options, so the server a user configures is the server
+             the credential is attached to; and a host may be a pattern
+             (`*.example.com`). A request matching several patterns gets one
+             header, from the first credential that claims it, and two
+             credentials claiming the same host is an error.
+    header   The header it goes in; Authorization by default.
+    value    The whole header value, with ${credential} where the real one goes.
+    standin  An environment variable a bottle gets a fake token in, for a tool
+             that won't work until it thinks it's logged in (see below).
 
   A tool in the bottle has to be pointed at `http://<host>` for the proxy to
   be able to attach anything, since a CONNECT tunnel is opaque; that is the
   feature's own business, in its install.sh, along with anything else the tool
   needs in order to believe it's configured.
 
-login is optional, and belongs to either kind: without it, `bottle auth login`
-asks for the value. capture is a regular expression with one group, matched
-(across lines) against the command's output with terminal escape codes
-removed; whitespace is removed from the captured value, since a narrow
-terminal may wrap it.
+  A CLI doesn't know someone is attaching its token for it, and usually
+  refuses to make a request until it has one. What it gets is a stand-in, and
+  never a secret: the feature either writes one itself (the teamcity feature
+  puts it in the CLI's config file) or names an environment variable in
+  inject.standin, and bottle sets that variable, to a value of its own, in
+  every bottle with the feature. Bottles only: the throwaway bottle that runs
+  a login command gets no stand-ins, so a login flow starts from nothing
+  rather than from a token that isn't one.
+
+login is optional: without it, `bottle auth login` asks for the value. capture
+is a regular expression with one group, matched across lines against the
+command's output with terminal escape codes removed; whitespace is removed from
+the captured value, since a narrow terminal may wrap it.
 
 requiredOptions names options a user has to set, for the ones with no sensible
 default (the teamcity feature's server). The format has no way to say this --
@@ -94,9 +93,12 @@ REMOTE_USER = "genie"
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
 BOTTLE_KEYS = {"credentials", "requiredOptions"}
-CREDENTIAL_KEYS = {"description", "login", "env", "inject"}
+CREDENTIAL_KEYS = {"description", "login", "inject"}
 LOGIN_KEYS = {"command", "capture"}
-INJECT_KEYS = {"hosts", "header", "value"}
+INJECT_KEYS = {"hosts", "header", "value", "standin"}
+# What a stand-in variable holds: enough for a tool to believe it's configured,
+# and obvious in a `env | grep TOKEN` that the real one is elsewhere.
+STANDIN = "the-egress-proxy-holds-the-real-one"
 CREDENTIAL_PLACEHOLDER = "${credential}"
 OPTION_REFERENCE = re.compile(r"\$\{([^}]*)\}")
 HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
@@ -124,17 +126,18 @@ class Inject:
     hosts: tuple[str, ...]  # `host` or `host:port`; `${option}` is an option's value
     value: str  # the header value, with ${credential} where the real one goes
     header: str = "Authorization"
+    # A variable holding a fake token in the bottle, for a tool that won't
+    # work until it thinks it's logged in. Never set in a login throwaway.
+    standin: str | None = None
 
 
 @dataclass(frozen=True)
 class Credential:
     name: str
     description: str
+    # Where it goes: onto the bottle's requests, by the egress proxy.
+    inject: Inject
     login: Login | None = None
-    # Where it goes, one or the other: into the bottle as this environment
-    # variable, or onto the bottle's requests by the egress proxy.
-    env: str | None = None
-    inject: Inject | None = None
 
 
 @dataclass(frozen=True)
@@ -192,9 +195,6 @@ class Feature:
         """
         resolved = []
         for credential in self.credentials:
-            if credential.inject is None:
-                resolved.append(credential)
-                continue
             hosts = tuple(self._substitute(host, credential) for host in credential.inject.hosts)
             resolved.append(replace(credential, inject=replace(credential.inject, hosts=hosts)))
         return tuple(resolved)
@@ -349,10 +349,8 @@ def _credential(name, spec, options, fail) -> Credential:
         raise fail(f"{where}: unsupported: {', '.join(unsupported)}")
     if not isinstance(spec.get("description"), str) or not spec["description"]:
         raise fail(f"{where}: needs a description")
-    if ("env" in spec) == ("inject" in spec):
-        raise fail(f"{where}: needs either env (the bottle holds it) or inject (the proxy attaches it), not both")
-    if "env" in spec and (not isinstance(spec["env"], str) or not ENV_NAME.fullmatch(spec["env"])):
-        raise fail(f"{where}: env must be an environment variable name")
+    if "inject" not in spec:
+        raise fail(f"{where}: needs inject, the hosts the proxy attaches it to; a bottle never holds a credential")
     login = None
     if "login" in spec:
         raw = spec["login"]
@@ -368,15 +366,10 @@ def _credential(name, spec, options, fail) -> Credential:
         if groups != 1:
             raise fail(f"{where}: login capture must be a regular expression with exactly one group")
         login = Login(tuple(command), raw["capture"])
-    return Credential(
-        name, spec["description"], login,
-        env=spec.get("env"), inject=_inject(spec.get("inject"), options, where, fail),
-    )
+    return Credential(name, spec["description"], _inject(spec["inject"], options, where, fail), login)
 
 
-def _inject(inject, options, where, fail) -> Inject | None:
-    if inject is None:
-        return None
+def _inject(inject, options, where, fail) -> Inject:
     if not isinstance(inject, dict):
         raise fail(f"{where}: inject must be an object")
     unsupported = sorted(set(inject) - INJECT_KEYS)
@@ -402,7 +395,10 @@ def _inject(inject, options, where, fail) -> Inject | None:
     value = inject.get("value")
     if not isinstance(value, str) or CREDENTIAL_PLACEHOLDER not in value:
         raise fail(f"{where}: inject.value must be the header value, containing {CREDENTIAL_PLACEHOLDER}")
-    return Inject(tuple(hosts), value, header)
+    standin = inject.get("standin")
+    if standin is not None and (not isinstance(standin, str) or not ENV_NAME.fullmatch(standin)):
+        raise fail(f"{where}: inject.standin must be an environment variable name")
+    return Inject(tuple(hosts), value, header, standin)
 
 
 def _container_env(env, fail) -> dict[str, str]:

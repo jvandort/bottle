@@ -98,26 +98,38 @@ class StoreTest(unittest.TestCase):
 class DeclaredTest(unittest.TestCase):
     def test_claude_declares_its_token(self) -> None:
         d = auth.get_declared("claude")
-        self.assertEqual((d.feature, d.credential.env), ("claude", "CLAUDE_CODE_OAUTH_TOKEN"))
+        self.assertEqual((d.feature, d.credential.inject.hosts), ("claude", ("api.anthropic.com",)))
 
     def test_unknown(self) -> None:
         with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, teamcity\\)"):
             auth.get_declared("nope")
 
-    def test_env_for_only_the_bottles_features(self) -> None:
+    def test_only_the_bottles_features_are_injected(self) -> None:
         with mock.patch.object(auth, "get", return_value="tok"):
-            self.assertEqual(auth.env_for(["claude", "tools"]), {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
-            self.assertEqual(auth.env_for(["tools"]), {})
+            [claude] = auth.injections_for(["claude", "tools"])
+            self.assertEqual((claude.host, claude.value), ("api.anthropic.com", "Bearer tok"))
+            self.assertEqual(auth.injections_for(["tools"]), [])
+
+
+class StandinTest(unittest.TestCase):
+    """What a bottle gets instead of a credential: a fake token, so a tool starts at all."""
+
+    def test_a_feature_names_the_variable_its_tool_reads(self) -> None:
+        self.assertEqual(auth.standins_for(["claude", "tools"]), {"CLAUDE_CODE_OAUTH_TOKEN": features.STANDIN})
+
+    def test_a_feature_that_configures_its_own_asks_for_none(self) -> None:
+        # teamcity writes its stand-in into the CLI's config file, in install.sh.
+        self.assertEqual(auth.standins_for(["teamcity:server=ci.example.com"]), {})
+
+    def test_the_keychain_is_never_read_for_one(self) -> None:
+        with mock.patch.object(auth, "get", side_effect=AssertionError("a stand-in is not a credential")):
+            self.assertEqual(auth.standins_for(["claude"]), {"CLAUDE_CODE_OAUTH_TOKEN": features.STANDIN})
 
 
 class InjectedCredentialTest(unittest.TestCase):
     """A credential the egress proxy holds: nothing about it enters the bottle."""
 
     specs = ["teamcity:server=https://ci.corp.example.com", "tools"]
-
-    def test_nothing_is_delivered(self) -> None:
-        with mock.patch.object(auth, "get", return_value="tc-token"):
-            self.assertEqual(auth.env_for(self.specs), {})
 
     def test_the_proxy_gets_the_real_one(self) -> None:
         with mock.patch.object(auth, "get", return_value="tc-token"):
@@ -129,11 +141,6 @@ class InjectedCredentialTest(unittest.TestCase):
     def test_nothing_is_injected_until_it_is_logged_in(self) -> None:
         with mock.patch.object(auth, "get", return_value=None):
             self.assertEqual(auth.injections_for(self.specs), [])
-
-    def test_a_delivered_credential_isnt_injected(self) -> None:
-        with mock.patch.object(auth, "get", return_value="tok"):
-            self.assertEqual(auth.injections_for(["claude"]), [])
-            self.assertEqual(auth.env_for(["claude"]), {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
 
     def test_one_host_belongs_to_one_credential(self) -> None:
         claimed = features.Credential(
@@ -243,13 +250,12 @@ class EnsureLoggedInTest(unittest.TestCase):
 
 
 class ExecEnvTest(unittest.TestCase):
-    def test_env_is_passed_by_name_only(self) -> None:
-        with mock.patch.object(runtime.os, "execvp") as execvp, mock.patch.dict(os.environ, {}):
-            runtime.container_exec_interactive("c", ["bash"], env={"TOKEN": "tok-secret"})
-            self.assertEqual(os.environ["TOKEN"], "tok-secret")
+    def test_nothing_from_the_host_reaches_a_session(self) -> None:
+        """A bottle's environment is its image's: no credential is ever handed in here."""
+        with mock.patch.object(runtime.os, "execvp") as execvp, mock.patch.dict(os.environ, {"TOKEN": "tok-secret"}):
+            runtime.container_exec_interactive("c", ["bash"])
         argv = execvp.call_args.args[1]
-        self.assertIn("--env", argv)
-        self.assertIn("TOKEN", argv)
+        self.assertNotIn("--env", argv)
         self.assertFalse(any("tok-secret" in arg for arg in argv))
 
 

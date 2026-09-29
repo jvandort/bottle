@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from bottle import bottles, host, repos
+from bottle import bottles, features as features_, host, repos
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
 
@@ -108,13 +108,9 @@ class FakeRuntime:
         self.containers.pop(name)
 
     contract_output = ""
-    credentials: dict = {}
+    standins: dict = {}
 
     def container_exec(self, name, argv, user=None, workdir=None, input=None):
-        if "/etc/environment" in argv[-1] and input is not None:
-            self._step("deliver_credentials")
-            self.delivered = input
-            return ""
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
@@ -147,7 +143,7 @@ class FakeRuntime:
             mock.patch.object(bottles.prereqs, "ensure_container"),
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
-            mock.patch.object(bottles.auth, "env_for", side_effect=lambda specs: dict(self.credentials)),
+            mock.patch.object(bottles.auth, "standins_for", side_effect=lambda specs: dict(self.standins)),
             mock.patch.object(bottles.auth, "ensure_logged_in", side_effect=lambda specs: self.calls.append("ensure_logged_in")),
         ):
             patcher.start()
@@ -474,28 +470,30 @@ class RepoDefaultsTest(BottleTestCase):
         self.assertEqual(bottles.get("gradle").features, ("tools",))
 
 
-class CredentialDeliveryTest(BottleTestCase):
-    def test_bottles_without_credentials_get_nothing(self) -> None:
-        fake = self.fake()
-        bottles.create("gradle")
-        self.assertNotIn("deliver_credentials", fake.calls)
+class StandinTest(BottleTestCase):
+    """A bottle gets a fake token, so a tool believes it's logged in; the proxy holds the real one."""
 
-    def test_delivered_at_creation_via_stdin(self) -> None:
-        fake = self.fake()
-        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "OTHER": None}
-        bottles.create("gradle")
-        self.assertEqual(fake.calls[-1], "deliver_credentials")
-        self.assertEqual(fake.delivered, "CLAUDE_CODE_OAUTH_TOKEN=tok\nOTHER=\n")  # unset ones are cleared
+    def test_a_bottle_with_the_claude_feature_gets_one(self) -> None:
+        env = bottles._container_env("http://192.168.128.1:3128", ("claude",))
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], features_.STANDIN)
+        # The entrypoint mirrors it into /etc/environment, for SSH sessions.
+        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "CLAUDE_CODE_OAUTH_TOKEN")
 
-    def test_delivered_again_when_a_stopped_bottle_starts(self) -> None:
-        fake = self.fake()
-        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}
-        bottle = bottles.create("gradle")
-        fake.containers[bottle.container] = "stopped"
-        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "new"}
-        bottles.ensure_running("gradle")
-        self.assertEqual(fake.delivered, "CLAUDE_CODE_OAUTH_TOKEN=new\n")
+    def test_features_that_ask_for_none_add_nothing(self) -> None:
+        proxy = "http://192.168.128.1:3128"
+        self.assertEqual(bottles._container_env(proxy, ("tools",)), bottles._proxy_env(proxy))
 
+    def test_the_bottle_a_login_runs_in_gets_none(self) -> None:
+        """`bottle auth login claude` must find nothing that looks like a token."""
+        fake = self.fake()
+        bottles.create("gradle")  # the fake runtime reports on a bottle that exists
+        with mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-claude"), \
+                bottles.throwaway(["claude"]):
+            pass
+        self.assertEqual(fake.run_args["env"], bottles._proxy_env("http://192.168.128.1:3128"))
+
+
+class CredentialTest(BottleTestCase):
     def test_new_start_reset_and_shell_log_in_first(self) -> None:
         fake = self.fake()
         bottles.create("gradle")
@@ -509,13 +507,13 @@ class CredentialDeliveryTest(BottleTestCase):
             bottles.shell("gradle")
         self.assertEqual(fake.calls[0], "ensure_logged_in")
 
-    def test_shell_passes_set_credentials_by_name(self) -> None:
-        fake = self.fake()
-        fake.credentials = {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "OTHER": None}
+    def test_shell_hands_the_bottle_nothing(self) -> None:
+        """Credentials live at the egress proxy, so a session gets none of them."""
+        self.fake()
         bottles.create("gradle")
         with mock.patch.object(bottles.runtime, "container_exec_interactive") as interactive:
             bottles.shell("gradle")
-        self.assertEqual(interactive.call_args.kwargs["env"], {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+        self.assertNotIn("env", interactive.call_args.kwargs)
 
 
 class OwnershipTest(BottleTestCase):

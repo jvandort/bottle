@@ -208,9 +208,11 @@ def features_on_reset(bottle: Bottle) -> list[str]:
 def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     """Start a fresh container for the bottle from `tag`, and set it up from scratch."""
     proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
+    # The bottle gets stand-ins, never credentials: the real ones are held by
+    # the egress proxy (see auth.py), and a throwaway bottle gets neither.
     runtime.container_run(
         bottle.container, tag, bottle.network,
-        env=_proxy_env(proxy),
+        env=_container_env(proxy, bottle.features),
         mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
         labels={runtime.OWNER_LABEL: bottle.id},
     )
@@ -218,25 +220,6 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     # The gateway only exists once the container is on the network, so egress comes second.
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     _init_workspace(bottle)
-    deliver_credentials(bottle)
-
-
-def deliver_credentials(bottle: Bottle) -> None:
-    """Put the credentials the bottle's features declare into /etc/environment, for SSH sessions.
-
-    Runs whenever the bottle starts, so logging in or out reaches it on its
-    next start. Values go in on stdin, never on a command line; a credential
-    that isn't set (anymore) is removed.
-    """
-    env = auth.env_for(bottle.features)
-    if not env:
-        return
-    lines = "".join(f"{key}={value or ''}\n" for key, value in env.items())
-    script = (
-        'while IFS= read -r line; do name=${line%%=*}; sed -i "/^$name=/d" /etc/environment; '
-        '[ "$line" = "$name=" ] || printf "%s\\n" "$line" >> /etc/environment; done'
-    )
-    runtime.container_exec(bottle.container, ["sh", "-c", script], user="root", input=lines)
 
 
 @contextmanager
@@ -326,6 +309,19 @@ def _proxy_env(proxy: str) -> dict[str, str]:
         env[key] = env[key.upper()] = proxy
     env["no_proxy"] = env["NO_PROXY"] = NO_PROXY
     return env
+
+
+def _container_env(proxy: str, features: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """What `container run` sets for a bottle: the proxy, and the stand-ins its features asked for.
+
+    `container exec` sees these; SSH sessions only see /etc/environment, so the
+    base image's entrypoint mirrors them there, and BOTTLE_MIRROR_ENV tells it
+    which ones beyond the proxy variables to mirror.
+    """
+    standins = auth.standins_for(features)
+    if not standins:
+        return _proxy_env(proxy)
+    return _proxy_env(proxy) | standins | {"BOTTLE_MIRROR_ENV": " ".join(sorted(standins))}
 
 
 CONTEXT = """\
@@ -485,7 +481,6 @@ def ensure_running(name: str) -> Bottle:
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
         verify_contract(bottle)
-        deliver_credentials(bottle)
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     return bottle
 
@@ -522,8 +517,7 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    env = {key: value for key, value in auth.env_for(bottle.features).items() if value}
-    runtime.container_exec_interactive(bottle.container, argv, user=USER, workdir=WORKSPACE, env=env, tty=tty)
+    runtime.container_exec_interactive(bottle.container, argv, user=USER, workdir=WORKSPACE, tty=tty)
 
 
 def host_remote(bottle: Bottle) -> str:
