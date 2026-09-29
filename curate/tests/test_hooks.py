@@ -61,3 +61,22 @@ class Hooks(CurateTestCase):
         mine.write_text("#!/bin/sh\necho mine\n")
         self.repo.curate("list")
         self.assertEqual(mine.read_text(), "#!/bin/sh\necho mine\n")
+
+    def test_a_hook_that_is_not_ours_is_reported_every_time(self) -> None:
+        """Saying it once, at `start`, is not enough.
+
+        git-lfs ships a post-checkout and a post-commit, so this is the
+        ordinary case rather than the odd one, and what it costs -- approvals
+        that are only durable at the next command -- is invisible until you
+        need them.
+        """
+        (self.hooks / "post-index-change").write_text("#!/bin/sh\necho mine\n")
+        self.assertEqual(self.repo.status_fields()["hooks"], "partial")
+        report = self.repo.curate("status").stdout
+        self.assertIn("post-index-change", report)
+        self.assertIn('hook post-index-change "$@"', report,
+                      "should say how to chain it")
+
+    def test_hooks_are_ok_when_they_are_all_ours(self) -> None:
+        self.assertEqual(self.repo.status_fields()["hooks"], "ok")
+        self.assertEqual(self.repo.status_fields()["problems"], "0")

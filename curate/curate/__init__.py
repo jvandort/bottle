@@ -6,10 +6,10 @@ One module per seam, and the dependencies run one way:
     gitcmd    every call made to git, and reading merge-tree's output
     state     what a review is: Session, Repo, the invariant, the versions
     modes     the mode switch -- two renames and a symbolic-ref
+    hooks     the three hooks, installing them and handling them
     start     beginning one: the base, and naming the clean line
     fixup     folding into an existing clean commit, and its conflicts
     commands  status, list, drop
-    hooks     the three hooks, installing them and handling them
     ui        asking, when there is a terminal to ask at
     cli       the verbs, and HELP
 

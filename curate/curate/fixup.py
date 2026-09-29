@@ -9,10 +9,11 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .errors import Refused
-from .gitcmd import (Conflicts, commit_tree, git, git_ok, merge_tree, metadata,
-                     parents_of, rev, run, tree_of)
+from .gitcmd import (Conflicts, blob, commit_tree, git, git_ok, merge_tree,
+                     metadata, parents_of, rev, run, tree_of)
 from .state import Repo, Session, named, read, short, write
 
 
@@ -40,6 +41,91 @@ def fixup_state(session: Session) -> FixupState:
     )
 
 
+# -- resolving -------------------------------------------------------------
+#
+# A conflict is resolved in files under `<fixup>/stages/`, not in your working
+# tree, which is the whole reason you can keep writing code while one is
+# paused. `materialise` puts them there, `scan` reads back what you did to
+# them, and both `resolve` and `fixup --continue` go through the pair -- so
+# editing them by hand works exactly as well as a merge tool does, which
+# matters because a merge tool is not always configured.
+
+SIDES = {1: "BASE", 2: "LOCAL", 3: "REMOTE"}
+
+
+def conflicted(data: bytes) -> bool:
+    """Whether a file still has conflict markers in it.
+
+    The same test a person applies. There is no index here with unmerged
+    entries to ask instead, since none of this touches one; and a resolution
+    that deliberately keeps a line beginning `<<<<<<< ` is rare enough to be
+    worth the false alarm, which `--continue` names the file for.
+    """
+    lines = data.split(b"\n")
+    return (any(line.startswith(b"<<<<<<< ") for line in lines)
+            and any(line.startswith(b">>>>>>> ") for line in lines))
+
+
+def materialise(session: Session, conflicts: Conflicts) -> Path:
+    """Write the three sides and the marked-up file, once.
+
+    Once, because these files are where a resolution lives: a second `resolve`
+    must not overwrite what you edited by hand the first time. All of it is
+    bytes -- content is content, and a decode here would corrupt it.
+    """
+    stages = session.fixup_dir / "stages"
+    if (session.fixup_dir / "materialised").exists():
+        return stages
+    tree = read(session.fixup_dir / "conflicted_tree")
+    for path, sides in sorted(conflicts.items()):
+        scratch = stages / path
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        for n, label in SIDES.items():
+            # A missing stage means the file was added on one side only.
+            content = blob(sides[n][1]) if n in sides else None
+            scratch.with_name(scratch.name + "." + label).write_bytes(content or b"")
+        # The conflicted tree already has ordinary markers in it, so it is the
+        # right starting point whether or not a merge tool shows up.
+        scratch.write_bytes(blob(f"{tree}:{path}") or b"")
+    write(session.fixup_dir / "materialised", "1")
+    return stages
+
+
+def scan(session: Session,
+         conflicts: Conflicts) -> tuple[list[str], list[str]]:
+    """Read the stage files back: (resolutions, paths still conflicted).
+
+    A resolution is `mode\toid\tpath`, with mode "0" for a file the
+    resolution deletes. Called by `--continue` as well as by `resolve`, so a
+    hand edit needs no second command to be noticed.
+
+    What counts as resolved depends on what you were given. A marked-up file
+    is resolved when the markers are gone. A file merge-tree could not mark up
+    -- a binary one, where it writes one side and calls it a conflict -- has no
+    markers to remove, so there the test is that you changed it at all.
+    Otherwise walking away would silently pick a side.
+    """
+    stages = session.fixup_dir / "stages"
+    if not (session.fixup_dir / "materialised").exists():
+        return [], sorted(conflicts)
+    tree = read(session.fixup_dir / "conflicted_tree")
+    resolved, outstanding = [], []
+    for path, sides in sorted(conflicts.items()):
+        scratch = stages / path
+        if not scratch.exists():           # deleting it is a resolution too
+            resolved.append(f"0\t{'0' * 40}\t{path}")
+            continue
+        now = scratch.read_bytes()
+        given = blob(f"{tree}:{path}") or b""
+        done = not conflicted(now) if conflicted(given) else now != given
+        if not done:
+            outstanding.append(path)
+            continue
+        mode = sides.get(2, sides.get(3, ("100644", "")))[0]
+        resolved.append(f"{mode}\t{git('hash-object', '-w', str(scratch))}\t{path}")
+    return resolved, outstanding
+
+
 def save_conflict(session: Session, stage: str, target: str, current: str,
                   done: str, todo: list[str], tree: str,
                   conflicts: Conflicts) -> None:
@@ -55,7 +141,10 @@ def save_conflict(session: Session, stage: str, target: str, current: str,
         f"{n}\t{mode}\t{oid}\t{path}"
         for path, stages in conflicts.items()
         for n, (mode, oid) in sorted(stages.items())))
-    (d / "resolved").unlink(missing_ok=True)
+    # A fresh conflict, so any resolution of the previous one is gone with it.
+    (d / "materialised").unlink(missing_ok=True)
+    shutil.rmtree(d / "stages", ignore_errors=True)
+    materialise(session, conflicts)
 
 
 def read_stages(session: Session) -> Conflicts:
@@ -83,7 +172,8 @@ def report_conflict(repo: Repo, session: Session, conflicts: Conflicts,
                       f"conflict again on replay.")
                 print(f'  If the change belongs there, abort and fix up '
                       f'"{subject}" instead.')
-    print("\n  resolve:  curate resolve")
+    print("\n  resolve:  curate resolve   (or edit the marked-up files in")
+    print(f"            {session.fixup_dir / 'stages'})")
     print("  then:     curate fixup --continue")
 
 
@@ -194,12 +284,30 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
 
 def continue_fixup(repo: Repo, session: Session) -> int:
     state = fixup_state(session)
+    conflicts = read_stages(session)
+    # Re-read the stage files rather than trusting what `resolve` recorded: you
+    # may have edited them since, or instead. This is also the check that keeps
+    # conflict markers off the clean line, which is the one branch that exists
+    # to not have any -- git rebase refuses here for the same reason.
+    resolved, outstanding = scan(session, conflicts)
+    if outstanding:
+        raise Refused(
+            "still conflicted, so there is nothing to continue with:\n  "
+            + "\n  ".join(outstanding)
+            + f"\nResolve them in {session.fixup_dir / 'stages'} -- `curate "
+              f"resolve` opens your merge tool, or edit the marked-up files "
+              f"there by hand.\n`curate fixup --abort` drops the fixup; "
+              f"nothing has been written.")
+
     tmp = session.fixup_dir / "index"
     tmp.unlink(missing_ok=True)
     git("read-tree", state.conflicted_tree, index=tmp)
-    for line in read(session.fixup_dir / "resolved").splitlines():
+    for line in resolved:
         mode, oid, path = line.split("\t", 2)
-        git("update-index", "--cacheinfo", f"{mode},{oid},{path}", index=tmp)
+        if mode == "0":
+            git("update-index", "--force-remove", path, index=tmp)
+        else:
+            git("update-index", "--cacheinfo", f"{mode},{oid},{path}", index=tmp)
     tree = git("write-tree", index=tmp)
     tmp.unlink(missing_ok=True)
 
@@ -225,49 +333,26 @@ def cmd_resolve(repo: Repo, argv: list[str]) -> int:
     if session is None or not session.fixup_pending:
         raise Refused("no conflict to resolve")
 
-    stages_dir = session.fixup_dir / "stages"
-    stages_dir.mkdir(parents=True, exist_ok=True)
     conflicts = read_stages(session)
+    stages = materialise(session, conflicts)
     tool = git("config", "merge.tool", check=False)
     cmd = git("config", f"mergetool.{tool}.cmd", check=False) if tool else ""
-    resolved = []
 
-    for path, stages in sorted(conflicts.items()):
-        scratch = stages_dir / path
-        scratch.parent.mkdir(parents=True, exist_ok=True)
-        names = {1: "BASE", 2: "LOCAL", 3: "REMOTE"}
-        for n, label in names.items():
-            # A missing stage means the file was added on one side only.
-            content = (git("cat-file", "blob", stages[n][1], check=False)
-                       if n in stages else "")
-            side = scratch.with_name(scratch.name + "." + label)
-            side.write_text(content + "\n" if content else "")
-        # The conflicted tree already has ordinary markers in it, so it is the
-        # right starting point whether or not a merge tool shows up.
-        merged = git("cat-file", "blob",
-                     f"{read(session.fixup_dir / 'conflicted_tree')}:{path}",
-                     check=False)
-        scratch.write_text(merged + "\n" if merged else "")
-        before = scratch.read_bytes()
-
-        if not cmd:
-            continue
-        env = {"BASE": str(scratch) + ".BASE", "LOCAL": str(scratch) + ".LOCAL",
-               "REMOTE": str(scratch) + ".REMOTE", "MERGED": str(scratch)}
+    for path in sorted(conflicts):
+        scratch = stages / path
+        if not cmd or not scratch.exists() or not conflicted(scratch.read_bytes()):
+            continue                       # already dealt with; leave it alone
+        env = {label: f"{scratch}.{label}" for label in SIDES.values()}
+        env["MERGED"] = str(scratch)
         subprocess.run(["sh", "-c", cmd], env={**os.environ, **env})
-        if scratch.read_bytes() != before:
-            mode = stages.get(2, stages.get(3, ("100644", "")))[0]
-            oid = git("hash-object", "-w", str(scratch))
-            resolved.append(f"{mode}\t{oid}\t{path}")
 
-    if resolved:
-        write(session.fixup_dir / "resolved", "\n".join(resolved))
-    paths = ", ".join(sorted(conflicts))
-    if cmd:
-        print(f"resolve: {len(resolved)} of {len(conflicts)} resolved ({paths})")
-    else:
-        print(f"resolve: no merge tool configured (`git config merge.tool`).")
+    resolved, outstanding = scan(session, conflicts)
+    if not cmd:
+        print("resolve: no merge tool configured (`git config merge.tool`).")
         print(f"         The three sides, and the marked-up file, are in")
-        print(f"         {stages_dir}: {paths}")
+        print(f"         {stages}")
+        print("         Edit the marked-up file there; `--continue` reads it back.")
+    print(f"resolve: {len(resolved)} of {len(conflicts)} resolved"
+          + (f"; still conflicted: {', '.join(outstanding)}" if outstanding else ""))
     print("then:    curate fixup --continue")
     return 0

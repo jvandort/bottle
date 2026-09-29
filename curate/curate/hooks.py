@@ -30,6 +30,24 @@ def script(name: str, me: str) -> str:
             f"exit 0\n")
 
 
+def me() -> str:
+    """The absolute path a hook has to name to reach this curate."""
+    return os.path.realpath(sys.argv[0])
+
+
+def foreign(repo: Repo) -> list[str]:
+    """Hooks curate is not installed in, because you already had one there.
+
+    `install` leaves them alone and says so once. Once is not enough: without
+    `post-index-change` an approval is only durable at the next command rather
+    than the instant it is made, and that is exactly the kind of quiet
+    degradation you want told about every time you ask what is wrong.
+    """
+    hooks = repo.gitdir / "hooks"
+    return [name for name in HOOKS
+            if (hooks / name).exists() and MARKER not in read(hooks / name)]
+
+
 def install(repo: Repo, quiet: bool = False) -> list[str]:
     """Write the hooks, or rewrite them if they name a curate that has moved.
 
@@ -38,17 +56,16 @@ def install(repo: Repo, quiet: bool = False) -> list[str]:
     """
     hooks = repo.gitdir / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
-    me = os.path.realpath(sys.argv[0])
     written = []
     for name in HOOKS:
         path = hooks / name
-        wanted = script(name, me)
+        wanted = script(name, me())
         if path.exists():
             current = read(path)
             if MARKER not in current:
                 if not quiet:
                     print(f"curate: leaving your existing {name} hook alone; "
-                          f"add `{me} hook {name} \"$@\"` to it by hand.",
+                          f"add `{me()} hook {name} \"$@\"` to it by hand.",
                           file=sys.stderr)
                 continue
             if current.strip() == wanted.strip():

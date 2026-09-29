@@ -5,6 +5,7 @@ conventions here.
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -53,6 +54,14 @@ class Repo:
     def curate(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([CURATE, *args], cwd=self.path, capture_output=True, text=True)
 
+    def state_version(self) -> str:
+        """The layout version this tool writes, from the tool rather than from
+        a constant here: a bump should not need the tests edited to agree."""
+        out = self.curate("--version").stdout
+        found = re.search(r"state version (\d+)", out)
+        assert found, out
+        return found.group(1)
+
     def status_fields(self) -> dict[str, str]:
         out = self.curate("status", "--porcelain")
         assert out.returncode == 0, out.stderr
@@ -83,6 +92,29 @@ class Repo:
         # to the review index; it is not there yet. Harmless when it is.
         self.git("update-index", "--add", "--cacheinfo",
                  f"100644,{self.blob(new)},{path}")
+
+    # --- resolving a fixup conflict ------------------------------------------
+
+    def use_merge_tool(self, cmd: str = 'cp "$LOCAL" "$MERGED"') -> None:
+        """Configure a merge tool, since `curate resolve` runs the real one.
+
+        The default takes our side wholesale, which is what a person clicking
+        through a two-line conflict would do and is enough to make the
+        resolution real rather than pretended.
+        """
+        self.git("config", "merge.tool", "fake")
+        self.git("config", "mergetool.fake.cmd", cmd)
+
+    def stage_file(self, path: str) -> Path:
+        """Where `resolve` puts the marked-up file you resolve in."""
+        clean = dict(
+            line.split("=", 1)
+            for line in subprocess.run([CURATE, "status", "--porcelain"],
+                                       cwd=self.path, capture_output=True,
+                                       text=True).stdout.splitlines()
+            if "=" in line)["clean"]
+        slug = clean[len("refs/heads/"):].replace("%", "%25").replace("/", "%2F")
+        return self.path / ".git" / "curate" / "sessions" / slug / "fixup" / "stages" / path
 
     # --- inspecting -----------------------------------------------------------
 

@@ -19,10 +19,10 @@ Stages = dict[int, tuple[str, str]]
 Conflicts = dict[str, Stages]
 
 
-def run(args: list[str], index: str | Path | None = None,
-        env: dict[str, str] | None = None,
-        stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run git. GIT_INDEX_FILE is ours to set, never inherited."""
+def environment(index: str | Path | None = None,
+                env: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment every git we run gets. GIT_INDEX_FILE is ours to set,
+    never inherited."""
     e = dict(os.environ)
     e.pop("GIT_INDEX_FILE", None)
     e[HOOK_GUARD] = "1"          # git we run must not re-enter our own hooks
@@ -30,8 +30,15 @@ def run(args: list[str], index: str | Path | None = None,
         e["GIT_INDEX_FILE"] = str(index)
     if env:
         e.update(env)
+    return e
+
+
+def run(args: list[str], index: str | Path | None = None,
+        env: dict[str, str] | None = None,
+        stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run git and decode its output as text."""
     return subprocess.run(["git", *args], capture_output=True, text=True,
-                          env=e, input=stdin)
+                          env=environment(index, env), input=stdin)
 
 
 def git(*args: str, index: str | Path | None = None,
@@ -45,6 +52,18 @@ def git(*args: str, index: str | Path | None = None,
 def git_ok(*args: str, index: str | Path | None = None,
            env: dict[str, str] | None = None) -> bool:
     return run(list(args), index=index, env=env).returncode == 0
+
+
+def blob(spec: str) -> bytes | None:
+    """A blob's exact bytes, or None if it is not there.
+
+    Never `git()` for file content: that strips, which silently reindents the
+    first line and drops trailing blank lines. File content is bytes and is
+    handled as bytes the whole way -- see `fixup.materialise`.
+    """
+    p = subprocess.run(["git", "cat-file", "blob", spec], capture_output=True,
+                       env=environment())
+    return p.stdout if p.returncode == 0 else None
 
 
 def rev(spec: str) -> str | None:
