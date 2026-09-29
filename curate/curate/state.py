@@ -312,25 +312,22 @@ class Repo:
                 print(f"curate: recovered; HEAD is {named(head)}, so this is "
                       f"{mode} mode.", file=sys.stderr)
             return
-        if active is not None and self.mode != "review":
+        if active is not None:
             # HEAD names no review at all. In write mode that is an ordinary
             # branch switch, which the README asks for before leaving: the live
             # index was git's own and moved with HEAD, while the approved set
             # stayed parked in index.review and in the ref. Nothing is at risk,
             # so stand down rather than refuse -- HEAD returning to the working
             # line picks the review up again, above.
+            #
+            # Review mode is the switch made without `curate write` first, which
+            # git allows the moment a review is finished. The live index was the
+            # approved set, but git has already rewritten it for HEAD's branch;
+            # refusing now cannot bring it back, only keep you from working.
+            # What it held is in the ref, recorded as each approval was made, so
+            # park a copy of that and stand down the same way -- silently, since
+            # this is what you meant by switching, and there is nothing to do.
+            if self.mode == "review":
+                active.index("review").unlink(missing_ok=True)
+                active.rebuild("review")
             self.set_state("write", None)
-
-
-def review_complete() -> bool:
-    """Whether nothing is left unreviewed, in review mode.
-
-    Only meaningful there, and only there is it asked: the live index is the
-    approved set, so the second status column -- what differs between the index
-    and your files -- is exactly what you have not read. The review is finished
-    when there is none of it.
-    """
-    p = run(["status", "--porcelain"])
-    if p.returncode != 0:
-        return False
-    return not any(len(line) > 1 and line[1] != " " for line in p.stdout.splitlines())

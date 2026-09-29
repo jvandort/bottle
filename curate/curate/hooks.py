@@ -1,15 +1,15 @@
 """The three hooks, and what they do when git fires them.
 
 `post-index-change` is what makes an approval durable the instant it is made;
-the other two are there to notice, and say, when something has moved HEAD out
-from under a review.
+`post-commit` does the same for a commit, and `post-checkout` stands a review
+down when HEAD leaves it, so that switching away needs no `curate write`.
 """
 
 import os
 import sys
 
 from .gitcmd import HOOK_GUARD
-from .state import Repo, named, read, review_complete, short
+from .state import Repo, read
 
 HOOKS = ("post-index-change", "post-checkout", "post-commit")
 MARKER = "# installed by curate; safe to delete"
@@ -100,32 +100,20 @@ def cmd_hook(repo: Repo, argv: list[str]) -> int:
         return 0
 
     if name == "post-checkout":
-        # Cannot prevent anything -- it runs afterwards -- but the difference
-        # between discovering this now and discovering it in a week.
+        # Runs afterwards, so it cannot prevent anything, and need not: git
+        # has already rewritten the live index, and the ref holds the rest.
         flag = args[2] if len(args) > 2 else "1"
         if flag != "1" or repo.consistent():
             return 0
         if repo.mode == "review":
-            if not session.index("review").exists():
-                session.rebuild("review")
-            print(f"curate: you were in review mode on {named(session.clean)}, and "
-                  f"HEAD is now {named(repo.head)}.", file=sys.stderr)
-            print(f"        The approved set is safe in {session.ref}. Get back with:"
-                  f"\n          git switch {short(session.working)} && curate review",
-                  file=sys.stderr)
+            # Standing down here rather than at the next command is what makes
+            # the next `git switch` back to the working line ordinary.
+            repo.recover()
         return 0
 
     if name == "post-commit":
         if repo.mode != "review" or repo.head != session.clean:
             return 0
         session.record("review")
-        if review_complete():
-            # The one place worth saying something out loud: git stops
-            # protecting you from a checkout at the exact moment you stop
-            # having unreviewed work, which is also when you walk away.
-            print("curate: the review is complete -- the clean line now matches "
-                  "your files.", file=sys.stderr)
-            print("        `curate write` before switching branches; git will not "
-                  "stop you now.", file=sys.stderr)
         return 0
     return 0
