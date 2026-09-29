@@ -1,0 +1,114 @@
+"""The three hooks, and what they do when git fires them.
+
+`post-index-change` is what makes an approval durable the instant it is made;
+the other two are there to notice, and say, when something has moved HEAD out
+from under a review.
+"""
+
+import os
+import sys
+
+from .gitcmd import HOOK_GUARD
+from .state import Repo, named, read, review_complete, short
+
+HOOKS = ("post-index-change", "post-checkout", "post-commit")
+MARKER = "# installed by curate; safe to delete"
+
+
+def script(name: str, me: str) -> str:
+    """The hook, which has to survive curate moving or going away.
+
+    It holds an absolute path, so a rename, a move or a deleted checkout all
+    leave it pointing at nothing. The guard is what keeps that quiet: without
+    it, git prints an interpreter error on every commit until someone works
+    out where it is coming from.
+    """
+    return (f"#!/bin/sh\n{MARKER}\n"
+            f'CURATE="{me}"\n'
+            f'[ -f "$CURATE" ] || exit 0        # curate moved or went away\n'
+            f'"{sys.executable}" "$CURATE" hook {name} "$@" || true\n'
+            f"exit 0\n")
+
+
+def install(repo: Repo, quiet: bool = False) -> list[str]:
+    """Write the hooks, or rewrite them if they name a curate that has moved.
+
+    Called from `start`, and again on every command, so a stale path repairs
+    itself the next time you run anything.
+    """
+    hooks = repo.gitdir / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    me = os.path.realpath(sys.argv[0])
+    written = []
+    for name in HOOKS:
+        path = hooks / name
+        wanted = script(name, me)
+        if path.exists():
+            current = read(path)
+            if MARKER not in current:
+                if not quiet:
+                    print(f"curate: leaving your existing {name} hook alone; "
+                          f"add `{me} hook {name} \"$@\"` to it by hand.",
+                          file=sys.stderr)
+                continue
+            if current.strip() == wanted.strip():
+                continue
+        path.write_text(wanted)
+        path.chmod(0o755)
+        written.append(name)
+    return written
+
+
+def cmd_hook(repo: Repo, argv: list[str]) -> int:
+    if os.environ.get(HOOK_GUARD) == "1":
+        return 0
+    name, args = argv[0], argv[1:]
+    session = repo.session()
+    if session is None:
+        return 0
+
+    if name == "post-index-change":
+        # args are <updated_workdir> <updated_skipworktree>. A checkout updates
+        # the working directory too, and fires this hook before HEAD has
+        # necessarily moved -- so that flag is the only thing that tells an
+        # approval apart from being yanked out. Recording then would overwrite
+        # the approved set with whatever was just checked out.
+        if args[:1] == ["1"]:
+            return 0
+        live = os.environ.get("GIT_INDEX_FILE")
+        if live and os.path.realpath(live) != os.path.realpath(repo.gitdir / "index"):
+            return 0
+        if repo.mode == "review" and repo.head == session.clean:
+            session.record("review")
+        return 0
+
+    if name == "post-checkout":
+        # Cannot prevent anything -- it runs afterwards -- but the difference
+        # between discovering this now and discovering it in a week.
+        flag = args[2] if len(args) > 2 else "1"
+        if flag != "1" or repo.consistent():
+            return 0
+        if repo.mode == "review":
+            if not session.index("review").exists():
+                session.rebuild("review")
+            print(f"curate: you were in review mode on {named(session.clean)}, and "
+                  f"HEAD is now {named(repo.head)}.", file=sys.stderr)
+            print(f"        The approved set is safe in {session.ref}. Get back with:"
+                  f"\n          git switch {short(session.working)} && curate review",
+                  file=sys.stderr)
+        return 0
+
+    if name == "post-commit":
+        if repo.mode != "review" or repo.head != session.clean:
+            return 0
+        session.record("review")
+        if review_complete():
+            # The one place worth saying something out loud: git stops
+            # protecting you from a checkout at the exact moment you stop
+            # having unreviewed work, which is also when you walk away.
+            print("curate: the review is complete -- the clean line now matches "
+                  "your files.", file=sys.stderr)
+            print("        `curate write` before switching branches; git will not "
+                  "stop you now.", file=sys.stderr)
+        return 0
+    return 0
