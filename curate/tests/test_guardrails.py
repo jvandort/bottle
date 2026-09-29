@@ -34,19 +34,35 @@ class Guardrails(CurateTestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, "git no longer protects us here")
 
-    def test_being_moved_out_of_review_mode_is_detected(self) -> None:
+    def test_being_moved_out_of_review_mode_says_nothing(self) -> None:
+        """Switching away is what you meant, so there is nothing to tell you."""
         self.approve_everything()
-        self.repo.git("switch", "-q", "elsewhere")
-        self.assertEqual(self.repo.status_fields()["consistent"], "no")
+        result = subprocess.run(["git", "-C", str(self.repo.path), "switch", "elsewhere"],
+                                capture_output=True, text=True)
+        self.assertNotIn("curate", result.stderr)
 
-    def test_the_tool_refuses_to_clobber_an_index_after_being_moved(self) -> None:
-        """The whole bug: the checkout is survivable, the blind mode switch is not."""
+    def test_and_stands_down_like_leaving_in_write_mode(self) -> None:
+        """The reported annoyance: forgetting `curate write` cost a round trip."""
         self.approve_everything()
-        approved = self.repo.index_tree()
         self.repo.git("switch", "-q", "elsewhere")
-        self.assertEqual(self.repo.curate("write").returncode, 1)
-        self.repo.git("switch", "-q", "wip")
+        fields = self.repo.status_fields()
+        self.assertEqual(fields["consistent"], "yes")
+        self.assertNotIn("clean", fields, "still claiming the review it left")
+        result = self.repo.curate("review")
+        self.assertNotIn("moved it out from under", result.stderr)
+        self.assertIn("no review here", result.stderr)
+
+    def test_no_index_is_clobbered_after_being_moved(self) -> None:
+        """The whole bug: the checkout is survivable, a blind mode switch is not."""
+        self.repo.git("add", "f.txt")
+        approved = self.repo.index_tree()
+        self.repo.git("commit", "-q", "-m", "Everything")
+        self.repo.git("switch", "-q", "elsewhere")
+        self.repo.curate("write")
         self.repo.curate("review")
+        self.repo.git("switch", "-q", "wip")
+        result = self.repo.curate("review")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.index_tree(), approved, "approvals were destroyed")
 
     def test_approvals_are_recorded_as_they_are_made(self) -> None:
@@ -72,43 +88,6 @@ class Guardrails(CurateTestCase):
         self.approve_everything()
         self.repo.git("switch", "-q", "elsewhere")
         self.assertEqual(self.repo.curate("status", "--porcelain").returncode, 0)
-
-
-class ReviewComplete(CurateTestCase):
-    """The announcement when a review finishes, which is when git stops helping."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.base = self.make_base()
-        self.repo.write("f.txt", "ONE\ntwo\nthree\n")
-        self.repo.write("junk.txt", "debug\n")
-        self.repo.commit_all("their work")
-        self.start(self.base)
-        self.repo.curate("review")
-
-    def commit_staged(self, message: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(self.repo.path), "commit", "-m", message],
-            capture_output=True, text=True).stderr
-
-    def test_says_nothing_while_work_is_still_unreviewed(self) -> None:
-        self.repo.git("add", "f.txt")
-        self.assertNotIn("review is complete", self.commit_staged("part of it"))
-
-    def test_and_says_so_the_moment_there_is_none(self) -> None:
-        self.repo.git("add", "-A")
-        said = self.commit_staged("all of it")
-        self.assertIn("review is complete", said)
-        self.assertIn("curate write", said)
-
-    def test_which_is_exactly_when_git_stops_refusing_a_checkout(self) -> None:
-        """The reason the announcement exists at all."""
-        self.repo.git("branch", "elsewhere", self.base)
-        self.repo.git("add", "-A")
-        self.commit_staged("all of it")
-        moved = subprocess.run(["git", "-C", str(self.repo.path), "switch", "elsewhere"],
-                               capture_output=True, text=True)
-        self.assertEqual(moved.returncode, 0, "git still protected us; no need to warn")
 
 
 class TornWrite(CurateTestCase):

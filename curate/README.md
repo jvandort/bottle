@@ -196,32 +196,21 @@ alone and tells you how to delete it by hand.
 
 ## Leaving
 
-**Switch to write mode before you switch branches.** In review mode your files
-deliberately differ from `HEAD`, so a checkout usually refuses -- but that
-protection disappears at exactly the moment the review is finished and you are
-most likely to walk away.
+**You can switch branches straight out of review mode.** Once a review is
+finished, git no longer refuses the checkout, and curate treats it as though
+you had run `curate write` first: it stands the review down.
 
-If something moves `HEAD` out from under a review anyway, curate notices and
-refuses to touch an index file rather than quietly losing what you approved:
-
-Reviewing `branch`, so the clean line is `curate/branch`, and something checked out
-`elsewhere`:
-
-```
-curate: review mode expects HEAD to be 'curate/branch', but HEAD is 'elsewhere'.
-Something moved it out from under the review. Nothing has been touched, and
-your approvals are safe in refs/curate/curate%2Fbranch.
-To get back:  git switch branch && curate review
-```
-
-Nothing is lost. The approved set is durable in `refs/curate/<clean branch>`,
-written on every stage by a `post-index-change` hook, and that ref has a reflog.
+Nothing is lost, because nothing was only in the index git just rewrote. The
+approved set is durable in `refs/curate/<clean branch>`, written on every stage
+by a `post-index-change` hook, and that ref has a reflog. What curate refuses
+to do is the dangerous half: treat the index git left behind as your approvals.
 
 In write mode there is nothing to move out from under: the approved set is
-parked, and the live index is git's own. So switching to a branch with no
-review of its own is ordinary -- curate says there is none here, `curate start`
-begins one, and coming back to the working line picks the first one up again
-with your approvals intact. HEAD is what says which review you are in.
+parked, and the live index is git's own. Either way, switching to a branch
+with no review of its own is ordinary -- curate says there is none here,
+`curate start` begins one, and coming back to the working line picks the first
+one up again with your approvals intact. HEAD is what says which review you
+are in.
 
 ## Several reviews at once
 
