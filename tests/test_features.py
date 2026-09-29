@@ -30,10 +30,21 @@ class RealFeaturesTest(unittest.TestCase):
         with self.assertRaisesRegex(BottleError, "option tui must be one of default, fullscreen"):
             features.resolve(["claude:tui=full"])
 
+    def test_claude_talks_to_the_api_through_the_proxy_and_holds_no_token(self) -> None:
+        claude = features.load("claude")
+        [credential] = claude.resolved_credentials()
+        self.assertEqual(credential.inject.hosts, ("api.anthropic.com",))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        # Plain http to the API, so the proxy can attach the real token, and a
+        # stand-in for the one Claude Code needs to believe it's logged in --
+        # which bottle sets per bottle, so it isn't in the image a login runs in.
+        self.assertEqual(claude.container_env["ANTHROPIC_BASE_URL"], "http://api.anthropic.com")
+        self.assertEqual(credential.inject.standin, "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude.container_env)
+
     def test_teamcity_needs_a_server_and_attaches_its_token_there(self) -> None:
         [teamcity] = features.resolve(["teamcity:server=https://ci.corp.example.com"])
         [credential] = teamcity.resolved_credentials()
-        self.assertIsNone(credential.env)  # nothing about it enters the bottle
         self.assertEqual(credential.inject.hosts, ("ci.corp.example.com",))
         self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
         with self.assertRaisesRegex(BottleError, "feature teamcity needs its server option"):
@@ -147,14 +158,14 @@ class LoadTest(FeatureTestCase):
         self.assert_invalid("installsAfter: no feature named 'ghost'", installsAfter=["ghost"])
 
     def credential(self, **spec) -> dict:
-        """customizations for one credential: delivered as TOKEN, unless it says where else it goes."""
-        base = {"description": "A token"} | ({} if "inject" in spec else {"env": "TOKEN"})
+        """customizations for one credential, attached to ci.example.com unless it says otherwise."""
+        base = {"description": "A token", "inject": {"hosts": ["ci.example.com"], "value": "Bearer ${credential}"}}
         return {"bottle": {"credentials": {"tok": {**base, **spec}}}}
 
     def test_credentials(self) -> None:
         self.feature("a", customizations=self.credential(login={"command": ["cli", "login"], "capture": "token: (\\S+)"}))
         [c] = features.load("a").credentials
-        self.assertEqual((c.name, c.env, c.login.command), ("tok", "TOKEN", ("cli", "login")))
+        self.assertEqual((c.name, c.inject.hosts, c.login.command), ("tok", ("ci.example.com",), ("cli", "login")))
 
     def test_credential_without_a_login_flow(self) -> None:
         self.feature("a", customizations=self.credential())
@@ -168,7 +179,6 @@ class LoadTest(FeatureTestCase):
                 "hosts": ["${server}", "*.mirror.example.com"], "value": "token ${credential}", "header": "X-Auth"}),
         )
         [c] = features.load("a").resolved_credentials()
-        self.assertIsNone(c.env)
         self.assertEqual(c.inject.hosts, ("ci.example.com", "*.mirror.example.com"))
         self.assertEqual((c.inject.header, c.inject.value), ("X-Auth", "token ${credential}"))
         [configured] = features.resolve(["a:server=other.example.com"])
@@ -186,11 +196,14 @@ class LoadTest(FeatureTestCase):
         with self.assertRaisesRegex(BottleError, "must be a host, reached over https"):
             plain.resolved_credentials()
 
-    def test_a_credential_goes_to_the_bottle_or_the_proxy_and_not_both(self) -> None:
-        for spec in ({"env": "TOKEN", "inject": {"hosts": ["x"], "value": "Bearer ${credential}"}}, {}):
+    def test_a_credential_belongs_to_hosts_and_never_to_the_bottle(self) -> None:
+        for spec, message in (
+            ({}, "needs inject, the hosts the proxy attaches it to"),
+            ({"env": "TOKEN"}, "unsupported: env"),  # a bottle can't be handed one any more
+        ):
             with self.subTest(spec):
                 self.feature("a", customizations={"bottle": {"credentials": {"tok": {"description": "d", **spec}}}})
-                with self.assertRaisesRegex(BottleError, "needs either env .* or inject .*, not both"):
+                with self.assertRaisesRegex(BottleError, message):
                     features.load("a")
                 __import__("shutil").rmtree(self.root / "a")
 
@@ -252,8 +265,9 @@ class LoadTest(FeatureTestCase):
     def test_credential_validation(self) -> None:
         for spec, message in (
             ({"description": ""}, "needs a description"),
-            ({"env": "1BAD"}, "env must be an environment variable name"),
             ({"file": "/x"}, "unsupported: file"),
+            ({"inject": {"hosts": ["x"], "value": "Bearer ${credential}", "standin": "1BAD"}},
+             "inject.standin must be an environment variable name"),
             ({"login": {"command": ["x"]}}, "login needs exactly command and capture"),
             ({"login": {"command": [], "capture": "(x)"}}, "non-empty list of strings"),
             ({"login": {"command": ["x"], "capture": "no group"}}, "exactly one group"),

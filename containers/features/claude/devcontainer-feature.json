@@ -2,9 +2,10 @@
   "id": "claude",
   "version": "1.0.0",
   "name": "Claude Code",
-  "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle.",
+  "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle, with its subscription token held by the egress proxy rather than the bottle.",
   "containerEnv": {
-    "DISABLE_AUTOUPDATER": "1"
+    "DISABLE_AUTOUPDATER": "1",
+    "ANTHROPIC_BASE_URL": "http://api.anthropic.com"
   },
   "options": {
     "permissionMode": {
@@ -52,7 +53,14 @@
             ],
             "capture": "Your OAuth token[^:]*:(.*?)Store this token"
           },
-          "env": "CLAUDE_CODE_OAUTH_TOKEN"
+          "inject": {
+            "hosts": [
+              "api.anthropic.com"
+            ],
+            "header": "Authorization",
+            "value": "Bearer ${credential}",
+            "standin": "CLAUDE_CODE_OAUTH_TOKEN"
+          }
         }
       }
     }

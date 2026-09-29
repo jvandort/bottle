@@ -7,20 +7,18 @@ the feature's own login command (e.g. `claude setup-token`) in a throwaway
 bottle with that feature, attached to your terminal, and captures the
 credential from its output.
 
-The credentials can be provided to the feature in two ways:
+A credential never enters a bottle. bottled hands it to that bottle's egress
+proxy (injections_for), which attaches it as a header to the bottle's requests
+to the hosts the feature named, on HTTPS connections the Mac makes (see
+egress.py). The agent can spend the credential against those hosts, and can't
+read it -- so a bottle that leaks everything it holds leaks no credential.
 
-  Delivered.  The credential is an environment variable in every bottle whose
-              features declare it, set whenever the bottle starts (env_for).
-              The agent in the bottle can read it. This method should generally
-              be avoided if possible. Prefer Injected credentials.
+What a bottle gets instead is a stand-in (standins_for): a fake token in the
+variable a feature named, because a CLI doesn't know its token is being
+attached for it and won't work until it thinks it's logged in. The throwaway
+bottle a login command runs in gets none, so logging in starts from nothing.
 
-  Injected.   The credential never enters the bottle. bottled hands it to that
-              bottle's egress proxy (injections_for), which attaches it as a
-              header to the bottle's requests to the hosts the feature named,
-              on HTTPS connections the Mac makes (see egress.py). The agent
-              can spend the credential against those hosts, and can't read it.
-
-Either way, a bottle picks up a login or a logout when it next starts.
+A bottle picks up a login or a logout when it next starts.
 """
 
 import getpass
@@ -171,7 +169,7 @@ def run_captured(argv: list[str]) -> str:
     return output
 
 
-# --- delivery -------------------------------------------------------------------
+# --- injection ------------------------------------------------------------------
 
 
 def credentials_for(specs: tuple[str, ...] | list[str]) -> list[features.Credential]:
@@ -194,14 +192,6 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
         login(credential.name)
 
 
-def env_for(specs: tuple[str, ...] | list[str]) -> dict[str, str | None]:
-    """Each delivered credential's variable and its stored value (None if not logged in).
-
-    An injected credential has no variable: nothing about it enters the bottle.
-    """
-    return {c.env: get(c.name) for c in credentials_for(specs) if c.env}
-
-
 def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
     """What the egress proxy attaches for a bottle with these features: one per injected credential.
 
@@ -216,8 +206,6 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
     """
     injections, claimed = [], {}
     for credential in credentials_for(specs):
-        if credential.inject is None:
-            continue
         for host in credential.inject.hosts:
             owner = claimed.setdefault(host.lower(), credential.name)
             if owner != credential.name:
@@ -234,6 +222,17 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
                 value=credential.inject.value.replace(features.CREDENTIAL_PLACEHOLDER, value),
             ))
     return injections
+
+
+def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """The fake tokens a bottle with these features gets, by variable name.
+
+    A stand-in is not a credential and not a secret: it is what makes a tool
+    believe it's logged in, so it will make the request the proxy then
+    authenticates. bottle sets these when it creates a bottle -- but never in
+    the throwaway bottle a login command runs in, which must find nothing.
+    """
+    return {c.inject.standin: features.STANDIN for c in credentials_for(specs) if c.inject.standin}
 
 
 def destination(host: str) -> tuple[str, int]:

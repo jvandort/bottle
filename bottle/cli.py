@@ -230,9 +230,12 @@ def _table(rows: list[tuple[str, ...]]) -> None:
 def _auth_list(args: argparse.Namespace) -> int:
     from bottle import auth
 
-    rows = [("CREDENTIAL", "FEATURE", "STATUS", "GOES TO", "DESCRIPTION")]
+    # Every credential is held by the egress proxy, so what's worth showing is
+    # where it's spent: the hosts it's attached to, as the feature declares
+    # them (${option} is filled in from a bottle's own options).
+    rows = [("CREDENTIAL", "FEATURE", "STATUS", "ATTACHED TO", "DESCRIPTION")]
     rows += [(d.credential.name, d.feature, "set" if is_set else "not set",
-              "the proxy" if d.credential.inject else "the bottle", d.credential.description)
+              ", ".join(d.credential.inject.hosts), d.credential.description)
              for d, is_set in auth.status()]
     _table(rows)
     return 0

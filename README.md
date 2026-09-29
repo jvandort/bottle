@@ -31,10 +31,11 @@ your other projects, or your branches. That's the boundary bottle is built to ho
 it without you watching.
 
 A bottle is **not** a box for a hostile agent. Egress allows any public destination, so anything
-inside a bottle — the repo, and any credential delivered to it — can leave. Treat a bottle's
-contents as the agent's to read and to send: don't put a secret in one you wouldn't hand to the
-agent directly. A credential the egress proxy attaches (see `bottle auth login`) is never in the bottle to
-leave, but the bottle can still spend it against the hosts it's attached to.
+inside a bottle — the repo, and anything you put there — can leave. Treat a bottle's contents as
+the agent's to read and to send: don't put a secret in one you wouldn't hand to the agent
+directly. Credentials bottle itself manages stay out of the bottle: the egress proxy attaches them
+(see `bottle auth login`), so they're never there to leave, though the bottle can still spend them
+against the hosts they're attached to.
 
 ## Quick start
 
@@ -105,22 +106,27 @@ command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
 captures the credential it prints and stores it in the macOS Keychain; a
 credential with no such command is asked for instead.
 
-Where the credential then goes is the feature's choice, and it decides what a
-bottle can read:
+A credential never enters a bottle. bottled hands it to that bottle's egress
+proxy, which attaches it as a header to the bottle's requests to the hosts the
+feature named — `claude` names `api.anthropic.com`, `teamcity` names its
+`server`. The agent can spend the credential against those hosts and can't read
+it, so an agent that sends everything it holds to a stranger sends no token.
 
-- **Delivered**, as an environment variable, to every bottle with that feature,
-  when it next starts. The agent can read it — `claude` works this way.
-- **Injected**, and then the bottle never gets it: bottled hands it to that
-  bottle's egress proxy, which attaches it as a header to the bottle's requests
-  to the hosts the feature named — `teamcity` names its `server`. The agent can
-  spend the credential against those hosts and can't read it.
+Such a host is always reached over HTTPS, by the Mac; the bottle addresses it as
+`http://<host>`, because a CONNECT tunnel is opaque and a header can only be
+attached to a request the proxy can read. That hop is plaintext on the bottle's
+own network, between the bottle and its gateway. The host is also reachable when
+it's a private address, since configuring it is what naming it means; nothing
+else about that host opens up. Pointing a tool at that address is the feature's
+own business, in its `install.sh`.
 
-An injected host is always reached over HTTPS, by the Mac; the bottle addresses
-it as `http://<host>`, because a CONNECT tunnel is opaque and a header can only
-be attached to a request the proxy can read. That hop is plaintext on the
-bottle's own network, between the bottle and its gateway. Such a host is also
-reachable when it's a private address, since configuring it is what naming it
-means; nothing else about that host opens up.
+A CLI doesn't know its token is being attached for it, and usually won't make a
+request until it thinks it's logged in, so a bottle gets a **stand-in**: a fake
+token, never a secret. A feature either writes one itself (`teamcity` puts one
+in the CLI's config file) or names an environment variable for bottle to set in
+every bottle with that feature (`claude` names `CLAUDE_CODE_OAUTH_TOKEN`). The
+throwaway bottle a login command runs in gets none, so `bottle auth login
+claude` starts from nothing rather than from a token that isn't one.
 
 `bottle new`, `shell`, `start` and `reset` log in for you when a bottle's
 features need a credential that isn't set yet.
@@ -162,8 +168,10 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   install breaks. Option: `externallyManaged` (default `false`) keeps the
   marker, and Debian's behaviour, if you'd rather work in a venv.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
-  the bottle's `/workspace` is trusted, first-run setup is done, it's logged in
-  with the `claude` credential (`bottle auth login claude`), and it reads
+  the bottle's `/workspace` is trusted, first-run setup is done, it reaches the
+  API through the egress proxy, which holds the `claude` credential
+  (`bottle auth login claude`) so the agent can spend its own subscription
+  token without ever being able to read it, and it reads
   bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Options:
   `permissionMode` (default `bypassPermissions`: the bottle is the sandbox),
   `theme` (default `dark`), and `tui` (default `default`: `fullscreen` would
@@ -189,8 +197,9 @@ their defaults.
 bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `containerEnv`, `dependsOn` / `installsAfter` naming local features, and
-`customizations.bottle` (the credentials a feature needs and where each one
-goes, and `requiredOptions`, the options a user has to set).
+`customizations.bottle` (the credentials a feature needs, the hosts each one is
+attached to and the stand-in it wants, and `requiredOptions`, the options a user
+has to set).
 Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`
