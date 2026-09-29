@@ -1,10 +1,13 @@
 import argparse
+import logging
 import sys
+import time
 from pathlib import Path
 
-from bottle import repos
+from bottle import repos, store
 from bottle.errors import BottleError
 
+log = logging.getLogger("bottle.cli")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bottle", description="Sandboxed Linux environments for agents.")
@@ -173,11 +176,31 @@ def main(argv: list[str] | None = None) -> int:
     egress.set_defaults(run=_egress, parser=egress)
 
     args = parser.parse_args(argv)
+    store.log_to_file("bottled" if args.run is _daemon_start and args.foreground else "bottle")
+    command = " ".join(sys.argv[1:] if argv is None else argv)
+    log.info("bottle %s", command)
+    started = time.monotonic()
     try:
-        return args.run(args)
+        status = args.run(args)
     except BottleError as e:
+        log.warning("bottle %s: failed after %.1fs: %s", command, time.monotonic() - started, e)
         print(f"bottle: error: {e}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        log.warning("bottle %s: interrupted after %.1fs", command, time.monotonic() - started)
+        raise
+    log.info("bottle %s: exit %s after %.1fs", command, status, time.monotonic() - started)
+    return status
+
+
+def _log_to_stderr(level: int) -> None:
+    """Also show bottle's log records at `level` and up on stderr, as `bottle: ...`."""
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("bottle: %(message)s"))
+    # How the command went is for the file; the terminal already has its output.
+    handler.addFilter(lambda record: record.name != log.name)
+    logging.getLogger("bottle").addHandler(handler)
 
 
 def _repo_add(args: argparse.Namespace) -> int:
@@ -309,12 +332,10 @@ def _delete(args: argparse.Namespace) -> int:
 
 
 def _build(args: argparse.Namespace) -> int:
-    import logging
-
     from bottle import features, images
 
     # Show the proxy's denials and failures; they explain most network errors in a build.
-    logging.basicConfig(level=logging.WARNING, format="bottle: %(message)s")
+    _log_to_stderr(logging.WARNING)
     print(f"Built {features.build(images.BASE, args.feature, args.no_cache)}")
     return 0
 
@@ -371,14 +392,17 @@ def _daemon_stop(args: argparse.Namespace) -> int:
 
 def _daemon_start(args: argparse.Namespace) -> int:
     import asyncio
-    import logging
 
     from bottle import daemon
 
     if not args.foreground:
         print("Started bottled" if daemon.start() else "bottled is already running")
         return 0
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    # It logs to bottled.log; a terminal running it by hand sees that too.
+    if sys.stderr.isatty():
+        _log_to_stderr(logging.INFO)
+    # A crash is logged, stamped, rather than left to a bare traceback on stderr.
+    sys.excepthook = lambda *exc_info: log.critical("bottled crashed", exc_info=exc_info)
     try:
         asyncio.run(daemon.serve())
     except KeyboardInterrupt:
@@ -388,14 +412,16 @@ def _daemon_start(args: argparse.Namespace) -> int:
 
 def _egress(args: argparse.Namespace) -> int:
     import asyncio
-    import logging
 
     from bottle import egress
 
     host, _, port = args.listen.rpartition(":")
     if not host or not port.isdigit():
         args.parser.error(f"--listen must be HOST:PORT, got {args.listen!r}")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    # Run by hand: its connections on stdout, stamped, as well as in bottle.log.
+    stdout = logging.StreamHandler(sys.stdout)
+    stdout.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logging.getLogger().addHandler(stdout)
     policy = egress.Policy(allow_private=tuple(args.allow))
     try:
         asyncio.run(egress.serve(args.name, host.strip("[]"), int(port), policy))

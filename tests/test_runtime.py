@@ -5,6 +5,14 @@ from unittest import mock
 from bottle import runtime
 
 
+class HostHasAddressTest(unittest.TestCase):
+    def test_one_of_this_machines_addresses(self) -> None:
+        self.assertTrue(runtime.host_has_address("127.0.0.1"))
+
+    def test_an_address_no_interface_has(self) -> None:
+        self.assertFalse(runtime.host_has_address("192.0.2.1"))  # TEST-NET-1
+
+
 class ContainerRunTest(unittest.TestCase):
     def test_a_bottle_gets_every_core_and_all_memory(self) -> None:
         with mock.patch.object(runtime, "_run") as run, mock.patch.object(runtime.os, "cpu_count", return_value=12), \

@@ -9,13 +9,13 @@ permissions inside. Take back only the commits you want.
   with everything it needs already installed. Starts in about a second.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through the host. Your
-  working copy, and the rest of your Mac, are never mounted.
+  working copy, and the rest of your machine, are never mounted.
 - **Git in, git out.** The repo is mounted read-only, and each bottle is a git remote you
   fetch from and push to. A bottle writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
-- **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
+- **Network on a leash.** Egress only through a proxy on your machine, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
-- **Credentials that stay on your Mac.** A feature can name the hosts its token belongs to, and
+- **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   the proxy attaches it there. The bottle talks to the proxy and never holds the token.
 - **Composable features.** `tools`, `jvm`, `python`, `claude`, `teamcity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
@@ -26,7 +26,7 @@ permissions inside. Take back only the commits you want.
 ## What a bottle is for
 
 A bottle contains an agent's **mistakes**. A stray `rm -rf`, a bad merge, a build script that
-rewrites a home directory, an agent that wanders out of its repo: none of it reaches your Mac,
+rewrites a home directory, an agent that wanders out of its repo: none of it reaches your machine,
 your other projects, or your branches. That's the boundary bottle is built to hold, and it holds
 it without you watching.
 
@@ -112,7 +112,7 @@ feature named — `claude` names `api.anthropic.com`, `teamcity` names its
 `server`. The agent can spend the credential against those hosts and can't read
 it, so an agent that sends everything it holds to a stranger sends no token.
 
-Such a host is always reached over HTTPS, by the Mac; the bottle addresses it as
+Such a host is always reached over HTTPS, by the machine; the bottle addresses it as
 `http://<host>`, because a CONNECT tunnel is opaque and a header can only be
 attached to a request the proxy can read. That hop is plaintext on the bottle's
 own network, between the bottle and its gateway. The host is also reachable when

@@ -9,7 +9,7 @@ credential from its output.
 
 A credential never enters a bottle. bottled hands it to that bottle's egress
 proxy (injections_for), which attaches it as a header to the bottle's requests
-to the hosts the feature named, on HTTPS connections the Mac makes (see
+to the hosts the feature named, on HTTPS connections the machine makes (see
 egress.py). The agent can spend the credential against those hosts, and can't
 read it -- so a bottle that leaks everything it holds leaks no credential.
 
@@ -23,6 +23,7 @@ A bottle picks up a login or a logout when it next starts.
 
 import getpass
 import hashlib
+import logging
 import os
 import pty
 import re
@@ -34,6 +35,8 @@ from pathlib import Path
 from bottle import egress, features
 from bottle.errors import BottleError
 from bottle.store import bottle_home
+
+log = logging.getLogger("bottle.auth")
 
 HTTPS_PORT = 443
 
@@ -94,6 +97,7 @@ def put(name: str, value: str) -> None:
     result = subprocess.run(["security", "-i"], input=command, capture_output=True, text=True)
     if result.returncode != 0 or "error" in result.stderr.lower() or get(name) != value:
         raise BottleError(f"couldn't store {name} in the Keychain: {result.stderr.strip() or 'unknown error'}")
+    log.info("credential %s stored", name)
 
 
 def delete(name: str) -> bool:
@@ -101,6 +105,8 @@ def delete(name: str) -> bool:
     result = subprocess.run(
         ["security", "delete-generic-password", "-s", _service(), "-a", name], capture_output=True, text=True
     )
+    if result.returncode == 0:
+        log.info("credential %s removed", name)
     return result.returncode == 0
 
 

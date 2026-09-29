@@ -57,7 +57,7 @@ class Policy:
         """Whether the bottle may reach `host` at `ip`.
 
         `private` is for a destination a credential names (see Injection): the
-        host was configured on the Mac, so a private address is expected. The
+        host was configured on the machine, so a private address is expected. The
         host's own addresses are still refused.
         """
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
@@ -74,15 +74,15 @@ class Injection:
     """A credential the host attaches on the bottle's behalf, for one host.
 
     A feature declares which hosts its credential belongs to (see
-    features.py); bottled looks the credential up on the Mac and builds these
+    features.py); bottled looks the credential up on the machine and builds these
     per bottle, so the token itself stays outside the bottle.
 
     The bottle addresses an injected host over plain HTTP, because a CONNECT
     tunnel is opaque and a header can only be attached to a request the proxy
     can read. The proxy always reaches the server over TLS, so a credential
     never travels in the clear beyond the bottle's own network: that hop is
-    between the bottle and its gateway on the Mac, and the request that leaves
-    the Mac is the ordinary HTTPS one the server expects.
+    between the bottle and its gateway on the machine, and the request that leaves
+    the machine is the ordinary HTTPS one the server expects.
 
     An injected host is also reachable where the policy would otherwise refuse
     a private address, since naming the host is what configuring the
@@ -148,6 +148,8 @@ class EgressProxy:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         started = time.monotonic()
         request, ip, up, down = None, None, [0], [0]
+        # The start of a plain-HTTP response, for its status line in the log.
+        response = bytearray()
         outcome = "ok"
         upstream_writer = None
         try:
@@ -162,7 +164,8 @@ class EgressProxy:
             else:
                 upstream_writer.write(request.upstream_head)
                 up[0] += len(request.upstream_head)
-            await _relay(reader, writer, upstream_reader, upstream_writer, up, down)
+            await _relay(reader, writer, upstream_reader, upstream_writer, up, down,
+                         response if request.upstream_head is not None else None)
         except Refused as e:
             outcome = e.outcome
             await _respond(writer, e.status, e.reason)
@@ -173,11 +176,15 @@ class EgressProxy:
             for w in (upstream_writer, writer):
                 if w is not None:
                     w.close()
-            target = f"{request.method} {request.host}:{request.port}" if request else "-"
+            target = f"{request.method} {request.host}:{request.port}{request.path}" if request else "-"
+            if request is not None and request.injected:
+                target += " +credential"
+            status = _status(response)
             log.log(
                 logging.INFO if outcome == "ok" else logging.WARNING,
-                "%s %s -> %s %s up=%d down=%d %.2fs",
-                self.name, target, ip or "-", outcome, up[0], down[0], time.monotonic() - started,
+                "%s %s -> %s %s%s up=%d down=%d %.2fs",
+                self.name, target, ip or "-", outcome, f" {status}" if status else "",
+                up[0], down[0], time.monotonic() - started,
             )
 
     async def _host(self, request: Request, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
@@ -250,7 +257,7 @@ class EgressProxy:
         allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a), private=request.injected)]
         if not allowed:
             raise Refused(403, "Forbidden: destination not allowed", "denied")
-        # The Mac's end of an injected request is always TLS: a credential is
+        # The machine's end of an injected request is always TLS: a credential is
         # never put on a request that leaves here in the clear.
         context = _tls_context() if request.injected else None
         for address in allowed:
@@ -267,7 +274,7 @@ class EgressProxy:
 
 @functools.cache
 def _tls_context() -> ssl.SSLContext:
-    """Verifying TLS with the Mac's trusted roots, for the host end of an injected request."""
+    """Verifying TLS with the machine's trusted roots, for the host end of an injected request."""
     return ssl.create_default_context()
 
 
@@ -276,22 +283,30 @@ async def _resolve(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in infos))
 
 
-async def _relay(client_r, client_w, upstream_r, upstream_w, up: list[int], down: list[int]) -> None:
+async def _relay(
+    client_r, client_w, upstream_r, upstream_w, up: list[int], down: list[int], response: bytearray | None = None,
+) -> None:
     """Copy both ways until the upstream is done.
 
     The client finishing only half-closes the upstream (it may still be
-    answering); the upstream finishing ends the exchange.
+    answering); the upstream finishing ends the exchange. `response`, if
+    given, collects the start of what the upstream sends.
     """
     sending = asyncio.create_task(_pipe(client_r, upstream_w, up))
     try:
-        await _pipe(upstream_r, client_w, down)
+        await _pipe(upstream_r, client_w, down, response)
     finally:
         sending.cancel()
 
 
-async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, count: list[int]) -> None:
+STATUS_PEEK = 256
+
+
+async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, count: list[int], start: bytearray | None = None) -> None:
     try:
         while data := await src.read(64 * 1024):
+            if start is not None and len(start) < STATUS_PEEK:
+                start += data[:STATUS_PEEK - len(start)]
             dst.write(data)
             await dst.drain()
             count[0] += len(data)
@@ -299,6 +314,26 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, count: lis
             dst.write_eof()
     except (ConnectionError, OSError):
         pass
+
+
+def _status(response: bytes) -> str | None:
+    """The status code of an HTTP response that starts with `response`, e.g. "401".
+
+    Interim responses (100 Continue) are skipped for the final one, when it's
+    within what was collected.
+    """
+    status, rest = None, bytes(response)
+    while rest:
+        line, _, _ = rest.partition(b"\r\n")
+        parts = line.split(b" ")
+        if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+            break
+        status = parts[1].decode()
+        head_end = rest.find(b"\r\n\r\n")
+        if not status.startswith("1") or head_end < 0:
+            break
+        rest = rest[head_end + 4:]
+    return status
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, reason: str) -> None:

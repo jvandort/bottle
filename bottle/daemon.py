@@ -20,7 +20,7 @@ from pathlib import Path
 from bottle import auth, egress, runtime
 from bottle.host import HostServices
 from bottle.errors import BottleError
-from bottle.store import bottle_home
+from bottle.store import bottle_home, log_path, open_log
 
 log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
@@ -41,10 +41,6 @@ def socket_path() -> Path:
     # A deep BOTTLE_HOME: use a short per-user directory, keyed by BOTTLE_HOME.
     key = hashlib.sha256(str(bottle_home()).encode()).hexdigest()[:16]
     return Path(f"/tmp/bottle-{os.getuid()}/{key}.sock")
-
-
-def log_path() -> Path:
-    return bottle_home() / "logs" / "bottled.log"
 
 
 # --- client -------------------------------------------------------------------
@@ -84,6 +80,7 @@ def stop() -> bool:
     """Stop the daemon and every egress it serves. False if it wasn't running."""
     try:
         reply = _send({"op": "shutdown"})
+        log.info("asked bottled to stop")
     except (FileNotFoundError, ConnectionRefusedError):
         return False
     if not reply.get("ok"):
@@ -113,9 +110,10 @@ def _send(message: dict) -> dict:
 
 
 def _start_daemon() -> None:
-    log_path().parent.mkdir(parents=True, exist_ok=True)
+    log.info("starting bottled")
     launcher = Path(__file__).resolve().parent.parent / "bin" / "bottle"
-    with open(log_path(), "a") as out:
+    # Its own records go to the log through logging, stamped; this catches anything else it prints.
+    with os.fdopen(open_log("bottled"), "a") as out:
         # A new session detaches it from this terminal, so it outlives the command.
         subprocess.Popen(
             [sys.executable, str(launcher), "daemon", "start", "--foreground"],
@@ -128,7 +126,7 @@ def _start_daemon() -> None:
             return
         except (FileNotFoundError, ConnectionRefusedError):
             time.sleep(0.05)
-    raise BottleError(f"bottled didn't start; see {log_path()}")
+    raise BottleError(f"bottled didn't start; see {log_path('bottled')}")
 
 
 # --- server -------------------------------------------------------------------
@@ -172,6 +170,7 @@ class Daemon:
                     await self.release(message["bottle"])
                     reply = {"ok": True}
                 case "shutdown":
+                    log.info("shutdown requested")
                     self.stopping.set()
                     reply = {"ok": True}
                 case op:
@@ -206,7 +205,13 @@ class Daemon:
             proxy = egress.EgressProxy(bottle, self.policy, services=services, injections=injections)
             server = await proxy.start(gateway, self.port)
         except OSError as e:
-            raise BottleError(f"can't serve {bottle}'s egress on {gateway}:{self.port}: {e.strerror}") from None
+            if not await asyncio.to_thread(runtime.host_has_address, gateway):
+                # asyncio reports this as a bare OSError, with no strerror.
+                raise BottleError(
+                    f"can't serve {bottle}'s egress: this machine has no address {gateway} on {network}, so its bridge "
+                    f"is gone; restart the bottle with `bottle stop {bottle}` and `bottle start {bottle}`"
+                ) from None
+            raise BottleError(f"can't serve {bottle}'s egress on {gateway}:{self.port}: {e.strerror or e}") from None
         self.proxies[bottle] = (serving, server)
         log.info("%s: egress on %s:%d", bottle, gateway, self.port)
         return proxy_url(gateway, self.port)

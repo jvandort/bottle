@@ -18,6 +18,7 @@ its commits (after git's grace periods, weeks to months), that checkout breaks
 and `bottle reset` starts the bottle over.
 """
 
+import logging
 import shlex
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from bottle import auth, daemon, features as features_, host, images, prereqs, r
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
+
+log = logging.getLogger("bottle.bottles")
 
 OBJECTS_MOUNT = "/mnt/repo/objects"
 WORKSPACE = "/workspace"
@@ -181,6 +184,7 @@ def create(
         _run_container(bottle, repo, tag)
         register_remote(repo, bottle)  # so the repo can fetch what the bottle pushes
     except BaseException as failure:
+        log.warning("%s: creating failed, rolling back: %s", bottle.name, _describe(failure))
         try:
             delete(bottle.name, force=True, keep_image=True)
         except Exception as cleanup:
@@ -188,6 +192,8 @@ def create(
         raise
     bottle = replace(bottle, status="ready")
     _save(bottle)
+    log.info("%s: created from %s at %s (%s), features %s, network %s",
+             name, repo.name, start.branch, start.commit[:12], ", ".join(installed) or "none", bottle.network)
     return bottle
 
 
@@ -232,6 +238,7 @@ def throwaway(feature_specs: list[str]):
     tag = features_.ensure_built(images.BASE, feature_specs)
     token = uuid.uuid4().hex[:12]
     name = f"bottle-throwaway-{token}"
+    log.info("%s: throwaway bottle with %s", name, ", ".join(feature_specs) or "no features")
     try:
         runtime.network_create(name, {runtime.OWNER_LABEL: token})
         proxy = daemon.proxy_url(runtime.network_gateway(name), daemon.EGRESS_PORT)
@@ -247,7 +254,9 @@ def throwaway(feature_specs: list[str]):
             try:
                 cleanup()
             except Exception as e:
+                log.warning("%s: cleaning up: %s", name, e)
                 print(f"bottle: cleaning up {name}: {e}", file=sys.stderr)
+        log.info("%s: throwaway bottle removed", name)
 
 
 def reset(name: str, force: bool = False) -> Bottle:
@@ -279,9 +288,12 @@ def reset(name: str, force: bool = False) -> Bottle:
         _run_container(fresh, repo, tag)
         register_remote(repo, fresh)  # also repairs a bottle made before its repo had lanes
     except BottleError as e:
+        log.warning("%s: resetting failed: %s", name, e)
         raise BottleError(f"resetting {name} failed: {e}; rerun `bottle reset {name}`, or delete it") from None
     fresh = replace(fresh, status="ready")
     _save(fresh)
+    log.info("%s: reset to %s at %s (%s), features %s",
+             name, repo.name, start.branch, start.commit[:12], ", ".join(installed) or "none")
     if set(installed) != set(bottle.features):
         _delete_image(bottle)  # the old features' image, unless another bottle uses it
     return fresh
@@ -457,6 +469,7 @@ def stop(name: str) -> None:
     daemon.release_egress(bottle.name)
     if runtime.container_state(bottle.container) == "running":
         runtime.container_stop(bottle.container)
+        log.info("%s: stopped", name)
 
 
 def shutdown() -> tuple[list[str], bool]:
@@ -465,6 +478,7 @@ def shutdown() -> tuple[list[str], bool]:
     for bottle in load().values():
         if runtime.container_state(bottle.container) == "running":
             runtime.container_stop(bottle.container)
+            log.info("%s: stopped (shutdown)", bottle.name)
             stopped.append(bottle.name)
     return stopped, daemon.stop()
 
@@ -477,9 +491,17 @@ def ensure_running(name: str) -> Bottle:
     state = runtime.container_state(bottle.container)
     if state is None:
         raise BottleError(f"{name}'s container is gone; recreate it with `bottle reset {name}`, or `bottle delete {name}`")
+    if state == "running" and not runtime.host_has_address(runtime.network_gateway(bottle.network)):
+        # Running but cut off: its network's bridge is gone. Restarting the VM brings it back.
+        log.warning("%s: running, but this machine has no address on %s (its bridge is gone); restarting", name, bottle.network)
+        print(f"bottle: {name}'s network lost its bridge on this machine; restarting {name}...", file=sys.stderr)
+        daemon.release_egress(bottle.name)
+        runtime.container_stop(bottle.container)
+        state = "stopped"
     if state != "running":
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
+        log.info("%s: started", name)
         verify_contract(bottle)
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     return bottle
@@ -664,9 +686,11 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
         except Exception as e:  # keep going: clean up every part we can
             failures.append(f"{step}: {e}")
     if failures:
+        log.warning("%s: deleting left parts behind: %s", name, "; ".join(failures))
         _save(replace(bottle, status="broken"))
         raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `bottle delete {name}`")
     _forget(name)
+    log.info("%s: deleted", name)
     if not keep_image:
         _delete_image(bottle)
 

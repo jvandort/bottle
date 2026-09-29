@@ -21,7 +21,7 @@ rm -rf /var/lib/apt/lists/*
 #   ANTHROPIC_BASE_URL (containerEnv) is the API's host over plain http,
 #   because that is what the bottle must send for the egress proxy to be able
 #   to attach the subscription token (see bottle/egress.py). The proxy makes
-#   the HTTPS connection to api.anthropic.com itself, from the Mac.
+#   the HTTPS connection to api.anthropic.com itself, from the machine.
 #
 #   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
 #   a fake token there when it creates a bottle -- and nowhere in the image, so

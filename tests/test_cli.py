@@ -1,5 +1,7 @@
 import contextlib
 import io
+import logging
+import sys
 import unittest
 from unittest import mock
 
@@ -54,6 +56,40 @@ class WrapCommandTest(GitTestCase):
         self.assertEqual(code, 2)
         self.assertIn("takes [NAME] PATH", err)
 
+
+class LogTest(WrapCommandTest):
+    def log(self) -> str:
+        return (self.bottle_home / "logs" / "bottle.log").read_text()
+
+    def test_each_command_and_how_it_went_are_logged(self) -> None:
+        repo = self.make_repo()
+        self.run_cli("repo", "add", str(repo))
+        self.run_cli("repo", "add", str(self.tmp / "nope"))
+        log = self.log()
+        self.assertRegex(log, rf"\d+ bottle.cli bottle repo add {repo}\n")
+        self.assertRegex(log, rf"bottle repo add {repo}: exit 0 after [\d.]+s")
+        self.assertRegex(log, rf"bottle repo add {self.tmp / 'nope'}: failed after [\d.]+s: .* is not a directory")
+
+    def test_the_daemon_logs_to_its_own_file(self) -> None:
+        with mock.patch("bottle.daemon.serve", new=mock.AsyncMock()), mock.patch.object(sys, "excepthook"):
+            self.run_cli("daemon", "start", "--foreground")
+        bottled = (self.bottle_home / "logs" / "bottled.log").read_text()
+        self.assertRegex(bottled, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ \d+ bottle.cli bottle daemon start --foreground\n")
+        self.assertFalse((self.bottle_home / "logs" / "bottle.log").exists())
+
+    def test_python_and_asyncio_reports_are_stamped_too(self) -> None:
+        self.run_cli("repo", "list")
+        logging.getLogger("asyncio").warning("Task was destroyed but it is pending!")
+        self.assertRegex(self.log(), r"\n\d{4}-\d\d-\d\d [\d:,]+ \d+ asyncio Task was destroyed")
+
+    def test_only_the_owner_can_read_the_log_or_list_bottle_home(self) -> None:
+        self.bottle_home.mkdir(mode=0o755)
+        (self.bottle_home / "logs").mkdir(mode=0o755)
+        (self.bottle_home / "logs" / "bottle.log").touch(mode=0o644)
+        self.run_cli("repo", "list")
+        for path, mode in ((self.bottle_home, 0o700), (self.bottle_home / "logs", 0o700),
+                           (self.bottle_home / "logs" / "bottle.log", 0o600)):
+            self.assertEqual(path.stat().st_mode & 0o777, mode, path)
 
 
 class BuildCommandTest(unittest.TestCase):

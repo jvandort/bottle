@@ -1,8 +1,10 @@
 """The container runtime (apple/container). All `container` invocations live here."""
 
 import asyncio
+import errno
 import json
 import os
+import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,22 @@ def network_gateway(network: str = "default") -> str:
     """The host's address on `network`, where bottle serves the network's egress proxy."""
     [info] = json.loads(_run("network", "inspect", network))
     return info["status"]["ipv4Gateway"]
+
+
+def host_has_address(address: str) -> bool:
+    """Whether `address` is one of this machine's own, i.e. a network's bridge is up with its gateway.
+
+    apple/container can lose a network's bridge while its containers keep
+    running and the network still reports the gateway; they're then cut off.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.bind((address, 0))
+        except OSError as e:
+            if e.errno == errno.EADDRNOTAVAIL:
+                return False
+            raise
+    return True
 
 
 def image_exists(image: str) -> bool:
@@ -105,7 +123,7 @@ def container_run(
 ) -> None:
     """Create and start a detached container running the image's default command.
 
-    It gets the whole Mac: every CPU core and all of its memory. The VM only
+    It gets the whole machine: every CPU core and all of its memory. The VM only
     takes memory from the host as the guest uses it, so this costs nothing up
     front, but memory the guest has used isn't given back until it stops.
     """
@@ -120,7 +138,7 @@ def container_run(
 
 
 def host_resources() -> tuple[int, str]:
-    """The Mac's CPU cores and memory, as `container run --cpus` and `--memory` values."""
+    """The machine's CPU cores and memory, as `container run --cpus` and `--memory` values."""
     memsize = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True).stdout)
     return os.cpu_count() or 1, f"{memsize // (1024 * 1024)}M"
 
