@@ -277,13 +277,20 @@ class Repo:
             f"To get back:  git switch {short(session.working)} && curate review")
 
     def recover(self) -> None:
-        """Re-anchor on HEAD after being moved out, if HEAD names a session.
+        """Anchor on HEAD: it is the one thing here git keeps honest.
+
+        Whichever review HEAD names is the review, and which of its two
+        branches it names is the mode. That covers both being moved out from
+        under a review and coming back to one afterwards, so a branch is never
+        a place curate refuses to work.
 
         The checkout itself is survivable; renaming an index file blindly
-        afterwards is not. So we work out which mode HEAD actually implies and
-        throw away whatever index file that makes stale.
+        afterwards is not. So we throw away whatever index file HEAD's own mode
+        makes stale.
         """
-        if self.consistent():
+        active = self.session()
+        expected = self.expected_head(active)
+        if active is not None and (expected is None or self.head == expected):
             return
         head = self.head
         for session in self.sessions():
@@ -299,9 +306,20 @@ class Repo:
             if not session.index("review" if mode == "write" else "write").exists():
                 session.rebuild("review" if mode == "write" else "write")
             self.set_state(mode, session)
-            print(f"curate: recovered; HEAD is {named(head)}, so this is {mode} mode.",
-                  file=sys.stderr)
+            if active is not None:
+                # Not worth saying when nothing was active: HEAD arriving on a
+                # review's branch is how you get back to one, not an incident.
+                print(f"curate: recovered; HEAD is {named(head)}, so this is "
+                      f"{mode} mode.", file=sys.stderr)
             return
+        if active is not None and self.mode != "review":
+            # HEAD names no review at all. In write mode that is an ordinary
+            # branch switch, which the README asks for before leaving: the live
+            # index was git's own and moved with HEAD, while the approved set
+            # stayed parked in index.review and in the ref. Nothing is at risk,
+            # so stand down rather than refuse -- HEAD returning to the working
+            # line picks the review up again, above.
+            self.set_state("write", None)
 
 
 def review_complete() -> bool:

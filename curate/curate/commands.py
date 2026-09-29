@@ -53,6 +53,9 @@ def problems(repo: Repo) -> list[str]:
 
 def cmd_status(repo: Repo, argv: list[str]) -> int:
     porcelain = "--porcelain" in argv
+    # Re-anchor first, like every other command: a report that says `away`
+    # about a branch switch curate has already absorbed is a false alarm.
+    repo.recover()
     wrong = problems(repo)
     session = repo.session()
     consistent = repo.consistent()
