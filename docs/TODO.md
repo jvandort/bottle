@@ -99,8 +99,15 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   proxy port.
 - **Build-time egress exposure.** During `bottle build`, the temporary proxy
   on the default network is usable by any container on that network.
-- **Credentials via the proxy.** Inject API keys and tokens as request
-  headers at the egress proxy, so they never enter a bottle.
+- **Credentials via the proxy: what's left.** Features can now name the hosts
+  a credential belongs to and have the egress proxy attach it (the `teamcity`
+  feature does), but it only works for a tool that can be pointed at a plain
+  `http://` address, since a CONNECT tunnel is opaque. A proxy that terminated
+  TLS for named hosts (a CA generated per Mac, trusted in the bottle) would
+  cover tools that insist on https, and would end the bottle-side plaintext
+  hop. Also: a bottle picks up a re-login only when it next starts, and an
+  injected host is allowed even when private, which is wider than the
+  `--allow` list it bypasses.
 
 ## Host commands for the genie
 
@@ -141,9 +148,11 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 - **Open login URLs on the host.** A `$BROWSER` script in the base image that
   asks bottled (e.g. via `http://bottle.host/open?url=...` through the egress
   proxy) to `open` the URL on the Mac, so `bottle auth login` needs no copying.
-- **Keep credentials out of bottles.** Today a delivered credential is readable
-  by the agent. Deliver a stand-in instead and have bottled add the real one
-  (see credentials via the proxy).
+- **Claude's token via the proxy.** Claude Code reads `ANTHROPIC_BASE_URL`, so
+  the `claude` feature could declare its credential injected at
+  `api.anthropic.com` the way `teamcity` does, and stop delivering a token to
+  the bottle at all. Worth checking what else the CLI talks to (statsig,
+  Sentry, the updater) and whether its own auth flow copes.
 - **Leftover throwaway bottles.** `bottle auth login` removes its throwaway
   bottle on exit, even when interrupted, but not if bottle itself is killed;
   clean up `bottle-throwaway-*` containers and networks.

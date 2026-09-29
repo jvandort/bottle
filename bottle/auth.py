@@ -1,15 +1,26 @@
-"""Credentials: logged in to once on the host, delivered to the bottles that need them.
+"""Credentials: logged in to once on the host, and used by the bottles that need them.
 
 Features declare the credentials they need (customizations.bottle.credentials
-in their devcontainer-feature.json): a name, how to log in, and the
-environment variable it's delivered as. bottle stores each credential in the
-macOS Keychain and delivers it to every bottle whose features declare it,
-whenever the bottle starts.
+in their devcontainer-feature.json): a name, how to log in, and where the
+credential goes. bottle stores each one in the macOS Keychain. Logging in runs
+the feature's own login command (e.g. `claude setup-token`) in a throwaway
+bottle with that feature, attached to your terminal, and captures the
+credential from its output.
 
-Logging in runs the feature's own login command (e.g. `claude setup-token`) in
-a throwaway bottle with that feature, attached to your terminal, and captures
-the credential from its output. The agent in a bottle can read a credential
-delivered to it.
+The credentials can be provided to the feature in two ways:
+
+  Delivered.  The credential is an environment variable in every bottle whose
+              features declare it, set whenever the bottle starts (env_for).
+              The agent in the bottle can read it. This method should generally
+              be avoided if possible. Prefer Injected credentials.
+
+  Injected.   The credential never enters the bottle. bottled hands it to that
+              bottle's egress proxy (injections_for), which attaches it as a
+              header to the bottle's requests to the hosts the feature named,
+              on HTTPS connections the Mac makes (see egress.py). The agent
+              can spend the credential against those hosts, and can't read it.
+
+Either way, a bottle picks up a login or a logout when it next starts.
 """
 
 import getpass
@@ -22,9 +33,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from bottle import features
+from bottle import egress, features
 from bottle.errors import BottleError
 from bottle.store import bottle_home
+
+HTTPS_PORT = 443
 
 # Terminal escape codes: colors, cursor movement, window titles.
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78DEHM]")
@@ -162,8 +175,8 @@ def run_captured(argv: list[str]) -> str:
 
 
 def credentials_for(specs: tuple[str, ...] | list[str]) -> list[features.Credential]:
-    """The credentials a bottle with these features gets."""
-    return [c for f in features.resolve(list(specs)) for c in f.credentials]
+    """The credentials a bottle with these features gets, with their features' options filled in."""
+    return [c for f in features.resolve(list(specs)) for c in f.resolved_credentials()]
 
 
 def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
@@ -182,5 +195,55 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
 
 
 def env_for(specs: tuple[str, ...] | list[str]) -> dict[str, str | None]:
-    """Each credential's variable and its stored value (None if not logged in)."""
-    return {c.env: get(c.name) for c in credentials_for(specs)}
+    """Each delivered credential's variable and its stored value (None if not logged in).
+
+    An injected credential has no variable: nothing about it enters the bottle.
+    """
+    return {c.env: get(c.name) for c in credentials_for(specs) if c.env}
+
+
+def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
+    """What the egress proxy attaches for a bottle with these features: one per injected credential.
+
+    Read from the Keychain here, in bottled, so the value goes no further than
+    the proxy. A credential that isn't logged in is left out; the bottle then
+    reaches the host unauthenticated, and the server says so.
+
+    A request to a host that several patterns match is served by the first
+    credential that claims it, in the features' install order. Two credentials
+    claiming the same host is a mistake in the features, and is refused here
+    rather than resolved arbitrarily.
+    """
+    injections, claimed = [], {}
+    for credential in credentials_for(specs):
+        if credential.inject is None:
+            continue
+        for host in credential.inject.hosts:
+            owner = claimed.setdefault(host.lower(), credential.name)
+            if owner != credential.name:
+                raise BottleError(f"credentials {owner!r} and {credential.name!r} both claim {host}")
+        value = get(credential.name)
+        if value is None:
+            continue
+        for host in credential.inject.hosts:
+            pattern, port = destination(host)
+            injections.append(egress.Injection(
+                host=pattern,
+                port=port,
+                header=credential.inject.header,
+                value=credential.inject.value.replace(features.CREDENTIAL_PLACEHOLDER, value),
+            ))
+    return injections
+
+
+def destination(host: str) -> tuple[str, int]:
+    """One of inject.hosts as a host pattern and a port: `example.com` or `example.com:8111`.
+
+    Always https, so the port is 443 unless the host names another one.
+    """
+    pattern, _, port = host.rpartition(":")
+    if not pattern:
+        return host, HTTPS_PORT
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise BottleError(f"{host!r} isn't a host for a credential: a host or a host:port")
+    return pattern, int(port)

@@ -1,0 +1,47 @@
+{
+  "id": "teamcity",
+  "version": "1.0.0",
+  "name": "TeamCity CLI",
+  "description": "JetBrains' TeamCity CLI, authenticated by the egress proxy: the bottle talks to its server without ever holding the token.",
+  "documentationURL": "https://www.jetbrains.com/help/teamcity/teamcity-cli.html",
+  "containerEnv": {
+    "TEAMCITY_NO_UPDATE": "1",
+    "TC_INSECURE_SKIP_WARN": "1"
+  },
+  "options": {
+    "server": {
+      "type": "string",
+      "default": "",
+      "description": "The TeamCity server, e.g. https://teamcity.example.com. Required: it's the host the access token is attached to, and the one the CLI talks to."
+    },
+    "version": {
+      "type": "string",
+      "default": "1.5.0",
+      "description": "The CLI release to install. This feature holds the checksums for the default; another version's are fetched from its own release."
+    },
+    "readOnly": {
+      "type": "boolean",
+      "default": true,
+      "description": "Block everything but GET requests (the CLI's own read-only mode), so a bottle can look at builds but not start or change anything."
+    }
+  },
+  "customizations": {
+    "bottle": {
+      "requiredOptions": [
+        "server"
+      ],
+      "credentials": {
+        "teamcity": {
+          "description": "TeamCity access token, from your profile page (Access Tokens)",
+          "inject": {
+            "hosts": [
+              "${server}"
+            ],
+            "header": "Authorization",
+            "value": "Bearer ${credential}"
+          }
+        }
+      }
+    }
+  }
+}

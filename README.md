@@ -15,7 +15,9 @@ permissions inside. Take back only the commits you want.
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
 - **Network on a leash.** Egress only through a proxy on your Mac, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
-- **Composable features.** `tools`, `jvm`, `python`, `claude`, in the
+- **Credentials that stay on your Mac.** A feature can name the hosts its token belongs to, and
+  the proxy attaches it there. The bottle talks to the proxy and never holds the token.
+- **Composable features.** `tools`, `jvm`, `python`, `claude`, `teamcity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
   defaults. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -31,7 +33,8 @@ it without you watching.
 A bottle is **not** a box for a hostile agent. Egress allows any public destination, so anything
 inside a bottle — the repo, and any credential delivered to it — can leave. Treat a bottle's
 contents as the agent's to read and to send: don't put a secret in one you wouldn't hand to the
-agent directly.
+agent directly. A credential the egress proxy attaches (see `bottle auth login`) is never in the bottle to
+leave, but the bottle can still spend it against the hosts it's attached to.
 
 ## Quick start
 
@@ -96,17 +99,35 @@ Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 ### `bottle auth login CREDENTIAL`
 
 Logs in once, for every bottle. Features declare the credentials they need (the
-`claude` feature needs `claude`, a Claude subscription token). `login` runs the
-feature's own login command (`claude setup-token`) in a throwaway bottle,
-attached to your terminal, captures the credential it prints and stores it in
-the macOS Keychain. Every bottle with that feature gets it, as an environment
-variable, when it next starts. The agent can read a credential delivered to it.
+`claude` feature needs `claude`, a Claude subscription token; the `teamcity`
+feature needs `teamcity`, an access token). `login` runs the feature's own login
+command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
+captures the credential it prints and stores it in the macOS Keychain; a
+credential with no such command is asked for instead.
+
+Where the credential then goes is the feature's choice, and it decides what a
+bottle can read:
+
+- **Delivered**, as an environment variable, to every bottle with that feature,
+  when it next starts. The agent can read it — `claude` works this way.
+- **Injected**, and then the bottle never gets it: bottled hands it to that
+  bottle's egress proxy, which attaches it as a header to the bottle's requests
+  to the hosts the feature named — `teamcity` names its `server`. The agent can
+  spend the credential against those hosts and can't read it.
+
+An injected host is always reached over HTTPS, by the Mac; the bottle addresses
+it as `http://<host>`, because a CONNECT tunnel is opaque and a header can only
+be attached to a request the proxy can read. That hop is plaintext on the
+bottle's own network, between the bottle and its gateway. Such a host is also
+reachable when it's a private address, since configuring it is what naming it
+means; nothing else about that host opens up.
 
 `bottle new`, `shell`, `start` and `reset` log in for you when a bottle's
 features need a credential that isn't set yet.
 
 ```sh
 bottle auth login claude
+bottle auth login teamcity
 ```
 
 ### `bottle auth list` / `bottle auth set CREDENTIAL` / `bottle auth logout CREDENTIAL`
@@ -147,6 +168,19 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `permissionMode` (default `bypassPermissions`: the bottle is the sandbox),
   `theme` (default `dark`), and `tui` (default `default`: `fullscreen` would
   capture the mouse, and a bottle has no clipboard to copy to instead).
+- `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
+  pinned and checksum-verified from its GitHub release, with its access token
+  held by the egress proxy rather than the bottle (see `bottle auth login`).
+  Options: `server` (required), the TeamCity server, e.g.
+  `https://teamcity.example.com`; `version`, the CLI release; and `readOnly`
+  (default `true`), which blocks everything but GET, so a bottle can read
+  builds but not start or change anything; pass `readOnly=false` to let it
+  start them. A token with read-only permissions is the real boundary.
+
+  ```sh
+  bottle new reponame --feature tools --feature teamcity:server=https://teamcity.example.com
+  bottle exec reponame -- teamcity run list
+  ```
 
 A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.
 `--feature jvm:version=21,additionalVersions=17,11`. Options left out take
@@ -155,7 +189,8 @@ their defaults.
 bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `containerEnv`, `dependsOn` / `installsAfter` naming local features, and
-`customizations.bottle` (credentials the feature needs).
+`customizations.bottle` (the credentials a feature needs and where each one
+goes, and `requiredOptions`, the options a user has to set).
 Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`

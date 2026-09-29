@@ -216,7 +216,7 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     )
     verify_contract(bottle)
     # The gateway only exists once the container is on the network, so egress comes second.
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle))
+    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     _init_workspace(bottle)
     deliver_credentials(bottle)
 
@@ -253,7 +253,7 @@ def throwaway(feature_specs: list[str]):
         runtime.network_create(name, {runtime.OWNER_LABEL: token})
         proxy = daemon.proxy_url(runtime.network_gateway(name), daemon.EGRESS_PORT)
         runtime.container_run(name, tag, name, env=_proxy_env(proxy), mounts=[], labels={runtime.OWNER_LABEL: token})
-        daemon.ensure_egress(name, name)
+        daemon.ensure_egress(name, name, features=feature_specs)
         yield lambda argv: runtime.exec_command(name, argv, user=USER, tty=True)
     finally:
         for cleanup in (
@@ -486,7 +486,7 @@ def ensure_running(name: str) -> Bottle:
         runtime.container_start(bottle.container)
         verify_contract(bottle)
         deliver_credentials(bottle)
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle))
+    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     return bottle
 
 

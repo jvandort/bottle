@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["claude", "jvm", "python", "tools"])
+        self.assertEqual(features.available(), ["claude", "jvm", "python", "teamcity", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
@@ -29,6 +29,21 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertEqual(claude.option_env()["TUI"], "fullscreen")
         with self.assertRaisesRegex(BottleError, "option tui must be one of default, fullscreen"):
             features.resolve(["claude:tui=full"])
+
+    def test_teamcity_needs_a_server_and_attaches_its_token_there(self) -> None:
+        [teamcity] = features.resolve(["teamcity:server=https://ci.corp.example.com"])
+        [credential] = teamcity.resolved_credentials()
+        self.assertIsNone(credential.env)  # nothing about it enters the bottle
+        self.assertEqual(credential.inject.hosts, ("ci.corp.example.com",))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        with self.assertRaisesRegex(BottleError, "feature teamcity needs its server option"):
+            features.resolve(["teamcity"])
+
+    def test_teamcity_is_read_only_until_asked_otherwise(self) -> None:
+        [teamcity] = features.resolve(["teamcity:server=ci.example.com"])
+        self.assertEqual(teamcity.option_env()["READONLY"], "true")
+        [writable] = features.resolve(["teamcity:server=ci.example.com,readOnly=false"])
+        self.assertEqual(writable.option_env()["READONLY"], "false")
 
     def test_jvm_options(self) -> None:
         self.assertEqual(features.load("jvm").option_env(), {"VERSION": "25", "ADDITIONALVERSIONS": ""})
@@ -132,7 +147,8 @@ class LoadTest(FeatureTestCase):
         self.assert_invalid("installsAfter: no feature named 'ghost'", installsAfter=["ghost"])
 
     def credential(self, **spec) -> dict:
-        base = {"description": "A token", "env": "TOKEN"}
+        """customizations for one credential: delivered as TOKEN, unless it says where else it goes."""
+        base = {"description": "A token"} | ({} if "inject" in spec else {"env": "TOKEN"})
         return {"bottle": {"credentials": {"tok": {**base, **spec}}}}
 
     def test_credentials(self) -> None:
@@ -143,6 +159,89 @@ class LoadTest(FeatureTestCase):
     def test_credential_without_a_login_flow(self) -> None:
         self.feature("a", customizations=self.credential())
         self.assertIsNone(features.load("a").credentials[0].login)
+
+    def test_credential_injected_at_a_hosts_option(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": "ci.example.com"}},
+            customizations=self.credential(inject={
+                "hosts": ["${server}", "*.mirror.example.com"], "value": "token ${credential}", "header": "X-Auth"}),
+        )
+        [c] = features.load("a").resolved_credentials()
+        self.assertIsNone(c.env)
+        self.assertEqual(c.inject.hosts, ("ci.example.com", "*.mirror.example.com"))
+        self.assertEqual((c.inject.header, c.inject.value), ("X-Auth", "token ${credential}"))
+        [configured] = features.resolve(["a:server=other.example.com"])
+        self.assertEqual(configured.resolved_credentials()[0].inject.hosts[0], "other.example.com")
+
+    def test_an_option_holding_a_server_may_be_written_as_a_url(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        [https] = features.resolve(["a:server=https://ci.example.com/"])
+        self.assertEqual(https.resolved_credentials()[0].inject.hosts, ("ci.example.com",))
+        [plain] = features.resolve(["a:server=http://ci.example.com"])
+        with self.assertRaisesRegex(BottleError, "must be a host, reached over https"):
+            plain.resolved_credentials()
+
+    def test_a_credential_goes_to_the_bottle_or_the_proxy_and_not_both(self) -> None:
+        for spec in ({"env": "TOKEN", "inject": {"hosts": ["x"], "value": "Bearer ${credential}"}}, {}):
+            with self.subTest(spec):
+                self.feature("a", customizations={"bottle": {"credentials": {"tok": {"description": "d", **spec}}}})
+                with self.assertRaisesRegex(BottleError, "needs either env .* or inject .*, not both"):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
+
+    def test_required_options(self) -> None:
+        self.feature("a", options={"server": {"type": "string", "default": ""}},
+                     customizations={"bottle": {"requiredOptions": ["server"]}})
+        self.assertEqual(features.load("a").required_options, ("server",))
+        with self.assertRaisesRegex(BottleError, "feature a needs its server option: --feature a:server="):
+            features.resolve(["a"])
+        with self.assertRaisesRegex(BottleError, "its server option can't be empty"):
+            features.resolve(["a:server="])
+        self.assertEqual(features.resolve(["a:server=ci.example.com"])[0].values, {"server": "ci.example.com"})
+
+    def test_a_required_option_is_what_the_user_set_not_what_it_defaults_to(self) -> None:
+        # The placeholder default is never a value: setting the option to the
+        # same string is still setting it, and the feature says so.
+        self.feature("a", options={"server": {"type": "string", "default": "ci.example.com"}},
+                     customizations={"bottle": {"requiredOptions": ["server"]}})
+        [configured] = features.resolve(["a:server=ci.example.com"])
+        self.assertEqual(configured.spec, "a:server=ci.example.com")
+        with self.assertRaisesRegex(BottleError, "needs its server option"):
+            features.resolve(["a"])
+
+    def test_required_options_must_be_options(self) -> None:
+        self.assert_invalid("requiredOptions: no option 'ghost'", customizations={"bottle": {"requiredOptions": ["ghost"]}})
+
+    def test_credential_injected_at_an_option_nobody_set(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        with self.assertRaisesRegex(BottleError, "isn't set: use --feature a:server="):
+            features.load("a").resolved_credentials()
+
+    def test_inject_validation(self) -> None:
+        for spec, message in (
+            ({"hosts": [], "value": "Bearer ${credential}"}, "inject.hosts must be a non-empty list"),
+            ({"hosts": ["${nope}"], "value": "Bearer ${credential}"}, "names no option of this feature"),
+            ({"hosts": ["${flag}"], "value": "Bearer ${credential}"}, "option 'flag' is a boolean, not a host"),
+            ({"hosts": ["x"], "value": "Bearer"}, r"must be the header value, containing \$\{credential\}"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "header": "bad header"}, "must be a header name"),
+            ({"hosts": ["https://x"], "value": "Bearer ${credential}"}, "always reached over https"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "scheme": "http"}, "inject: unsupported: scheme"),
+        ):
+            with self.subTest(message):
+                self.feature("a", options={"flag": {"type": "boolean", "default": False}},
+                             customizations=self.credential(inject=spec))
+                with self.assertRaisesRegex(BottleError, message):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
 
     def test_other_tools_customizations_fail_loudly(self) -> None:
         self.assert_invalid("customizations: unsupported: vscode", customizations={"vscode": {"extensions": []}})

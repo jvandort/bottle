@@ -7,13 +7,19 @@ and the policy is enforced where root in the bottle can't reach it.
 
 Speaks the two things proxy-aware clients send: CONNECT (HTTPS, SSH, any TCP)
 and absolute-form plain HTTP requests (apt).
+
+It also holds credentials the bottle never sees (Injection): for the hosts a
+feature names, the proxy attaches the real token as a request header and makes
+the HTTPS connection itself.
 """
 
 import asyncio
 import fnmatch
+import functools
 import ipaddress
 import logging
 import socket
+import ssl
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -47,14 +53,50 @@ class Policy:
 
     allow_private: tuple[str, ...] = ()
 
-    def allows(self, host: str, ip: IPAddress) -> bool:
+    def allows(self, host: str, ip: IPAddress, private: bool = False) -> bool:
+        """Whether the bottle may reach `host` at `ip`.
+
+        `private` is for a destination a credential names (see Injection): the
+        host was configured on the Mac, so a private address is expected. The
+        host's own addresses are still refused.
+        """
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
             return False
         if ip.is_global:
             return True
-        return any(fnmatch.fnmatch(host.lower(), pattern.lower()) for pattern in self.allow_private)
+        return private or any(fnmatch.fnmatch(host.lower(), pattern.lower()) for pattern in self.allow_private)
+
+
+@dataclass(frozen=True)
+class Injection:
+    """A credential the host attaches on the bottle's behalf, for one host.
+
+    A feature declares which hosts its credential belongs to (see
+    features.py); bottled looks the credential up on the Mac and builds these
+    per bottle, so the token itself stays outside the bottle.
+
+    The bottle addresses an injected host over plain HTTP, because a CONNECT
+    tunnel is opaque and a header can only be attached to a request the proxy
+    can read. The proxy always reaches the server over TLS, so a credential
+    never travels in the clear beyond the bottle's own network: that hop is
+    between the bottle and its gateway on the Mac, and the request that leaves
+    the Mac is the ordinary HTTPS one the server expects.
+
+    An injected host is also reachable where the policy would otherwise refuse
+    a private address, since naming the host is what configuring the
+    credential means. Nothing else about that host opens up: a CONNECT to it
+    is judged by the policy alone.
+    """
+
+    host: str  # a pattern, e.g. "teamcity.corp.example.com" or "*.example.com"
+    header: str
+    value: str  # the whole header value, credential included
+    port: int = 443
+
+    def matches(self, host: str) -> bool:
+        return fnmatch.fnmatch(host.lower(), self.host.lower())
 
 
 class Refused(Exception):
@@ -78,17 +120,27 @@ class Request:
     path: str = ""
     query: str = ""
     headers: dict[str, str] | None = None
+    # Set when a credential was attached: the proxy makes this connection
+    # over TLS, and allows a private address for this destination.
+    injected: bool = False
 
 
 class EgressProxy:
     def __init__(
-        self, name: str, policy: Policy, resolve: Resolver | None = None, services: "host.HostServices | None" = None
+        self,
+        name: str,
+        policy: Policy,
+        resolve: Resolver | None = None,
+        services: "host.HostServices | None" = None,
+        injections: tuple[Injection, ...] = (),
     ) -> None:
         self.name = name
         self.policy = policy
         self.resolve = resolve or _resolve
         # Requests to http://bottle.host/ are answered here, never forwarded.
         self.services = services
+        # Credentials the host attaches for the bottle, by destination.
+        self.injections = tuple(injections)
 
     async def start(self, host: str, port: int) -> asyncio.Server:
         return await asyncio.start_server(self._handle, host, port, limit=MAX_HEADER_BYTES)
@@ -104,7 +156,7 @@ class EgressProxy:
                 ip = "host"
                 outcome = await self._host(request, reader, writer)
                 return
-            ip, upstream_reader, upstream_writer = await self._open(request.host, request.port)
+            ip, upstream_reader, upstream_writer = await self._open(request)
             if request.upstream_head is None:
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:
@@ -163,6 +215,16 @@ class EgressProxy:
             raise Refused(400, "Bad Request", "bad-request")
         path = (url.path or "/") + (f"?{url.query}" if url.query else "")
         headers = [line for line in header_lines if line.split(":", 1)[0].strip().lower() not in PROXY_HEADERS]
+        injection = next((i for i in self.injections if i.matches(url.hostname)), None)
+        if injection is not None:
+            # Whatever the bottle sent under this name is a stand-in; replace it.
+            # The Host header goes with the destination too, so a request
+            # carrying a credential can't ask one server to answer as another.
+            dropped = {injection.header.lower(), "host"}
+            headers = [line for line in headers if line.split(":", 1)[0].strip().lower() not in dropped]
+            authority = url.hostname + (f":{url.port}" if url.port else "")
+            headers[:0] = [f"Host: {authority}"]
+            headers.append(f"{injection.header}: {injection.value}")
         if not any(line.lower().startswith("host:") for line in headers):
             headers.insert(0, f"Host: {url.netloc}")
         # One request per connection keeps relaying simple: the upstream closes when done.
@@ -172,24 +234,41 @@ class EgressProxy:
         for line in header_lines:
             name, _, value = line.partition(":")
             parsed[name.strip().lower()] = value.strip()
-        return Request(method, url.hostname, url.port or 80, upstream_head, url.path or "/", url.query, parsed)
+        default_port = injection.port if injection else 80
+        return Request(
+            method, url.hostname, url.port or default_port, upstream_head, url.path or "/", url.query, parsed,
+            injected=injection is not None,
+        )
 
-    async def _open(self, host: str, port: int) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+    async def _open(self, request: Request) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        host, port = request.host, request.port
         try:
             addresses = await self.resolve(host, port)
         except OSError:
             raise Refused(502, "Bad Gateway: cannot resolve host", "unresolved") from None
         # Connect to the exact addresses we checked, so a second lookup can't swap them.
-        allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a))]
+        allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a), private=request.injected)]
         if not allowed:
             raise Refused(403, "Forbidden: destination not allowed", "denied")
+        # The Mac's end of an injected request is always TLS: a credential is
+        # never put on a request that leaves here in the clear.
+        context = _tls_context() if request.injected else None
         for address in allowed:
             try:
-                reader, writer = await asyncio.wait_for(asyncio.open_connection(address, port), CONNECT_TIMEOUT)
+                connect = asyncio.open_connection(address, port, ssl=context, server_hostname=host if context else None)
+                reader, writer = await asyncio.wait_for(connect, CONNECT_TIMEOUT)
                 return address, reader, writer
+            except ssl.SSLError as e:
+                raise Refused(502, f"Bad Gateway: TLS to {host} failed", "tls-failed") from e
             except (OSError, TimeoutError):
                 continue
         raise Refused(502, "Bad Gateway: cannot connect", "failed")
+
+
+@functools.cache
+def _tls_context() -> ssl.SSLContext:
+    """Verifying TLS with the Mac's trusted roots, for the host end of an injected request."""
+    return ssl.create_default_context()
 
 
 async def _resolve(host: str, port: int) -> list[str]:
