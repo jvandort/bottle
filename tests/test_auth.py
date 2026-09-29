@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from bottle import auth, runtime
+from bottle import auth, features, runtime
 from bottle.errors import BottleError
 
 # What `claude setup-token` printed, as recorded with `script` (token replaced).
@@ -101,13 +101,64 @@ class DeclaredTest(unittest.TestCase):
         self.assertEqual((d.feature, d.credential.env), ("claude", "CLAUDE_CODE_OAUTH_TOKEN"))
 
     def test_unknown(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude\\)"):
+        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, teamcity\\)"):
             auth.get_declared("nope")
 
     def test_env_for_only_the_bottles_features(self) -> None:
         with mock.patch.object(auth, "get", return_value="tok"):
             self.assertEqual(auth.env_for(["claude", "tools"]), {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
             self.assertEqual(auth.env_for(["tools"]), {})
+
+
+class InjectedCredentialTest(unittest.TestCase):
+    """A credential the egress proxy holds: nothing about it enters the bottle."""
+
+    specs = ["teamcity:server=https://ci.corp.example.com", "tools"]
+
+    def test_nothing_is_delivered(self) -> None:
+        with mock.patch.object(auth, "get", return_value="tc-token"):
+            self.assertEqual(auth.env_for(self.specs), {})
+
+    def test_the_proxy_gets_the_real_one(self) -> None:
+        with mock.patch.object(auth, "get", return_value="tc-token"):
+            [injection] = auth.injections_for(self.specs)
+        self.assertEqual(injection.host, "ci.corp.example.com")
+        self.assertEqual((injection.header, injection.value), ("Authorization", "Bearer tc-token"))
+        self.assertEqual(injection.port, 443)
+
+    def test_nothing_is_injected_until_it_is_logged_in(self) -> None:
+        with mock.patch.object(auth, "get", return_value=None):
+            self.assertEqual(auth.injections_for(self.specs), [])
+
+    def test_a_delivered_credential_isnt_injected(self) -> None:
+        with mock.patch.object(auth, "get", return_value="tok"):
+            self.assertEqual(auth.injections_for(["claude"]), [])
+            self.assertEqual(auth.env_for(["claude"]), {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+
+    def test_one_host_belongs_to_one_credential(self) -> None:
+        claimed = features.Credential(
+            "other", "Another token",
+            inject=features.Inject(hosts=("ci.corp.example.com",), value="Bearer ${credential}"),
+        )
+        with mock.patch.object(auth, "get", return_value="tok"), \
+                mock.patch.object(auth, "credentials_for", return_value=[
+                    auth.credentials_for(self.specs)[0], claimed]), \
+                self.assertRaisesRegex(BottleError, "both claim ci.corp.example.com"):
+            auth.injections_for(self.specs)
+
+
+class DestinationTest(unittest.TestCase):
+    def test_a_host_is_reached_over_https(self) -> None:
+        self.assertEqual(auth.destination("ci.example.com"), ("ci.example.com", 443))
+        self.assertEqual(auth.destination("*.example.com"), ("*.example.com", 443))
+
+    def test_a_host_may_name_its_port(self) -> None:
+        self.assertEqual(auth.destination("ci.example.com:8111"), ("ci.example.com", 8111))
+
+    def test_a_host_is_only_a_host(self) -> None:
+        for host in ("ci.example.com:https", "ci.example.com:0", "ci.example.com:99999"):
+            with self.subTest(host), self.assertRaisesRegex(BottleError, "isn't a host for a credential"):
+                auth.destination(host)
 
 
 class LoginTest(unittest.TestCase):

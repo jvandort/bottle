@@ -1,0 +1,4 @@
+# From https://github.com/JetBrains/teamcity-cli/releases/download/v1.5.0/checksums.txt,
+# keeping the Debian packages: a bottle is a Debian container, on arm64 or amd64.
+46030d02da1521fb1540bb56e1bc80390bd340fa79ea9ea1e9458c4602c06927  teamcity_linux_amd64.deb
+67778d6376d99f5485d088cd11eb15b1e8f157172c8e4b59045a187085a7b3cb  teamcity_linux_arm64.deb

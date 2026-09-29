@@ -122,7 +122,7 @@ class FakeRuntime:
         self.workspace_script = argv[-1]
         return ""
 
-    def ensure_egress(self, bottle, network, git_dir=None):
+    def ensure_egress(self, bottle, network, git_dir=None, features=()):
         self._step("ensure_egress")
         self.egress_git_dir = git_dir
         self.egress.add(bottle)

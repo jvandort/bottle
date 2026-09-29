@@ -230,8 +230,9 @@ def _table(rows: list[tuple[str, ...]]) -> None:
 def _auth_list(args: argparse.Namespace) -> int:
     from bottle import auth
 
-    rows = [("CREDENTIAL", "FEATURE", "STATUS", "DESCRIPTION")]
-    rows += [(d.credential.name, d.feature, "set" if is_set else "not set", d.credential.description)
+    rows = [("CREDENTIAL", "FEATURE", "STATUS", "GOES TO", "DESCRIPTION")]
+    rows += [(d.credential.name, d.feature, "set" if is_set else "not set",
+              "the proxy" if d.credential.inject else "the bottle", d.credential.description)
              for d, is_set in auth.status()]
     _table(rows)
     return 0

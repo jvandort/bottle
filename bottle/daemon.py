@@ -14,9 +14,10 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from bottle import egress, runtime
+from bottle import auth, egress, runtime
 from bottle.host import HostServices
 from bottle.errors import BottleError
 from bottle.store import bottle_home
@@ -49,12 +50,18 @@ def log_path() -> Path:
 # --- client -------------------------------------------------------------------
 
 
-def ensure_egress(bottle: str, network: str, git_dir: Path | None = None) -> str:
+def ensure_egress(bottle: str, network: str, git_dir: Path | None = None, features: tuple[str, ...] | list[str] = ()) -> str:
     """Make sure `bottle`'s egress proxy is serving; return its URL.
 
     `git_dir` is the repo the proxy serves the bottle as origin (see host.py).
+    `features` are the bottle's, so the daemon can look up the credentials
+    they inject (see auth.py) -- the values stay in the daemon, never in this
+    message and never in the bottle.
     """
-    message = {"op": "ensure", "bottle": bottle, "network": network, "git_dir": str(git_dir) if git_dir else None}
+    message = {
+        "op": "ensure", "bottle": bottle, "network": network,
+        "git_dir": str(git_dir) if git_dir else None, "features": list(features),
+    }
     return _request(message, start=True)["proxy"]
 
 
@@ -127,11 +134,20 @@ def _start_daemon() -> None:
 # --- server -------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Served:
+    """What a bottle's proxy was built from; it is replaced when any of it changes."""
+
+    gateway: str
+    git_dir: Path | None
+    injections: tuple[egress.Injection, ...]
+
+
 class Daemon:
     def __init__(self, port: int = EGRESS_PORT, policy: egress.Policy | None = None) -> None:
         self.port = port
         self.policy = policy or egress.Policy()
-        self.proxies: dict[str, tuple[str, asyncio.Server]] = {}
+        self.proxies: dict[str, tuple[Served, asyncio.Server]] = {}
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
@@ -148,7 +164,10 @@ class Daemon:
                     reply = {"ok": True}
                 case "ensure":
                     git_dir = Path(message["git_dir"]) if message.get("git_dir") else None
-                    reply = {"ok": True, "proxy": await self.ensure(message["bottle"], message["network"], git_dir)}
+                    proxy = await self.ensure(
+                        message["bottle"], message["network"], git_dir, tuple(message.get("features", ()))
+                    )
+                    reply = {"ok": True, "proxy": proxy}
                 case "release":
                     await self.release(message["bottle"])
                     reply = {"ok": True}
@@ -166,24 +185,29 @@ class Daemon:
         await writer.drain()
         writer.close()
 
-    async def ensure(self, bottle: str, network: str, git_dir: Path | None = None) -> str:
+    async def ensure(self, bottle: str, network: str, git_dir: Path | None = None, features: tuple[str, ...] = ()) -> str:
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            return await self._ensure(bottle, network, git_dir)
+            return await self._ensure(bottle, network, git_dir, features)
 
-    async def _ensure(self, bottle: str, network: str, git_dir: Path | None) -> str:
+    async def _ensure(self, bottle: str, network: str, git_dir: Path | None, features: tuple[str, ...]) -> str:
         gateway = await asyncio.to_thread(runtime.network_gateway, network)
+        # Credentials are read here, each time a bottle is served, so logging
+        # in or out reaches the proxy when the bottle next starts.
+        injections = tuple(await asyncio.to_thread(auth.injections_for, features))
+        serving = Served(gateway, git_dir, injections)
         if bottle in self.proxies:
             served, server = self.proxies[bottle]
             # A stopped bottle's network loses its gateway address; the old socket may be dead.
-            if served == gateway and await _accepting(gateway, self.port):
+            if served == serving and await _accepting(gateway, self.port):
                 return proxy_url(gateway, self.port)
             self._close(bottle)
         try:
             services = HostServices(git_dir, bottle=bottle)
-            server = await egress.EgressProxy(bottle, self.policy, services=services).start(gateway, self.port)
+            proxy = egress.EgressProxy(bottle, self.policy, services=services, injections=injections)
+            server = await proxy.start(gateway, self.port)
         except OSError as e:
             raise BottleError(f"can't serve {bottle}'s egress on {gateway}:{self.port}: {e.strerror}") from None
-        self.proxies[bottle] = (gateway, server)
+        self.proxies[bottle] = (serving, server)
         log.info("%s: egress on %s:%d", bottle, gateway, self.port)
         return proxy_url(gateway, self.port)
 
@@ -197,20 +221,20 @@ class Daemon:
             server.close()
             log.info("%s: egress stopped", bottle)
 
-    async def restore(self, running: list[tuple[str, str, Path | None]]) -> None:
+    async def restore(self, running: list[tuple[str, str, Path | None, tuple[str, ...]]]) -> None:
         """Serve egress for bottles that are already running, e.g. after a restart."""
-        for bottle, network, git_dir in running:
+        for bottle, network, git_dir, features in running:
             try:
-                await self.ensure(bottle, network, git_dir)
+                await self.ensure(bottle, network, git_dir, features)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore egress: %s", bottle, e)
 
 
-def running_bottles() -> list[tuple[str, str, Path | None]]:
-    """(name, network, repo git dir) of every ready bottle whose container is running."""
+def running_bottles() -> list[tuple[str, str, Path | None, tuple[str, ...]]]:
+    """(name, network, repo git dir, features) of every ready bottle whose container is running."""
     from bottle import bottles  # bottles imports this module
 
-    return [(b.name, b.network, bottles.git_dir(b)) for b in bottles.load().values()
+    return [(b.name, b.network, bottles.git_dir(b), tuple(b.features)) for b in bottles.load().values()
             if b.status == "ready" and runtime.container_state(b.container) == "running"]
 
 

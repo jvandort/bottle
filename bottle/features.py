@@ -14,19 +14,59 @@ error, so a feature never silently loses behavior it asked for:
   containerEnv; dependsOn (local feature ids, without options);
   installsAfter (local feature ids); customizations.bottle (below).
 
-customizations.bottle.credentials declares credentials the feature needs, e.g.
-a login token. bottle stores them on the host and delivers them to bottles
-with the feature (see bottle/auth.py):
+customizations.bottle declares what a feature needs from bottle itself:
+credentials, and options a user has to set.
 
-  "customizations": {"bottle": {"credentials": {"claude": {
-      "description": "Claude subscription token",
-      "login": {"command": ["claude", "setup-token"], "capture": "Your OAuth token[^:]*:(.*?)Store this token"},
-      "env": "CLAUDE_CODE_OAUTH_TOKEN"}}}}
+A credential is a secret bottle keeps on the host and a bottle's tools need
+(see bottle/auth.py). Each says where it goes, in one of two ways, and never
+both:
 
-login is optional: without it, `bottle auth login` asks for the value. capture
-is a regular expression with one group, matched (across lines) against the
-command's output with terminal escape codes removed; whitespace is removed from
-the captured value, since a narrow terminal may wrap it.
+  env       The bottle gets it in this environment variable, and the agent in
+            the bottle can read it.
+
+            "customizations": {"bottle": {"credentials": {"claude": {
+                "description": "Claude subscription token",
+                "login": {"command": ["claude", "setup-token"],
+                          "capture": "Your OAuth token[^:]*:(.*?)Store this token"},
+                "env": "CLAUDE_CODE_OAUTH_TOKEN"}}}}
+
+  inject    The bottle never gets it: the egress proxy attaches it to the
+            bottle's requests to the hosts named here (see bottle/egress.py).
+
+            "customizations": {"bottle": {"credentials": {"teamcity": {
+                "description": "TeamCity access token",
+                "inject": {"hosts": ["${server}"], "header": "Authorization",
+                           "value": "Bearer ${credential}"}}}}}
+
+    hosts   Where the credential is sent: `host` or `host:port`, always
+            reached over https -- a credential is never put on a request the
+            proxy sends in the clear. `${option}` is the value of one of this
+            feature's options, so the server a user configures is the server
+            the credential is attached to; and a host may be a pattern
+            (`*.example.com`). A request matching several patterns gets one
+            header, from the first credential that claims it, and two
+            credentials claiming the same host is an error.
+    header  The header it goes in; Authorization by default.
+    value   The whole header value, with ${credential} where the real one goes.
+
+  A tool in the bottle has to be pointed at `http://<host>` for the proxy to
+  be able to attach anything, since a CONNECT tunnel is opaque; that is the
+  feature's own business, in its install.sh, along with anything else the tool
+  needs in order to believe it's configured.
+
+login is optional, and belongs to either kind: without it, `bottle auth login`
+asks for the value. capture is a regular expression with one group, matched
+(across lines) against the command's output with terminal escape codes
+removed; whitespace is removed from the captured value, since a narrow
+terminal may wrap it.
+
+requiredOptions names options a user has to set, for the ones with no sensible
+default (the teamcity feature's server). The format has no way to say this --
+an option must declare a default, of its own type, so there is no null to mean
+"none" -- and bottle doesn't read the placeholder default those options
+declare: it refuses the feature unless the user set the option.
+
+  "customizations": {"bottle": {"requiredOptions": ["server"]}}
 
 Features are requested as specs: an id, optionally with option values, e.g.
 `jvm:version=17` or `name:a=1,b=true`. Unset options take their defaults.
@@ -53,8 +93,13 @@ REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
-CREDENTIAL_KEYS = {"description", "login", "env"}
+BOTTLE_KEYS = {"credentials", "requiredOptions"}
+CREDENTIAL_KEYS = {"description", "login", "env", "inject"}
 LOGIN_KEYS = {"command", "capture"}
+INJECT_KEYS = {"hosts", "header", "value"}
+CREDENTIAL_PLACEHOLDER = "${credential}"
+OPTION_REFERENCE = re.compile(r"\$\{([^}]*)\}")
+HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
 OPTION_KEYS = {"type", "default", "description", "proposals", "enum"}
 OPTION_TYPES = {"string": str, "boolean": bool}
 
@@ -73,11 +118,23 @@ class Login:
 
 
 @dataclass(frozen=True)
+class Inject:
+    """Where a credential belongs, so the egress proxy can attach it there."""
+
+    hosts: tuple[str, ...]  # `host` or `host:port`; `${option}` is an option's value
+    value: str  # the header value, with ${credential} where the real one goes
+    header: str = "Authorization"
+
+
+@dataclass(frozen=True)
 class Credential:
     name: str
     description: str
-    env: str  # delivered as this environment variable
     login: Login | None = None
+    # Where it goes, one or the other: into the bottle as this environment
+    # variable, or onto the bottle's requests by the egress proxy.
+    env: str | None = None
+    inject: Inject | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +147,7 @@ class Feature:
     depends_on: tuple[str, ...]
     installs_after: tuple[str, ...]
     credentials: tuple[Credential, ...] = ()
+    required_options: tuple[str, ...] = ()
     # Option values set explicitly (not defaulted), from the feature's spec.
     overrides: tuple[tuple[str, str | bool], ...] = ()
 
@@ -108,6 +166,59 @@ class Feature:
         """Options as install.sh sees them, per the spec's naming rule (e.g. version -> VERSION)."""
         return {_option_env_name(k): _option_value(v) for k, v in self.values.items()}
 
+    def check_required(self) -> None:
+        """Fail unless the user set every option the feature says they must.
+
+        Some options have no sensible default (which server?), and the Dev
+        Container format gives no way to say so: an option must declare a
+        default, of its own type, so there is no null to mean "none". The
+        feature names those options in customizations.bottle.requiredOptions
+        and declares a default bottle never reads -- what's checked here is
+        whether the user set the option, not what the value happens to be.
+        """
+        given = dict(self.overrides)
+        for name in self.required_options:
+            if name not in given:
+                raise BottleError(f"feature {self.id} needs its {name} option: --feature {self.id}:{name}=...")
+            if not _option_value(given[name]):
+                raise BottleError(f"feature {self.id}: its {name} option can't be empty")
+
+    def resolved_credentials(self) -> tuple[Credential, ...]:
+        """This feature's credentials, with ${option} in inject.hosts replaced by what the options are set to.
+
+        A feature says which hosts its credential belongs to; when that is an
+        option (the server a user configured), the value has to be there, or
+        the credential would be attached to nothing.
+        """
+        resolved = []
+        for credential in self.credentials:
+            if credential.inject is None:
+                resolved.append(credential)
+                continue
+            hosts = tuple(self._substitute(host, credential) for host in credential.inject.hosts)
+            resolved.append(replace(credential, inject=replace(credential.inject, hosts=hosts)))
+        return tuple(resolved)
+
+    def _substitute(self, host: str, credential: Credential) -> str:
+        """One of inject.hosts with its ${option} filled in, as a bare host or host:port.
+
+        An option holding a server is the URL a user has at hand, so https://
+        is allowed here and dropped; http:// is not, because the proxy only
+        ever attaches a credential to a request it makes over TLS.
+        """
+        option = next(iter(OPTION_REFERENCE.findall(host)), None)
+        filled = OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), host)
+        where = f"{self.id}: credential {credential.name!r}"
+        if option and not OPTION_REFERENCE.sub("", filled):
+            raise BottleError(
+                f"{where} is attached to the {option} option's host, which isn't set: "
+                f"use --feature {self.id}:{option}=..."
+            )
+        filled = filled.removeprefix("https://").rstrip("/")
+        if "//" in filled or "/" in filled:
+            raise BottleError(f"{where}: {filled!r} must be a host, reached over https, with no path")
+        return filled
+
     def configured(self, settings: dict[str, str]) -> "Feature":
         """This feature with options set from a spec's `name=value` strings."""
         overrides = {}
@@ -125,7 +236,9 @@ class Feature:
             if option.enum is not None and value not in option.enum:
                 allowed = ", ".join(_option_value(v) for v in option.enum)
                 raise BottleError(f"{self.id}: option {name} must be one of {allowed}, not {raw!r}")
-            if value != option.default:
+            # A required option's default is a placeholder, so what the user
+            # set is kept even when it matches: it's the value, not a default.
+            if value != option.default or name in self.required_options:
                 overrides[name] = value
         return replace(self, overrides=tuple(sorted(overrides.items())))
 
@@ -159,15 +272,16 @@ def load(feature_id: str) -> Feature:
     if not (path / "install.sh").is_file():
         raise fail("install.sh is missing")
 
+    options = _options(spec.get("options", {}), fail)
     return Feature(
         id=feature_id,
         version=spec["version"],
         path=path,
-        options=_options(spec.get("options", {}), fail),
+        options=options,
         container_env=_container_env(spec.get("containerEnv", {}), fail),
         depends_on=_depends_on(spec.get("dependsOn", {}), fail),
         installs_after=_id_list(spec.get("installsAfter", []), "installsAfter", fail),
-        credentials=_customizations(spec.get("customizations", {}), fail),
+        **_customizations(spec.get("customizations", {}), options, fail),
     )
 
 
@@ -195,7 +309,8 @@ def _options(options, fail) -> dict[str, Option]:
     return parsed
 
 
-def _customizations(customizations, fail) -> tuple[Credential, ...]:
+def _customizations(customizations, options, fail) -> dict:
+    """What the feature asks of bottle: its credentials, and the options a user has to set."""
     if not isinstance(customizations, dict):
         raise fail("customizations must be an object")
     unsupported = sorted(set(customizations) - {"bottle"})
@@ -204,16 +319,26 @@ def _customizations(customizations, fail) -> tuple[Credential, ...]:
     bottle = customizations.get("bottle", {})
     if not isinstance(bottle, dict):
         raise fail("customizations.bottle must be an object")
-    unsupported = sorted(set(bottle) - {"credentials"})
+    unsupported = sorted(set(bottle) - BOTTLE_KEYS)
     if unsupported:
         raise fail(f"customizations.bottle: unsupported: {', '.join(unsupported)}")
     credentials = bottle.get("credentials", {})
     if not isinstance(credentials, dict):
         raise fail("customizations.bottle.credentials must be an object")
-    return tuple(_credential(name, spec, fail) for name, spec in credentials.items())
+    required = bottle.get("requiredOptions", [])
+    if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+        raise fail("customizations.bottle.requiredOptions must be a list of option names")
+    for name in required:
+        if name not in options:
+            known = ", ".join(sorted(options)) or "none"
+            raise fail(f"customizations.bottle.requiredOptions: no option {name!r} (options: {known})")
+    return {
+        "credentials": tuple(_credential(name, spec, options, fail) for name, spec in credentials.items()),
+        "required_options": tuple(required),
+    }
 
 
-def _credential(name, spec, fail) -> Credential:
+def _credential(name, spec, options, fail) -> Credential:
     where = f"credential {name!r}"
     if not ID_PATTERN.fullmatch(name):
         raise fail(f"{where}: names use lowercase letters, digits and '-'")
@@ -224,7 +349,9 @@ def _credential(name, spec, fail) -> Credential:
         raise fail(f"{where}: unsupported: {', '.join(unsupported)}")
     if not isinstance(spec.get("description"), str) or not spec["description"]:
         raise fail(f"{where}: needs a description")
-    if not isinstance(spec.get("env"), str) or not ENV_NAME.fullmatch(spec["env"]):
+    if ("env" in spec) == ("inject" in spec):
+        raise fail(f"{where}: needs either env (the bottle holds it) or inject (the proxy attaches it), not both")
+    if "env" in spec and (not isinstance(spec["env"], str) or not ENV_NAME.fullmatch(spec["env"])):
         raise fail(f"{where}: env must be an environment variable name")
     login = None
     if "login" in spec:
@@ -241,7 +368,41 @@ def _credential(name, spec, fail) -> Credential:
         if groups != 1:
             raise fail(f"{where}: login capture must be a regular expression with exactly one group")
         login = Login(tuple(command), raw["capture"])
-    return Credential(name, spec["description"], spec["env"], login)
+    return Credential(
+        name, spec["description"], login,
+        env=spec.get("env"), inject=_inject(spec.get("inject"), options, where, fail),
+    )
+
+
+def _inject(inject, options, where, fail) -> Inject | None:
+    if inject is None:
+        return None
+    if not isinstance(inject, dict):
+        raise fail(f"{where}: inject must be an object")
+    unsupported = sorted(set(inject) - INJECT_KEYS)
+    if unsupported:
+        raise fail(f"{where}: inject: unsupported: {', '.join(unsupported)}")
+    hosts = inject.get("hosts")
+    if not isinstance(hosts, list) or not hosts or not all(isinstance(h, str) and h for h in hosts):
+        raise fail(f"{where}: inject.hosts must be a non-empty list of hosts")
+    for host in hosts:
+        # A credential is only ever put on a request the proxy makes over
+        # TLS, so a host says nothing about its scheme: there is one.
+        if "//" in host:
+            raise fail(f"{where}: inject.hosts: {host!r} is a host or host:port, always reached over https")
+        for option in OPTION_REFERENCE.findall(host):
+            if option not in options:
+                known = ", ".join(sorted(options)) or "none"
+                raise fail(f"{where}: inject.hosts: {host!r} names no option of this feature (options: {known})")
+            if options[option].type != "string":
+                raise fail(f"{where}: inject.hosts: option {option!r} is a {options[option].type}, not a host")
+    header = inject.get("header", "Authorization")
+    if not isinstance(header, str) or not HEADER_NAME.fullmatch(header):
+        raise fail(f"{where}: inject.header must be a header name")
+    value = inject.get("value")
+    if not isinstance(value, str) or CREDENTIAL_PLACEHOLDER not in value:
+        raise fail(f"{where}: inject.value must be the header value, containing {CREDENTIAL_PLACEHOLDER}")
+    return Inject(tuple(hosts), value, header)
 
 
 def _container_env(env, fail) -> dict[str, str]:
@@ -318,6 +479,7 @@ def resolve(requested: list[str]) -> list[Feature]:
         feature_id = pending.pop()
         if feature_id not in loaded:
             loaded[feature_id] = load(feature_id).configured(settings.get(feature_id, {}))
+            loaded[feature_id].check_required()
             pending.extend(loaded[feature_id].depends_on)
 
     before = {f.id: {d for d in (*f.depends_on, *f.installs_after) if d in loaded} for f in loaded.values()}

@@ -93,6 +93,24 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply["ok"])
         self.assertIsNot(self.daemon.proxies["b"][1], dead)
 
+    async def test_a_bottles_credentials_reach_its_proxy_and_go_no_further(self) -> None:
+        injections = [daemon.egress.Injection(("ci.test",), "Authorization", "Bearer tok")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections) as looked_up:
+            await self.request({"op": "ensure", "bottle": "b", "network": "n", "features": ["teamcity:server=ci.test"]})
+        looked_up.assert_called_once_with(("teamcity:server=ci.test",))
+        self.assertEqual(self.daemon.proxies["b"][0].injections, tuple(injections))
+
+    async def test_a_changed_credential_gets_a_new_proxy(self) -> None:
+        first = [daemon.egress.Injection(("ci.test",), "Authorization", "Bearer old")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=first):
+            await self.request({"op": "ensure", "bottle": "b", "network": "n", "features": ["teamcity"]})
+        server = self.daemon.proxies["b"][1]
+        second = [daemon.egress.Injection(("ci.test",), "Authorization", "Bearer new")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=second):
+            await self.request({"op": "ensure", "bottle": "b", "network": "n", "features": ["teamcity"]})
+        self.assertIsNot(self.daemon.proxies["b"][1], server)
+        self.assertEqual(self.daemon.proxies["b"][0].injections, tuple(second))
+
     async def test_release(self) -> None:
         await self.request({"op": "ensure", "bottle": "b", "network": "bottle-x"})
         self.assertEqual(await self.request({"op": "release", "bottle": "b"}), {"ok": True})
@@ -142,7 +160,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         path, port = Path(tmp) / "d.sock", free_port()
         d = Daemon(port=port)
         with mock.patch.object(daemon.runtime, "network_gateway", return_value="127.0.0.1"), \
-                mock.patch.object(daemon, "running_bottles", return_value=[("b", "bottle-b", None)]):
+                mock.patch.object(daemon, "running_bottles", return_value=[("b", "bottle-b", None, ())]):
             task = asyncio.create_task(daemon.serve(path, d))
             for _ in range(200):
                 if "b" in d.proxies:
@@ -165,7 +183,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         with mock.patch.object(daemon.runtime, "network_gateway", side_effect=gateway):
-            await d.restore([("x", "bad", None), ("y", "good", None)])
+            await d.restore([("x", "bad", None, ()), ("y", "good", None, ())])
         self.assertEqual(list(d.proxies), ["y"])
         await d.release("y")
 
