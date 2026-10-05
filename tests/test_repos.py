@@ -143,6 +143,31 @@ class AddTest(GitTestCase):
         with self.assertRaisesRegex(BottleError, "no repo named 'nope'"):
             repos.set_settings("nope", [])
 
+    def test_update_adds_features(self) -> None:
+        repo = self.make_repo()
+        repos.add(repo, features=["tools"])
+        self.assertEqual(repos.update_settings("project", ["claude"]).features, ("tools", "claude"))
+        self.assertEqual(repos.get("project").path, repo)
+
+    def test_update_replaces_a_feature_given_again(self) -> None:
+        repo = self.make_repo()
+        repos.add(repo, features=["tools", "jvm:version=17"])
+        updated = repos.update_settings("project", ["jvm:version=21"])
+        self.assertEqual(updated.features, ("tools", "jvm:version=21"))
+
+    def test_update_unknown_repo(self) -> None:
+        with self.assertRaisesRegex(BottleError, "no repo named 'nope'"):
+            repos.update_settings("nope", ["tools"])
+
+    def test_update_validates_features(self) -> None:
+        repo = self.make_repo()
+        repos.add(repo, features=["tools"])
+        with self.assertRaisesRegex(BottleError, "no feature named 'nope'"):
+            repos.update_settings("project", ["nope"])
+        with self.assertRaisesRegex(BottleError, "given twice with different options"):
+            repos.update_settings("project", ["jvm:version=17", "jvm:version=21"])
+        self.assertEqual(repos.get("project").features, ("tools",))
+
     def test_hand_edited_registry_without_features(self) -> None:
         repo = self.make_repo()
         (self.bottle_home).mkdir(parents=True, exist_ok=True)

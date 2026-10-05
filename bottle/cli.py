@@ -37,6 +37,17 @@ def main(argv: list[str] | None = None) -> int:
     repo_set.add_argument("name", metavar="REPO", help="the repo to change")
     repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
     repo_set.set_defaults(run=_repo_set, parser=repo_set)
+    repo_update = repo_commands.add_parser(
+        "update",
+        help="add features to a repo",
+        description="Add features to a repo's existing ones: a feature given again replaces its "
+        "options, others are kept. Existing bottles get them when reset.",
+    )
+    repo_update.add_argument("name", metavar="REPO", help="the repo to change")
+    repo_update.add_argument(
+        "--feature", action="append", default=[], required=True, metavar="FEATURE", help=feature_help
+    )
+    repo_update.set_defaults(run=_repo_update, parser=repo_update)
 
     auth = commands.add_parser("auth", help="log in once; bottles get the credentials their features need")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True, metavar="COMMAND")
@@ -233,15 +244,26 @@ def _repo_list(args: argparse.Namespace) -> int:
 
 
 def _repo_set(args: argparse.Namespace) -> int:
-    from bottle import bottles
-
     repo = repos.set_settings(args.name, args.feature)
     print(f"Set repo '{repo.name}' features to {_features(repo.features)}")
+    _report_stale_bottles(repo.name)
+    return 0
+
+
+def _repo_update(args: argparse.Namespace) -> int:
+    repo = repos.update_settings(args.name, args.feature)
+    print(f"Set repo '{repo.name}' features to {_features(repo.features)}")
+    _report_stale_bottles(repo.name)
+    return 0
+
+
+def _report_stale_bottles(repo_name: str) -> None:
+    from bottle import bottles
+
     stale = [b.name for b in bottles.load().values()
-             if b.repo == repo.name and set(bottles.features_on_reset(b)) != set(b.features)]
+             if b.repo == repo_name and set(bottles.features_on_reset(b)) != set(b.features)]
     for name in stale:
         print(f"Bottle '{name}' gets them when reset: bottle reset {name}")
-    return 0
 
 
 def _table(rows: list[tuple[str, ...]]) -> None:
