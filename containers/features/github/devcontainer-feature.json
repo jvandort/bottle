@@ -1,0 +1,32 @@
+{
+  "id": "github",
+  "version": "1.0.0",
+  "name": "GitHub",
+  "description": "GitHub's CLI (gh), from GitHub's signed apt repository, with git and gh both authenticated to github.com by the egress proxy: the bottle never holds the token.",
+  "documentationURL": "https://cli.github.com/manual/",
+  "containerEnv": {
+    "GH_NO_UPDATE_NOTIFIER": "1"
+  },
+  "installsAfter": [
+    "tools"
+  ],
+  "customizations": {
+    "bottle": {
+      "credentials": {
+        "github": {
+          "description": "GitHub fine-grained personal access token, limited to the repositories and permissions a bottle should have (https://github.com/settings/personal-access-tokens)",
+          "inject": {
+            "hosts": [
+              "github.com",
+              "api.github.com",
+              "uploads.github.com"
+            ],
+            "header": "Authorization",
+            "value": "Bearer ${credential}",
+            "standin": "GH_TOKEN"
+          }
+        }
+      }
+    }
+  }
+}

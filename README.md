@@ -17,7 +17,7 @@ permissions inside. Take back only the commits you want.
   VPN routes but not your local network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   the proxy attaches it there. The bottle talks to the proxy and never holds the token.
-- **Composable features.** `tools`, `jvm`, `python`, `claude`, `teamcity`, in the
+- **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
   defaults. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -100,16 +100,17 @@ Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 ### `bottle auth login CREDENTIAL`
 
 Logs in once, for every bottle. Features declare the credentials they need (the
-`claude` feature needs `claude`, a Claude subscription token; the `teamcity`
-feature needs `teamcity`, an access token). `login` runs the feature's own login
+`claude` feature needs `claude`, a Claude subscription token; the `github`
+feature needs `github`, a personal access token; the `teamcity` feature needs
+`teamcity`, an access token). `login` runs the feature's own login
 command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
 captures the credential it prints and stores it in the macOS Keychain; a
 credential with no such command is asked for instead.
 
 A credential never enters a bottle. bottled hands it to that bottle's egress
 proxy, which attaches it as a header to the bottle's requests to the hosts the
-feature named — `claude` names `api.anthropic.com`, `teamcity` names its
-`server`. The agent can spend the credential
+feature named — `claude` names `api.anthropic.com`, `github` names `github.com`
+and its API, `teamcity` names its `server`. The agent can spend the credential
 against those hosts and can't read it, so an agent that sends everything it
 holds to a stranger sends no token.
 
@@ -189,6 +190,20 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `permissionMode` (default `bypassPermissions`: the bottle is the sandbox),
   `theme` (default `dark`), and `tui` (default `default`: `fullscreen` would
   capture the mouse, and a bottle has no clipboard to copy to instead).
+- `github`: GitHub's CLI, `gh`, from GitHub's signed apt repository, with `gh`
+  and git both authenticated to github.com by the egress proxy, which holds the
+  `github` credential. `bottle auth login github` asks for a
+  [fine-grained personal access token](https://github.com/settings/personal-access-tokens):
+  what the token may do is what a bottle may do on GitHub, and a push there
+  doesn't pass through your repo the way a bottle's `work` lane does, so give
+  it just the repositories and permissions the agent needs. GitHub's ssh
+  remotes (`git@github.com:...`) are fetched over https instead, since a bottle
+  has no ssh key.
+
+  ```sh
+  bottle new reponame --feature tools --feature github
+  bottle exec reponame -- gh pr list
+  ```
 - `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
   pinned and checksum-verified from its GitHub release, with its access token
   held by the egress proxy rather than the bottle (see `bottle auth login`).
