@@ -70,6 +70,23 @@ def set_settings(name: str, features: list[str]) -> Repo:
     return repo
 
 
+def update_settings(name: str, features: list[str]) -> Repo:
+    """Add `features` to a repo's existing ones: a spec for a feature already there replaces it,
+    others are appended. Existing bottles get the change when reset.
+    """
+    from bottle import features as features_  # avoid shadowing the `features` parameter
+
+    repo = get(name)
+    merged = {features_.parse_spec(spec)[0]: spec for spec in repo.features}
+    for spec in canonical_features(features):
+        merged[features_.parse_spec(spec)[0]] = spec
+    updated = replace(repo, features=canonical_features(list(merged.values())))
+    repos = load()
+    repos[name] = updated
+    _save(repos)
+    return updated
+
+
 def canonical_features(specs: list[str]) -> tuple[str, ...]:
     """Validate feature specs and put each in canonical form, keeping their order."""
     from bottle import features  # imports images and runtime, which repos doesn't otherwise need

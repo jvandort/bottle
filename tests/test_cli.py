@@ -51,6 +51,19 @@ class WrapCommandTest(GitTestCase):
         code, out, _ = self.run_cli("repo", "set", "project")
         self.assertEqual((code, out), (0, "Set repo 'project' features to []\n"))
 
+    def test_update_adds_to_existing_features(self) -> None:
+        repo = self.make_repo()
+        self.run_cli("repo", "add", str(repo), "--feature", "tools")
+        code, out, _ = self.run_cli("repo", "update", "project", "--feature", "claude")
+        self.assertEqual((code, out), (0, "Set repo 'project' features to [claude, tools]\n"))
+
+    def test_update_requires_a_feature(self) -> None:
+        repo = self.make_repo()
+        self.run_cli("repo", "add", str(repo))
+        code, _, err = self.run_cli("repo", "update", "project")
+        self.assertEqual(code, 2)
+        self.assertIn("required: --feature", err)
+
     def test_too_many_arguments(self) -> None:
         code, _, err = self.run_cli("repo", "add", "a", "b", "c")
         self.assertEqual(code, 2)

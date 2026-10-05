@@ -59,7 +59,7 @@ and a Linux kernel) as necessary, and asks before installing anything.
 
 | Command | |
 | --- | --- |
-| `bottle repo add` / `list` / `set` | Register a repo, and set its bottles' default features |
+| `bottle repo add` / `list` / `set` / `update` | Register a repo, and set its bottles' default features |
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
 | `bottle new` | Create a bottle from a repo |
 | `bottle shell` | Open a shell in a bottle, at `/workspace` |
@@ -93,6 +93,15 @@ Lists repos and their default features.
 
 Replaces all the repo's settings: its default features become exactly those
 given. Existing bottles get them when reset.
+
+### `bottle repo update REPO --feature FEATURE...`
+
+Adds features to the repo's existing ones: a feature given again replaces its
+options, others are kept. Existing bottles get them when reset.
+
+```sh
+bottle repo update foo --feature github
+```
 
 Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
 `BOTTLE_HOME` to use a directory other than `~/.bottle`.
