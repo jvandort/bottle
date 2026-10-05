@@ -8,12 +8,6 @@ The rule this section keeps coming back to: **round one is IDE-first, and the
 git tools you already use should be convenient from inside a review.** Not new
 tools that duplicate them.
 
-- **Keeping up with the working line is three commands.** When someone pushes
-  to the branch you are reviewing, catching up is `curate write`, `git pull`,
-  `curate review`. This is tedious. A `curate git <command>` that drops to
-  write mode, runs it and comes back would be very convenient, and would cover
-  `log`, `fetch` and `rebase` in one idea rather than a verb each.
-
 - **Say why git refused, when the reason is curate.** `git pull` in review mode
   gives you `There is no tracking information for the current branch`, which is
   true, useless, and says nothing about review mode -- HEAD is the clean line,

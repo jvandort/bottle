@@ -9,6 +9,7 @@ One module per seam, and the dependencies run one way:
     hooks     the three hooks, installing them and handling them
     start     beginning one: the base, and naming the clean line
     fixup     folding into an existing clean commit, and its conflicts
+    gitverb   `curate git <command>`: borrow write mode for one command
     commands  status, list, drop
     ui        asking, when there is a terminal to ask at
     cli       the verbs, and HELP
