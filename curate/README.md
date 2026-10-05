@@ -62,6 +62,8 @@ curate start --from <base>   begin. --clean <branch> to name the clean line
 curate review                switch to review mode
 curate write                 switch back
 curate switch                toggle between the two
+curate git <command>         run a git command in write mode, whatever mode
+                             you are in, then come back
 curate status                report on curate's state, and anything wrong
 curate fixup <commit>        fold what you approved into an existing clean
                              commit.  --continue / --abort when it conflicts
@@ -167,12 +169,24 @@ finishing one does not disturb the other.
 
 ## Keeping up with a branch someone else writes
 
-An agent's branch, a colleague's, your own from another machine: switch to write
-mode and use ordinary git.
+An agent's branch, a colleague's, your own from another machine: it is ordinary
+git on the working line, so `curate git` runs it for you.
+
+```sh
+curate git pull              # plain conflicts, in your working tree, as usual
+```
+
+That is write mode, the command, and review mode again -- borrowed for exactly
+as long as the pull takes. It works the same from write mode, where it is
+simply `git`, so you never have to know which mode you were in to type it.
+`log`, `fetch`, `diff`, `status`: anything that wants HEAD to be the
+branch you are writing rather than the clean line.
+
+You can still do it by hand, which is all `curate git` does:
 
 ```sh
 curate write
-git pull                     # plain conflicts, in your working tree, as usual
+git pull
 curate review                # your approvals come back untouched
 ```
 
@@ -180,6 +194,11 @@ They come back because the approved set is a *tree*: it records content, and
 content does not care how it got there. Only genuinely new changes reappear as
 unapproved. If your tree is dirty, commit on the working line -- never stash.
 It is a history nobody reads, where an extra commit costs nothing.
+
+If the command checks something else out -- `curate git switch elsewhere` --
+there is no review to come back to, because the working line is no longer where
+you are standing. curate says so and leaves you there; `git switch <working>
+&& curate review` returns.
 
 ## Starting from the wrong base
 

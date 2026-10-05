@@ -6,6 +6,7 @@ from typing import Callable
 from .commands import cmd_drop, cmd_list, cmd_status
 from .errors import Refused
 from .fixup import cmd_fixup, cmd_resolve
+from .gitverb import cmd_git
 from .hooks import cmd_hook, install as install_hooks
 from .modes import NoReview, switch_mode
 from .start import cmd_start
@@ -17,6 +18,9 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
   curate review                read your files against the clean line. Stage a
                                hunk to approve it, commit to ship it.
   curate write                 back to an ordinary repository, to write code.
+  curate git <command>         run a git command as if you were in write mode,
+                               whatever mode you are in, then come back. So
+                               `curate git pull` without leaving the review.
   curate switch                toggle between the two.
   curate status                which mode you are in, the two branches, and
                                anything wrong that curate cannot put right.
@@ -38,6 +42,7 @@ is finished when `git status` is empty."""
 # yours, which is why it is listed apart.
 COMMANDS: dict[str, Callable[[Repo, list[str]], int]] = {
     "start": cmd_start,
+    "git": cmd_git,
     "status": cmd_status,
     "fixup": cmd_fixup,
     "resolve": cmd_resolve,
