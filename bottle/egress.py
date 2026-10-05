@@ -9,8 +9,9 @@ Speaks the two things proxy-aware clients send: CONNECT (HTTPS, SSH, any TCP)
 and absolute-form plain HTTP requests (apt).
 
 It also holds credentials the bottle never sees (Injection): for the hosts a
-feature names, the proxy attaches the real token as a request header and makes
-the HTTPS connection itself.
+feature names, the proxy terminates the bottle's TLS with a certificate from
+the egress CA (see ca.py), attaches the real token as a request header, and
+makes the HTTPS connection to the server itself.
 """
 
 import asyncio
@@ -36,9 +37,25 @@ HEADER_TIMEOUT = 30
 CONNECT_TIMEOUT = 10
 # Hop-by-hop headers meant for the proxy, never forwarded upstream.
 PROXY_HEADERS = {"proxy-connection", "proxy-authorization", "connection", "keep-alive"}
+# Headers a proxy or load balancer sets to tell the server where a request came
+# from, what it was really for, or which method it is. A bottle's client has no
+# reason to send them, and on a request carrying a credential they could make
+# the server (or one in front of it) route or read it as something else, so
+# they're dropped there, as Host is replaced.
+ROUTING_HEADERS = {
+    "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+    "x-forwarded-prefix", "x-forwarded-server", "x-forwarded-scheme", "x-forwarded-ssl", "x-real-ip",
+    "x-original-url", "x-rewrite-url", "x-original-host", "x-host",
+    "x-http-method-override", "x-http-method", "x-method-override",
+}
+# Methods a server answers by echoing the request back, credential included,
+# so they're never sent with one. TRACK is IIS's TRACE.
+ECHOING_METHODS = {"TRACE", "TRACK"}
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[[str, int], Awaitable[list[str]]]
+# A TLS server context presenting a certificate for a host (ca.server_context).
+Certificates = Callable[[str], ssl.SSLContext]
 
 
 @dataclass(frozen=True)
@@ -77,17 +94,19 @@ class Injection:
     features.py); bottled looks the credential up on the machine and builds these
     per bottle, so the token itself stays outside the bottle.
 
-    The bottle addresses an injected host over plain HTTP, because a CONNECT
-    tunnel is opaque and a header can only be attached to a request the proxy
-    can read. The proxy always reaches the server over TLS, so a credential
-    never travels in the clear beyond the bottle's own network: that hop is
-    between the bottle and its gateway on the machine, and the request that leaves
-    the machine is the ordinary HTTPS one the server expects.
+    The bottle talks to an injected host the way it talks to any other: HTTPS,
+    through CONNECT. A tunnel is opaque, and a header can only be attached to
+    a request the proxy can read, so for this host and port the proxy doesn't
+    tunnel: it completes the TLS handshake itself, with a certificate from the
+    bottle's egress CA, which it trusts for its credentials' hosts only (see
+    ca.py), reads each request, attaches the
+    credential, and sends it on over its own verified TLS connection. A
+    credential is never on the wire in the clear, in the bottle or beyond it.
 
     An injected host is also reachable where the policy would otherwise refuse
     a private address, since naming the host is what configuring the
-    credential means. Nothing else about that host opens up: a CONNECT to it
-    is judged by the policy alone.
+    credential means. Nothing else about that host opens up: a CONNECT to
+    another port is tunnelled, and judged by the policy alone.
     """
 
     host: str  # a pattern, e.g. "teamcity.corp.example.com" or "*.example.com"
@@ -95,14 +114,14 @@ class Injection:
     value: str  # the whole header value, credential included
     port: int = 443
 
-    def matches(self, host: str) -> bool:
-        return fnmatch.fnmatch(host.lower(), self.host.lower())
+    def matches(self, host: str, port: int) -> bool:
+        return port == self.port and fnmatch.fnmatch(host.lower(), self.host.lower())
 
 
 class Refused(Exception):
-    """The request can't be served; carries the HTTP status to answer with."""
+    """The request can't be served; carries the HTTP status to answer with, None when there's no answering."""
 
-    def __init__(self, status: int, reason: str, outcome: str) -> None:
+    def __init__(self, status: int | None, reason: str, outcome: str) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
@@ -120,8 +139,9 @@ class Request:
     path: str = ""
     query: str = ""
     headers: dict[str, str] | None = None
-    # Set when a credential was attached: the proxy makes this connection
-    # over TLS, and allows a private address for this destination.
+    # Set when a credential was attached, inside a tunnel the proxy
+    # terminated: the proxy makes this connection over TLS, and allows a
+    # private address for this destination.
     injected: bool = False
 
 
@@ -133,14 +153,17 @@ class EgressProxy:
         resolve: Resolver | None = None,
         services: "host.HostServices | None" = None,
         injections: tuple[Injection, ...] = (),
+        certificates: Certificates | None = None,
     ) -> None:
         self.name = name
         self.policy = policy
         self.resolve = resolve or _resolve
         # Requests to http://bottle.host/ are answered here, never forwarded.
         self.services = services
-        # Credentials the host attaches for the bottle, by destination.
-        self.injections = tuple(injections)
+        # Credentials the host attaches for the bottle, by destination, and
+        # the certificates that let it: without them, nothing is attached.
+        self.injections = tuple(injections) if certificates else ()
+        self.certificates = certificates
 
     async def start(self, host: str, port: int) -> asyncio.Server:
         return await asyncio.start_server(self._handle, host, port, limit=MAX_HEADER_BYTES)
@@ -154,11 +177,18 @@ class EgressProxy:
         upstream_writer = None
         try:
             request = await self._read_request(reader)
+            injection = self._injection_for(request)
+            allowed = None
+            if injection is not None:
+                # Judged before anything is minted or handshaken for it, so a
+                # destination the bottle may not reach costs nothing.
+                allowed = await self._allowed(request.host, request.port, private=True)
+                request = await self._terminate(request, injection, reader, writer)
             if request.host == host.HOST:
                 ip = "host"
                 outcome = await self._host(request, reader, writer)
                 return
-            ip, upstream_reader, upstream_writer = await self._open(request)
+            ip, upstream_reader, upstream_writer = await self._open(request, allowed)
             if request.upstream_head is None:
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:
@@ -168,7 +198,8 @@ class EgressProxy:
                          response if request.upstream_head is not None else None)
         except Refused as e:
             outcome = e.outcome
-            await _respond(writer, e.status, e.reason)
+            if e.status is not None:
+                await _respond(writer, e.status, e.reason)
         except Exception:
             outcome = "error"
             log.exception("%s: unexpected error", self.name)
@@ -199,19 +230,7 @@ class EgressProxy:
         )
 
     async def _read_request(self, reader: asyncio.StreamReader) -> Request:
-        try:
-            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEADER_TIMEOUT)
-        except asyncio.LimitOverrunError:
-            raise Refused(431, "Request Header Fields Too Large", "bad-request") from None
-        except (asyncio.IncompleteReadError, TimeoutError):
-            raise Refused(400, "Bad Request", "bad-request") from None
-
-        request_line, *header_lines = head.decode("latin-1").split("\r\n")[:-2]
-        parts = request_line.split(" ")
-        if len(parts) != 3 or not parts[2].startswith("HTTP/"):
-            raise Refused(400, "Bad Request", "bad-request")
-        method, target, version = parts
-
+        method, target, version, header_lines = await _read_head(reader)
         if method == "CONNECT":
             host, port = _split_host_port(target)
             return Request(method, host, port, None)
@@ -221,42 +240,80 @@ class EgressProxy:
             # HTTPS goes through CONNECT; origin-form means the client isn't proxy-aware.
             raise Refused(400, "Bad Request", "bad-request")
         path = (url.path or "/") + (f"?{url.query}" if url.query else "")
-        headers = [line for line in header_lines if line.split(":", 1)[0].strip().lower() not in PROXY_HEADERS]
-        injection = next((i for i in self.injections if i.matches(url.hostname)), None)
-        if injection is not None:
-            # Whatever the bottle sent under this name is a stand-in; replace it.
-            # The Host header goes with the destination too, so a request
-            # carrying a credential can't ask one server to answer as another.
-            dropped = {injection.header.lower(), "host"}
-            headers = [line for line in headers if line.split(":", 1)[0].strip().lower() not in dropped]
-            authority = url.hostname + (f":{url.port}" if url.port else "")
-            headers[:0] = [f"Host: {authority}"]
-            headers.append(f"{injection.header}: {injection.value}")
+        headers = _forwarded(header_lines)
         if not any(line.lower().startswith("host:") for line in headers):
             headers.insert(0, f"Host: {url.netloc}")
-        # One request per connection keeps relaying simple: the upstream closes when done.
-        headers.append("Connection: close")
-        upstream_head = "\r\n".join([f"{method} {path} {version}", *headers, "", ""]).encode("latin-1")
-        parsed = {}
-        for line in header_lines:
-            name, _, value = line.partition(":")
-            parsed[name.strip().lower()] = value.strip()
-        default_port = injection.port if injection else 80
         return Request(
-            method, url.hostname, url.port or default_port, upstream_head, url.path or "/", url.query, parsed,
-            injected=injection is not None,
+            method, url.hostname, url.port or 80, _upstream_head(method, path, version, headers),
+            url.path or "/", url.query, _parsed(header_lines),
         )
 
-    async def _open(self, request: Request) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
-        host, port = request.host, request.port
+    def _injection_for(self, request: Request) -> Injection | None:
+        """The credential for a CONNECT to this host and port, if one claims it."""
+        if request.upstream_head is not None:
+            return None
+        return next((i for i in self.injections if i.matches(request.host, request.port)), None)
+
+    async def _terminate(
+        self, tunnel: Request, injection: Injection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    ) -> Request:
+        """Answer a CONNECT as the server would, and read the request inside, with the credential attached.
+
+        One request per tunnel, like the plain-HTTP path: the upstream is told
+        to close when it's done, and the client opens a new tunnel for the next.
+        """
+        try:
+            context = await asyncio.to_thread(self.certificates, tunnel.host)
+        except Exception:
+            log.exception("%s: no certificate for %s", self.name, tunnel.host)
+            raise Refused(502, f"Bad Gateway: no certificate for {tunnel.host}", "error") from None
+        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await writer.drain()
+        try:
+            await asyncio.wait_for(writer.start_tls(context), HEADER_TIMEOUT)
+        except (ssl.SSLError, ConnectionError, OSError, TimeoutError):
+            # Most likely a client that doesn't trust the egress CA: nothing to answer on.
+            raise Refused(None, "TLS handshake with the bottle failed", "tls-refused") from None
+        method, target, version, header_lines = await _read_head(reader)
+        url = urlsplit(target)
+        if method == "CONNECT" or (url.scheme and url.scheme != "https") or (url.netloc and url.hostname != tunnel.host.lower()):
+            raise Refused(400, "Bad Request", "bad-request")
+        if method.upper() in ECHOING_METHODS:
+            # The response would carry the credential back into the bottle.
+            raise Refused(405, "Method Not Allowed", "denied")
+        path = (url.path or "/") + (f"?{url.query}" if url.query else "")
+        # Whatever the bottle sent under this name is a stand-in; replace it.
+        # The Host header goes with the destination too, and the routing
+        # headers go altogether, so a request carrying a credential can't ask
+        # one server to answer as another, or for something else.
+        dropped = {injection.header.lower(), "host", *ROUTING_HEADERS}
+        headers = [line for line in _forwarded(header_lines) if line.split(":", 1)[0].strip().lower() not in dropped]
+        authority = tunnel.host + (f":{tunnel.port}" if tunnel.port != 443 else "")
+        headers = [f"Host: {authority}", *headers, f"{injection.header}: {injection.value}"]
+        return Request(
+            method, tunnel.host, tunnel.port, _upstream_head(method, path, version, headers),
+            url.path or "/", url.query, _parsed(header_lines), injected=True,
+        )
+
+    async def _allowed(self, host: str, port: int, private: bool) -> list[str]:
+        """The addresses `host` resolves to that the policy lets the bottle reach; refused if none."""
         try:
             addresses = await self.resolve(host, port)
         except OSError:
             raise Refused(502, "Bad Gateway: cannot resolve host", "unresolved") from None
-        # Connect to the exact addresses we checked, so a second lookup can't swap them.
-        allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a), private=request.injected)]
+        allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a), private=private)]
         if not allowed:
             raise Refused(403, "Forbidden: destination not allowed", "denied")
+        return allowed
+
+    async def _open(
+        self, request: Request, allowed: list[str] | None = None,
+    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to the request's destination, at `allowed` when it has already been judged."""
+        host, port = request.host, request.port
+        # Connect to the exact addresses we checked, so a second lookup can't swap them.
+        if allowed is None:
+            allowed = await self._allowed(host, port, private=request.injected)
         # The machine's end of an injected request is always TLS: a credential is
         # never put on a request that leaves here in the clear.
         context = _tls_context() if request.injected else None
@@ -276,6 +333,40 @@ class EgressProxy:
 def _tls_context() -> ssl.SSLContext:
     """Verifying TLS with the machine's trusted roots, for the host end of an injected request."""
     return ssl.create_default_context()
+
+
+async def _read_head(reader: asyncio.StreamReader) -> tuple[str, str, str, list[str]]:
+    """A request's method, target, HTTP version and header lines."""
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEADER_TIMEOUT)
+    except asyncio.LimitOverrunError:
+        raise Refused(431, "Request Header Fields Too Large", "bad-request") from None
+    except (asyncio.IncompleteReadError, TimeoutError, ConnectionError, ssl.SSLError):
+        raise Refused(400, "Bad Request", "bad-request") from None
+    request_line, *header_lines = head.decode("latin-1").split("\r\n")[:-2]
+    parts = request_line.split(" ")
+    if len(parts) != 3 or not parts[2].startswith("HTTP/"):
+        raise Refused(400, "Bad Request", "bad-request")
+    method, target, version = parts
+    return method, target, version, header_lines
+
+
+def _forwarded(header_lines: list[str]) -> list[str]:
+    """The header lines meant for the server, without the hop-by-hop ones meant for the proxy."""
+    return [line for line in header_lines if line.split(":", 1)[0].strip().lower() not in PROXY_HEADERS]
+
+
+def _parsed(header_lines: list[str]) -> dict[str, str]:
+    parsed = {}
+    for line in header_lines:
+        name, _, value = line.partition(":")
+        parsed[name.strip().lower()] = value.strip()
+    return parsed
+
+
+def _upstream_head(method: str, path: str, version: str, headers: list[str]) -> bytes:
+    # One request per connection keeps relaying simple: the upstream closes when done.
+    return "\r\n".join([f"{method} {path} {version}", *headers, "Connection: close", "", ""]).encode("latin-1")
 
 
 async def _resolve(host: str, port: int) -> list[str]:

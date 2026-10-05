@@ -18,10 +18,12 @@ rm -rf /var/lib/apt/lists/*
 
 # How this feature is authenticated, since JSON has no room for a comment:
 #
-#   ANTHROPIC_BASE_URL (containerEnv) is the API's host over plain http,
-#   because that is what the bottle must send for the egress proxy to be able
-#   to attach the subscription token (see bottle/egress.py). The proxy makes
-#   the HTTPS connection to api.anthropic.com itself, from the machine.
+#   Claude Code talks to https://api.anthropic.com as it always does. The
+#   egress proxy terminates that TLS with a certificate from the egress CA,
+#   which the bottle trusts (NODE_EXTRA_CA_CERTS, set by the base image), and
+#   attaches the subscription token (see bottle/egress.py). So every call gets
+#   it -- inference, and the organization's managed settings and policy
+#   limits, which ignore ANTHROPIC_BASE_URL.
 #
 #   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
 #   a fake token there when it creates a bottle -- and nowhere in the image, so

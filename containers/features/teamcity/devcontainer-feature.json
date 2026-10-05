@@ -5,8 +5,7 @@
   "description": "JetBrains' TeamCity CLI, authenticated by the egress proxy: the bottle talks to its server without ever holding the token.",
   "documentationURL": "https://www.jetbrains.com/help/teamcity/teamcity-cli.html",
   "containerEnv": {
-    "TEAMCITY_NO_UPDATE": "1",
-    "TC_INSECURE_SKIP_WARN": "1"
+    "TEAMCITY_NO_UPDATE": "1"
   },
   "options": {
     "server": {
