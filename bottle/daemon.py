@@ -247,6 +247,8 @@ def running_bottles() -> list[tuple[str, str, Path | None, tuple[str, ...]]]:
     """(name, network, repo git dir, features) of every ready bottle whose container is running."""
     from bottle import bottles  # bottles imports this module
 
+    if not runtime.services_running():
+        return []  # nothing runs without them
     return [(b.name, b.network, bottles.git_dir(b), tuple(b.features)) for b in bottles.load().values()
             if b.status == "ready" and runtime.container_state(b.container) == "running"]
 

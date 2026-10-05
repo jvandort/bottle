@@ -38,6 +38,16 @@ class FakeRuntime:
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
         self.bridged = True
+        self.services = True  # container's system services; down after the machine restarts
+
+    def services_running(self):
+        return self.services
+
+    def _visible(self) -> None:
+        """As runtime's inspects do: start the services if they're down, rather than report everything gone."""
+        if not self.services:
+            self.calls.append("start_services")
+            self.services = True
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -80,9 +90,11 @@ class FakeRuntime:
         del self.built_images[tag]
 
     def network_exists(self, network):
+        self._visible()
         return network in self.networks
 
     def container_state(self, name):
+        self._visible()
         return self.containers.get(name)
 
     def container_start(self, name):
@@ -98,6 +110,7 @@ class FakeRuntime:
         return True
 
     def container_info(self, name):
+        self._visible()
         if name not in self.containers:
             return None
         return bottles.runtime.ContainerInfo(
@@ -142,7 +155,7 @@ class FakeRuntime:
             (bottles.runtime, ("network_create", "network_gateway", "host_has_address", "network_delete", "network_exists",
                                "container_run", "container_state", "container_start", "container_stop",
                                "container_delete", "container_info", "container_exec", "images", "images_in_use",
-                               "image_delete")),
+                               "image_delete", "services_running")),
             (bottles.daemon, ("ensure_egress", "release_egress", "stop")),
         ):
             for name in names:
@@ -367,6 +380,16 @@ class DeleteTest(BottleTestCase):
         with self.assertRaisesRegex(BottleError, "no bottle named 'nope'"):
             bottles.delete("nope")
 
+    def test_after_a_restart_starts_the_services_and_removes_every_part(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example", "base")
+        fake.containers[bottle.container] = "stopped"
+        fake.services = False  # the machine restarted
+        bottles.delete("example", force=True)
+        self.assertEqual(bottles.load(), {})
+        self.assertEqual((fake.networks, fake.containers), (set(), {}))
+        self.assertIn("start_services", fake.calls)
+
 
 class EnsureRunningTest(BottleTestCase):
     def test_starts_a_stopped_bottle_and_its_egress(self) -> None:
@@ -411,6 +434,14 @@ class EnsureRunningTest(BottleTestCase):
         with mock.patch("sys.stderr"):
             bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["container_stop", "container_start", "verify_contract", "trust_egress_ca", "ensure_egress"])
+
+    def test_after_a_restart_starts_the_services_then_the_bottle(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example", "base")
+        fake.containers[bottle.container] = "stopped"
+        fake.services = False
+        bottles.ensure_running("example")
+        self.assertEqual(fake.containers[bottle.container], "running")
 
     def test_missing_container(self) -> None:
         fake = self.fake()
@@ -651,6 +682,15 @@ class StartStopTest(BottleTestCase):
         fake.calls.clear()
         bottles.stop("example")
         self.assertEqual(fake.calls, [])
+
+    def test_stopping_doesnt_start_the_services_just_to_find_nothing_running(self) -> None:
+        fake = self.fake()
+        bottles.create("example", "base")
+        fake.services = False
+        fake.calls.clear()
+        bottles.stop("example")
+        bottles.shutdown()
+        self.assertEqual(fake.calls, ["daemon_stop"])
 
     def test_start_after_stop(self) -> None:
         fake = self.fake()

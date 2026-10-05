@@ -474,6 +474,8 @@ def stop(name: str) -> None:
     """Stop the bottle's VM and egress. Its checkout and changes are kept."""
     bottle = get(name)
     daemon.release_egress(bottle.name)
+    if not runtime.services_running():
+        return  # so nothing is running
     if runtime.container_state(bottle.container) == "running":
         runtime.container_stop(bottle.container)
         log.info("%s: stopped", name)
@@ -482,7 +484,7 @@ def stop(name: str) -> None:
 def shutdown() -> tuple[list[str], bool]:
     """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running."""
     stopped = []
-    for bottle in load().values():
+    for bottle in load().values() if runtime.services_running() else ():
         if runtime.container_state(bottle.container) == "running":
             runtime.container_stop(bottle.container)
             log.info("%s: stopped (shutdown)", bottle.name)
