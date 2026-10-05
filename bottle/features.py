@@ -40,10 +40,13 @@ those hosts (see bottle/egress.py).
     standin  An environment variable a bottle gets a fake token in, for a tool
              that won't work until it thinks it's logged in (see below).
 
-  A tool in the bottle has to be pointed at `http://<host>` for the proxy to
-  be able to attach anything, since a CONNECT tunnel is opaque; that is the
-  feature's own business, in its install.sh, along with anything else the tool
-  needs in order to believe it's configured.
+  A tool in the bottle talks to the host over https as it always would: the
+  proxy terminates the tunnel with a certificate from the bottle's egress CA,
+  which the bottle trusts for its credentials' hosts and no others (see
+  bottle/ca.py), so it can read the request and attach the header. A host is
+  a name, an IP address, or `*.` and a name, since the CA's name constraint
+  can say nothing else. Anything else the tool needs in order to believe it's
+  configured is the feature's own business, in its install.sh.
 
   A CLI doesn't know someone is attaching its token for it, and usually
   refuses to make a request until it has one. What it gets is a stand-in, and

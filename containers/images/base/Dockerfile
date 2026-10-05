@@ -8,6 +8,9 @@
 #   - git: setting up /workspace, pushing work back to the host, and
 #     `bottle delete`'s check for unpushed work
 #   - sshd, for IDEs
+#   - ca-certificates, so bottle can install the egress CA (bottle/ca.py) in
+#     the trust store when the bottle starts; NODE_EXTRA_CA_CERTS points at it
+#     too, for Node tools (Claude Code among them)
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.
 
@@ -28,6 +31,7 @@ RUN . /etc/os-release \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+      ca-certificates \
       git \
       openssh-server \
       sudo \
@@ -62,8 +66,10 @@ COPY entrypoint.sh /usr/local/bin/bottle-entrypoint
 COPY profile.sh /etc/profile.d/bottle.sh
 
 # ENV reaches `container exec`; SSH sessions only see /etc/environment (via PAM).
-ENV LANG=C.UTF-8
-RUN printf '%s\n' "LANG=$LANG" > /etc/environment
+# The egress CA's certificate is installed at NODE_EXTRA_CA_CERTS when a
+# bottle starts (CA_CERTIFICATE in bottle/bottles.py); keep the two in sync.
+ENV LANG=C.UTF-8 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bottle-egress.crt
+RUN printf '%s\n' "LANG=$LANG" "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS" > /etc/environment
 
 # Default directory for `exec` sessions: the project.
 WORKDIR /workspace

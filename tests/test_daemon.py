@@ -39,6 +39,10 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.path = Path(tmp) / "d.sock"
         self.port = free_port()
         self.daemon = Daemon(port=self.port)
+        # The features these tests name aren't resolved: what a credential claims is mocked where it matters.
+        hosts = mock.patch.object(daemon.auth, "intercepted_hosts", return_value=[])
+        hosts.start()
+        self.addCleanup(hosts.stop)
         self.running = getattr(self, "running", [])
         for patcher in (
             mock.patch.object(daemon.runtime, "network_gateway", return_value="127.0.0.1"),
@@ -99,6 +103,16 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
             await self.request({"op": "ensure", "bottle": "b", "network": "n", "features": ["teamcity:server=ci.test"]})
         looked_up.assert_called_once_with(("teamcity:server=ci.test",))
         self.assertEqual(self.daemon.proxies["b"][0].injections, tuple(injections))
+
+    async def test_a_bottles_proxy_mints_from_that_bottles_ca(self) -> None:
+        with mock.patch.object(daemon.auth, "intercepted_hosts", return_value=["ci.test"]), \
+                mock.patch.object(daemon.auth, "injections_for", return_value=[]), \
+                mock.patch.object(daemon.egress, "EgressProxy", wraps=daemon.egress.EgressProxy) as proxy, \
+                mock.patch.object(daemon.ca, "server_context") as server_context:
+            await self.request({"op": "ensure", "bottle": "b", "network": "n", "features": ["teamcity:server=ci.test"]})
+            proxy.call_args.kwargs["certificates"]("ci.test")
+        server_context.assert_called_once_with("b", ("ci.test",), "ci.test")
+        self.assertEqual(self.daemon.proxies["b"][0].intercepted, ("ci.test",))
 
     async def test_a_changed_credential_gets_a_new_proxy(self) -> None:
         first = [daemon.egress.Injection(("ci.test",), "Authorization", "Bearer old")]

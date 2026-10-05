@@ -35,10 +35,12 @@ class RealFeaturesTest(unittest.TestCase):
         [credential] = claude.resolved_credentials()
         self.assertEqual(credential.inject.hosts, ("api.anthropic.com",))
         self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
-        # Plain http to the API, so the proxy can attach the real token, and a
-        # stand-in for the one Claude Code needs to believe it's logged in --
-        # which bottle sets per bottle, so it isn't in the image a login runs in.
-        self.assertEqual(claude.container_env["ANTHROPIC_BASE_URL"], "http://api.anthropic.com")
+        # The API's own https address, which the proxy terminates to attach the
+        # real token -- for every call, not just the ones ANTHROPIC_BASE_URL
+        # moves -- and a stand-in for the one Claude Code needs to believe it's
+        # logged in, which bottle sets per bottle, so it isn't in the image a
+        # login runs in.
+        self.assertNotIn("ANTHROPIC_BASE_URL", claude.container_env)
         self.assertEqual(credential.inject.standin, "CLAUDE_CODE_OAUTH_TOKEN")
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude.container_env)
 

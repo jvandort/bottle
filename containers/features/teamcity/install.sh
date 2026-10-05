@@ -31,13 +31,10 @@ cd "$OLDPWD"
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
-# The CLI's configuration, which is all it needs to work here. Two things in
-# it are bottle's doing:
-#
-#   The address is the server's host over plain http, because that is what the
-#   bottle must send for the egress proxy to be able to attach the access
-#   token (see bottle/egress.py). The proxy makes the HTTPS connection to the
-#   server itself, from the machine.
+# The CLI's configuration, which is all it needs to work here. The server is
+# addressed over https, as usual: the egress proxy terminates that TLS with a
+# certificate from the egress CA, which the bottle trusts, and attaches the
+# access token (see bottle/egress.py). One thing in it is bottle's doing:
 #
 #   The token is a placeholder, and no secret: the CLI refuses to make a
 #   request until it has been logged in to a server, and the proxy replaces
@@ -58,10 +55,10 @@ esac
 home="$_REMOTE_USER_HOME"
 install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$home/.config" "$home/.config/tc"
 {
-  echo "default_server: http://$host"
+  echo "default_server: https://$host"
   echo "analytics: false"  # a sandbox shouldn't phone home about what the agent ran
   echo "servers:"
-  echo "  \"http://$host\":"
+  echo "  \"https://$host\":"
   echo "    token: the-egress-proxy-holds-the-real-one"
   # READONLY is the feature's option, and on by default: the CLI refuses
   # anything but GET, so an agent can look at builds without starting or

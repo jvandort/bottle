@@ -99,25 +99,16 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   proxy port.
 - **Build-time egress exposure.** During `bottle build`, the temporary proxy
   on the default network is usable by any container on that network.
-- **Credentials via the proxy: what's left.** Features can now name the hosts
-  a credential belongs to and have the egress proxy attach it (`claude` and
-  `teamcity` both do), but it only works for a tool that can be pointed at a
-  plain `http://` address, since a CONNECT tunnel is opaque. A proxy that terminated
-  TLS for named hosts (a CA generated per machine, trusted in the bottle) would
-  cover tools that insist on https, and would end the bottle-side plaintext
-  hop. Also: a bottle picks up a re-login only when it next starts, and an
-  injected host is allowed even when private, which is wider than the
-  `--allow` list it bypasses.
-- **`claude` through the proxy: the calls that bypass it.** Run against the
-  real API, Claude Code starts on the stand-in, and inference goes to
-  `http://api.anthropic.com` with the token attached (`/v1/messages
-  +credential ... 200` in the log). Other calls ignore `ANTHROPIC_BASE_URL`
-  and go to `https://api.anthropic.com` through a CONNECT tunnel with the
-  stand-in, so they're refused: at startup, the remote managed settings fetch
-  (org policy) gets a 401, and the features that wait for org policy stay off
-  (Remote Control, cloud sessions, `/feedback`). Terminating TLS for named
-  hosts (above) is the fix. Pointing the base URL at another name would make
-  Claude Code skip the fetch instead, and with it the organization's policy.
+- **Credentials via the proxy: what's left.** The proxy terminates TLS for the
+  hosts a credential names (the egress CA, bottle/ca.py), so tools use https as
+  usual. What's left:
+  - One request per terminated tunnel: the upstream is told
+    `Connection: close`, so a client opens a new tunnel (and handshake) per
+    request, and an `Upgrade` (WebSockets) through a terminated tunnel doesn't
+    work. Reading responses' framing would allow keep-alive.
+  - A bottle picks up a re-login only when it next starts.
+  - An injected host is allowed even when private, which is wider than the
+    `--allow` list it bypasses.
 
 ## Host commands for the genie
 
@@ -164,7 +155,8 @@ instructions file (like `CLAUDE.md`) in the bottle's home or workspace:
 - **Credentials a proxy can't attach.** A credential is spent as a request
   header the egress proxy attaches, which suits token-in-a-header APIs and
   nothing else. A tool that signs its requests, or one reached over a protocol
-  the proxy can't read (ssh, a CONNECT tunnel), has no way to use one. Whether
+  the proxy can't read (ssh, or TLS the bottle pins rather than trusting the
+  egress CA), has no way to use one. Whether
   those are worth supporting -- and how, without handing the bottle the secret
   -- is open.
 

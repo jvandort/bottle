@@ -4,8 +4,7 @@
   "name": "Claude Code",
   "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle, with its subscription token held by the egress proxy rather than the bottle.",
   "containerEnv": {
-    "DISABLE_AUTOUPDATER": "1",
-    "ANTHROPIC_BASE_URL": "http://api.anthropic.com"
+    "DISABLE_AUTOUPDATER": "1"
   },
   "options": {
     "permissionMode": {

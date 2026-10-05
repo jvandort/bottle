@@ -29,7 +29,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, replace
 from typing import NoReturn
 
-from bottle import auth, daemon, features as features_, host, images, prereqs, repos, runtime
+from bottle import auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -53,7 +53,11 @@ CONTRACT = (
     ("/workspace exists and genie can write to it", "test -d /workspace && test -w /workspace"),
     ("git is installed", "command -v git"),
     ("sshd is installed", "test -x /usr/sbin/sshd"),
+    ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
+# Where the egress CA's certificate goes in a bottle: the base image points
+# NODE_EXTRA_CA_CERTS here too, for tools that don't read the system store.
+CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,7 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
         labels={runtime.OWNER_LABEL: bottle.id},
     )
     verify_contract(bottle)
+    trust_egress_ca(bottle)
     # The gateway only exists once the container is on the network, so egress comes second.
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     _init_workspace(bottle)
@@ -243,7 +248,9 @@ def throwaway(feature_specs: list[str]):
         runtime.network_create(name, {runtime.OWNER_LABEL: token})
         proxy = daemon.proxy_url(runtime.network_gateway(name), daemon.EGRESS_PORT)
         runtime.container_run(name, tag, name, env=_proxy_env(proxy), mounts=[], labels={runtime.OWNER_LABEL: token})
-        daemon.ensure_egress(name, name, features=feature_specs)
+        # No features, so no credentials and no egress CA: a login starts from
+        # nothing, and mustn't find its own credential attached to what it sends.
+        daemon.ensure_egress(name, name)
         yield lambda argv: runtime.exec_command(name, argv, user=USER, tty=True)
     finally:
         for cleanup in (
@@ -503,8 +510,33 @@ def ensure_running(name: str) -> Bottle:
         runtime.container_start(bottle.container)
         log.info("%s: started", name)
         verify_contract(bottle)
+        trust_egress_ca(bottle)
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     return bottle
+
+
+def trust_egress_ca(bottle: Bottle) -> None:
+    """Make the bottle's trust store hold its egress CA's certificate, and no other.
+
+    Every time a bottle starts, so a bottle made before its CA, or whose
+    credential hosts have changed since, trusts the current one, and a bottle
+    with no credential hosts trusts none. It's what lets the egress proxy
+    attach a credential to the bottle's HTTPS (see ca.py); the key stays on
+    the machine.
+    """
+    certificate = ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
+    if certificate is None:
+        script = f"if [ -e {CA_CERTIFICATE} ]; then rm {CA_CERTIFICATE} && update-ca-certificates --fresh >/dev/null; fi"
+    else:
+        script = (
+            f"cat > {CA_CERTIFICATE}.new && "
+            f"if cmp -s {CA_CERTIFICATE}.new {CA_CERTIFICATE}; then rm {CA_CERTIFICATE}.new; "
+            f"else mv {CA_CERTIFICATE}.new {CA_CERTIFICATE} && update-ca-certificates --fresh >/dev/null; fi"
+        )
+    try:
+        runtime.container_exec(bottle.container, ["sh", "-c", script], user="root", input=certificate)
+    except BottleError as e:
+        raise BottleError(f"installing the egress CA in {bottle.container} failed: {e}") from None
 
 
 def verify_contract(bottle: Bottle) -> None:
@@ -680,6 +712,7 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
         ("container", lambda: runtime.container_delete(bottle.container, bottle.owner)),
         ("network", lambda: runtime.network_delete(bottle.network)),
         ("remote", lambda: forget_remote(bottle)),
+        ("egress CA", lambda: ca.forget(bottle.name)),
     ):
         try:
             action()

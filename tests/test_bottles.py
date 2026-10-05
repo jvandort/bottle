@@ -113,11 +113,16 @@ class FakeRuntime:
 
     contract_output = ""
     standins: dict = {}
+    intercepted: list = ["ci.test"]
 
     def container_exec(self, name, argv, user=None, workdir=None, input=None):
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
+        if bottles.CA_CERTIFICATE in argv[-1]:
+            self._step("trust_egress_ca")
+            self.trusted = (user, input)
+            return ""
         self._step("init_workspace")
         self.workspace_script = argv[-1]
         return ""
@@ -125,6 +130,7 @@ class FakeRuntime:
     def ensure_egress(self, bottle, network, git_dir=None, features=()):
         self._step("ensure_egress")
         self.egress_git_dir = git_dir
+        self.egress_features = tuple(features)
         self.egress.add(bottle)
         return "http://192.168.128.1:3128"
 
@@ -145,6 +151,8 @@ class FakeRuntime:
                 test.addCleanup(patcher.stop)
         for patcher in (
             mock.patch.object(bottles.prereqs, "ensure_container"),
+            mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
+            mock.patch.object(bottles.auth, "intercepted_hosts", side_effect=lambda specs: list(self.intercepted)),
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
             mock.patch.object(bottles.auth, "standins_for", side_effect=lambda specs: dict(self.standins)),
@@ -190,7 +198,7 @@ class CreateTest(BottleTestCase):
     def test_order_container_before_egress(self) -> None:
         fake = self.fake()
         bottles.create("example", "base")
-        self.assertEqual(fake.calls, ["ensure_logged_in", "network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"])
+        self.assertEqual(fake.calls, ["ensure_logged_in", "network_create", "container_run", "verify_contract", "trust_egress_ca", "ensure_egress", "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
         fake = self.fake()
@@ -302,7 +310,7 @@ class CreateTest(BottleTestCase):
 
 class RollbackTest(BottleTestCase):
     def test_failure_at_each_step_leaves_nothing(self) -> None:
-        for step in ("network_create", "container_run", "verify_contract", "ensure_egress", "init_workspace"):
+        for step in ("network_create", "container_run", "verify_contract", "trust_egress_ca", "ensure_egress", "init_workspace"):
             with self.subTest(step):
                 fake = self.fake(fail=step)
                 with self.assertRaisesRegex(BottleError, f"{step} failed"):
@@ -378,7 +386,7 @@ class EnsureRunningTest(BottleTestCase):
         fake.containers[bottle.container] = "stopped"
         fake.calls.clear()
         bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["container_start", "verify_contract", "ensure_egress"])
+        self.assertEqual(fake.calls, ["container_start", "verify_contract", "trust_egress_ca", "ensure_egress"])
 
     def test_running_bottle_only_ensures_egress(self) -> None:
         fake = self.fake()
@@ -387,6 +395,14 @@ class EnsureRunningTest(BottleTestCase):
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["ensure_egress"])
 
+    def test_starting_installs_the_egress_ca_as_root(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example")
+        fake.containers[bottle.container] = "stopped"
+        fake.trusted = None
+        bottles.ensure_running("example")
+        self.assertEqual(fake.trusted, ("root", "the egress CA's certificate"))
+
     def test_running_bottle_without_its_bridge_is_restarted(self) -> None:
         fake = self.fake()
         bottles.create("example", "base")
@@ -394,7 +410,7 @@ class EnsureRunningTest(BottleTestCase):
         fake.calls.clear()
         with mock.patch("sys.stderr"):
             bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["container_stop", "container_start", "verify_contract", "ensure_egress"])
+        self.assertEqual(fake.calls, ["container_stop", "container_start", "verify_contract", "trust_egress_ca", "ensure_egress"])
 
     def test_missing_container(self) -> None:
         fake = self.fake()
@@ -504,6 +520,10 @@ class StandinTest(BottleTestCase):
                 bottles.throwaway(["claude"]):
             pass
         self.assertEqual(fake.run_args["env"], bottles._proxy_env("http://192.168.128.1:3128"))
+        # Nor does its egress attach one: a login mustn't send the credential it's replacing.
+        self.assertEqual(fake.egress_features, ())
+        # And it trusts no egress CA, since its proxy terminates nothing.
+        self.assertEqual(fake.calls[-2:], ["container_run", "ensure_egress"])
 
 
 class CredentialTest(BottleTestCase):
@@ -968,7 +988,7 @@ class ResetTest(WorkspaceTestCase):
         bottle = bottles.get("example")
         bottles.stop("example")
         # Checking for unsaved work starts the bottle; the contract check would run on this machine.
-        with mock.patch.object(bottles, "verify_contract"), \
+        with mock.patch.object(bottles, "verify_contract"), mock.patch.object(bottles, "trust_egress_ca"), \
                 mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
             bottles.reset("example")
         self.assertEqual(bottles.runtime.container_state(bottle.container), "running")

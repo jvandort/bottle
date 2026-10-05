@@ -109,16 +109,29 @@ credential with no such command is asked for instead.
 A credential never enters a bottle. bottled hands it to that bottle's egress
 proxy, which attaches it as a header to the bottle's requests to the hosts the
 feature named — `claude` names `api.anthropic.com`, `teamcity` names its
-`server`. The agent can spend the credential against those hosts and can't read
-it, so an agent that sends everything it holds to a stranger sends no token.
+`server`. The agent can spend the credential
+against those hosts and can't read it, so an agent that sends everything it
+holds to a stranger sends no token.
 
-Such a host is always reached over HTTPS, by the machine; the bottle addresses it as
-`http://<host>`, because a CONNECT tunnel is opaque and a header can only be
-attached to a request the proxy can read. That hop is plaintext on the bottle's
-own network, between the bottle and its gateway. The host is also reachable when
-it's a private address, since configuring it is what naming it means; nothing
-else about that host opens up. Pointing a tool at that address is the feature's
-own business, in its `install.sh`.
+Tools in the bottle talk to those hosts over HTTPS as usual. A CONNECT tunnel is
+opaque, so for those hosts only, the proxy terminates it: it completes the
+bottle's TLS handshake with a certificate from the bottle's **egress CA**,
+reads the request, attaches the credential, and makes its own verified HTTPS
+connection to the server. Every other destination is tunnelled untouched. The
+host is also reachable when it's a private address, since configuring it is
+what naming it means; nothing else about that host opens up.
+
+Each bottle has an egress CA of its own, made with `openssl` in
+`~/.bottle/ca/<bottle>` when the bottle starts, and installed in that bottle's
+trust store (and at `NODE_EXTRA_CA_CERTS`, for Node tools); a bottle whose
+features name no credential hosts has none. The CA carries a name constraint
+permitting only the hosts the bottle's credentials name, which the bottle's own
+TLS clients enforce: a certificate for any other site is refused, whoever signs
+it, so nothing but those hosts' traffic can be read by the proxy. A constraint
+on a host also covers the names below it (`github.com` covers
+`gist.github.com`); that is how X.509 name constraints work. The keys never
+leave your machine, your machine never trusts any of them, and `bottle delete`
+removes them.
 
 A CLI doesn't know its token is being attached for it, and usually won't make a
 request until it thinks it's logged in, so a bottle gets a **stand-in**: a fake

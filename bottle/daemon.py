@@ -6,6 +6,7 @@ It listens on a Unix socket in $BOTTLE_HOME and speaks one JSON line per request
 """
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from bottle import auth, egress, runtime
+from bottle import auth, ca, egress, runtime
 from bottle.host import HostServices
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log
@@ -139,6 +140,8 @@ class Served:
     gateway: str
     git_dir: Path | None
     injections: tuple[egress.Injection, ...]
+    # What the bottle's egress CA is constrained to (see ca.py).
+    intercepted: tuple[str, ...]
 
 
 class Daemon:
@@ -193,7 +196,8 @@ class Daemon:
         # Credentials are read here, each time a bottle is served, so logging
         # in or out reaches the proxy when the bottle next starts.
         injections = tuple(await asyncio.to_thread(auth.injections_for, features))
-        serving = Served(gateway, git_dir, injections)
+        intercepted = tuple(await asyncio.to_thread(auth.intercepted_hosts, features))
+        serving = Served(gateway, git_dir, injections, intercepted)
         if bottle in self.proxies:
             served, server = self.proxies[bottle]
             # A stopped bottle's network loses its gateway address; the old socket may be dead.
@@ -202,7 +206,11 @@ class Daemon:
             self._close(bottle)
         try:
             services = HostServices(git_dir, bottle=bottle)
-            proxy = egress.EgressProxy(bottle, self.policy, services=services, injections=injections)
+            # The bottle's own CA, which bottle made when it started the bottle.
+            certificates = functools.partial(ca.server_context, bottle, intercepted)
+            proxy = egress.EgressProxy(
+                bottle, self.policy, services=services, injections=injections, certificates=certificates,
+            )
             server = await proxy.start(gateway, self.port)
         except OSError as e:
             if not await asyncio.to_thread(runtime.host_has_address, gateway):
