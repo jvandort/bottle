@@ -6,11 +6,27 @@ import json
 import os
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
 from bottle.errors import BottleError
+
+
+def services_running() -> bool:
+    """Whether container's system services are up. Nothing else here works without them."""
+    result = subprocess.run(["container", "system", "status"], capture_output=True, text=True)
+    return result.returncode == 0 and any(
+        line.split() == ["status", "running"] for line in result.stdout.splitlines()
+    )
+
+
+def start_services() -> None:
+    """Start container's system services, with their output visible. Installs nothing, so needs no prompt."""
+    print("Starting container services...", file=sys.stderr)
+    if subprocess.run(["container", "system", "start", "--disable-kernel-install"]).returncode != 0:
+        raise BottleError("`container system start` failed")
 
 
 def builder_start() -> None:
@@ -55,15 +71,14 @@ def host_has_address(address: str) -> bool:
 
 
 def image_exists(image: str) -> bool:
-    return _succeeds("image", "inspect", image)
+    return _inspect("image", "inspect", image) is not None
 
 
 def image_labels(image: str) -> dict[str, str] | None:
     """The image's labels, or None if there's no such image."""
-    result = subprocess.run(["container", "image", "inspect", image], capture_output=True, text=True)
-    if result.returncode != 0:
+    info = _inspect("image", "inspect", image)
+    if info is None:
         return None
-    [info] = json.loads(result.stdout)
     labels: dict[str, str] = {}
     for variant in info.get("variants", []):
         labels.update(variant.get("config", {}).get("config", {}).get("Labels") or {})
@@ -97,7 +112,7 @@ def image_delete(image: str) -> None:
 
 
 def network_exists(network: str) -> bool:
-    return _succeeds("network", "inspect", network)
+    return _inspect("network", "inspect", network) is not None
 
 
 def network_create(network: str, labels: dict[str, str] | None = None) -> None:
@@ -145,11 +160,8 @@ def host_resources() -> tuple[int, str]:
 
 def container_state(name: str) -> str | None:
     """"running", "stopped", etc., or None if there's no such container."""
-    result = subprocess.run(["container", "inspect", name], capture_output=True, text=True)
-    if result.returncode != 0:
-        return None
-    [info] = json.loads(result.stdout)
-    return info["status"]["state"]
+    info = _inspect("inspect", name)
+    return None if info is None else info["status"]["state"]
 
 
 def container_start(name: str) -> None:
@@ -168,10 +180,9 @@ class ContainerInfo:
 
 
 def container_info(name: str) -> ContainerInfo | None:
-    result = subprocess.run(["container", "inspect", name], capture_output=True, text=True)
-    if result.returncode != 0:
+    info = _inspect("inspect", name)
+    if info is None:
         return None
-    [info] = json.loads(result.stdout)
     config = info["configuration"]
     return ContainerInfo(
         info["status"]["state"], config.get("labels") or {}, [n["network"] for n in config.get("networks") or []]
@@ -265,8 +276,23 @@ async def build(
         raise BottleError(f"building {tag} failed")
 
 
-def _succeeds(*args: str) -> bool:
-    return subprocess.run(["container", *args], capture_output=True).returncode == 0
+def _inspect(*args: str) -> dict | None:
+    """What `container ARGS` (an inspect) reports about one object, or None if there's no such object.
+
+    A failed inspect means the object is absent only if the services that would
+    have found it are up. When they're down (as after the machine restarts)
+    they're started and the inspect retried; read as absence instead, every
+    container would look gone, and a delete would forget a bottle whose
+    container and network it never removed.
+    """
+    result = subprocess.run(["container", *args], capture_output=True, text=True)
+    if result.returncode != 0 and not services_running():
+        start_services()
+        result = subprocess.run(["container", *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    found = json.loads(result.stdout or "[]")
+    return found[0] if found else None
 
 
 def _run(*args: str, input: str | None = None) -> str:
