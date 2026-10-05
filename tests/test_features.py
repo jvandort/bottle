@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["claude", "jvm", "python", "teamcity", "tools"])
+        self.assertEqual(features.available(), ["claude", "github", "jvm", "python", "teamcity", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
@@ -43,6 +43,22 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_BASE_URL", claude.container_env)
         self.assertEqual(credential.inject.standin, "CLAUDE_CODE_OAUTH_TOKEN")
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude.container_env)
+
+    def test_github_attaches_its_token_for_git_and_gh(self) -> None:
+        github = features.load("github")
+        [credential] = github.resolved_credentials()
+        # github.com for git, api.github.com for gh and the REST and GraphQL
+        # APIs, uploads.github.com for release assets.
+        self.assertEqual(credential.inject.hosts, ("github.com", "api.github.com", "uploads.github.com"))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        self.assertEqual(credential.inject.standin, "GH_TOKEN")
+        self.assertNotIn("GH_TOKEN", github.container_env)
+        # Asked for, not captured from a login flow: gh's would mint a token for every repo.
+        self.assertIsNone(credential.login)
+
+    def test_github_installs_after_tools_which_owns_etc_gitconfig(self) -> None:
+        order = [f.id for f in features.resolve(["github", "tools"])]
+        self.assertEqual(order, ["tools", "github"])
 
     def test_teamcity_needs_a_server_and_attaches_its_token_there(self) -> None:
         [teamcity] = features.resolve(["teamcity:server=https://ci.corp.example.com"])

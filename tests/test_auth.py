@@ -101,7 +101,7 @@ class DeclaredTest(unittest.TestCase):
         self.assertEqual((d.feature, d.credential.inject.hosts), ("claude", ("api.anthropic.com",)))
 
     def test_unknown(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, teamcity\\)"):
+        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, github, teamcity\\)"):
             auth.get_declared("nope")
 
     def test_only_the_bottles_features_are_injected(self) -> None:
