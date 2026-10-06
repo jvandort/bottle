@@ -7,13 +7,14 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
 - **Stop idle bottles.** A bottle runs until `bottle stop`, `bottle shutdown`
   or the host stops it. bottled could stop bottles that have been idle for a
   while, once "idle" is defined (no exec sessions, no egress traffic).
-- **Resource limits.** Bottles get the whole machine (every core, all memory), so
-  a busy bottle can slow the host, and memory a guest has touched isn't
-  returned to the host until the bottle stops, so a bottle holds its
-  high-water mark for as long as it runs. Make CPUs and memory configurable,
-  per bottle and as a repo default; consider a lower default than "everything"
-  once several bottles at once is normal. Worth measuring what `container`
-  actually returns first (no free-page reporting or ballooning is assumed).
+- **Resource limits.** Memory can be limited per repo (`--memory` on `repo
+  add`/`set`/`update`) and per bottle (`new --memory`), but bottles still get
+  every core, so a busy bottle can slow the host. Make CPUs configurable the
+  same way. Without a limit, a bottle gets all of the machine's memory, and
+  memory a guest has touched isn't returned to the host until the bottle
+  stops; consider a lower default than "everything" once several bottles at
+  once is normal. Worth measuring what `container` actually returns first (no
+  free-page reporting or ballooning is assumed).
 - **Reconcile egress periodically.** bottled restores egress for running
   bottles when it starts, but a bottle started outside bottle (e.g.
   `container start`) has no network until a bottle command touches it.

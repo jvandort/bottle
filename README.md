@@ -59,7 +59,7 @@ and a Linux kernel) as necessary, and asks before installing anything.
 
 | Command | |
 | --- | --- |
-| `bottle repo add` / `list` / `set` / `update` | Register a repo, and set its bottles' default features |
+| `bottle repo add` / `list` / `set` / `update` | Register a repo, and set its bottles' default features and memory |
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
 | `bottle new` | Create a bottle from a repo |
 | `bottle shell` | Open a shell in a bottle, at `/workspace` |
@@ -74,12 +74,18 @@ and a Linux kernel) as necessary, and asks before installing anything.
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
 
-### `bottle repo add [NAME] PATH [--feature FEATURE]...`
+### `bottle repo add [NAME] PATH [--feature FEATURE]... [--memory MEMORY]`
 
 Registers the git repo rooted at `PATH` under `NAME`, so bottles can be created
 from it. Nothing is copied. `NAME` defaults to the origin remote's repo name,
 else the directory name. The features become the defaults for the repo's
 bottles. Adding the same repo again is a no-op.
+
+`MEMORY` is how much memory the repo's bottles get: a size in `M` or `G`, such
+as `8G`, up to what the machine has. The default, `all`, gives each bottle all
+of the machine's memory. A VM only takes memory from the host as it uses it,
+but doesn't give it back until it stops, so a long-running bottle holds on to
+the most it has ever used; a limit caps that.
 
 ```sh
 bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,additionalVersions=17,21 --feature claude
@@ -87,20 +93,24 @@ bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,addi
 
 ### `bottle repo list`
 
-Lists repos and their default features.
+Lists repos and their default features and memory.
 
-### `bottle repo set REPO [--feature FEATURE]...`
+### `bottle repo set REPO [--feature FEATURE]... [--memory MEMORY]`
 
 Replaces all the repo's settings: its default features become exactly those
-given. Existing bottles get them when reset.
+given, and its memory the one given (`all`, if none is). Existing bottles get
+them when reset.
 
-### `bottle repo update REPO --feature FEATURE...`
+### `bottle repo update REPO [--feature FEATURE]... [--memory MEMORY]`
 
 Adds features to the repo's existing ones: a feature given again replaces its
-options, others are kept. Existing bottles get them when reset.
+options, others are kept. Changes the repo's memory, if given; `--memory all`
+removes the limit. Takes at least one of the two. Existing bottles get the
+change when reset.
 
 ```sh
 bottle repo update foo --feature github
+bottle repo update foo --memory 8G
 ```
 
 Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
@@ -239,7 +249,7 @@ attached to and the stand-in it wants, and `requiredOptions`, the options a user
 has to set).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME]`
+### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME] [--memory MEMORY]`
 
 Creates a bottle: a VM with `REPO`'s `BRANCH` checked out at `/workspace`,
 and the repo's default features plus any given (a feature given again replaces
@@ -269,7 +279,8 @@ three remotes, served live by bottle through its egress proxy:
 `git switch BRANCH` to start tracking what it pushed, `git pull`, `git push`.
 
 `NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
-with those features is built first if it isn't built yet.
+with those features is built first if it isn't built yet. `MEMORY` overrides the
+repo's (see `bottle repo add`), and stays with the bottle when it's reset.
 
 ```sh
 bottle new reponame --feature tools --feature jvm --feature claude
@@ -293,7 +304,7 @@ bottle exec reponame cat /workspace/report.json | jq .failures
 
 ### `bottle list`
 
-Lists bottles and their state.
+Lists bottles, their memory and their state.
 
 ### `bottle start BOTTLE` / `bottle stop BOTTLE`
 
@@ -315,7 +326,8 @@ another bottle uses it.
 
 Deletes the bottle and creates it again with the arguments `bottle new` was
 given: a fresh, running VM with the repo's current default features (plus any
-the bottle was created with), and `/workspace` at the latest commit of its
+the bottle was created with) and memory (unless the bottle was created with its
+own), and `/workspace` at the latest commit of its
 branch. Like `delete`, it refuses to lose unpushed commits or uncommitted
 changes without `--force`. Also recreates a bottle whose VM has gone missing,
 and registers its `bottle-NAME` remote again if the repo has lost it.

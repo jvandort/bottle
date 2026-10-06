@@ -16,37 +16,41 @@ def main(argv: list[str] | None = None) -> int:
     repo = commands.add_parser("repo", help="manage the repos bottles are created from")
     repo_commands = repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
     feature_help = "a default feature for its bottles, optionally with options, e.g. jvm:version=17 (repeatable)"
+    memory_help = "memory for its bottles, in M or G, e.g. 8G; `all` (the default) gives them all of this machine's"
     repo_add = repo_commands.add_parser(
         "add",
         help="register a local git repo",
-        usage="bottle repo add [NAME] PATH [--feature FEATURE]...",
+        usage="bottle repo add [NAME] PATH [--feature FEATURE]... [--memory MEMORY]",
         description="Register a local git repo so bottles can be created from it. "
         "NAME defaults to the origin remote's repo name, else the directory name.",
     )
     repo_add.add_argument("args", nargs="+", metavar="[NAME] PATH")
     repo_add.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+    repo_add.add_argument("--memory", help=memory_help)
     repo_add.set_defaults(run=_repo_add, parser=repo_add)
-    repo_list = repo_commands.add_parser("list", help="list repos and their default features")
+    repo_list = repo_commands.add_parser("list", help="list repos and their default features and memory")
     repo_list.set_defaults(run=_repo_list, parser=repo_list)
     repo_set = repo_commands.add_parser(
         "set",
         help="replace a repo's settings",
         description="Replace all of a repo's settings: its default features become exactly those given "
-        "(none, if none are given). Existing bottles get them when reset.",
+        "(none, if none are given), and its memory the one given (all, if none is). "
+        "Existing bottles get them when reset.",
     )
     repo_set.add_argument("name", metavar="REPO", help="the repo to change")
     repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+    repo_set.add_argument("--memory", help=memory_help)
     repo_set.set_defaults(run=_repo_set, parser=repo_set)
     repo_update = repo_commands.add_parser(
         "update",
-        help="add features to a repo",
+        help="add features to a repo, or change its memory",
+        usage="bottle repo update REPO [--feature FEATURE]... [--memory MEMORY]",
         description="Add features to a repo's existing ones: a feature given again replaces its "
-        "options, others are kept. Existing bottles get them when reset.",
+        "options, others are kept. Change its memory, if given. Existing bottles get them when reset.",
     )
     repo_update.add_argument("name", metavar="REPO", help="the repo to change")
-    repo_update.add_argument(
-        "--feature", action="append", default=[], required=True, metavar="FEATURE", help=feature_help
-    )
+    repo_update.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+    repo_update.add_argument("--memory", help=memory_help)
     repo_update.set_defaults(run=_repo_update, parser=repo_update)
 
     auth = commands.add_parser("auth", help="log in once; bottles get the credentials their features need")
@@ -99,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         help="branch to check out (default: origin's default branch, else what the repo has checked out)",
     )
     new.add_argument("--name", help="name for the bottle")
+    new.add_argument(
+        "--memory", help="memory for the bottle, in M or G, e.g. 8G, or `all` for all of this machine's "
+        "(default: the repo's); kept when it's reset",
+    )
     new.set_defaults(run=_new, parser=new)
 
     list_ = commands.add_parser("list", help="list bottles", description="List bottles.")
@@ -223,12 +231,12 @@ def _repo_add(args: argparse.Namespace) -> int:
         case _:
             args.parser.error("takes [NAME] PATH")
 
-    result = repos.add(Path(path).expanduser(), name, args.feature)
+    result = repos.add(Path(path).expanduser(), name, args.feature, args.memory)
     repo = result.repo
     if result.created:
-        print(f"Created repo '{repo.name}' ({repo.path}) with features {_features(repo.features)}")
+        print(f"Created repo '{repo.name}' ({repo.path}) with features {_settings(repo)}")
     else:
-        print(f"Repo '{repo.name}' already exists ({repo.path}) with features {_features(repo.features)}")
+        print(f"Repo '{repo.name}' already exists ({repo.path}) with features {_settings(repo)}")
     return 0
 
 
@@ -236,23 +244,32 @@ def _features(specs) -> str:
     return f"[{', '.join(sorted(specs))}]"
 
 
+def _settings(repo_or_bottle) -> str:
+    """Its features, and its memory unless it has no limit: [claude, tools] and memory 8G."""
+    memory = repo_or_bottle.memory
+    return _features(repo_or_bottle.features) + (f" and memory {memory}" if memory else "")
+
+
 def _repo_list(args: argparse.Namespace) -> int:
-    rows = [("NAME", "PATH", "FEATURES")]
-    rows += [(r.name, str(r.path), " ".join(r.features) or "-") for r in sorted(repos.load().values(), key=lambda r: r.name)]
+    rows = [("NAME", "PATH", "FEATURES", "MEMORY")]
+    rows += [(r.name, str(r.path), " ".join(r.features) or "-", r.memory or "all")
+             for r in sorted(repos.load().values(), key=lambda r: r.name)]
     _table(rows)
     return 0
 
 
 def _repo_set(args: argparse.Namespace) -> int:
-    repo = repos.set_settings(args.name, args.feature)
-    print(f"Set repo '{repo.name}' features to {_features(repo.features)}")
+    repo = repos.set_settings(args.name, args.feature, args.memory)
+    print(f"Set repo '{repo.name}' features to {_settings(repo)}")
     _report_stale_bottles(repo.name)
     return 0
 
 
 def _repo_update(args: argparse.Namespace) -> int:
-    repo = repos.update_settings(args.name, args.feature)
-    print(f"Set repo '{repo.name}' features to {_features(repo.features)}")
+    if not args.feature and args.memory is None:
+        args.parser.error("give --feature or --memory")
+    repo = repos.update_settings(args.name, args.feature, args.memory)
+    print(f"Set repo '{repo.name}' features to {_settings(repo)}")
     _report_stale_bottles(repo.name)
     return 0
 
@@ -261,7 +278,8 @@ def _report_stale_bottles(repo_name: str) -> None:
     from bottle import bottles
 
     stale = [b.name for b in bottles.load().values()
-             if b.repo == repo_name and set(bottles.features_on_reset(b)) != set(b.features)]
+             if b.repo == repo_name and (set(bottles.features_on_reset(b)) != set(b.features)
+                                         or bottles.memory_on_reset(b) != b.memory)]
     for name in stale:
         print(f"Bottle '{name}' gets them when reset: bottle reset {name}")
 
@@ -318,7 +336,7 @@ def _new(args: argparse.Namespace) -> int:
     print(f"Creating a bottle from {args.repo}...", file=sys.stderr)
     from bottle import images
 
-    bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature)
+    bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature, args.memory)
     print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
@@ -326,7 +344,7 @@ def _new(args: argparse.Namespace) -> int:
 
 def _describe(bottle) -> str:
     at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
-    return f"bottle '{bottle.name}' from repo '{bottle.repo}' at {at} with features {_features(bottle.features)}"
+    return f"bottle '{bottle.name}' from repo '{bottle.repo}' at {at} with features {_settings(bottle)}"
 
 
 def _shell(args: argparse.Namespace) -> int:
@@ -339,8 +357,9 @@ def _shell(args: argparse.Namespace) -> int:
 def _list(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    rows = [("NAME", "REPO", "BRANCH", "FEATURES", "STATE")]
-    rows += [(b.name, b.repo, b.checkout, " ".join(sorted(b.features)) or "-", state) for b, state in bottles.list_all()]
+    rows = [("NAME", "REPO", "BRANCH", "FEATURES", "MEMORY", "STATE")]
+    rows += [(b.name, b.repo, b.checkout, " ".join(sorted(b.features)) or "-", b.memory or "all", state)
+             for b, state in bottles.list_all()]
     _table(rows)
     return 0
 

@@ -70,9 +70,9 @@ class FakeRuntime:
             raise BottleError("network busy")
         self.networks.discard(network)
 
-    def container_run(self, name, image, network, env, mounts, labels=None):
+    def container_run(self, name, image, network, env, mounts, labels=None, memory=None):
         self._step("container_run")
-        self.run_args = dict(name=name, image=image, network=network, env=env, mounts=mounts, labels=labels)
+        self.run_args = dict(name=name, image=image, network=network, env=env, mounts=mounts, labels=labels, memory=memory)
         self.containers[name] = "running"
         self.container_labels[name] = dict(labels or {})
         self.container_networks[name] = network
@@ -310,6 +310,27 @@ class CreateTest(BottleTestCase):
         del data["bottles"]["example"]["features"]
         bottles.registry_path().write_text(json.dumps(data))
         self.assertEqual(bottles.get("example").features, ())
+
+    def test_the_container_gets_the_repos_memory(self) -> None:
+        fake = self.fake()
+        with mock.patch.object(bottles.repos.runtime, "host_memory_mib", return_value=16384):
+            bottles.repos.update_settings("example", memory="8G")
+            self.assertEqual(bottles.create("example").memory, "8G")
+            self.assertEqual(fake.run_args["memory"], "8G")
+            self.assertEqual(bottles.create("example", name="other", memory="2g").memory, "2G")
+            self.assertEqual(fake.run_args["memory"], "2G")
+            self.assertEqual(bottles.create("example", name="third", memory="all").memory, None)
+            self.assertEqual(fake.run_args["memory"], None)
+
+    def test_old_records_without_memory_load(self) -> None:
+        self.fake()
+        bottles.create("example", "base")
+        data = json.loads(bottles.registry_path().read_text())
+        del data["bottles"]["example"]["memory"]
+        del data["bottles"]["example"]["request"]["memory"]
+        bottles.registry_path().write_text(json.dumps(data))
+        self.assertEqual(bottles.get("example").memory, None)
+        self.assertEqual(bottles.get("example").request.memory, None)
 
     def test_unknown_repo(self) -> None:
         with self.assertRaisesRegex(BottleError, "no repo named 'nope' \\(repos: example\\)"):
@@ -1051,6 +1072,20 @@ class ResetTest(WorkspaceTestCase):
             reset = bottles.reset("example")
         self.assertEqual(set(reset.features), {"claude", "jvm"})
         self.assertEqual(bottles.get("example").features, reset.features)
+
+    def test_gets_the_repos_current_memory_unless_it_has_its_own(self) -> None:
+        with mock.patch.object(bottles, "_run_container"), mock.patch.object(bottles.features_, "ensure_built"), \
+                mock.patch.object(bottles.repos.runtime, "host_memory_mib", return_value=16384):
+            bottles.delete("example", force=True)
+            bottles.create("example")
+            bottles.create("example", name="own", memory="2G")
+            bottles.create("example", name="unlimited", memory="all")
+            bottles.repos.update_settings("example", memory="8G")
+            self.assertEqual(bottles.memory_on_reset(bottles.get("example")), "8G")
+            self.assertEqual(bottles.get("example").memory, None)  # until it's reset
+            self.assertEqual(bottles.reset("example").memory, "8G")
+            self.assertEqual(bottles.reset("own").memory, "2G")
+            self.assertEqual(bottles.reset("unlimited").memory, None)
 
     def test_moves_to_the_latest_commit_of_its_branch(self) -> None:
         bottle = bottles.get("example")

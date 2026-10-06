@@ -134,15 +134,18 @@ class Mount:
 
 
 def container_run(
-    name: str, image: str, network: str, env: dict[str, str], mounts: list[Mount], labels: dict[str, str] | None = None
+    name: str, image: str, network: str, env: dict[str, str], mounts: list[Mount], labels: dict[str, str] | None = None,
+    memory: str | None = None,
 ) -> None:
     """Create and start a detached container running the image's default command.
 
-    It gets the whole machine: every CPU core and all of its memory. The VM only
-    takes memory from the host as the guest uses it, so this costs nothing up
-    front, but memory the guest has used isn't given back until it stops.
+    It gets every CPU core, and `memory` (a `--memory` value, e.g. 8G), else all
+    of the machine's. The VM only takes memory from the host as the guest uses
+    it, so this costs nothing up front, but memory the guest has used isn't
+    given back until it stops.
     """
-    cpus, memory = host_resources()
+    cpus, all_memory = host_resources()
+    memory = memory or all_memory
     cmd = ["run", "--detach", "--name", name, "--network", network, "--cpus", str(cpus), "--memory", memory]
     cmd += _label_options(labels)
     for key, value in env.items():
@@ -154,8 +157,13 @@ def container_run(
 
 def host_resources() -> tuple[int, str]:
     """The machine's CPU cores and memory, as `container run --cpus` and `--memory` values."""
+    return os.cpu_count() or 1, f"{host_memory_mib()}M"
+
+
+def host_memory_mib() -> int:
+    """The machine's memory, in MiB."""
     memsize = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True).stdout)
-    return os.cpu_count() or 1, f"{memsize // (1024 * 1024)}M"
+    return memsize // (1024 * 1024)
 
 
 def container_state(name: str) -> str | None:
