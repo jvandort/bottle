@@ -38,6 +38,7 @@ class FakeRuntime:
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
         self.bridged = True
+        self.anchored: set[str] = set()  # the networks the anchor is on
         self.services = True  # container's system services; down after the machine restarts
 
     def services_running(self):
@@ -59,8 +60,10 @@ class FakeRuntime:
         self._step("network_create")
         self.networks.add(network)
 
+    gateway = "192.168.128.1"
+
     def network_gateway(self, network):
-        return "192.168.128.1"
+        return self.gateway
 
     def host_has_address(self, address):
         return self.bridged
@@ -68,6 +71,8 @@ class FakeRuntime:
     def network_delete(self, network):
         if self.fail_cleanup == "network":
             raise BottleError("network busy")
+        if network in self.anchored:
+            raise BottleError(f"cannot delete subnet {network} with referring containers")
         self.networks.discard(network)
 
     def container_run(self, name, image, network, env, mounts, labels=None, memory=None):
@@ -128,7 +133,11 @@ class FakeRuntime:
     standins: dict = {}
     intercepted: list = ["ci.test"]
 
-    def container_exec(self, name, argv, user=None, workdir=None, input=None):
+    def container_exec(self, name, argv, user=None, workdir=None, input=None, env=None):
+        if "/etc/environment" in argv[-1]:
+            self._step("point_at_egress")
+            self.environment = (user, input)
+            return ""
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
@@ -150,6 +159,14 @@ class FakeRuntime:
     def release_egress(self, bottle):
         self.egress.discard(bottle)
 
+    def ensure_anchor(self, networks):
+        self._step("anchor")
+        self.anchored = set(networks) & self.networks
+
+    def remove_anchor(self):
+        self.calls.append("anchor_remove")
+        self.anchored = set()
+
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
             (bottles.runtime, ("network_create", "network_gateway", "host_has_address", "network_delete", "network_exists",
@@ -164,6 +181,8 @@ class FakeRuntime:
                 test.addCleanup(patcher.stop)
         for patcher in (
             mock.patch.object(bottles.prereqs, "ensure_container"),
+            mock.patch.object(bottles.anchor, "ensure", self.ensure_anchor),
+            mock.patch.object(bottles.anchor, "remove", self.remove_anchor),
             mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
             mock.patch.object(bottles.auth, "intercepted_hosts", side_effect=lambda specs: list(self.intercepted)),
             mock.patch.object(bottles.images, "is_current", return_value=True),
@@ -211,7 +230,7 @@ class CreateTest(BottleTestCase):
     def test_order_container_before_egress(self) -> None:
         fake = self.fake()
         bottles.create("example", "base")
-        self.assertEqual(fake.calls, ["ensure_logged_in", "network_create", "container_run", "verify_contract", "trust_egress_ca", "ensure_egress", "init_workspace"])
+        self.assertEqual(fake.calls, ["ensure_logged_in", "network_create", "anchor", "container_run", "verify_contract", "trust_egress_ca", "ensure_egress", "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
         fake = self.fake()
@@ -412,6 +431,41 @@ class DeleteTest(BottleTestCase):
         self.assertIn("start_services", fake.calls)
 
 
+class AnchorTest(BottleTestCase):
+    def test_every_bottles_network_is_anchored(self) -> None:
+        fake = self.fake()
+        one, two = bottles.create("example"), bottles.create("example")
+        self.assertEqual(fake.anchored, {one.network, two.network})
+
+    def test_delete_takes_the_anchor_off_the_network_first(self) -> None:
+        fake = self.fake()
+        one, two = bottles.create("example"), bottles.create("example")
+        bottles.delete(one.name)
+        self.assertEqual((fake.anchored, fake.networks), ({two.network}, {two.network}))
+
+    def test_rollback_takes_the_anchor_off_the_network(self) -> None:
+        fake = self.fake(fail="init_workspace")
+        with self.assertRaisesRegex(BottleError, "init_workspace failed"):
+            bottles.create("example")
+        self.assertEqual((fake.anchored, fake.networks), (set(), set()))
+
+    def test_reset_keeps_the_network_anchored(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example")
+        bottles.reset("example", force=True)
+        self.assertEqual(fake.anchored, {bottle.network})
+
+    def test_starting_a_bottle_anchors_first(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example")
+        fake.containers[bottle.container] = "stopped"
+        fake.anchored = set()  # as after the machine restarts
+        fake.calls.clear()
+        bottles.ensure_running("example")
+        self.assertEqual(fake.calls[:2], ["anchor", "container_start"])
+        self.assertEqual(fake.anchored, {bottle.network})
+
+
 class EnsureRunningTest(BottleTestCase):
     def test_starts_a_stopped_bottle_and_its_egress(self) -> None:
         fake = self.fake()
@@ -430,14 +484,25 @@ class EnsureRunningTest(BottleTestCase):
         fake.containers[bottle.container] = "stopped"
         fake.calls.clear()
         bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["container_start", "verify_contract", "trust_egress_ca", "ensure_egress"])
+        self.assertEqual(fake.calls, ["anchor", "container_start", "verify_contract", "trust_egress_ca", "point_at_egress", "ensure_egress"])
+
+    def test_starting_points_ssh_sessions_at_the_current_proxy(self) -> None:
+        fake = self.fake()
+        bottle = bottles.create("example")
+        fake.containers[bottle.container] = "stopped"
+        fake.gateway = "192.168.130.1"
+        bottles.ensure_running("example")
+        user, environment = fake.environment
+        self.assertEqual(user, "root")
+        self.assertIn("HTTPS_PROXY=http://192.168.130.1:3128\n", environment)
+        self.assertIn("NO_PROXY=localhost,127.0.0.1\n", environment)
 
     def test_running_bottle_only_ensures_egress(self) -> None:
         fake = self.fake()
         bottles.create("example", "base")
         fake.calls.clear()
         bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["ensure_egress"])
+        self.assertEqual(fake.calls, ["anchor", "ensure_egress"])
 
     def test_starting_installs_the_egress_ca_as_root(self) -> None:
         fake = self.fake()
@@ -447,14 +512,15 @@ class EnsureRunningTest(BottleTestCase):
         bottles.ensure_running("example")
         self.assertEqual(fake.trusted, ("root", "the egress CA's certificate"))
 
-    def test_running_bottle_without_its_bridge_is_restarted(self) -> None:
+    def test_running_bottle_without_its_bridge_is_left_alone(self) -> None:
+        # Restarting it would take its bridge back from whichever network has it now.
         fake = self.fake()
         bottles.create("example", "base")
         fake.bridged = False
         fake.calls.clear()
-        with mock.patch("sys.stderr"):
+        with self.assertRaisesRegex(BottleError, "lost its bridge .* `bottle shutdown && container system stop`"):
             bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["container_stop", "container_start", "verify_contract", "trust_egress_ca", "ensure_egress"])
+        self.assertEqual(fake.calls, [])
 
     def test_after_a_restart_starts_the_services_then_the_bottle(self) -> None:
         fake = self.fake()
@@ -593,12 +659,20 @@ class CredentialTest(BottleTestCase):
         self.assertEqual(fake.calls[0], "ensure_logged_in")
 
     def test_shell_hands_the_bottle_nothing(self) -> None:
-        """Credentials live at the egress proxy, so a session gets none of them."""
+        """Credentials live at the egress proxy, so a session gets none of them: only where the proxy is."""
         self.fake()
         bottles.create("example")
         with mock.patch.object(bottles.runtime, "container_exec_interactive") as interactive:
             bottles.shell("example")
-        self.assertNotIn("env", interactive.call_args.kwargs)
+        self.assertEqual(interactive.call_args.kwargs["env"], bottles._proxy_env("http://192.168.128.1:3128"))
+
+    def test_shell_follows_the_proxy_when_the_gateway_moves(self) -> None:
+        fake = self.fake()
+        bottles.create("example")
+        fake.gateway = "192.168.130.1"  # container's services restarted and gave the network another subnet
+        with mock.patch.object(bottles.runtime, "container_exec_interactive") as interactive:
+            bottles.shell("example")
+        self.assertEqual(interactive.call_args.kwargs["env"]["HTTPS_PROXY"], "http://192.168.130.1:3128")
 
 
 class OwnershipTest(BottleTestCase):
@@ -721,7 +795,7 @@ class StartStopTest(BottleTestCase):
         self.assertEqual(fake.containers[bottle.container], "running")
         self.assertEqual(fake.egress, {"example"})
 
-    def test_shutdown_stops_running_bottles_then_bottled(self) -> None:
+    def test_shutdown_stops_running_bottles_then_the_anchor_then_bottled(self) -> None:
         fake = self.fake()
         a = bottles.create("example", "base")
         b = bottles.create("example", "base")
@@ -732,7 +806,7 @@ class StartStopTest(BottleTestCase):
 
         self.assertEqual((stopped, daemon_was_running), (["example"], True))
         self.assertEqual(fake.containers, {a.container: "stopped", b.container: "stopped"})
-        self.assertEqual(fake.calls, ["container_stop", "daemon_stop"])
+        self.assertEqual(fake.calls, ["container_stop", "anchor_remove", "daemon_stop"])
 
 
 class WorkspaceTestCase(BottleTestCase):
@@ -1050,6 +1124,7 @@ class ResetTest(WorkspaceTestCase):
         bottles.stop("example")
         # Checking for unsaved work starts the bottle; the contract check would run on this machine.
         with mock.patch.object(bottles, "verify_contract"), mock.patch.object(bottles, "trust_egress_ca"), \
+                mock.patch.object(bottles, "point_at_egress"), \
                 mock.patch.object(bottles, "_run_container", side_effect=lambda b, r, t: self.fake_runtime.containers.__setitem__(b.container, "running")):
             bottles.reset("example")
         self.assertEqual(bottles.runtime.container_state(bottle.container), "running")

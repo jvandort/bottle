@@ -68,7 +68,7 @@ and a Linux kernel) as necessary, and asks before installing anything.
 | `bottle start` / `stop` / `reset` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
 | `bottle daemon start` / `stop` | Manage `bottled`, the background network process |
-| `bottle shutdown` | Stop every running bottle, then `bottled` |
+| `bottle shutdown` | Stop every running bottle and the anchor, then `bottled` |
 | `bottle egress` | Run a bottle's egress proxy by hand, for testing |
 
 <details>
@@ -334,7 +334,14 @@ and registers its `bottle-NAME` remote again if the repo has lost it.
 
 ### `bottle shutdown`
 
-Stops every running bottle, then `bottled`.
+Stops every running bottle and the anchor, then `bottled`.
+
+The anchor is one small idle VM (about 290 MB of memory) attached to every
+bottle's network. It works around an apple/container bug
+([#2051](https://github.com/apple/container/issues/2051)) where restarting one
+bottle could cut off another's network; bottle starts it whenever a bottle
+needs it. If a bottle still reports that its network lost its bridge, run
+`bottle shutdown && container system stop` and try again.
 
 ### `bottle daemon start` / `bottle daemon stop`
 

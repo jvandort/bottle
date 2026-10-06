@@ -163,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     reset.set_defaults(run=_reset, parser=reset)
 
     shutdown = commands.add_parser(
-        "shutdown", help="stop every bottle and bottled", description="Stop every running bottle, then bottled."
+        "shutdown", help="stop every bottle, the anchor and bottled",
+        description="Stop every running bottle and the anchor (the idle VM that keeps bottles' networks up), then bottled."
     )
     shutdown.set_defaults(run=_shutdown, parser=shutdown)
 

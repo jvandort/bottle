@@ -101,5 +101,17 @@ class ContainerRunTest(unittest.TestCase):
         self.assertRegex(memory, r"^[1-9][0-9]*M$")
 
 
+class WithEnvTest(unittest.TestCase):
+    def test_unsets_each_variable_before_setting_it(self) -> None:
+        # So the command sees one copy, not the container's stale one first.
+        self.assertEqual(
+            runtime._with_env(["curl", "x"], {"HTTPS_PROXY": "http://a:1", "NO_PROXY": "localhost"}),
+            ["env", "-u", "HTTPS_PROXY", "-u", "NO_PROXY", "HTTPS_PROXY=http://a:1", "NO_PROXY=localhost", "curl", "x"],
+        )
+
+    def test_no_env_leaves_the_command_alone(self) -> None:
+        self.assertEqual(runtime._with_env(["bash", "-l"], None), ["bash", "-l"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,11 @@ def network_delete(network: str) -> None:
         _run("network", "delete", network)
 
 
+def networks() -> set[str]:
+    """Every network's name."""
+    return {n["id"] for n in json.loads(_run("network", "list", "--format", "json"))}
+
+
 @dataclass(frozen=True)
 class Mount:
     source: Path
@@ -153,6 +158,14 @@ def container_run(
     for m in mounts:
         cmd += ["--mount", f"type=bind,source={m.source},target={m.target}" + (",readonly" if m.readonly else "")]
     _run(*cmd, image)
+
+
+def idle_run(name: str, image: str, networks: list[str], labels: dict[str, str] | None = None) -> None:
+    """Create and start a detached container on `networks` that does nothing, with as little as container allows."""
+    cmd = ["run", "--detach", "--name", name, "--cpus", "1", "--memory", "200M", *_label_options(labels)]
+    for network in networks:
+        cmd += ["--network", network]
+    _run(*cmd, image, "sleep", "infinity")
 
 
 def host_resources() -> tuple[int, str]:
@@ -189,8 +202,15 @@ class ContainerInfo:
 
 def container_info(name: str) -> ContainerInfo | None:
     info = _inspect("inspect", name)
-    if info is None:
-        return None
+    return None if info is None else _container_info(info)
+
+
+def containers() -> dict[str, ContainerInfo]:
+    """Every container, running or not, by name."""
+    return {c["configuration"]["id"]: _container_info(c) for c in json.loads(_run("list", "--all", "--format", "json"))}
+
+
+def _container_info(info: dict) -> ContainerInfo:
     config = info["configuration"]
     return ContainerInfo(
         info["status"]["state"], config.get("labels") or {}, [n["network"] for n in config.get("networks") or []]
@@ -226,9 +246,14 @@ def _label_options(labels: dict[str, str] | None) -> list[str]:
 
 
 def container_exec(
-    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, input: str | None = None
+    name: str, argv: list[str], user: str | None = None, workdir: str | None = None, input: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
-    """Run a command in a running container and return its output. `input` is sent to its stdin."""
+    """Run a command in a running container and return its output. `input` is sent to its stdin.
+
+    `env` is set for the command, over the container's own.
+    """
+    argv = _with_env(argv, env)
     if input is None:
         return _run("exec", *_exec_options(user, workdir), name, *argv)
     return _run("exec", "--interactive", *_exec_options(user, workdir), name, *argv, input=input)
@@ -241,16 +266,29 @@ def exec_command(name: str, argv: list[str], user: str | None = None, tty: bool 
 
 def container_exec_interactive(
     name: str, argv: list[str], user: str | None = None, workdir: str | None = None, tty: bool = True,
+    env: dict[str, str] | None = None,
 ) -> NoReturn:
     """Replace this process with a command in the container, attached to this terminal.
 
     Nothing is passed in from the host: the bottle's environment is the image's
     (a feature's containerEnv), and credentials never enter a bottle at all
     (see auth.py). Without `tty` the command's stdout is a pipe, which is what
-    a caller redirecting or piping the output wants.
+    a caller redirecting or piping the output wants. `env` is set over the
+    container's own.
     """
     options = ["--interactive", *(["--tty"] if tty else [])]
-    os.execvp("container", ["container", "exec", *options, *_exec_options(user, workdir), name, *argv])
+    os.execvp("container", ["container", "exec", *options, *_exec_options(user, workdir), name, *_with_env(argv, env)])
+
+
+def _with_env(argv: list[str], env: dict[str, str] | None) -> list[str]:
+    """`argv`, run with `env` set over the container's own.
+
+    Not `container exec --env`: that adds a second copy of a variable the
+    container already has, and most programs read the first, the container's.
+    """
+    if not env:
+        return argv
+    return ["env", *(option for key in env for option in ("-u", key)), *(f"{k}={v}" for k, v in env.items()), *argv]
 
 
 def _exec_options(user: str | None, workdir: str | None) -> list[str]:
