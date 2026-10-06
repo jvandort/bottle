@@ -43,15 +43,19 @@ those hosts (see bottle/egress.py).
   A tool in the bottle talks to the host over https as it always would: the
   proxy terminates the tunnel with a certificate from the bottle's egress CA,
   which the bottle trusts for its credentials' hosts and no others (see
-  bottle/ca.py), so it can read the request and attach the header. A host is
+  bottle/ca.py), so it can read the request and put the credential in place
+  of the stand-in, on the requests that present it (see below). A host is
   a name, an IP address, or `*.` and a name, since the CA's name constraint
   can say nothing else. Anything else the tool needs in order to believe it's
   configured is the feature's own business, in its install.sh.
 
   A CLI doesn't know someone is attaching its token for it, and usually
   refuses to make a request until it has one. What it gets is a stand-in, and
-  never a secret: the feature either writes one itself (the teamcity feature
-  puts it in the CLI's config file) or names an environment variable in
+  never a secret, and sending it is how a request asks for the credential: in
+  the header, as the token (`Bearer <stand-in>`) or as the password of Basic
+  credentials. A request without it goes to the host as the bottle sent it.
+  The feature either writes one itself (the teamcity feature puts it in the
+  CLI's config file, as STANDIN) or names an environment variable in
   inject.standin, and bottle sets that variable, to a value of its own, in
   every bottle with the feature. Bottles only: the throwaway bottle that runs
   a login command gets no stand-ins, so a login flow starts from nothing

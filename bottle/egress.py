@@ -10,11 +10,13 @@ and absolute-form plain HTTP requests (apt).
 
 It also holds credentials the bottle never sees (Injection): for the hosts a
 feature names, the proxy terminates the bottle's TLS with a certificate from
-the egress CA (see ca.py), attaches the real token as a request header, and
-makes the HTTPS connection to the server itself.
+the egress CA (see ca.py), puts the real token in place of the stand-in on the
+requests that present one, and makes the HTTPS connection to the server itself.
 """
 
 import asyncio
+import base64
+import binascii
 import fnmatch
 import functools
 import ipaddress
@@ -99,9 +101,21 @@ class Injection:
     a request the proxy can read, so for this host and port the proxy doesn't
     tunnel: it completes the TLS handshake itself, with a certificate from the
     bottle's egress CA, which it trusts for its credentials' hosts only (see
-    ca.py), reads each request, attaches the
-    credential, and sends it on over its own verified TLS connection. A
-    credential is never on the wire in the clear, in the bottle or beyond it.
+    ca.py), reads each request, and sends it on over its own verified TLS
+    connection. A credential is never on the wire in the clear, in the bottle
+    or beyond it.
+
+    The credential goes only on a request that asks for it: one whose header
+    presents the stand-in, the fake token a tool in the bottle was given (see
+    features.py) -- as the header's token, or as the password of Basic
+    credentials, which is how git sends what a credential helper gave it. Such
+    a request gets the real one in the same form: `value` in place of the
+    token, or the same Basic user with `credential` as its password. Any other
+    request goes on as the bottle sent it, so a client that wasn't asked to
+    authenticate -- a build tool downloading a release, an anonymous clone --
+    reaches the host as it would from the machine. That is about being
+    understood, not about who may spend the credential: the stand-in is no
+    secret, and anything in the bottle can present it.
 
     An injected host is also reachable where the policy would otherwise refuse
     a private address, since naming the host is what configuring the
@@ -113,6 +127,24 @@ class Injection:
     header: str
     value: str  # the whole header value, credential included
     port: int = 443
+    standin: str = ""  # what a request presents to be given the credential; "" matches none
+    credential: str = ""  # the bare credential, for Basic; "" when the feature doesn't take Basic
+
+    def replacing(self, presented: str) -> str | None:
+        """The value to send in place of `presented`, this injection's header as the bottle sent it; None to leave it."""
+        if not self.standin:
+            return None
+        scheme, _, token = presented.strip().partition(" ")
+        if self.standin in (scheme, token.strip()):
+            return self.value
+        if scheme.lower() == "basic" and self.credential and self.header.lower() == "authorization":
+            try:
+                user, _, password = base64.b64decode(token.strip(), validate=True).decode().partition(":")
+            except (binascii.Error, UnicodeDecodeError):
+                return None
+            if password == self.standin:
+                return "Basic " + base64.b64encode(f"{user}:{self.credential}".encode()).decode()
+        return None
 
     def matches(self, host: str, port: int) -> bool:
         return port == self.port and fnmatch.fnmatch(host.lower(), self.host.lower())
@@ -139,9 +171,11 @@ class Request:
     path: str = ""
     query: str = ""
     headers: dict[str, str] | None = None
-    # Set when a credential was attached, inside a tunnel the proxy
-    # terminated: the proxy makes this connection over TLS, and allows a
+    # Set for a request inside a tunnel the proxy terminated, for a host a
+    # credential names: the proxy makes this connection over TLS, and allows a
     # private address for this destination.
+    terminated: bool = False
+    # Set when the credential was attached, which only a terminated request can have.
     injected: bool = False
 
 
@@ -257,7 +291,7 @@ class EgressProxy:
     async def _terminate(
         self, tunnel: Request, injection: Injection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> Request:
-        """Answer a CONNECT as the server would, and read the request inside, with the credential attached.
+        """Answer a CONNECT as the server would, and read the request inside, with the credential if it asks for it.
 
         One request per tunnel, like the plain-HTTP path: the upstream is told
         to close when it's done, and the client opens a new tunnel for the next.
@@ -282,17 +316,23 @@ class EgressProxy:
             # The response would carry the credential back into the bottle.
             raise Refused(405, "Method Not Allowed", "denied")
         path = (url.path or "/") + (f"?{url.query}" if url.query else "")
-        # Whatever the bottle sent under this name is a stand-in; replace it.
-        # The Host header goes with the destination too, and the routing
-        # headers go altogether, so a request carrying a credential can't ask
-        # one server to answer as another, or for something else.
-        dropped = {injection.header.lower(), "host", *ROUTING_HEADERS}
+        # The credential, if the bottle presented the stand-in under this name.
+        presented = [line.split(":", 1)[1] for line in header_lines
+                     if line.split(":", 1)[0].strip().lower() == injection.header.lower()]
+        value = next((v for v in map(injection.replacing, presented) if v is not None), None)
+        # The Host header goes with the destination, and the routing headers
+        # go altogether, so a request carrying a credential can't ask one
+        # server to answer as another, or for something else. Nothing else
+        # differs between the requests that carry it and those that don't.
+        dropped = {"host", *ROUTING_HEADERS} | ({injection.header.lower()} if value is not None else set())
         headers = [line for line in _forwarded(header_lines) if line.split(":", 1)[0].strip().lower() not in dropped]
         authority = tunnel.host + (f":{tunnel.port}" if tunnel.port != 443 else "")
-        headers = [f"Host: {authority}", *headers, f"{injection.header}: {injection.value}"]
+        headers = [f"Host: {authority}", *headers]
+        if value is not None:
+            headers.append(f"{injection.header}: {value}")
         return Request(
             method, tunnel.host, tunnel.port, _upstream_head(method, path, version, headers),
-            url.path or "/", url.query, _parsed(header_lines), injected=True,
+            url.path or "/", url.query, _parsed(header_lines), terminated=True, injected=value is not None,
         )
 
     async def _allowed(self, host: str, port: int, private: bool) -> list[str]:
@@ -313,10 +353,11 @@ class EgressProxy:
         host, port = request.host, request.port
         # Connect to the exact addresses we checked, so a second lookup can't swap them.
         if allowed is None:
-            allowed = await self._allowed(host, port, private=request.injected)
-        # The machine's end of an injected request is always TLS: a credential is
-        # never put on a request that leaves here in the clear.
-        context = _tls_context() if request.injected else None
+            allowed = await self._allowed(host, port, private=request.terminated)
+        # The machine's end of a terminated tunnel is always TLS: a credential
+        # is never put on a request that leaves here in the clear, and one
+        # without it was TLS when the bottle sent it.
+        context = _tls_context() if request.terminated else None
         for address in allowed:
             try:
                 connect = asyncio.open_connection(address, port, ssl=context, server_hostname=host if context else None)

@@ -8,15 +8,18 @@ bottle with that feature, attached to your terminal, and captures the
 credential from its output.
 
 A credential never enters a bottle. bottled hands it to that bottle's egress
-proxy (injections_for), which attaches it as a header to the bottle's requests
-to the hosts the feature named, on HTTPS connections the machine makes (see
-egress.py). The agent can spend the credential against those hosts, and can't
-read it -- so a bottle that leaks everything it holds leaks no credential.
+proxy (injections_for), which puts it in place of the stand-in on the bottle's
+requests to the hosts the feature named, on HTTPS connections the machine
+makes (see egress.py). The agent can spend the credential against those
+hosts, and can't read it -- so a bottle that leaks everything it holds leaks
+no credential.
 
 What a bottle gets instead is a stand-in (standins_for): a fake token in the
 variable a feature named, because a CLI doesn't know its token is being
-attached for it and won't work until it thinks it's logged in. The throwaway
-bottle a login command runs in gets none, so logging in starts from nothing.
+replaced for it and won't work until it thinks it's logged in. A request that
+presents the stand-in is one that asks for the credential; the rest reach the
+host as they would from the machine. The throwaway bottle a login command
+runs in gets none, so logging in starts from nothing.
 
 A bottle picks up a login or a logout when it next starts.
 """
@@ -226,6 +229,8 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
                 port=port,
                 header=credential.inject.header,
                 value=credential.inject.value.replace(features.CREDENTIAL_PLACEHOLDER, value),
+                standin=features.STANDIN,
+                credential=value,
             ))
     return injections
 

@@ -21,9 +21,9 @@ rm -rf /var/lib/apt/lists/*
 #   Claude Code talks to https://api.anthropic.com as it always does. The
 #   egress proxy terminates that TLS with a certificate from the egress CA,
 #   which the bottle trusts (NODE_EXTRA_CA_CERTS, set by the base image), and
-#   attaches the subscription token (see bottle/egress.py). So every call gets
-#   it -- inference, and the organization's managed settings and policy
-#   limits, which ignore ANTHROPIC_BASE_URL.
+#   puts the subscription token in place of the stand-in Claude Code sends
+#   (see bottle/egress.py) -- on inference, and on the organization's managed
+#   settings and policy limits, which ignore ANTHROPIC_BASE_URL.
 #
 #   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
 #   a fake token there when it creates a bottle -- and nowhere in the image, so

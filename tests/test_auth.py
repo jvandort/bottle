@@ -121,6 +121,11 @@ class StandinTest(unittest.TestCase):
         # teamcity writes its stand-in into the CLI's config file, in install.sh.
         self.assertEqual(auth.standins_for(["teamcity:server=ci.example.com"]), {})
 
+    def test_a_stand_in_a_feature_writes_itself_is_the_one_the_proxy_replaces(self) -> None:
+        # Anything else would reach the server as it is, and the CLI would be refused.
+        install = Path(__file__).parent.parent / "containers/features/teamcity/install.sh"
+        self.assertIn(f"token: {features.STANDIN}", install.read_text())
+
     def test_the_keychain_is_never_read_for_one(self) -> None:
         with mock.patch.object(auth, "get", side_effect=AssertionError("a stand-in is not a credential")):
             self.assertEqual(auth.standins_for(["claude"]), {"CLAUDE_CODE_OAUTH_TOKEN": features.STANDIN})
@@ -137,6 +142,8 @@ class InjectedCredentialTest(unittest.TestCase):
         self.assertEqual(injection.host, "ci.corp.example.com")
         self.assertEqual((injection.header, injection.value), ("Authorization", "Bearer tc-token"))
         self.assertEqual(injection.port, 443)
+        # Given in place of the stand-in only, and bare for Basic credentials.
+        self.assertEqual((injection.standin, injection.credential), (features.STANDIN, "tc-token"))
 
     def test_nothing_is_injected_until_it_is_logged_in(self) -> None:
         with mock.patch.object(auth, "get", return_value=None):
