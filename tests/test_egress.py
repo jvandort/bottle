@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import functools
 import ipaddress
 import shutil
@@ -247,6 +248,7 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         self.asked: list[tuple[str, bool]] = []
         injection = egress.Injection(
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
+            standin="stand-in", credential="real-token",
         )
         proxy = EgressProxy(
             "test", self.recording_policy(), fake_resolve, injections=(injection,),
@@ -289,12 +291,42 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         return (await asyncio.wait_for(self.received.get(), 5)).decode()
 
     async def test_the_bottles_https_request_reaches_the_server_with_the_credential(self) -> None:
-        response = await self.send(b"GET /app/rest/server HTTP/1.1\r\nHost: upstream.test\r\nAccept: */*\r\n\r\n")
+        response = await self.send(
+            b"GET /app/rest/server HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n"
+            b"Accept: */*\r\n\r\n"
+        )
         head = (await asyncio.wait_for(self.received.get(), 5)).decode()
         self.assertTrue(response.endswith(b"hello"))
         self.assertTrue(head.startswith("GET /app/rest/server HTTP/1.1\r\n"))
         self.assertIn("Authorization: Bearer real-token", head)
+        self.assertNotIn("stand-in", head)
         self.assertIn("Accept: */*", head)
+
+    async def test_a_request_that_doesnt_ask_for_the_credential_goes_without_it(self) -> None:
+        # Over TLS all the same: the upstream speaks nothing else.
+        response = await self.send(b"GET /releases/download/x.zip HTTP/1.1\r\nHost: upstream.test\r\n\r\n")
+        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
+        self.assertTrue(response.startswith(b"HTTP/1.1 200 "))
+        self.assertNotIn("authorization", head.lower())
+
+    async def test_a_token_of_the_bottles_own_goes_as_it_was_sent(self) -> None:
+        for sent in (b"Bearer made-in-the-bottle", b"Basic " + base64.b64encode(b"me:my-password")):
+            with self.subTest(sent):
+                head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: " + sent + b"\r\n\r\n")
+                self.assertIn("Authorization: " + sent.decode(), head)
+                self.assertNotIn("real-token", head)
+
+    async def test_basic_credentials_with_the_stand_in_get_the_real_one_as_their_password(self) -> None:
+        # What git sends with what its credential helper gave it.
+        basic = base64.b64encode(b"x-access-token:stand-in")
+        head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Basic " + basic + b"\r\n\r\n")
+        self.assertIn("Authorization: Basic " + base64.b64encode(b"x-access-token:real-token").decode(), head)
+        self.assertEqual(head.lower().count("authorization:"), 1)
+
+    async def test_the_header_is_found_whatever_its_case(self) -> None:
+        head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nauthorization: bearer stand-in\r\n\r\n")
+        self.assertIn("Authorization: Bearer real-token", head)
+        self.assertEqual(head.lower().count("authorization:"), 1)
 
     async def test_the_bottle_is_shown_a_certificate_for_the_host_it_asked_for(self) -> None:
         _, writer = await self.tunnel()
@@ -308,33 +340,43 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_log_says_a_credential_was_attached_and_what_the_server_answered(self) -> None:
         with self.assertLogs("bottle.egress") as logs:
-            await self.head_of(b"GET /v1/models HTTP/1.1\r\nHost: upstream.test\r\n\r\n")
+            await self.head_of(b"GET /v1/models HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
             await asyncio.sleep(0.05)
-        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/v1/models \+credential -> 127.0.0.1 ok 200 ")
+            await self.head_of(b"GET /v1/public HTTP/1.1\r\nHost: upstream.test\r\n\r\n")
+            await asyncio.sleep(0.05)
+        self.assertRegex(logs.output[-2], rf"test GET upstream.test:{self.upstream_port}/v1/models \+credential -> 127.0.0.1 ok 200 ")
+        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/v1/public -> 127.0.0.1 ok 200 ")
         self.assertNotIn("real-token", "\n".join(logs.output))
 
-    async def test_what_the_bottle_sent_under_that_name_never_leaves(self) -> None:
+    async def test_with_the_credential_nothing_else_the_bottle_sent_under_that_name_leaves(self) -> None:
         head = await self.head_of(
-            b"GET / HTTP/1.1\r\nHost: upstream.test\r\nauthorization: Bearer guessed-at-in-the-bottle\r\n\r\n"
+            b"GET / HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n"
+            b"authorization: Bearer guessed-at-in-the-bottle\r\n\r\n"
         )
         self.assertNotIn("guessed-at-in-the-bottle", head)
         self.assertEqual(head.lower().count("authorization:"), 1)
         self.assertIn("Authorization: Bearer real-token", head)
 
+    asking = (b"", b"Authorization: Bearer stand-in\r\n")  # with the credential and without
+
     async def test_the_host_header_goes_with_the_destination(self) -> None:
-        head = await self.head_of(b"GET / HTTP/1.1\r\nHost: elsewhere.test\r\n\r\n")
-        self.assertIn(f"Host: upstream.test:{self.upstream_port}", head)
-        self.assertNotIn("elsewhere.test", head)
+        for auth in self.asking:
+            with self.subTest(auth):
+                head = await self.head_of(b"GET / HTTP/1.1\r\nHost: elsewhere.test\r\n" + auth + b"\r\n")
+                self.assertIn(f"Host: upstream.test:{self.upstream_port}", head)
+                self.assertNotIn("elsewhere.test", head)
 
     async def test_headers_that_would_reroute_a_credentialed_request_never_leave(self) -> None:
-        head = await self.head_of(
-            b"GET / HTTP/1.1\r\nHost: upstream.test\r\nX-Forwarded-Host: elsewhere.test\r\n"
-            b"forwarded: host=elsewhere.test\r\nX-Original-URL: /admin\r\nX-HTTP-Method-Override: DELETE\r\n"
-            b"X-Real-IP: 10.0.0.1\r\nX-GitHub-Api-Version: 2022-11-28\r\n\r\n"
-        )
-        for gone in ("elsewhere.test", "/admin", "DELETE", "10.0.0.1"):
-            self.assertNotIn(gone, head)
-        self.assertIn("X-GitHub-Api-Version: 2022-11-28", head)
+        for auth in self.asking:
+            with self.subTest(auth):
+                head = await self.head_of(
+                    b"GET / HTTP/1.1\r\nHost: upstream.test\r\nX-Forwarded-Host: elsewhere.test\r\n" + auth +
+                    b"forwarded: host=elsewhere.test\r\nX-Original-URL: /admin\r\nX-HTTP-Method-Override: DELETE\r\n"
+                    b"X-Real-IP: 10.0.0.1\r\nX-GitHub-Api-Version: 2022-11-28\r\n\r\n"
+                )
+                for gone in ("elsewhere.test", "/admin", "DELETE", "10.0.0.1"):
+                    self.assertNotIn(gone, head)
+                self.assertIn("X-GitHub-Api-Version: 2022-11-28", head)
 
     async def test_a_request_for_another_host_inside_the_tunnel_is_refused(self) -> None:
         response = await self.send(b"GET https://elsewhere.test/ HTTP/1.1\r\n\r\n")
@@ -416,6 +458,43 @@ class InjectionMatchTest(unittest.TestCase):
 
     def test_nothing_without_certificates(self) -> None:
         self.assertIsNone(self.injection_for("ci.test:443", certificates=None))
+
+
+class ReplacingTest(unittest.TestCase):
+    """Which header values present the stand-in, and what goes in their place."""
+
+    bearer = egress.Injection(host="ci.test", header="Authorization", value="Bearer real",
+                              standin="stand-in", credential="real")
+
+    def test_the_stand_in_as_the_token_whatever_the_scheme(self) -> None:
+        for presented in ("Bearer stand-in", " token stand-in ", "bearer stand-in"):
+            with self.subTest(presented):
+                self.assertEqual(self.bearer.replacing(presented), "Bearer real")
+
+    def test_the_stand_in_as_a_whole_value(self) -> None:
+        raw = egress.Injection(host="ci.test", header="X-Auth", value="real", standin="stand-in")
+        self.assertEqual(raw.replacing("stand-in"), "real")
+
+    def test_the_stand_in_as_a_basic_password(self) -> None:
+        basic = "Basic " + base64.b64encode(b"x-access-token:stand-in").decode()
+        self.assertEqual(self.bearer.replacing(basic), "Basic " + base64.b64encode(b"x-access-token:real").decode())
+
+    def test_anything_else_is_left(self) -> None:
+        for presented in ("", "Bearer", "Bearer other", "Bearer stand-in-and-more", "Bearer xstand-in",
+                          "Basic " + base64.b64encode(b"stand-in:other").decode(),
+                          "Basic " + base64.b64encode(b"x:stand-in2").decode(), "Basic not-base64!"):
+            with self.subTest(presented):
+                self.assertIsNone(self.bearer.replacing(presented))
+
+    def test_no_basic_without_the_bare_credential(self) -> None:
+        injection = egress.Injection(host="ci.test", header="Authorization", value="Bearer real", standin="stand-in")
+        self.assertIsNone(injection.replacing("Basic " + base64.b64encode(b"u:stand-in").decode()))
+
+    def test_no_stand_in_matches_nothing(self) -> None:
+        injection = egress.Injection(host="ci.test", header="Authorization", value="Bearer real")
+        for presented in ("", "Bearer ", "Basic " + base64.b64encode(b"u:").decode()):
+            with self.subTest(presented):
+                self.assertIsNone(injection.replacing(presented))
 
 
 if __name__ == "__main__":

@@ -21,13 +21,20 @@ rm -rf /var/lib/apt/lists/*
 #
 #   gh and git talk to github.com over https as they always do. The egress
 #   proxy terminates that TLS with a certificate from the egress CA, which
-#   the bottle trusts, and attaches the token to requests for github.com,
-#   api.github.com and uploads.github.com (see bottle/egress.py).
+#   the bottle trusts, for github.com, api.github.com and uploads.github.com,
+#   and puts the token in place of the stand-in on the requests that present
+#   one (see bottle/egress.py). Requests that don't -- a build tool fetching a
+#   release, a clone of a public repository -- go as they would from your
+#   machine, anonymously: GitHub answers some of those differently, and
+#   wrongly, when they carry a token.
 #
 #   GH_TOKEN is the credential's inject.standin, so bottle puts a fake token
-#   there when it creates a bottle, and gh believes it's logged in. git needs
-#   no stand-in: it sends its request without credentials, and the proxy adds
-#   them.
+#   there when it creates a bottle, and gh believes it's logged in and sends
+#   it. git asks the credential helper below only when GitHub has refused it
+#   without credentials (a private repository, a push), and sends what it
+#   gets as Basic credentials -- the only kind GitHub's git endpoints take a
+#   token in, and the proxy replaces the password in kind. The helper gives
+#   nothing where GH_TOKEN is unset, such as the bottle a login runs in.
 #
 # What the token can do is what a bottle can do on GitHub, which is why the
 # credential asks for a fine-grained token: pushes that reach GitHub directly
@@ -38,6 +45,8 @@ rm -rf /var/lib/apt/lists/*
 # --system, since the tools feature (installed first) owns /etc/gitconfig.
 git config --system url."https://github.com/".insteadOf "git@github.com:"
 git config --system --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+git config --system credential.https://github.com.helper \
+  '!f() { [ "$1" = get ] && [ -n "${GH_TOKEN:-}" ] && printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; true; }; f'
 
 # gh's settings for the bottle's user: https for the repos it clones, and no telemetry
 home="$_REMOTE_USER_HOME"
