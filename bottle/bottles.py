@@ -6,7 +6,8 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a host-only network, bottle-<id>, reaching only the host
+  - a host-only network, bottle-<id>, reaching only the host, and held up by
+    the anchor (see anchor.py) for as long as it exists
   - an egress proxy on that network's gateway, served by bottled, which also
     serves the repo as the bottle's origin and host remotes (see host.py)
   - a container, bottle-<name>, with the repo's objects mounted read-only
@@ -29,7 +30,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, replace
 from typing import NoReturn
 
-from bottle import auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime
+from bottle import anchor, auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -189,6 +190,7 @@ def create(
     _save(bottle)
     try:
         runtime.network_create(bottle.network, {runtime.OWNER_LABEL: bottle.id})
+        _anchor()
         _run_container(bottle, repo, tag)
         register_remote(repo, bottle)  # so the repo can fetch what the bottle pushes
     except BaseException as failure:
@@ -228,6 +230,11 @@ def _memory(repo: repos.Repo, request: Request) -> str | None:
     if request.memory is None:
         return repo.memory
     return None if request.memory == repos.ALL_MEMORY else request.memory
+
+
+def _anchor(excluding: str | None = None) -> None:
+    """Have the anchor on every bottle's network but `excluding`'s, which is about to be deleted."""
+    anchor.ensure({b.network for b in load().values() if b.name != excluding})
 
 
 def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
@@ -307,6 +314,7 @@ def reset(name: str, force: bool = False) -> Bottle:
     try:
         if not runtime.network_exists(fresh.network):
             runtime.network_create(fresh.network, {runtime.OWNER_LABEL: fresh.id})
+        _anchor()
         _run_container(fresh, repo, tag)
         register_remote(repo, fresh)  # also repairs a bottle made before its repo had lanes
     except BottleError as e:
@@ -497,13 +505,15 @@ def stop(name: str) -> None:
 
 
 def shutdown() -> tuple[list[str], bool]:
-    """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running."""
+    """Stop every running bottle, the anchor, then bottled. Returns the stopped bottles and whether bottled was running."""
     stopped = []
-    for bottle in load().values() if runtime.services_running() else ():
-        if runtime.container_state(bottle.container) == "running":
-            runtime.container_stop(bottle.container)
-            log.info("%s: stopped (shutdown)", bottle.name)
-            stopped.append(bottle.name)
+    if runtime.services_running():
+        for bottle in load().values():
+            if runtime.container_state(bottle.container) == "running":
+                runtime.container_stop(bottle.container)
+                log.info("%s: stopped (shutdown)", bottle.name)
+                stopped.append(bottle.name)
+        anchor.remove()
     return stopped, daemon.stop()
 
 
@@ -516,20 +526,46 @@ def ensure_running(name: str) -> Bottle:
     if state is None:
         raise BottleError(f"{name}'s container is gone; recreate it with `bottle reset {name}`, or `bottle delete {name}`")
     if state == "running" and not runtime.host_has_address(runtime.network_gateway(bottle.network)):
-        # Running but cut off: its network's bridge is gone. Restarting the VM brings it back.
-        log.warning("%s: running, but this machine has no address on %s (its bridge is gone); restarting", name, bottle.network)
-        print(f"bottle: {name}'s network lost its bridge on this machine; restarting {name}...", file=sys.stderr)
-        daemon.release_egress(bottle.name)
-        runtime.container_stop(bottle.container)
-        state = "stopped"
+        # Running but cut off: another network took its bridge (see anchor.py). Restarting
+        # the VM would take the bridge back and cut that network off instead; only
+        # restarting container's services gives each network a bridge of its own again.
+        log.warning("%s: running, but this machine has no address on %s (its bridge is gone)", name, bottle.network)
+        raise BottleError(
+            f"{name}'s network lost its bridge on this machine, an apple/container bug; to repair it, "
+            "run `bottle shutdown && container system stop`, then try again"
+        )
+    _anchor()
     if state != "running":
         prereqs.ensure_container()
         runtime.container_start(bottle.container)
         log.info("%s: started", name)
         verify_contract(bottle)
         trust_egress_ca(bottle)
+        point_at_egress(bottle)
     daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
     return bottle
+
+
+def current_proxy_env(bottle: Bottle) -> dict[str, str]:
+    """The proxy settings for the bottle's network as it is now.
+
+    The ones `container run` gave it can be stale: a network's subnet isn't
+    kept when container's services restart (as when the machine does), so the
+    gateway the egress proxy listens on can move.
+    """
+    return _proxy_env(daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT))
+
+
+def point_at_egress(bottle: Bottle) -> None:
+    """Point SSH sessions, which only see /etc/environment, at the egress proxy's current address."""
+    env = current_proxy_env(bottle)
+    script = f'for var in {" ".join(env)}; do sed -i "/^$var=/d" /etc/environment; done; cat >> /etc/environment'
+    try:
+        runtime.container_exec(
+            bottle.container, ["sh", "-c", script], user="root", input="".join(f"{k}={v}\n" for k, v in env.items())
+        )
+    except BottleError as e:
+        raise BottleError(f"pointing {bottle.container} at its egress proxy failed: {e}") from None
 
 
 def trust_egress_ca(bottle: Bottle) -> None:
@@ -588,7 +624,9 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    runtime.container_exec_interactive(bottle.container, argv, user=USER, workdir=WORKSPACE, tty=tty)
+    runtime.container_exec_interactive(
+        bottle.container, argv, user=USER, workdir=WORKSPACE, tty=tty, env=current_proxy_env(bottle)
+    )
 
 
 def host_remote(bottle: Bottle) -> str:
@@ -727,6 +765,7 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
     for step, action in (
         ("egress", lambda: daemon.release_egress(bottle.name)),
         ("container", lambda: runtime.container_delete(bottle.container, bottle.owner)),
+        ("anchor", lambda: _anchor(excluding=bottle.name)),  # off the network, or it can't be deleted
         ("network", lambda: runtime.network_delete(bottle.network)),
         ("remote", lambda: forget_remote(bottle)),
         ("egress CA", lambda: ca.forget(bottle.name)),
