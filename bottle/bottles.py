@@ -66,6 +66,7 @@ class Request:
 
     branch: str | None = None  # None: the repo's default branch, resolved again on reset
     features: tuple[str, ...] = ()  # beyond the repo's defaults, as canonical specs
+    memory: str | None = None  # None: the repo's; else canonical, which may be "all"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))
@@ -84,6 +85,8 @@ class Bottle:
     status: str = "creating"
     # Features installed on top of the image, as specs (e.g. jvm:version=17), including dependencies.
     features: tuple[str, ...] = ()
+    # The VM's memory, as a `container run --memory` value (e.g. 8G); None: all of the machine's.
+    memory: str | None = None
     request: Request | None = None
 
     def __post_init__(self) -> None:
@@ -161,9 +164,10 @@ def default_name(repo: str, taken: set[str]) -> str:
 
 
 def create(
-    repo_name: str, image: str = images.BASE, branch: str | None = None, name: str | None = None, features: list[str] = ()
+    repo_name: str, image: str = images.BASE, branch: str | None = None, name: str | None = None,
+    features: list[str] = (), memory: str | None = None,
 ) -> Bottle:
-    request = Request(branch, repos.canonical_features(list(features)))
+    request = Request(branch, repos.canonical_features(list(features)), memory and repos.canonical_memory(memory))
     repo, start, installed = _plan(repo_name, request)
     existing = load()
     name = name or default_name(repo.name, set(existing))
@@ -177,7 +181,7 @@ def create(
 
     bottle = Bottle(
         name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(),
-        features=tuple(installed), request=request,
+        features=tuple(installed), memory=_memory(repo, request), request=request,
     )
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if runtime.container_info(bottle.container) is not None:
@@ -215,6 +219,17 @@ def features_on_reset(bottle: Bottle) -> list[str]:
     return _plan(bottle.repo, bottle.request)[2]
 
 
+def memory_on_reset(bottle: Bottle) -> str | None:
+    """The memory `bottle reset` would give the bottle now: its own, else its repo's."""
+    return _memory(repos.get(bottle.repo), bottle.request)
+
+
+def _memory(repo: repos.Repo, request: Request) -> str | None:
+    if request.memory is None:
+        return repo.memory
+    return None if request.memory == repos.ALL_MEMORY else request.memory
+
+
 def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     """Start a fresh container for the bottle from `tag`, and set it up from scratch."""
     proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
@@ -224,7 +239,7 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
         bottle.container, tag, bottle.network,
         env=_container_env(proxy, bottle.features),
         mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
-        labels={runtime.OWNER_LABEL: bottle.id},
+        labels={runtime.OWNER_LABEL: bottle.id}, memory=bottle.memory,
     )
     verify_contract(bottle)
     trust_egress_ca(bottle)
@@ -270,7 +285,7 @@ def reset(name: str, force: bool = False) -> Bottle:
     """`bottle delete NAME` then `bottle new` with the arguments it was created with, in one step.
 
     So the bottle gets its repo's current default features (plus any it was
-    created with), the latest commit of its branch, and a fresh, running VM.
+    created with) and memory (unless it was created with its own), the latest commit of its branch, and a fresh, running VM.
     Refuses, unless `force`, if the bottle has work its repo doesn't. Unlike a
     real delete and new, it keeps the bottle's id and network, and changes
     nothing until the new image is built. Also repairs a bottle left half-made.
@@ -284,7 +299,7 @@ def reset(name: str, force: bool = False) -> Bottle:
     tag = features_.ensure_built(bottle.image, installed)
     fresh = replace(
         bottle, branch=start.branch, commit=start.commit, created=time.time(), status="creating",
-        features=tuple(installed),
+        features=tuple(installed), memory=_memory(repo, bottle.request),
     )
     daemon.release_egress(bottle.name)
     runtime.container_delete(bottle.container, bottle.owner)

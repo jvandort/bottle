@@ -47,7 +47,7 @@ class WrapCommandTest(GitTestCase):
         repo = self.make_repo()
         self.run_cli("repo", "add", str(repo), "--feature", "tools", "--feature", "jvm:version=17")
         _, out, _ = self.run_cli("repo", "list")
-        self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "jvm:version=17"])
+        self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "jvm:version=17", "all"])
         code, out, _ = self.run_cli("repo", "set", "project")
         self.assertEqual((code, out), (0, "Set repo 'project' features to []\n"))
 
@@ -57,12 +57,26 @@ class WrapCommandTest(GitTestCase):
         code, out, _ = self.run_cli("repo", "update", "project", "--feature", "claude")
         self.assertEqual((code, out), (0, "Set repo 'project' features to [claude, tools]\n"))
 
-    def test_update_requires_a_feature(self) -> None:
+    def test_update_requires_a_feature_or_memory(self) -> None:
         repo = self.make_repo()
         self.run_cli("repo", "add", str(repo))
         code, _, err = self.run_cli("repo", "update", "project")
         self.assertEqual(code, 2)
-        self.assertIn("required: --feature", err)
+        self.assertIn("give --feature or --memory", err)
+
+    def test_memory(self) -> None:
+        repo = self.make_repo()
+        with mock.patch("bottle.runtime.host_memory_mib", return_value=16384):
+            code, out, _ = self.run_cli("repo", "add", str(repo), "--feature", "tools", "--memory", "8g")
+            self.assertEqual((code, out), (0, f"Created repo 'project' ({repo}) with features [tools] and memory 8G\n"))
+            _, out, _ = self.run_cli("repo", "list")
+            self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "8G"])
+            code, out, _ = self.run_cli("repo", "update", "project", "--memory", "4096M")
+            self.assertEqual((code, out), (0, "Set repo 'project' features to [tools] and memory 4096M\n"))
+            code, out, _ = self.run_cli("repo", "update", "project", "--memory", "all")
+            self.assertEqual((code, out), (0, "Set repo 'project' features to [tools]\n"))
+            code, _, err = self.run_cli("repo", "update", "project", "--memory", "32G")
+            self.assertEqual((code, err), (1, "bottle: error: memory 32G is more than this machine has (16384M)\n"))
 
     def test_too_many_arguments(self) -> None:
         code, _, err = self.run_cli("repo", "add", "a", "b", "c")

@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 from bottle import repos
 from bottle.errors import BottleError
@@ -168,11 +169,40 @@ class AddTest(GitTestCase):
             repos.update_settings("project", ["jvm:version=17", "jvm:version=21"])
         self.assertEqual(repos.get("project").features, ("tools",))
 
+    def test_memory(self) -> None:
+        repo = self.make_repo()
+        with mock.patch.object(repos.runtime, "host_memory_mib", return_value=16384):
+            self.assertEqual(repos.add(repo, memory="8g").repo.memory, "8G")
+            self.assertEqual(repos.get("project").memory, "8G")
+            self.assertEqual(json.loads((self.bottle_home / "repos.json").read_text())["repos"]["project"]["memory"], "8G")
+            self.assertFalse(repos.add(repo, memory="8G").created)
+            with self.assertRaisesRegex(BottleError, "change its memory with `bottle repo update project`"):
+                repos.add(repo, memory="4G")
+            # update keeps the memory unless given one; set replaces it, with all if none is given
+            self.assertEqual(repos.update_settings("project", ["tools"]).memory, "8G")
+            self.assertEqual(repos.update_settings("project", memory="512M").memory, "512M")
+            self.assertEqual(repos.update_settings("project", memory="all").memory, None)
+            self.assertEqual(repos.set_settings("project", [], "16G").memory, "16G")
+            self.assertEqual(repos.set_settings("project", []).memory, None)
+            self.assertNotIn("memory", json.loads((self.bottle_home / "repos.json").read_text())["repos"]["project"])
+
+    def test_memory_is_validated(self) -> None:
+        repo = self.make_repo()
+        repos.add(repo)
+        with mock.patch.object(repos.runtime, "host_memory_mib", return_value=16384):
+            for value in ("8", "8GB", "0G", "-1G", "1.5G", "8K", "", "ALL", "none"):
+                with self.subTest(value=value), self.assertRaisesRegex(BottleError, f"invalid memory {value!r}"):
+                    repos.update_settings("project", memory=value)
+            with self.assertRaisesRegex(BottleError, r"memory 17G is more than this machine has \(16384M\)"):
+                repos.update_settings("project", memory="17G")
+            self.assertEqual(repos.update_settings("project", memory="16G").memory, "16G")
+
     def test_hand_edited_registry_without_features(self) -> None:
         repo = self.make_repo()
         (self.bottle_home).mkdir(parents=True, exist_ok=True)
         (self.bottle_home / "repos.json").write_text(json.dumps({"version": 1, "repos": {"p": {"path": str(repo)}}}))
         self.assertEqual(repos.get("p").features, ())
+        self.assertIsNone(repos.get("p").memory)
 
     def test_load_without_registry(self) -> None:
         self.assertEqual(repos.load(), {})
