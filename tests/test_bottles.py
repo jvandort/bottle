@@ -733,22 +733,20 @@ class DeleteImageTest(BottleTestCase):
                 mock.patch.object(bottles.features_, "image_tag", return_value=tag):
             return bottles.create("example", features=features, name=name), tag
 
-    def test_delete_removes_the_bottles_image(self) -> None:
-        fake = self.fake()
-        bottle, tag = self.create_with(fake, ["tools"])
-        with mock.patch.object(bottles.features_, "resolve", return_value=[]), \
-                mock.patch.object(bottles.features_, "image_tag", return_value=tag):
-            bottles.delete("example")
-        self.assertNotIn(tag, fake.built_images)
-
-    def test_keeps_an_image_another_bottle_uses(self) -> None:
+    def test_delete_keeps_the_bottles_image_for_the_next_one(self) -> None:
+        """A cache: the next bottle with those features starts without a build."""
         fake = self.fake()
         _, tag = self.create_with(fake, ["tools"])
-        self.create_with(fake, ["tools"], name="other")
-        with mock.patch.object(bottles.features_, "resolve", return_value=[]), \
-                mock.patch.object(bottles.features_, "image_tag", return_value=tag):
-            bottles.delete("example")
+        bottles.delete("example")
         self.assertIn(tag, fake.built_images)
+        self.assertNotIn(f"image_delete {tag}", fake.calls)
+
+    def test_delete_removes_stale_images(self) -> None:
+        fake = self.fake()
+        self.create_with(fake, ["tools"])
+        with mock.patch.object(bottles.features_, "remove_stale", return_value=[]) as remove_stale:
+            bottles.delete("example")
+        remove_stale.assert_called_once_with()
 
     def test_keeps_the_base_image(self) -> None:
         fake = self.fake()

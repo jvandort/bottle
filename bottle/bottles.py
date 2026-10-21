@@ -279,7 +279,7 @@ def _bring_up(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
     except BaseException as failure:
         log.warning("%s: creating failed, rolling back: %s", bottle.name, _describe(failure))
         try:
-            delete(bottle.name, force=True, keep_image=True)
+            delete(bottle.name, force=True)
         except Exception as cleanup:
             raise BottleError(f"{_describe(failure)}; cleanup also failed: {cleanup}") from failure
         raise
@@ -463,8 +463,7 @@ def reset(name: str, force: bool = False) -> Bottle:
     _save(fresh)
     log.info("%s: reset to %s at %s (%s), features %s",
              name, repo.name, start.branch, start.commit[:12], ", ".join(installed) or "none")
-    if set(installed) != set(bottle.features):
-        _delete_image(bottle)  # the old features' image, unless another bottle uses it
+    _remove_stale_images()
     return fresh
 
 
@@ -1016,8 +1015,8 @@ def _refuse_to_lose_work(bottle: Bottle, action: str) -> None:
         )
 
 
-def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
-    """Remove every part of the bottle that exists, then its record, and its image if no other bottle uses it.
+def delete(name: str, force: bool = False) -> None:
+    """Remove every part of the bottle that exists, then its record, and any images gone stale.
 
     Refuses, unless `force`, if the bottle has work the bottle's repo doesn't:
     unpushed commits or uncommitted changes. A stopped bottle is started to
@@ -1048,25 +1047,20 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
         raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `bottle delete {name}`")
     _forget(name)
     log.info("%s: deleted", name)
-    if not keep_image:
-        _delete_image(bottle)
+    _remove_stale_images()
 
 
-def _delete_image(bottle: Bottle) -> None:
-    """Delete the bottle's features image if no container uses it, and any stale images.
+def _remove_stale_images() -> None:
+    """Delete images whose features or base have changed since they were built, if no container uses one.
 
-    Best effort: the bottle is already gone. The base image is kept, since every
-    bottle is built on it.
+    An image that's still current is kept, even with nothing using it: it's a
+    cache, and the next bottle with those features starts without a build.
+    Best effort: the bottle is already gone.
     """
     try:
-        if bottle.features:
-            tag = features_.image_tag(bottle.image, features_.resolve(list(bottle.features)))
-            in_use = runtime.images_in_use()
-            if any(ref.name == tag and ref.digest not in in_use for ref in runtime.images()):
-                runtime.image_delete(tag)
         features_.remove_stale()
     except BottleError as e:
-        print(f"bottle: couldn't remove {bottle.name}'s image: {e}", file=sys.stderr)
+        print(f"bottle: couldn't remove stale images: {e}", file=sys.stderr)
 
 
 def _describe(failure: BaseException) -> str:

@@ -362,8 +362,10 @@ was interrupted, `delete` cleans up whatever is left.
 It refuses if the bottle has work its repo doesn't: commits that were never
 pushed, or uncommitted changes. Push them first (`bottle exec NAME git push
 work`), or pass `--force`. Whatever the bottle pushed is kept, since it may be
-the only copy; the remote is removed. The bottle's image is deleted too, unless
-another bottle uses it.
+the only copy; the remote is removed. The bottle's image is kept, so the next
+bottle with the same features starts without a build; images whose features
+or base have changed since they were built are deleted, unless a bottle uses
+one.
 
 ### `bottle reset BOTTLE [--force]`
 
