@@ -63,13 +63,18 @@ then, so a resume is also how a thread gets features added since.
 | Command | |
 | --- | --- |
 | `folio new THREAD [--from BRANCH]` | Start a thread: its bottle and its lane |
-| `folio claude THREAD` | Attach to the thread's Claude |
-| `folio shell THREAD` | Attach to the thread's shell |
-| `folio pause THREAD` | Snapshot a thread, and delete its bottle |
+| `folio claude [THREAD]` | Attach to the thread's Claude |
+| `folio shell [THREAD]` | Attach to the thread's shell |
+| `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
-| `folio delete THREAD [--yes]` | Delete a thread: its bottle, its lane and its remote |
+| `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec: its threads' features and memory |
 | `folio repo list` | Every repo folio has state for |
+
+Leave the thread out, on a terminal, and you choose it from a list: the
+repo's threads, most recently active first, with their state. Move with j/k
+or the arrow keys, Enter to choose, q or Esc to leave. For `claude` and
+`shell` the list starts with a new thread, which asks for its name.
 
 **`folio new`** starts from origin's default branch, or `--from BRANCH`.
 

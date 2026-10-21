@@ -105,7 +105,9 @@ class AttachTest(FolioTestCase):
         self.state.write_text(json.dumps(state))
         result = self.folio("claude", "fix-it")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("is gone; its branches are safe in bottle/fix-it", result.stderr)
+        self.assertIn("is gone, and with it everything that wasn't pushed", result.stderr)
+        self.assertIn("What was pushed is in your repo: `git fetch bottle/fix-it`", result.stderr)
+        self.assertIn("`folio delete fix-it` removes what's left of the thread", result.stderr)
 
     def test_an_unknown_thread(self) -> None:
         result = self.folio("claude", "nope")

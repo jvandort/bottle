@@ -10,7 +10,9 @@ record:
               stop`): start it, and the work is all there
     paused    no bottle, and a snapshot of it (see snapshots.py): attaching
               resumes it in a new bottle, made from the repo's spec as it is now
-    missing   no bottle, and no snapshot: only what's in the lane is left
+    missing   no bottle, and no snapshot: only what's in the lane is left.
+              Folio never leaves a thread so (a snapshot exists exactly while
+              there's no bottle); it's a bottle deleted from under it.
 
 A thread has a snapshot only while it has no bottle: attaching to one drops
 it, since the bottle is where the work is from then on.
@@ -177,8 +179,9 @@ def _ensure_running(repo: Repo, thread: Thread) -> None:
         print(f"Resuming thread {thread.name}...", file=sys.stderr)
         _resume(repo, thread)
     elif state == "missing":
-        raise FolioError(f"thread {thread.name}'s bottle, {thread.bottle}, is gone; its branches are safe in "
-                         f"bottle/{thread.name}, and `folio delete {thread.name}` removes the rest")
+        raise FolioError(f"thread {thread.name}'s bottle, {thread.bottle}, is gone, and with it everything that "
+                         f"wasn't pushed. What was pushed is in your repo: `git fetch bottle/{thread.name}`. "
+                         f"`folio delete {thread.name}` removes what's left of the thread")
     elif state != "running":
         engine.start(thread.bottle)
 

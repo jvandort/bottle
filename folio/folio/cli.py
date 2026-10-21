@@ -4,8 +4,11 @@ import argparse
 import sys
 import time
 
-from . import engine, lanes, repos, threads
+from . import engine, lanes, picker, repos, threads
 from .errors import FolioError
+
+
+PICK = "choose one from a list"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
             description=f"Attach to the thread's {what}, starting its bottle and the session if they've stopped. "
             "Closing the terminal only detaches: what's running in it carries on.",
         )
-        attach.add_argument("thread", metavar="THREAD", help="the thread")
+        attach.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
         attach.set_defaults(run=_attach, session=session)
 
     pause = commands.add_parser(
@@ -39,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         "Claude's conversation -- and delete its bottle. Only running processes are lost. `folio claude` or "
         "`folio shell` resumes it, in a new bottle made from the repo's spec as it is then.",
     )
-    pause.add_argument("thread", metavar="THREAD", help="the thread")
+    pause.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
     pause.set_defaults(run=_pause)
 
     list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
@@ -50,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Delete a thread: its bottle, its lane and the bottle/THREAD remote, and what folio knows "
         "about it. Says first what that would lose, and asks you to type the thread's name.",
     )
-    delete.add_argument("thread", metavar="THREAD", help="the thread")
+    delete.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
     delete.add_argument("--yes", action="store_true", help="don't ask (needed without a terminal)")
     delete.set_defaults(run=_delete)
 
@@ -84,22 +87,58 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _new(args: argparse.Namespace) -> int:
-    repo = repos.current()
-    print(f"Starting thread {args.thread} in {repo.path}...", file=sys.stderr)
-    thread = threads.create(repo, args.thread, args.base)
-    print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}")
+    thread = _start(repos.current(), args.thread, args.base)
     print(f"Work in it with: folio claude {thread.name}  (or folio shell {thread.name})")
     return 0
 
 
+def _start(repo: repos.Repo, name: str, base: str | None = None) -> threads.Thread:
+    print(f"Starting thread {name} in {repo.path}...", file=sys.stderr)
+    thread = threads.create(repo, name, base)
+    print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}")
+    return thread
+
+
+def _thread(args: argparse.Namespace, repo: repos.Repo, new: bool = False) -> threads.Thread | None:
+    """The thread the command names, else the one chosen in the picker; None if none was."""
+    if args.thread is not None:
+        return threads.load(repo, args.thread)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise FolioError(f"give the thread: `folio {args.command} THREAD` (choosing one needs a terminal)")
+    all_ = threads.all_(repo)
+    if not all_ and not new:
+        raise FolioError(f"{repo.path} has no threads; start one with `folio new THREAD`")
+    states = threads.states(repo, all_)
+    width = max((len(t.name) for t in all_), default=0)
+    choices = [picker.NEW] if new else []
+    choices += [picker.Choice(f"{t.name:<{width}}  {states[t.name]['state']:<8}  {_ago(t.last_active)}", t.name)
+                for t in all_]
+    choice = picker.pick(f"folio {args.command}: choose a thread (j/k, Enter; q to leave)", choices)
+    if choice is None:
+        return None
+    if choice.thread is not None:
+        return threads.load(repo, choice.thread)
+    try:
+        name = input("The new thread's name: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return _start(repo, name) if name else None
+
+
 def _attach(args: argparse.Namespace) -> int:
     repo = repos.current()
-    threads.attach(repo, threads.load(repo, args.thread), args.session)
+    thread = _thread(args, repo, new=True)
+    if thread is None:
+        return 0
+    threads.attach(repo, thread, args.session)
 
 
 def _pause(args: argparse.Namespace) -> int:
     repo = repos.current()
-    thread = threads.load(repo, args.thread)
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
     print(f"Pausing thread {thread.name}...", file=sys.stderr)
     threads.pause(repo, thread)
     print(f"Paused thread {thread.name}. Resume it with: folio claude {thread.name}")
@@ -123,7 +162,9 @@ def _list(args: argparse.Namespace) -> int:
 
 def _delete(args: argparse.Namespace) -> int:
     repo = repos.current()
-    thread = threads.load(repo, args.thread)
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
     if not args.yes:
         if not sys.stdin.isatty():
             raise FolioError(f"deleting {thread.name} needs --yes when there's no terminal to ask on")

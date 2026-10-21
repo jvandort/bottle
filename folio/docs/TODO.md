@@ -29,23 +29,6 @@ the user", "What can't be rewritten" and "Delivering finished work" sections.
 What stays is fact: the sandbox, the proxy, what's installed, and which remotes
 it serves and what each one is.
 
-## Threads
-
-### States
-
-If a thread's sandbox is missing and it has no snapshot, folio says so and
-offers to start a fresh sandbox from the thread's lane: its branches are safe
-there, and everything else is gone.
-
-## CLI
-
-**The picker.** Every command that takes a thread, except `new`, opens a picker
-when no thread is given: the repo's threads, most recently active first, with
-their state. Move with j/k or the arrow keys, Enter to choose. The picker for
-`claude` and `shell` also has an entry at the top for a new thread. It's built
-on the standard library's `curses`. With no TTY, leaving the thread out is an
-error.
-
 ## Not in scope
 
 - Periodic checkpoints while a thread runs. Adding them later means writing
@@ -68,7 +51,7 @@ error.
 3. **Folio, running threads**: done. Repo keys, `configure`, lanes, `new`,
    `claude`, `shell`, `list`, `delete`, with tmux.
 4. **Folio, pause and resume**: done.
-5. **The picker.**
+5. **The picker**: done.
 
 # Found along the way
 
