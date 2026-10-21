@@ -263,7 +263,7 @@ def running_bottles() -> list[tuple[str, str, Path | None, tuple[str, ...], tupl
 
     if not runtime.services_running():
         return []  # nothing runs without them
-    return [(b.name, b.network, bottles.git_dir(b), tuple(b.features), b.served) for b in bottles.load().values()
+    return [(b.name, b.network, bottles.git_dir(b), tuple(b.features), b.remotes) for b in bottles.load().values()
             if b.status == "ready" and runtime.container_state(b.container) == "running"]
 
 

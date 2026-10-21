@@ -1,6 +1,4 @@
-import json
 import unittest
-from unittest import mock
 
 from bottle import repos
 from bottle.errors import BottleError
@@ -23,190 +21,37 @@ class NameFromUrlTest(unittest.TestCase):
         self.assertEqual(repos.name_from_url("/srv/git/tools.git"), "tools")
 
 
-class AddTest(GitTestCase):
-    def test_registers_repo(self) -> None:
-        repo = self.make_repo()
-
-        result = repos.add(repo)
-
-        self.assertTrue(result.created)
-        self.assertEqual(result.repo, repos.Repo("project", repo))
-        self.assertEqual(repos.load(), {"project": repos.Repo("project", repo)})
-
-    def test_registry_file(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo)
-        data = json.loads((self.bottle_home / "repos.json").read_text())
-        self.assertEqual(data, {"version": 1, "repos": {"project": {"path": str(repo), "features": []}}})
-
-    def test_copies_nothing(self) -> None:
-        repos.add(self.make_repo())
-        self.assertEqual([p.name for p in self.bottle_home.iterdir()], ["repos.json"])
-
-    def test_name_from_origin(self) -> None:
+class DeriveNameTest(GitTestCase):
+    def test_from_origin(self) -> None:
         repo = self.make_repo("checkout", origin="git@github.com:example/project.git")
-        self.assertEqual(repos.add(repo).repo.name, "project")
+        self.assertEqual(repos.derive_name(repo), "project")
 
-    def test_name_falls_back_to_directory(self) -> None:
-        repo = self.make_repo("my-tool")
-        self.assertEqual(repos.add(repo).repo.name, "my-tool")
+    def test_falls_back_to_the_directory(self) -> None:
+        self.assertEqual(repos.derive_name(self.make_repo("my-tool")), "my-tool")
 
-    def test_explicit_name(self) -> None:
-        repo = self.make_repo(origin="git@github.com:example/project.git")
-        self.assertEqual(repos.add(repo, "custom").repo.name, "custom")
 
-    def test_rejects_subdirectory(self) -> None:
+class ToplevelTest(GitTestCase):
+    """What `--git-repo` accepts: a repo's root, and nothing else."""
+
+    def test_a_repos_root(self) -> None:
         repo = self.make_repo()
-        (repo / "sub").mkdir()
-        with self.assertRaisesRegex(BottleError, f"add its root instead: {repo}$"):
-            repos.add(repo / "sub")
+        self.assertEqual(repos.toplevel(repo), repo)
 
-    def test_accepts_symlink_to_root(self) -> None:
+    def test_through_a_symlink(self) -> None:
         repo = self.make_repo()
         link = self.tmp / "link"
         link.symlink_to(repo)
-        self.assertEqual(repos.add(link).repo.path, repo)
+        self.assertEqual(repos.toplevel(link), repo)
 
-    def test_rewrap_is_a_no_op(self) -> None:
+    def test_refuses_a_subdirectory(self) -> None:
         repo = self.make_repo()
-        repos.add(repo)
-        before = (self.bottle_home / "repos.json").read_text()
+        (repo / "sub").mkdir()
+        with self.assertRaisesRegex(BottleError, f"give its root instead: {repo}$"):
+            repos.toplevel(repo / "sub")
 
-        result = repos.add(repo)
-
-        self.assertFalse(result.created)
-        self.assertEqual((self.bottle_home / "repos.json").read_text(), before)
-
-    def test_keeps_other_repos(self) -> None:
-        a, b = self.make_repo("a"), self.make_repo("b")
-        repos.add(a)
-        repos.add(b)
-        self.assertEqual(set(repos.load()), {"a", "b"})
-
-    def test_name_taken_by_other_repo(self) -> None:
-        repos.add(self.make_repo("a"), "shared")
-        with self.assertRaisesRegex(BottleError, "is already"):
-            repos.add(self.make_repo("b"), "shared")
-
-    def test_repo_already_wrapped_under_other_name(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, "first")
-        with self.assertRaisesRegex(BottleError, "already added as 'first'"):
-            repos.add(repo, "second")
-
-    def test_invalid_name(self) -> None:
-        with self.assertRaisesRegex(BottleError, "invalid name"):
-            repos.add(self.make_repo(), "bad name")
-
-    def test_missing_directory(self) -> None:
-        with self.assertRaisesRegex(BottleError, "not a directory"):
-            repos.add(self.tmp / "nope")
-
-    def test_not_a_repo(self) -> None:
+    def test_refuses_what_isnt_a_repo(self) -> None:
         plain = self.tmp / "plain"
         plain.mkdir()
-        with self.assertRaisesRegex(BottleError, "is not a git repo"):
-            repos.add(plain)
-
-    def test_features(self) -> None:
-        repo = self.make_repo()
-        added = repos.add(repo, features=["tools", "jvm:version=25", "jvm:version=25", "claude"]).repo
-        # Canonical (the default version drops out), deduplicated, in the order given.
-        self.assertEqual(added.features, ("tools", "jvm", "claude"))
-        self.assertEqual(repos.get("project").features, ("tools", "jvm", "claude"))
-
-    def test_features_are_validated(self) -> None:
-        repo = self.make_repo()
-        with self.assertRaisesRegex(BottleError, "no feature named 'nope'"):
-            repos.add(repo, features=["nope"])
-        with self.assertRaisesRegex(BottleError, "has no option 'vesion'"):
-            repos.add(repo, features=["jvm:vesion=17"])
-        with self.assertRaisesRegex(BottleError, "given twice with different options"):
-            repos.add(repo, features=["jvm:version=17", "jvm:version=21"])
-        self.assertEqual(repos.load(), {})
-
-    def test_adding_again_with_other_features_points_to_set(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, features=["tools"])
-        self.assertFalse(repos.add(repo).created)  # no features given: a no-op
-        self.assertFalse(repos.add(repo, features=["tools"]).created)
-        with self.assertRaisesRegex(BottleError, "change its features with `bottle repo set project`"):
-            repos.add(repo, features=["claude"])
-
-    def test_set_replaces_the_settings(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, features=["tools", "claude"])
-        self.assertEqual(repos.set_settings("project", ["jvm:version=17"]).features, ("jvm:version=17",))
-        self.assertEqual(repos.set_settings("project", []).features, ())
-        self.assertEqual(repos.get("project").path, repo)
-
-    def test_set_unknown_repo(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no repo named 'nope'"):
-            repos.set_settings("nope", [])
-
-    def test_update_adds_features(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, features=["tools"])
-        self.assertEqual(repos.update_settings("project", ["claude"]).features, ("tools", "claude"))
-        self.assertEqual(repos.get("project").path, repo)
-
-    def test_update_replaces_a_feature_given_again(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, features=["tools", "jvm:version=17"])
-        updated = repos.update_settings("project", ["jvm:version=21"])
-        self.assertEqual(updated.features, ("tools", "jvm:version=21"))
-
-    def test_update_unknown_repo(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no repo named 'nope'"):
-            repos.update_settings("nope", ["tools"])
-
-    def test_update_validates_features(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo, features=["tools"])
-        with self.assertRaisesRegex(BottleError, "no feature named 'nope'"):
-            repos.update_settings("project", ["nope"])
-        with self.assertRaisesRegex(BottleError, "given twice with different options"):
-            repos.update_settings("project", ["jvm:version=17", "jvm:version=21"])
-        self.assertEqual(repos.get("project").features, ("tools",))
-
-    def test_memory(self) -> None:
-        repo = self.make_repo()
-        with mock.patch.object(repos.runtime, "host_memory_mib", return_value=16384):
-            self.assertEqual(repos.add(repo, memory="8g").repo.memory, "8G")
-            self.assertEqual(repos.get("project").memory, "8G")
-            self.assertEqual(json.loads((self.bottle_home / "repos.json").read_text())["repos"]["project"]["memory"], "8G")
-            self.assertFalse(repos.add(repo, memory="8G").created)
-            with self.assertRaisesRegex(BottleError, "change its memory with `bottle repo update project`"):
-                repos.add(repo, memory="4G")
-            # update keeps the memory unless given one; set replaces it, with all if none is given
-            self.assertEqual(repos.update_settings("project", ["tools"]).memory, "8G")
-            self.assertEqual(repos.update_settings("project", memory="512M").memory, "512M")
-            self.assertEqual(repos.update_settings("project", memory="all").memory, None)
-            self.assertEqual(repos.set_settings("project", [], "16G").memory, "16G")
-            self.assertEqual(repos.set_settings("project", []).memory, None)
-            self.assertNotIn("memory", json.loads((self.bottle_home / "repos.json").read_text())["repos"]["project"])
-
-    def test_memory_is_validated(self) -> None:
-        repo = self.make_repo()
-        repos.add(repo)
-        with mock.patch.object(repos.runtime, "host_memory_mib", return_value=16384):
-            for value in ("8", "8GB", "0G", "-1G", "1.5G", "8K", "", "ALL", "none"):
-                with self.subTest(value=value), self.assertRaisesRegex(BottleError, f"invalid memory {value!r}"):
-                    repos.update_settings("project", memory=value)
-            with self.assertRaisesRegex(BottleError, r"memory 17G is more than this machine has \(16384M\)"):
-                repos.update_settings("project", memory="17G")
-            self.assertEqual(repos.update_settings("project", memory="16G").memory, "16G")
-
-    def test_hand_edited_registry_without_features(self) -> None:
-        repo = self.make_repo()
-        (self.bottle_home).mkdir(parents=True, exist_ok=True)
-        (self.bottle_home / "repos.json").write_text(json.dumps({"version": 1, "repos": {"p": {"path": str(repo)}}}))
-        self.assertEqual(repos.get("p").features, ())
-        self.assertIsNone(repos.get("p").memory)
-
-    def test_load_without_registry(self) -> None:
-        self.assertEqual(repos.load(), {})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        for path, message in ((self.tmp / "nope", "not a directory"), (plain, "is not a git repo")):
+            with self.subTest(path), self.assertRaisesRegex(BottleError, message):
+                repos.toplevel(path)

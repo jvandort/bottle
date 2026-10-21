@@ -67,7 +67,7 @@ LEAF_REFRESH = 30 * 86400
 # and a bound on what a wildcard host pattern could make bottled hold.
 LEAVES_KEPT = 256
 
-# A bottle's name is a directory here (repos.NAME_PATTERN, which a throwaway's also fits).
+# A bottle's name is a directory here (bottles.NAME_PATTERN, which a throwaway's also fits).
 BOTTLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 HOST_CHARACTERS = set("abcdefghijklmnopqrstuvwxyz0123456789.-:")
 # What a DNS name constraint is set to when no DNS name is permitted: nothing is under it.

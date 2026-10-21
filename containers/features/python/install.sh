@@ -13,7 +13,7 @@ rm -rf /var/lib/apt/lists/*
 # to install into it at all -- not system-wide, not even --user -- until you
 # make a virtualenv or pass --break-system-packages. Right for a machine you
 # keep, wrong for a bottle, which exists so an agent can work without asking
-# and which `bottle reset` rebuilds in a second. externallyManaged keeps it.
+# and which a new bottle replaces in a second. externallyManaged keeps it.
 if [ "$EXTERNALLYMANAGED" = "true" ]; then
   echo "python: keeping Debian's PEP 668 marker; pip installs need a virtualenv"
 else

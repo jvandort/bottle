@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from bottle import repos, store
+from bottle import store
 from bottle.errors import BottleError
 
 log = logging.getLogger("bottle.cli")
@@ -12,46 +12,6 @@ log = logging.getLogger("bottle.cli")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bottle", description="Sandboxed Linux environments for agents.")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-
-    repo = commands.add_parser("repo", help="manage the repos bottles are created from")
-    repo_commands = repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
-    feature_help = "a default feature for its bottles, optionally with options, e.g. jvm:version=17 (repeatable)"
-    memory_help = "memory for its bottles, in M or G, e.g. 8G; `all` (the default) gives them all of this machine's"
-    repo_add = repo_commands.add_parser(
-        "add",
-        help="register a local git repo",
-        usage="bottle repo add [NAME] PATH [--feature FEATURE]... [--memory MEMORY]",
-        description="Register a local git repo so bottles can be created from it. "
-        "NAME defaults to the origin remote's repo name, else the directory name.",
-    )
-    repo_add.add_argument("args", nargs="+", metavar="[NAME] PATH")
-    repo_add.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
-    repo_add.add_argument("--memory", help=memory_help)
-    repo_add.set_defaults(run=_repo_add, parser=repo_add)
-    repo_list = repo_commands.add_parser("list", help="list repos and their default features and memory")
-    repo_list.set_defaults(run=_repo_list, parser=repo_list)
-    repo_set = repo_commands.add_parser(
-        "set",
-        help="replace a repo's settings",
-        description="Replace all of a repo's settings: its default features become exactly those given "
-        "(none, if none are given), and its memory the one given (all, if none is). "
-        "Existing bottles get them when reset.",
-    )
-    repo_set.add_argument("name", metavar="REPO", help="the repo to change")
-    repo_set.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
-    repo_set.add_argument("--memory", help=memory_help)
-    repo_set.set_defaults(run=_repo_set, parser=repo_set)
-    repo_update = repo_commands.add_parser(
-        "update",
-        help="add features to a repo, or change its memory",
-        usage="bottle repo update REPO [--feature FEATURE]... [--memory MEMORY]",
-        description="Add features to a repo's existing ones: a feature given again replaces its "
-        "options, others are kept. Change its memory, if given. Existing bottles get them when reset.",
-    )
-    repo_update.add_argument("name", metavar="REPO", help="the repo to change")
-    repo_update.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
-    repo_update.add_argument("--memory", help=memory_help)
-    repo_update.set_defaults(run=_repo_update, parser=repo_update)
 
     auth = commands.add_parser("auth", help="log in once; bottles get the credentials their features need")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True, metavar="COMMAND")
@@ -100,21 +60,17 @@ def main(argv: list[str] | None = None) -> int:
 
     new = commands.add_parser(
         "new",
-        help="create a bottle from a repo, or from a spec",
-        usage="bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--memory MEMORY] [--name NAME] [--context FILE]\n"
-        "       bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]",
-        description="Create a bottle, in its own VM: REPO's branch checked out at /workspace, with REPO's "
-        "default features; or, with --spec, the spec's features and memory, and --git-repo checked out if "
-        "given. From REPO, NAME defaults to the repo's name, then REPO-2, REPO-3, ...; with --spec it's "
-        "required, and a name that's taken is refused.",
+        help="create a bottle from a spec",
+        usage="bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]",
+        description="Create a bottle, in its own VM, with the spec's features and memory, and --git-repo checked "
+        "out at /workspace if given. NAME is required, and a name that's taken is refused.",
     )
-    new.add_argument(
-        "repo", metavar="REPO", nargs="?", help="the repo to create a bottle from (added with `bottle repo add`)"
-    )
-    new.add_argument("--spec", metavar="FILE", help="create the bottle from this spec, instead of from REPO")
+    new.add_argument("--spec", metavar="FILE", required=True,
+                     help='its features and memory, e.g. {"features": ["tools"], "memory": "8G"}')
+    new.add_argument("--name", required=True, help="its name, which is its identity")
     new.add_argument(
         "--git-repo", metavar="PATH",
-        help="with --spec: the repo whose objects are mounted, read-only, and whose remotes are served",
+        help="the repo whose objects are mounted, read-only, and whose remotes are served",
     )
     new.add_argument(
         "--git-remote", action="append", metavar="REMOTE",
@@ -127,20 +83,6 @@ def main(argv: list[str] | None = None) -> int:
         "else what the repo has checked out)",
     )
     new.add_argument("--context", metavar="FILE", help="add this file to what the bottle tells its agent (~/BOTTLE.md)")
-    new.add_argument(
-        "--feature", action="append", default=[], metavar="FEATURE",
-        help="a feature to add to the repo's defaults, optionally with options, e.g. jvm:version=17 "
-        "(repeatable); given for a default feature, it replaces that feature's options",
-    )
-    new.add_argument(
-        "--branch",
-        help="branch to check out (default: origin's default branch, else what the repo has checked out)",
-    )
-    new.add_argument("--name", help="name for the bottle")
-    new.add_argument(
-        "--memory", help="memory for the bottle, in M or G, e.g. 8G, or `all` for all of this machine's "
-        "(default: the repo's); kept when it's reset",
-    )
     new.set_defaults(run=_new, parser=new)
 
     status = commands.add_parser(
@@ -181,25 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Delete a bottle and everything it created. Also cleans up a bottle left half-made.",
     )
     delete.add_argument("name", metavar="BOTTLE", help="the bottle to delete (not its repo)")
-    delete.add_argument(
-        "-f", "--force", action="store_true",
-        help="delete even if the bottle has unpushed commits or uncommitted changes",
-    )
     delete.set_defaults(run=_delete, parser=delete)
-
-    reset = commands.add_parser(
-        "reset",
-        help="delete a bottle and create it again",
-        description="Delete a bottle and create it again with `bottle new`'s original arguments, in one "
-        "step: a fresh, running VM with the repo's current default features (plus any the bottle was "
-        "created with), and /workspace at the latest commit of its branch.",
-    )
-    reset.add_argument("name", metavar="BOTTLE", help="the bottle to reset")
-    reset.add_argument(
-        "-f", "--force", action="store_true",
-        help="reset even if the bottle has unpushed commits or uncommitted changes",
-    )
-    reset.set_defaults(run=_reset, parser=reset)
 
     shutdown = commands.add_parser(
         "shutdown", help="stop every bottle, the anchor and bottled",
@@ -262,66 +186,13 @@ def _log_to_stderr(level: int) -> None:
     logging.getLogger("bottle").addHandler(handler)
 
 
-def _repo_add(args: argparse.Namespace) -> int:
-    match args.args:
-        case [path]:
-            name = None
-        case [name, path]:
-            pass
-        case _:
-            args.parser.error("takes [NAME] PATH")
-
-    result = repos.add(Path(path).expanduser(), name, args.feature, args.memory)
-    repo = result.repo
-    if result.created:
-        print(f"Created repo '{repo.name}' ({repo.path}) with features {_settings(repo)}")
-    else:
-        print(f"Repo '{repo.name}' already exists ({repo.path}) with features {_settings(repo)}")
-    return 0
-
-
 def _features(specs) -> str:
     return f"[{', '.join(sorted(specs))}]"
 
 
-def _settings(repo_or_bottle) -> str:
+def _settings(bottle) -> str:
     """Its features, and its memory unless it has no limit: [claude, tools] and memory 8G."""
-    memory = repo_or_bottle.memory
-    return _features(repo_or_bottle.features) + (f" and memory {memory}" if memory else "")
-
-
-def _repo_list(args: argparse.Namespace) -> int:
-    rows = [("NAME", "PATH", "FEATURES", "MEMORY")]
-    rows += [(r.name, str(r.path), " ".join(r.features) or "-", r.memory or "all")
-             for r in sorted(repos.load().values(), key=lambda r: r.name)]
-    _table(rows)
-    return 0
-
-
-def _repo_set(args: argparse.Namespace) -> int:
-    repo = repos.set_settings(args.name, args.feature, args.memory)
-    print(f"Set repo '{repo.name}' features to {_settings(repo)}")
-    _report_stale_bottles(repo.name)
-    return 0
-
-
-def _repo_update(args: argparse.Namespace) -> int:
-    if not args.feature and args.memory is None:
-        args.parser.error("give --feature or --memory")
-    repo = repos.update_settings(args.name, args.feature, args.memory)
-    print(f"Set repo '{repo.name}' features to {_settings(repo)}")
-    _report_stale_bottles(repo.name)
-    return 0
-
-
-def _report_stale_bottles(repo_name: str) -> None:
-    from bottle import bottles
-
-    stale = [b.name for b in bottles.load().values()
-             if b.repo == repo_name and (set(bottles.features_on_reset(b)) != set(b.features)
-                                         or bottles.memory_on_reset(b) != b.memory)]
-    for name in stale:
-        print(f"Bottle '{name}' gets them when reset: bottle reset {name}")
+    return _features(bottle.features) + (f" and memory {bottle.memory}" if bottle.memory else "")
 
 
 def _table(rows: list[tuple[str, ...]]) -> None:
@@ -384,31 +255,13 @@ def _spec_validate(args: argparse.Namespace) -> int:
 
 
 def _new(args: argparse.Namespace) -> int:
-    from bottle import bottles, images
+    from bottle import bottles, specs
 
     context = _read_context(args.context)
-    if args.spec is None:
-        if args.repo is None:
-            args.parser.error("give REPO, or --spec FILE")
-        for flag, value in (("--git-repo", args.git_repo), ("--git-remote", args.git_remote), ("--checkout", args.checkout)):
-            if value is not None:
-                args.parser.error(f"{flag} goes with --spec; a bottle from REPO is served REPO itself")
-        print(f"Creating a bottle from {args.repo}...", file=sys.stderr)
-        bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature, args.memory, context)
-    else:
-        from bottle import specs
-
-        for flag, value in (("REPO", args.repo), ("--feature", args.feature or None),
-                            ("--branch", args.branch), ("--memory", args.memory)):
-            if value is not None:
-                args.parser.error(f"{flag} goes with a bottle from REPO; with --spec, use --git-repo, "
-                                  "--checkout, and the spec's features and memory")
-        if args.name is None:
-            args.parser.error("--spec needs --name: a bottle from a spec is named by its creator")
-        spec = specs.read(Path(args.spec).expanduser())
-        print("Creating a bottle from a spec...", file=sys.stderr)
-        git_repo = Path(args.git_repo).expanduser() if args.git_repo else None
-        bottle = bottles.create_from_spec(spec, args.name, git_repo, args.git_remote, args.checkout, context)
+    spec = specs.read(Path(args.spec).expanduser())
+    print("Creating a bottle...", file=sys.stderr)
+    git_repo = Path(args.git_repo).expanduser() if args.git_repo else None
+    bottle = bottles.create(spec, args.name, git_repo, args.git_remote, args.checkout, context)
     print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
@@ -425,10 +278,8 @@ def _read_context(path: str | None) -> str:
 
 def _describe(bottle) -> str:
     at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
-    if bottle.from_spec:
-        source = f"{bottle.git_repo} at {at}" if bottle.git_repo else "no repo"
-        return f"bottle '{bottle.name}' from a spec, with {source} and features {_settings(bottle)}"
-    return f"bottle '{bottle.name}' from repo '{bottle.repo}' at {at} with features {_settings(bottle)}"
+    source = f"{bottle.git_repo} at {at}" if bottle.git_repo else "no repo"
+    return f"bottle '{bottle.name}', with {source} and features {_settings(bottle)}"
 
 
 def _shell(args: argparse.Namespace) -> int:
@@ -453,7 +304,7 @@ def _status(args: argparse.Namespace) -> int:
             table.append((row["name"], "-", "-", "-", "-", "missing"))
             continue
         checkout = row["branch"] or (f"({row['commit'][:12]})" if row["commit"] else "-")
-        table.append((row["name"], row["repo"] or row["git_repo"] or "-", checkout,
+        table.append((row["name"], row["git_repo"] or "-", checkout,
                       " ".join(row["features"]) or "-", row["memory"], row["state"]))
     _table(table)
     return 0
@@ -462,7 +313,7 @@ def _status(args: argparse.Namespace) -> int:
 def _delete(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    bottles.delete(args.name, args.force)
+    bottles.delete(args.name)
     print(f"Deleted {args.name}")
     return 0
 
@@ -495,14 +346,6 @@ def _stop(args: argparse.Namespace) -> int:
 
     bottles.stop(args.name)
     print(f"Stopped {args.name}")
-    return 0
-
-
-def _reset(args: argparse.Namespace) -> int:
-    from bottle import bottles
-
-    bottle = bottles.reset(args.name, args.force)
-    print(f"Reset {_describe(bottle)}")
     return 0
 
 

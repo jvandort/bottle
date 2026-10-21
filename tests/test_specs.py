@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class CanonicalTest(unittest.TestCase):
     def setUp(self) -> None:
-        patcher = mock.patch.object(specs.repos.runtime, "host_memory_mib", return_value=16384)
+        patcher = mock.patch.object(specs.runtime, "host_memory_mib", return_value=16384)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -28,7 +28,7 @@ class CanonicalTest(unittest.TestCase):
     def test_dependencies_are_left_to_the_feature(self) -> None:
         # Resolved, so a missing or cyclic dependency fails here; but the spec keeps
         # what was asked for, not what it pulls in.
-        with mock.patch.object(specs.repos, "canonical_features", return_value=("jvm",)), \
+        with mock.patch.object(specs, "canonical_features", return_value=("jvm",)), \
                 mock.patch("bottle.features.resolve") as resolve:
             self.assertEqual(specs.canonical({"features": ["jvm"]})["features"], ["jvm"])
         resolve.assert_called_once_with(["jvm"])

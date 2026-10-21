@@ -9,7 +9,7 @@ from bottle.cli import main
 from tests.support import GitTestCase
 
 
-class WrapCommandTest(GitTestCase):
+class CliTestCase(GitTestCase):
     def run_cli(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -19,83 +19,25 @@ class WrapCommandTest(GitTestCase):
                 code = e.code
         return code, out.getvalue(), err.getvalue()
 
-    def test_path_only(self) -> None:
-        repo = self.make_repo()
-        code, out, _ = self.run_cli("repo", "add", str(repo))
-        self.assertEqual(code, 0)
-        self.assertEqual(out, f"Created repo 'project' ({repo}) with features []\n")
-
-    def test_name_and_path(self) -> None:
-        repo = self.make_repo()
-        code, out, _ = self.run_cli("repo", "add", "named", str(repo))
-        self.assertEqual(code, 0)
-        self.assertIn("Created repo 'named'", out)
-
-    def test_rerun_reports_already_wrapped(self) -> None:
-        repo = self.make_repo()
-        self.run_cli("repo", "add", str(repo))
-        code, out, _ = self.run_cli("repo", "add", str(repo))
-        self.assertEqual(code, 0)
-        self.assertEqual(out, f"Repo 'project' already exists ({repo}) with features []\n")
-
     def test_errors_exit_nonzero_without_traceback(self) -> None:
-        code, _, err = self.run_cli("repo", "add", str(self.tmp / "nope"))
+        code, _, err = self.run_cli("spec", "validate", str(self.tmp / "nope.json"))
         self.assertEqual(code, 1)
-        self.assertEqual(err, f"bottle: error: {self.tmp / 'nope'} is not a directory\n")
-
-    def test_add_with_features_then_list_and_set(self) -> None:
-        repo = self.make_repo()
-        self.run_cli("repo", "add", str(repo), "--feature", "tools", "--feature", "jvm:version=17")
-        _, out, _ = self.run_cli("repo", "list")
-        self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "jvm:version=17", "all"])
-        code, out, _ = self.run_cli("repo", "set", "project")
-        self.assertEqual((code, out), (0, "Set repo 'project' features to []\n"))
-
-    def test_update_adds_to_existing_features(self) -> None:
-        repo = self.make_repo()
-        self.run_cli("repo", "add", str(repo), "--feature", "tools")
-        code, out, _ = self.run_cli("repo", "update", "project", "--feature", "claude")
-        self.assertEqual((code, out), (0, "Set repo 'project' features to [claude, tools]\n"))
-
-    def test_update_requires_a_feature_or_memory(self) -> None:
-        repo = self.make_repo()
-        self.run_cli("repo", "add", str(repo))
-        code, _, err = self.run_cli("repo", "update", "project")
-        self.assertEqual(code, 2)
-        self.assertIn("give --feature or --memory", err)
-
-    def test_memory(self) -> None:
-        repo = self.make_repo()
-        with mock.patch("bottle.runtime.host_memory_mib", return_value=16384):
-            code, out, _ = self.run_cli("repo", "add", str(repo), "--feature", "tools", "--memory", "8g")
-            self.assertEqual((code, out), (0, f"Created repo 'project' ({repo}) with features [tools] and memory 8G\n"))
-            _, out, _ = self.run_cli("repo", "list")
-            self.assertEqual(out.splitlines()[1].split(), ["project", str(repo), "tools", "8G"])
-            code, out, _ = self.run_cli("repo", "update", "project", "--memory", "4096M")
-            self.assertEqual((code, out), (0, "Set repo 'project' features to [tools] and memory 4096M\n"))
-            code, out, _ = self.run_cli("repo", "update", "project", "--memory", "all")
-            self.assertEqual((code, out), (0, "Set repo 'project' features to [tools]\n"))
-            code, _, err = self.run_cli("repo", "update", "project", "--memory", "32G")
-            self.assertEqual((code, err), (1, "bottle: error: memory 32G is more than this machine has (16384M)\n"))
-
-    def test_too_many_arguments(self) -> None:
-        code, _, err = self.run_cli("repo", "add", "a", "b", "c")
-        self.assertEqual(code, 2)
-        self.assertIn("takes [NAME] PATH", err)
+        self.assertEqual(err, f"bottle: error: can't read spec {self.tmp / 'nope.json'}: No such file or directory\n")
 
 
-class LogTest(WrapCommandTest):
+class LogTest(CliTestCase):
     def log(self) -> str:
         return (self.bottle_home / "logs" / "bottle.log").read_text()
 
     def test_each_command_and_how_it_went_are_logged(self) -> None:
-        repo = self.make_repo()
-        self.run_cli("repo", "add", str(repo))
-        self.run_cli("repo", "add", str(self.tmp / "nope"))
+        spec = self.tmp / "spec.json"
+        spec.write_text('{"features": []}')
+        self.run_cli("spec", "validate", str(spec))
+        self.run_cli("spec", "validate", str(self.tmp / "nope.json"))
         log = self.log()
-        self.assertRegex(log, rf"\d+ bottle.cli bottle repo add {repo}\n")
-        self.assertRegex(log, rf"bottle repo add {repo}: exit 0 after [\d.]+s")
-        self.assertRegex(log, rf"bottle repo add {self.tmp / 'nope'}: failed after [\d.]+s: .* is not a directory")
+        self.assertRegex(log, rf"\d+ bottle.cli bottle spec validate {spec}\n")
+        self.assertRegex(log, rf"bottle spec validate {spec}: exit 0 after [\d.]+s")
+        self.assertRegex(log, rf"bottle spec validate {self.tmp / 'nope.json'}: failed after [\d.]+s: can't read spec")
 
     def test_the_daemon_logs_to_its_own_file(self) -> None:
         with mock.patch("bottle.daemon.serve", new=mock.AsyncMock()), mock.patch.object(sys, "excepthook"):
@@ -105,7 +47,7 @@ class LogTest(WrapCommandTest):
         self.assertFalse((self.bottle_home / "logs" / "bottle.log").exists())
 
     def test_python_and_asyncio_reports_are_stamped_too(self) -> None:
-        self.run_cli("repo", "list")
+        self.run_cli("status")
         logging.getLogger("asyncio").warning("Task was destroyed but it is pending!")
         self.assertRegex(self.log(), r"\n\d{4}-\d\d-\d\d [\d:,]+ \d+ asyncio Task was destroyed")
 
@@ -113,7 +55,7 @@ class LogTest(WrapCommandTest):
         self.bottle_home.mkdir(mode=0o755)
         (self.bottle_home / "logs").mkdir(mode=0o755)
         (self.bottle_home / "logs" / "bottle.log").touch(mode=0o644)
-        self.run_cli("repo", "list")
+        self.run_cli("status")
         for path, mode in ((self.bottle_home, 0o700), (self.bottle_home / "logs", 0o700),
                            (self.bottle_home / "logs" / "bottle.log", 0o600)):
             self.assertEqual(path.stat().st_mode & 0o777, mode, path)
@@ -127,12 +69,7 @@ class BuildCommandTest(unittest.TestCase):
         build.assert_called_once_with("base", ["tools"], False)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class SpecCommandsTest(GitTestCase):
-    run_cli = WrapCommandTest.run_cli
+class SpecCommandsTest(CliTestCase):
 
     def spec(self, data: str) -> str:
         path = self.tmp / "spec.json"
@@ -151,16 +88,14 @@ class SpecCommandsTest(GitTestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("no feature named 'nope'", err)
 
-    def test_new_takes_a_repo_or_a_spec_and_their_own_flags(self) -> None:
+    def test_new_needs_a_spec_and_a_name(self) -> None:
         spec = self.spec('{"features": []}')
         for argv, message in (
-            ((), "give REPO, or --spec FILE"),
-            (("repo", "--git-repo", "x"), "--git-repo goes with --spec"),
-            (("repo", "--checkout", "main"), "--checkout goes with --spec"),
-            (("--spec", spec, "repo"), "REPO goes with a bottle from REPO"),
-            (("--spec", spec, "--feature", "tools"), "--feature goes with a bottle from REPO"),
-            (("--spec", spec, "--memory", "8G"), "--memory goes with a bottle from REPO"),
-            (("--spec", spec), "--spec needs --name"),
+            ((), "the following arguments are required: --spec, --name"),
+            (("--spec", spec), "the following arguments are required: --name"),
+            (("--name", "b"), "the following arguments are required: --spec"),
+            (("repo", "--spec", spec, "--name", "b"), "unrecognized arguments: repo"),
+            (("--spec", spec, "--name", "b", "--feature", "tools"), "unrecognized arguments: --feature"),
         ):
             with self.subTest(argv):
                 code, _, err = self.run_cli("new", *argv)
@@ -172,17 +107,21 @@ class SpecCommandsTest(GitTestCase):
         context = self.tmp / "context.md"
         context.write_text("More.\n")
         repo = self.make_repo()
-        bottle = mock.Mock(from_spec=True, git_repo=str(repo), branch="main", commit="c" * 40, features=("tools",), memory=None)
+        bottle = mock.Mock(git_repo=str(repo), branch="main", commit="c" * 40, features=("tools",), memory=None)
         bottle.name = "project"
-        with mock.patch("bottle.bottles.create_from_spec", return_value=bottle) as create:
+        with mock.patch("bottle.bottles.create", return_value=bottle) as create:
             code, out, _ = self.run_cli("new", "--spec", spec, "--git-repo", str(repo), "--git-remote", "origin:fetch=upstream",
                                         "--checkout", "main", "--name", "project", "--context", str(context))
         self.assertEqual(code, 0)
         create.assert_called_once_with({"features": ["tools"], "memory": "all"}, "project", repo, ["origin:fetch=upstream"],
                                        "main", "More.\n")
-        self.assertIn(f"Created bottle 'project' from a spec, with {repo} at main (cccccccccccc)", out)
+        self.assertIn(f"Created bottle 'project', with {repo} at main (cccccccccccc)", out)
 
     def test_status_shows_missing_bottles(self) -> None:
         self.assertEqual(self.run_cli("status", "gone", "--json"), (0, '[\n  {\n    "name": "gone",\n    "state": "missing"\n  }\n]\n', ""))
         code, out, _ = self.run_cli("status", "gone")
         self.assertEqual(out.splitlines()[1].split(), ["gone", "-", "-", "-", "-", "missing"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -11,12 +11,16 @@ and resolved again whenever a bottle is created.
 """
 
 import json
+import re
 from pathlib import Path
 
-from bottle import repos
+from bottle import runtime
 from bottle.errors import BottleError
 
 KEYS = ("features", "memory")
+MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
+# A memory setting meaning no limit: all of the machine's.
+ALL_MEMORY = "all"
 
 
 def read(path: Path) -> dict:
@@ -47,14 +51,42 @@ def canonical(data: object) -> dict:
     specs = data.get("features", [])
     if not isinstance(specs, list) or not all(isinstance(spec, str) for spec in specs):
         raise BottleError('features is a list of feature specs, e.g. ["tools", "jvm:version=25"]')
-    memory = data.get("memory", repos.ALL_MEMORY)
+    memory = data.get("memory", ALL_MEMORY)
     if not isinstance(memory, str):
-        raise BottleError(f'memory is a string: a size in M or G, e.g. "8G", or "{repos.ALL_MEMORY}"')
-    canonical_features = sorted(repos.canonical_features(specs))
-    features.resolve(canonical_features)  # every dependency exists, and none is cyclic
-    return {"features": canonical_features, "memory": repos.canonical_memory(memory)}
+        raise BottleError(f'memory is a string: a size in M or G, e.g. "8G", or "{ALL_MEMORY}"')
+    canonical = sorted(canonical_features(specs))
+    features.resolve(canonical)  # every dependency exists, and none is cyclic
+    return {"features": canonical, "memory": canonical_memory(memory)}
+
+
+def canonical_features(specs: list[str]) -> tuple[str, ...]:
+    """Validate feature specs and put each in canonical form, keeping their order."""
+    from bottle import features  # imports images, which loading a spec doesn't otherwise need
+
+    result: dict[str, str] = {}
+    for spec in specs:
+        feature_id, settings = features.parse_spec(spec)
+        canonical = features.load(feature_id).configured(settings).spec
+        if feature_id in result and result[feature_id] != canonical:
+            raise BottleError(f"feature {feature_id} given twice with different options")
+        result[feature_id] = canonical
+    return tuple(result.values())
+
+
+def canonical_memory(value: str) -> str:
+    """Validate a memory setting: `all`, or a size in M or G (e.g. 8G) no bigger than the machine's."""
+    if value == ALL_MEMORY:
+        return value
+    match = MEMORY_PATTERN.fullmatch(value)
+    if not match:
+        raise BottleError(f"invalid memory {value!r}: give a size in M or G, e.g. 8G, or `{ALL_MEMORY}`")
+    amount, unit = int(match[1]), match[2].upper()
+    host = runtime.host_memory_mib()
+    if amount * (1024 if unit == "G" else 1) > host:
+        raise BottleError(f"memory {value} is more than this machine has ({host}M)")
+    return f"{amount}{unit}"
 
 
 def memory_limit(spec: dict) -> str | None:
     """The spec's memory as a bottle keeps it: a size, or None for all of the machine's."""
-    return None if spec["memory"] == repos.ALL_MEMORY else spec["memory"]
+    return None if spec["memory"] == ALL_MEMORY else spec["memory"]

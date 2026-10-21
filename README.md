@@ -10,16 +10,16 @@ permissions inside. Take back only the commits you want.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through the host. Your
   working copy, and the rest of your machine, are never mounted.
-- **Git in, git out.** The repo is mounted read-only, and each bottle is a git remote you
-  fetch from and push to. A bottle writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
+- **Git in, git out.** The repo is mounted read-only, and the bottle is served the git remotes
+  it's given. One that takes pushes writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
 - **Network on a leash.** Egress only through a proxy on your machine, so a bottle gets your DNS and
   VPN routes but not your local network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   the proxy attaches it there. The bottle talks to the proxy and never holds the token.
 - **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, in the
-  [Dev Container feature](https://containers.dev/implementors/features/) format, with per-repo
-  defaults. Images are prebuilt, and rebuilt when they go stale.
+  [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
+  file. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
   Python and Homebrew.
 
@@ -39,15 +39,23 @@ against the hosts they're attached to.
 
 ## Quick start
 
+Bottle is the sandbox. To work in one -- a line of work with its own lane of branches, Claude
+running in tmux, and pause and resume -- use [folio](folio/README.md), which drives bottle for
+you:
+
 ```sh
-bottle repo add ~/path/to/foo --feature tools --feature claude
-bottle new foo            # Create a bottle with foo's default features
-bottle shell foo          # Open a shell at /workspace; run `claude` here
-git fetch bottle-foo      # In your repo: see what the agent pushed
+cd ~/path/to/foo
+folio configure set --feature tools --feature claude
+folio claude fix-it       # A thread: a bottle, a lane for its commits, and Claude in it
 ```
 
-To keep a line of work going across bottles and terminals, with its own lane of
-branches and Claude running in tmux, see [folio](folio/README.md).
+Bottle on its own:
+
+```sh
+echo '{"features": ["tools", "claude"]}' > spec.json
+bottle new --spec spec.json --name foo --git-repo ~/path/to/foo
+bottle shell foo          # Open a shell at /workspace; run `claude` here
+```
 
 ## Prerequisites
 
@@ -62,14 +70,13 @@ and a Linux kernel) as necessary, and asks before installing anything.
 
 | Command | |
 | --- | --- |
-| `bottle repo add` / `list` / `set` / `update` | Register a repo, and set its bottles' default features and memory |
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
-| `bottle new` | Create a bottle from a repo, or from a spec |
+| `bottle new` | Create a bottle from a spec |
 | `bottle spec validate` | Check a spec, and print it in canonical form |
 | `bottle shell` | Open a shell in a bottle, at `/workspace` |
 | `bottle exec` | Run one command in a bottle |
 | `bottle status` | List bottles and their state |
-| `bottle start` / `stop` / `reset` / `delete` | Control a bottle's lifecycle |
+| `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
 | `bottle daemon start` / `stop` | Manage `bottled`, the background network process |
 | `bottle shutdown` | Stop every running bottle and the anchor, then `bottled` |
@@ -77,48 +84,6 @@ and a Linux kernel) as necessary, and asks before installing anything.
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
-
-### `bottle repo add [NAME] PATH [--feature FEATURE]... [--memory MEMORY]`
-
-Registers the git repo rooted at `PATH` under `NAME`, so bottles can be created
-from it. Nothing is copied. `NAME` defaults to the origin remote's repo name,
-else the directory name. The features become the defaults for the repo's
-bottles. Adding the same repo again is a no-op.
-
-`MEMORY` is how much memory the repo's bottles get: a size in `M` or `G`, such
-as `8G`, up to what the machine has. The default, `all`, gives each bottle all
-of the machine's memory. A VM only takes memory from the host as it uses it,
-but doesn't give it back until it stops, so a long-running bottle holds on to
-the most it has ever used; a limit caps that.
-
-```sh
-bottle repo add ~/path/to/reponame --feature tools --feature jvm:version=25,additionalVersions=17,21 --feature claude
-```
-
-### `bottle repo list`
-
-Lists repos and their default features and memory.
-
-### `bottle repo set REPO [--feature FEATURE]... [--memory MEMORY]`
-
-Replaces all the repo's settings: its default features become exactly those
-given, and its memory the one given (`all`, if none is). Existing bottles get
-them when reset.
-
-### `bottle repo update REPO [--feature FEATURE]... [--memory MEMORY]`
-
-Adds features to the repo's existing ones: a feature given again replaces its
-options, others are kept. Changes the repo's memory, if given; `--memory all`
-removes the limit. Takes at least one of the two. Existing bottles get the
-change when reset.
-
-```sh
-bottle repo update foo --feature github
-bottle repo update foo --memory 8G
-```
-
-Repos are stored in `~/.bottle/repos.json`, which may be edited by hand. Set
-`BOTTLE_HOME` to use a directory other than `~/.bottle`.
 
 ### `bottle auth login CREDENTIAL`
 
@@ -165,7 +130,7 @@ every bottle with that feature (`claude` names `CLAUDE_CODE_OAUTH_TOKEN`). The
 throwaway bottle a login command runs in gets none, so `bottle auth login
 claude` starts from nothing rather than from a token that isn't one.
 
-`bottle new`, `shell`, `start` and `reset` log in for you when a bottle's
+`bottle new`, `shell` and `start` log in for you when a bottle's
 features need a credential that isn't set yet.
 
 ```sh
@@ -201,7 +166,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   Gradle's toolchains find them.
 - `python`: Debian's Python 3, with `venv`, `pip`, and `python` as a name for
   it. `pip install` works without a virtualenv: Debian's PEP 668 marker is
-  removed, since a bottle is disposable and `bottle reset` undoes whatever an
+  removed, since a bottle is disposable and a new one undoes whatever an
   install breaks. Option: `externallyManaged` (default `false`) keeps the
   marker, and Debian's behaviour, if you'd rather work in a venv.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
@@ -218,13 +183,14 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `github` credential. `bottle auth login github` asks for a
   [fine-grained personal access token](https://github.com/settings/personal-access-tokens):
   what the token may do is what a bottle may do on GitHub, and a push there
-  doesn't pass through your repo the way a bottle's `work` lane does, so give
+  doesn't pass through your repo the way a push to a bottle's remote does, so give
   it just the repositories and permissions the agent needs. GitHub's ssh
   remotes (`git@github.com:...`) are fetched over https instead, since a bottle
   has no ssh key.
 
   ```sh
-  bottle new reponame --feature tools --feature github
+  echo '{"features": ["tools", "github"]}' > spec.json
+  bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
   bottle exec reponame -- gh pr list
   ```
 - `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
@@ -237,7 +203,8 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   start them. A token with read-only permissions is the real boundary.
 
   ```sh
-  bottle new reponame --feature tools --feature teamcity:server=https://teamcity.example.com
+  echo '{"features": ["tools", "teamcity:server=https://teamcity.example.com"]}' > spec.json
+  bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
   bottle exec reponame -- teamcity run list
   ```
 
@@ -253,74 +220,59 @@ attached to and the stand-in it wants, and `requiredOptions`, the options a user
 has to set).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME] [--memory MEMORY] [--context FILE]`
-
-Creates a bottle: a VM with `REPO`'s `BRANCH` checked out at `/workspace`,
-and the repo's default features plus any given (a feature given again replaces
-that default's options). `BRANCH` defaults to the origin remote's default
-branch, or, if there's no origin, to whatever the repo has checked out (a branch
-or commit). The repo's history is mounted read-only, so nothing is cloned and
-the bottle can't change your repo, except through `host` below. The bottle has
-three remotes, served live by bottle through its egress proxy:
-
-- `origin`: your repo's upstream (its `origin/*` branches), read-only. Fetching
-  first fetches your repo's `origin` on the host (at most once a minute), so
-  the bottle gets the upstream's latest even if you haven't fetched.
-- `host`: your repo's own branches, read-only. How the agent sees what you've
-  integrated: `git fetch host && git rebase host/main`.
-- `work`: where you and the agent exchange commits. Each of you writes a
-  separate [git namespace](https://git-scm.com/docs/gitnamespaces) and reads the
-  other's, so neither side's push is ever refused because of what the other
-  did — you can commit an edit, find the agent has since pushed something that
-  conflicts, and push anyway. The agent resolves the conflict and your next pull is a
-  fast-forward. A namespace is also what confines the bottle: every ref its
-  `receive-pack` resolves is inside one, and your own refs aren't advertised to
-  it at all. Its lane refuses force-pushes and deletes, so nothing you've
-  already read changes underneath you. Your repo's own hooks don't run.
-
-`bottle new` registers the bottle in your repo as a remote called
-`bottle-NAME`, so from your side it is an ordinary one: `git fetch bottle-NAME`,
-`git switch BRANCH` to start tracking what it pushed, `git pull`, `git push`.
-
-`NAME` defaults to the repo's name, then `REPO-2`, `REPO-3`, and so on. The image
-with those features is built first if it isn't built yet. `MEMORY` overrides the
-repo's (see `bottle repo add`), and stays with the bottle when it's reset.
-
-```sh
-bottle new reponame --feature tools --feature jvm --feature claude
-```
-
-`--context FILE` adds the file contents to the end of `~/BOTTLE.md`.
-
 ### `bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]`
 
 Creates a bottle from a **spec**: a file giving its features and memory, owned
-by whoever creates the bottle. Bottle keeps no specs, and no repo registry is
-involved. `NAME` is required, and is the bottle's identity: there's no default,
-and a name that's taken is refused.
+by whoever creates the bottle. `NAME` is required, and is the bottle's identity:
+there's no default, and a name that's taken is refused. The image with those features
+is built first if it isn't built yet.
 
 ```json
 {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
 ```
 
-`--git-repo PATH` is the repo whose objects are mounted read-only, and checked
-out at `/workspace` at `--checkout` (a branch or a commit; by default as for
-`bottle new REPO`). Without it the bottle has an empty `/workspace`.
+`--git-repo PATH` is the repo whose objects are mounted read-only, so nothing
+is cloned and the bottle can't change your repo except by pushing to a remote
+it's served. It's checked out at `/workspace` at `--checkout`: a branch (the
+repo's, else origin's) or a commit, by default the origin remote's default
+branch, or, if there's no origin, whatever the repo has checked out. Without
+`--git-repo` the bottle has an empty `/workspace`.
 
-Each `--git-remote` serves the bottle one remote, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`.
-What a fetch sees is one of three views: `upstream`, the repo's upstream (as
-`origin` above); `heads`, the repo's own branches (as `host`); or
-`ns/NAMESPACE`, the refs in one git namespace of the repo. With `push`, pushes
-go into that namespace, append-only, as `work`'s do, and no other bottle may
-push into the same one. Without any `--git-remote`, the bottle gets `origin`
-and `host`, both read-only.
+Each `--git-remote` serves the bottle one remote, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`,
+live, through its egress proxy. What a fetch sees is one of three views:
+
+- `upstream`: your repo's upstream (its `origin/*` branches), read-only.
+  Fetching first fetches your repo's `origin` on the host (at most once a
+  minute), so the bottle gets the upstream's latest even if you haven't
+  fetched.
+- `heads`: your repo's own branches: how the agent sees what you've integrated.
+- `ns/NAMESPACE`: the refs in one [git namespace](https://git-scm.com/docs/gitnamespaces)
+  of your repo, and nothing else.
+
+With `push`, pushes go into that namespace. A namespace is what confines the
+bottle: every ref its `receive-pack` resolves is inside it, and your own refs
+aren't advertised to it at all. Pushes are append-only, refusing force-pushes
+and deletes, so nothing you've already read changes underneath you; no other
+bottle may push into the same namespace; and your repo's own hooks don't run.
+Reading one namespace and writing another makes a two-lane exchange, where
+neither side's push is ever refused for what the other did: that's how
+[folio](folio/README.md) gives each thread its lane. Without any
+`--git-remote`, the bottle gets `origin` (`upstream`) and `host` (`heads`),
+both read-only.
 
 ```sh
 bottle new --spec spec.json --name foo-fix-tests --git-repo ~/src/foo --checkout main \
   --git-remote origin:fetch=upstream \
   --git-remote host:fetch=heads \
-  --git-remote work:fetch=ns/foo-in,push=ns/foo-out
+  --git-remote agent:fetch=ns/fix-tests-out,push=ns/fix-tests-out \
+  --git-remote user:fetch=ns/fix-tests-in
 ```
+
+`--context FILE` adds the file's contents to the end of `~/BOTTLE.md`, which
+says what the bottle and its remotes are, and nothing about how to work in it.
+
+Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
+directory.
 
 ### `bottle spec validate FILE [--json]`
 
@@ -357,28 +309,17 @@ repo, branch and commit, features, memory, spec and remotes.
 Starts or stops a bottle's VM. Stopping keeps the checkout and any changes;
 `shell` also starts a stopped bottle.
 
-### `bottle delete BOTTLE [--force]`
+### `bottle delete BOTTLE`
 
 Deletes the bottle and everything it created. If creating or deleting a bottle
 was interrupted, `delete` cleans up whatever is left.
 
-It refuses if the bottle has work its repo doesn't: commits that were never
-pushed, or uncommitted changes. Push them first (`bottle exec NAME git push
-work`), or pass `--force`. Whatever the bottle pushed is kept, since it may be
-the only copy; the remote is removed. The bottle's image is kept, so the next
+It doesn't ask: anything in the bottle that was never pushed goes with it, so
+push what you want first. Whatever the bottle pushed is kept, in your repo's
+namespaces. The bottle's image is kept, so the next
 bottle with the same features starts without a build; images whose features
 or base have changed since they were built are deleted, unless a bottle uses
 one.
-
-### `bottle reset BOTTLE [--force]`
-
-Deletes the bottle and creates it again with the arguments `bottle new` was
-given: a fresh, running VM with the repo's current default features (plus any
-the bottle was created with) and memory (unless the bottle was created with its
-own), and `/workspace` at the latest commit of its
-branch. Like `delete`, it refuses to lose unpushed commits or uncommitted
-changes without `--force`. Also recreates a bottle whose VM has gone missing,
-and registers its `bottle-NAME` remote again if the repo has lost it.
 
 ### `bottle shutdown`
 

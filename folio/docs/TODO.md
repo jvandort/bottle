@@ -1,60 +1,5 @@
 # TODO
 
-The top half is what's left of the initial design (`DESIGN.md`, kept on the
-`genie/folio-design-2` branch), copied from it verbatim, with the overview and
-whatever's been built taken out. It tracks progress on that design; nothing
-new goes in it. The bottom half is a working list: things found along the way,
-appended as they come up.
-
-# What's left of the design
-
-## Changes to bottle
-
-### Removed
-
-- **`bottle repo`** and `repos.json`. Specs come from files, repos from
-  `--git-repo`.
-- **`bottle reset`.** It was delete-then-new with the same arguments, used mostly
-  to get a fresh sandbox with new features. A caller with a spec file does that
-  with `delete` and `new`, and folio does it with a pause and a resume.
-- **The unsaved-work refusal** in `delete`, and its `--force`.
-  Bottle discards a sandbox's processes and working tree without asking already;
-  deciding what's worth keeping is folio's job. This also retires the weak
-  `cat-file -e` check noted in `docs/TODO.md`.
-- **Registering the `bottle-<name>` remote** in the user's repo. Folio owns
-  remotes now.
-
-`~/BOTTLE.md` itself drops the workflow, which moves to folio: the "Working with
-the user", "What can't be rewritten" and "Delivering finished work" sections.
-What stays is fact: the sandbox, the proxy, what's installed, and which remotes
-it serves and what each one is.
-
-## Not in scope
-
-- Periodic checkpoints while a thread runs. Adding them later means writing
-  the same slots more often.
-- `--git-repo` with a URL, and folio on a different machine from its sandboxes.
-  The design keeps both possible: no writable mounts, and everything over exec.
-- Moving a repo without orphaning its threads.
-- tmux UX: the prefix key (Ctrl+B is also Claude Code's background key), mouse
-  handling, scrollback, the status bar.
-- Curate's own branch bag.
-- Migrating existing bottles, lanes or `bottle-*` remotes.
-
-## Order of work
-
-1. **Spike**: done. tmux survives a disconnected exec, and `claude --continue`
-   works from a restored `claude.tar.gz`.
-2. **Bottle**: `--spec` and `spec validate`, `--git-repo`, `--git-remote`,
-   `--checkout`, `--context` and `status` are done. Left: the workflow moved
-   out of `~/BOTTLE.md`, and the removals, once folio has replaced them.
-3. **Folio, running threads**: done. Repo keys, `configure`, lanes, `new`,
-   `claude`, `shell`, `list`, `delete`, with tmux.
-4. **Folio, pause and resume**: done.
-5. **The picker**: done.
-
-# Found along the way
-
 - **A spec without `claude` fails tersely.** `folio claude` then gets tmux's
   "can't find session", since the session's command exits at once. Say that
   the repo's spec has no `claude`, and how to add it.
@@ -77,3 +22,10 @@ it serves and what each one is.
   - **The workspace's first fetch** (part of 1.2s with the CA and egress) has
     the host `git fetch origin` before serving origin. A new bottle could
     serve what the repo has and leave fetching to the agent. Measure first.
+- **What's in a thread's lane, in `folio list`.** How far the agent's branches
+  are ahead of your copy, and whether you've commits it hasn't seen. Both
+  directions, because the loop has two.
+- `--git-repo` with a URL, and folio on a different machine from its sandboxes.
+  The design keeps both possible: no writable mounts, and everything over exec.
+- tmux UX: the prefix key (Ctrl+B is also Claude Code's background key), mouse
+  handling, scrollback, the status bar.
