@@ -97,6 +97,22 @@ def run(name: str, argv: list[str], input: str | None = None, check: bool = True
     return _run("exec", name, "--", *argv, input=input, check=check)
 
 
+def run_to_file(name: str, argv: list[str], path: Path) -> None:
+    """Run a command in the bottle with its stdout, bytes and all, going to `path`."""
+    with path.open("wb") as out:
+        result = subprocess.run([*command(), "exec", name, "--", *argv], stdin=subprocess.DEVNULL, stdout=out)
+    if result.returncode != 0:
+        raise failed(["exec", name], result.returncode)
+
+
+def run_from_file(name: str, argv: list[str], path: Path) -> None:
+    """Run a command in the bottle with `path` as its stdin."""
+    with path.open("rb") as in_:
+        result = subprocess.run([*command(), "exec", name, "--", *argv], stdin=in_, stdout=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise failed(["exec", name], result.returncode)
+
+
 def attach(name: str, argv: list[str]) -> NoReturn:
     """Replace folio with a command in the bottle, on this terminal."""
     cmd = [*command(), "exec", name, "--", *argv]

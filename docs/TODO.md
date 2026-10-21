@@ -98,6 +98,13 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   the host, but any host service listening on all interfaces is reachable,
   not just the egress proxy. A `pf` rule (one-time sudo) could allow only the
   proxy port.
+- **Reuse networks, so the anchor stays put.** A container's networks are
+  fixed when it starts, so every bottle network made or removed boots a new
+  anchor VM (1.1-1.5s) and deletes the old one (0.4-0.5s): about 1.5s of each
+  `bottle new` (4.0s, image built) and of each `delete` (2.1s), timed from
+  bottle.log. Keep a deleted bottle's network as a spare, the anchor still on
+  it, and give the next bottle a spare if there is one: then a delete-then-new
+  never touches the anchor. Folio does exactly that on every pause and resume.
 - **Build-time egress exposure.** During `bottle build`, the temporary proxy
   on the default network is usable by any container on that network.
 - **Credentials via the proxy: what's left.** The proxy terminates TLS for the

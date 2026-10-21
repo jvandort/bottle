@@ -3,13 +3,16 @@
 
 It keeps its bottles in $FAKE_BOTTLE_STATE, a JSON file, and logs every call
 there. A bottle's /workspace is a real clone of its --git-repo, beside the
-state file, and `exec` runs commands in it, with /workspace rewritten; tmux is
-pretended, by keeping each bottle's sessions in the state. Failures look like
+state file, and `exec` runs commands in it, with /workspace rewritten and
+$HOME a home of the bottle's own, which starts with the settings.json an image
+would give it; tmux is pretended, by keeping each bottle's sessions in the
+state. Failures look like
 bottle's: `bottle: error: ...` on stderr, exit 1.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +57,8 @@ def main(argv: list[str]) -> int:
             if os.environ.get("FAKE_BOTTLE_FAIL_NEW"):
                 fail("creating failed")
             workspace = STATE.parent / "bottles" / name / "workspace"
+            (workspace.parent / "home" / ".claude").mkdir(parents=True)
+            (workspace.parent / "home" / ".claude" / "settings.json").write_text('{"from": "the image"}')
             subprocess.run(["git", "clone", "-q", "--shared", option(rest, "--git-repo"), str(workspace)], check=True)
             if option(rest, "--checkout"):
                 subprocess.run(["git", "-C", str(workspace), "checkout", "-q", option(rest, "--checkout")], check=True)
@@ -74,7 +79,7 @@ def main(argv: list[str]) -> int:
             bottles[name]["state"] = "running"
             save(state)
         case ["delete", name]:
-            del bottles[name]
+            shutil.rmtree(Path(bottles.pop(name)["workspace"]).parent)
             save(state)
         case ["exec", name, "--", *command]:
             bottle = bottles[name]
@@ -87,10 +92,15 @@ def main(argv: list[str]) -> int:
                     save(state)
                 case ["tmux", "attach", *_]:
                     pass  # attached; the call log is the evidence
+                case ["tmux", "list-panes", *_]:
+                    return 0  # no real processes to wait for
+                case ["tmux", "kill-server"]:
+                    bottle["sessions"] = {}
                 case _:
                     rewritten = [arg.replace("/workspace", bottle["workspace"]) for arg in command]
                     save(state)
-                    return subprocess.run(rewritten).returncode
+                    home = str(Path(bottle["workspace"]).parent / "home")
+                    return subprocess.run(rewritten, env={**os.environ, "HOME": home}).returncode
             save(state)
         case _:
             fail(f"the fake doesn't know {argv}")

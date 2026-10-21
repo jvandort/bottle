@@ -43,9 +43,20 @@ never clashes. The repo key is the repo's name and a hash of its path.
   `genie/<feature>-N`, starting with `genie/<thread>-1`, and a rebase or a
   squash is pushed as the next N rather than over the old one.
 
-A thread's bottle is **running**, **stopped** (its VM stopped, the disk
-intact: a crash, a restart) or **missing**. Attaching to a stopped one starts
-it, with all its work where it was; only running processes are lost.
+A thread is **running**; **stopped**, its VM stopped with the disk intact (a
+crash, a restart); **paused**, its bottle deleted and a snapshot kept; or
+**missing**, its bottle gone with no snapshot, leaving only what's in its
+lane. Attaching to a stopped thread starts it, and to a paused one resumes it
+in a new bottle. Either way only running processes are lost.
+
+## Pausing
+
+`folio pause` snapshots a thread and deletes its bottle, so a thread you're
+not working on holds no VM. The snapshot is the workspace (every branch and
+stash, staged and unstaged changes, untracked files, though not ignored ones
+like build output) and Claude's conversation and memory. `folio claude` or
+`folio shell` resumes it, in a new bottle made from the repo's spec as it is
+then, so a resume is also how a thread gets features added since.
 
 ## Commands
 
@@ -54,7 +65,8 @@ it, with all its work where it was; only running processes are lost.
 | `folio new THREAD [--from BRANCH]` | Start a thread: its bottle and its lane |
 | `folio claude THREAD` | Attach to the thread's Claude |
 | `folio shell THREAD` | Attach to the thread's shell |
-| `folio list` | The repo's threads, most recently active first |
+| `folio pause THREAD` | Snapshot a thread, and delete its bottle |
+| `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
 | `folio delete THREAD [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec: its threads' features and memory |
 | `folio repo list` | Every repo folio has state for |

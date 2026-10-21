@@ -33,6 +33,15 @@ def main(argv: list[str] | None = None) -> int:
         attach.add_argument("thread", metavar="THREAD", help="the thread")
         attach.set_defaults(run=_attach, session=session)
 
+    pause = commands.add_parser(
+        "pause", help="snapshot a thread and delete its bottle",
+        description="Snapshot the thread -- its workspace, every branch and stash, uncommitted changes, and "
+        "Claude's conversation -- and delete its bottle. Only running processes are lost. `folio claude` or "
+        "`folio shell` resumes it, in a new bottle made from the repo's spec as it is then.",
+    )
+    pause.add_argument("thread", metavar="THREAD", help="the thread")
+    pause.set_defaults(run=_pause)
+
     list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
     list_.set_defaults(run=_list)
 
@@ -88,14 +97,25 @@ def _attach(args: argparse.Namespace) -> int:
     threads.attach(repo, threads.load(repo, args.thread), args.session)
 
 
+def _pause(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = threads.load(repo, args.thread)
+    print(f"Pausing thread {thread.name}...", file=sys.stderr)
+    threads.pause(repo, thread)
+    print(f"Paused thread {thread.name}. Resume it with: folio claude {thread.name}")
+    return 0
+
+
 def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
-    states = threads.states(all_)
-    rows = [("THREAD", "STATE", "ACTIVE", "FEATURES", "BRANCHES")]
+    states = threads.states(repo, all_)
+    rows = [("THREAD", "STATE", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
     for thread in all_:
         row = states[thread.name]
-        rows.append((thread.name, row["state"], _ago(thread.last_active), " ".join(row.get("features", ())) or "-",
+        size = threads.snapshot_size(repo, thread) if row["state"] == "paused" else None
+        rows.append((thread.name, row["state"], _size(size) if size is not None else "-", _ago(thread.last_active),
+                     " ".join(row.get("features", ())) or "-",
                      " ".join(sorted(lanes.branches(repo.path, thread.name))) or "-"))
     _table(rows)
     return 0
@@ -162,6 +182,13 @@ def _repo_list(args: argparse.Namespace) -> int:
 
 def _spec(spec: dict) -> str:
     return f"features [{', '.join(spec.get('features', []))}], memory {spec.get('memory', 'all')}"
+
+
+def _size(size: int) -> str:
+    for unit, scale in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if size >= scale:
+            return f"{size / scale:.1f}{unit}"
+    return f"{size}B"
 
 
 def _ago(when: float) -> str:

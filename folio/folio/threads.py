@@ -8,7 +8,12 @@ record:
     running   the bottle is up: attach to it
     stopped   the VM stopped, its disk intact (a crash, a restart, `bottle
               stop`): start it, and the work is all there
-    missing   the bottle is gone
+    paused    no bottle, and a snapshot of it (see snapshots.py): attaching
+              resumes it in a new bottle, made from the repo's spec as it is now
+    missing   no bottle, and no snapshot: only what's in the lane is left
+
+A thread has a snapshot only while it has no bottle: attaching to one drops
+it, since the bottle is where the work is from then on.
 
 Inside the bottle, Claude and a shell each run in a tmux session of their own,
 started by one exec and attached to by another, so closing a terminal only
@@ -17,13 +22,15 @@ detaches it, and whatever the session started keeps running.
 
 import json
 import re
+import shlex
 import shutil
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from . import engine, lanes, store
+from . import engine, lanes, snapshots, store
 from .advice import advice
 from .errors import FolioError
 from .repos import DEFAULT_SPEC, Repo
@@ -39,10 +46,15 @@ SESSIONS = {
             'then exec claude --continue; else exec claude; fi',
     SHELL: "exec bash -l",
 }
-# A bottle's own branches and uncommitted changes, one per line, tab-separated
-# so a name is never split.
-WORK_SCRIPT = f"""\
-cd {WORKSPACE} 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+SNAPSHOT = (snapshots.WORKSPACE_ARCHIVE, snapshots.CLAUDE_ARCHIVE, snapshots.WORK)
+
+
+def work_script(workspace: str) -> str:
+    """Lists a workspace's own branches and whether it has uncommitted changes,
+    one per line, tab-separated so a name is never split."""
+    workspace = shlex.quote(workspace)
+    return f"""\
+cd {workspace} 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 git for-each-ref --format='%(refname:short)%09%(objectname)' refs/heads
 git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' "$(git rev-parse HEAD)"
 [ -z "$(git status --porcelain)" ] || printf '(uncommitted changes)\\n'
@@ -80,8 +92,21 @@ def all_(repo: Repo) -> list[Thread]:
     return sorted(threads, key=lambda t: t.last_active, reverse=True)
 
 
-def _save(repo: Repo, thread: Thread) -> None:
-    store.write_slot(directory(repo, thread.name), {RECORD: (json.dumps(asdict(thread), indent=2) + "\n").encode()})
+def _save(repo: Repo, thread: Thread, files: dict[str, Path | None] | None = None) -> None:
+    record = (json.dumps(asdict(thread), indent=2) + "\n").encode()
+    store.write_slot(directory(repo, thread.name), {RECORD: record, **(files or {})})
+
+
+def snapshot_size(repo: Repo, thread: Thread) -> int | None:
+    """The bytes a paused thread's snapshot takes up; None if it has none."""
+    slot = _snapshot(repo, thread)
+    return sum((slot / name).stat().st_size for name in SNAPSHOT if (slot / name).exists()) if slot else None
+
+
+def _snapshot(repo: Repo, thread: Thread) -> Path | None:
+    """The slot holding the thread's snapshot, if it has one."""
+    slot = store.current_slot(directory(repo, thread.name))
+    return slot if slot is not None and (slot / snapshots.WORKSPACE_ARCHIVE).exists() else None
 
 
 def create(repo: Repo, name: str, base: str | None = None) -> Thread:
@@ -90,15 +115,9 @@ def create(repo: Repo, name: str, base: str | None = None) -> Thread:
         raise FolioError(f"invalid thread name {name!r}: use lowercase letters and digits, in words joined by '-'")
     if store.current_slot(directory(repo, name)) is not None:
         raise FolioError(f"thread {name} already exists; attach with `folio claude {name}`")
-    # Checked again each time: a feature can have changed since the spec was saved.
-    spec = engine.validate_spec(repo.spec() or DEFAULT_SPEC)
-    repo.remember()
-    if repo.spec() != spec:
-        repo.save_spec(spec)
-    bottle = f"{repo.key}-{name}"
-    engine.new(bottle, spec, repo.path, lanes.bottle_remotes(name), base, advice(name, repo.name))
     now = time.time()
-    thread = Thread(name, bottle, now, now, base)
+    thread = Thread(name, f"{repo.key}-{name}", now, now, base)
+    _make_bottle(repo, thread)
     try:
         lanes.register(repo.path, name)
         _save(repo, thread)
@@ -106,6 +125,17 @@ def create(repo: Repo, name: str, base: str | None = None) -> Thread:
         _undo(repo, thread)
         raise
     return thread
+
+
+def _make_bottle(repo: Repo, thread: Thread) -> None:
+    """Create the thread's bottle from the repo's spec as it is now, served the thread's lane."""
+    # Checked again each time: a feature can have changed since the spec was saved.
+    spec = engine.validate_spec(repo.spec() or DEFAULT_SPEC)
+    repo.remember()
+    if repo.spec() != spec:
+        repo.save_spec(spec)
+    engine.new(thread.bottle, spec, repo.path, lanes.bottle_remotes(thread.name), thread.base,
+               advice(thread.name, repo.name))
 
 
 def _undo(repo: Repo, thread: Thread) -> None:
@@ -118,29 +148,98 @@ def _undo(repo: Repo, thread: Thread) -> None:
             pass
 
 
-def states(threads: list[Thread]) -> dict[str, dict]:
-    """Each thread's bottle's status row, by thread name."""
+def states(repo: Repo, threads: list[Thread]) -> dict[str, dict]:
+    """Each thread's bottle's status row, by thread name; a missing bottle with a snapshot is paused."""
     rows = engine.status([t.bottle for t in threads])
-    return {t.name: rows.get(t.bottle, {"name": t.bottle, "state": "missing"}) for t in threads}
+    result = {}
+    for t in threads:
+        row = rows.get(t.bottle, {"name": t.bottle, "state": "missing"})
+        if row["state"] == "missing" and _snapshot(repo, t) is not None:
+            row = {**row, "state": "paused"}
+        result[t.name] = row
+    return result
 
 
 def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
     """Attach this terminal to one of the thread's sessions, bringing the thread to running first."""
-    _ensure_running(thread)
+    _ensure_running(repo, thread)
     _ensure_session(thread, session)
-    _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}))
+    # The bottle has the work now, so a snapshot would only be out of date.
+    _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}), dict.fromkeys(SNAPSHOT))
     # -d detaches anything else on it: closing a terminal doesn't hang up its
     # attach inside the VM, and tmux sizes a window to its smallest client.
     engine.attach(thread.bottle, ["tmux", "attach", "-d", "-t", f"={session}"])
 
 
-def _ensure_running(thread: Thread) -> None:
-    state = states([thread])[thread.name]["state"]
-    if state == "missing":
+def _ensure_running(repo: Repo, thread: Thread) -> None:
+    state = states(repo, [thread])[thread.name]["state"]
+    if state == "paused":
+        print(f"Resuming thread {thread.name}...", file=sys.stderr)
+        _resume(repo, thread)
+    elif state == "missing":
         raise FolioError(f"thread {thread.name}'s bottle, {thread.bottle}, is gone; its branches are safe in "
                          f"bottle/{thread.name}, and `folio delete {thread.name}` removes the rest")
+    elif state != "running":
+        engine.start(thread.bottle)
+
+
+def pause(repo: Repo, thread: Thread) -> None:
+    """Snapshot the thread and delete its bottle: everything but its running processes is kept.
+
+    The sessions are stopped first, and waited for, so Claude has written its
+    conversation out. Nothing is deleted until both archives are in the
+    thread's slot and read back whole; if anything fails before that, the
+    bottle is left as it is.
+    """
+    state = states(repo, [thread])[thread.name]["state"]
+    if state == "paused":
+        raise FolioError(f"thread {thread.name} is already paused; `folio claude {thread.name}` resumes it")
+    if state == "missing":
+        raise FolioError(f"thread {thread.name}'s bottle, {thread.bottle}, is gone; there's nothing to pause")
     if state != "running":
         engine.start(thread.bottle)
+    _stop_sessions(thread)
+    staging = store.staging(directory(repo, thread.name))
+    try:
+        workspace, claude, work = (staging / name for name in SNAPSHOT)
+        engine.run_to_file(thread.bottle, ["sh", "-c", snapshots.workspace_out(WORKSPACE)], workspace)
+        engine.run_to_file(thread.bottle, ["sh", "-c", snapshots.CLAUDE_OUT], claude)
+        engine.run_to_file(thread.bottle, ["sh", "-c", work_script(WORKSPACE)], work)
+        snapshots.check(workspace)
+        snapshots.check(claude)
+        _save(repo, thread, {snapshots.WORKSPACE_ARCHIVE: workspace, snapshots.CLAUDE_ARCHIVE: claude,
+                             snapshots.WORK: work})
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    engine.delete(thread.bottle)
+
+
+def _stop_sessions(thread: Thread) -> None:
+    """Stop the bottle's tmux server, and wait (a while) for what ran in it to exit."""
+    panes = engine.run(thread.bottle, ["tmux", "list-panes", "-a", "-F", "#{pane_pid}"], check=False).stdout.split()
+    engine.run(thread.bottle, ["tmux", "kill-server"], check=False)
+    pids = " ".join(pid for pid in panes if pid.isdigit())
+    if pids:
+        engine.run(thread.bottle, ["sh", "-c", f"for i in $(seq 50); do alive=; for p in {pids}; do "
+                                               "kill -0 $p 2>/dev/null && alive=1; done; "
+                                               '[ -z "$alive" ] && exit 0; sleep 0.2; done'])
+
+
+def _resume(repo: Repo, thread: Thread) -> None:
+    """A new bottle for a paused thread, with its snapshot restored; on any failure, still paused."""
+    slot = _snapshot(repo, thread)
+    lanes.register(repo.path, thread.name)  # repairs it, if it was edited meanwhile
+    _make_bottle(repo, thread)
+    try:
+        engine.run_from_file(thread.bottle, ["sh", "-c", snapshots.workspace_in(WORKSPACE)],
+                             slot / snapshots.WORKSPACE_ARCHIVE)
+        engine.run_from_file(thread.bottle, ["sh", "-c", snapshots.CLAUDE_IN], slot / snapshots.CLAUDE_ARCHIVE)
+    except BaseException:
+        try:
+            engine.delete(thread.bottle)
+        except Exception:
+            pass
+        raise
 
 
 def _ensure_session(thread: Thread, session: str) -> None:
@@ -153,31 +252,37 @@ def losses(repo: Repo, thread: Thread) -> list[str]:
     """What deleting the thread would lose, for the user to read first.
 
     Branches in the lane that aren't on the user's branches or origin's, and
-    work in the bottle that never reached the lane. A stopped bottle is
-    started to look.
+    work that never reached the lane: read from the bottle, which is started
+    if it's stopped, or from a paused thread's snapshot.
     """
     lost = [f"{branch}: pushed, but not on your branches or origin's" for branch in lanes.unintegrated(repo.path, thread.name)]
-    state = states([thread])[thread.name]["state"]
+    state = states(repo, [thread])[thread.name]["state"]
     if state == "missing":
         return lost
-    if state != "running":
-        engine.start(thread.bottle)
+    if state == "paused":
+        # As the bottle saw it at pause: the snapshot itself is never opened here (see snapshots.py).
+        work = (_snapshot(repo, thread) / snapshots.WORK).read_text()
+    else:
+        if state != "running":
+            engine.start(thread.bottle)
+        work = engine.run(thread.bottle, ["sh", "-c", work_script(WORKSPACE)]).stdout
     tips, dirty = {}, False
-    for line in engine.run(thread.bottle, ["sh", "-c", WORK_SCRIPT]).stdout.splitlines():
+    for line in work.splitlines():
         name, _, commit = line.partition("\t")
         if name == "(uncommitted changes)":
             dirty = True
         elif commit:
             tips[name] = commit
-    lost += [f"{name}: in the bottle, never pushed" for name in lanes.unsaved(repo.path, thread.name, tips)]
+    where = "the snapshot" if state == "paused" else "the bottle"
+    lost += [f"{name}: in {where}, never pushed" for name in lanes.unsaved(repo.path, thread.name, tips)]
     if dirty:
-        lost.append("uncommitted changes in the bottle")
+        lost.append(f"uncommitted changes in {where}")
     return lost
 
 
 def delete(repo: Repo, thread: Thread) -> None:
-    """Delete the thread: its bottle, its lane and remote, and its record."""
-    if states([thread])[thread.name]["state"] != "missing":
+    """Delete the thread: its bottle, its lane and remote, and its record and snapshot."""
+    if states(repo, [thread])[thread.name]["state"] not in ("missing", "paused"):
         engine.delete(thread.bottle)
     lanes.forget(repo.path, thread.name)
     shutil.rmtree(directory(repo, thread.name))

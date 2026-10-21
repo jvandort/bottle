@@ -55,14 +55,22 @@ def current_slot(directory: Path) -> Path | None:
     return directory / os.readlink(link) if link.is_symlink() else None
 
 
-def write_slot(directory: Path, files: dict[str, bytes]) -> Path:
-    """Write a new slot in `directory` with `files`, and every other file of the current slot; make it current."""
+def write_slot(directory: Path, files: dict[str, bytes | Path | None]) -> Path:
+    """Write a new slot in `directory` with `files`, and every other file of the current slot; make it current.
+
+    A file is given as its content, or as a file to move in (from the same
+    filesystem: an archive streamed in beside the slots, say), or as None to
+    leave it out of the new slot.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     old = current_slot(directory)
     _remove_leftovers(directory, keep=old)
     slot = _new_slot(directory)
     for name, content in files.items():
-        (slot / name).write_bytes(content)
+        if isinstance(content, Path):
+            content.replace(slot / name)
+        elif content is not None:
+            (slot / name).write_bytes(content)
     if old is not None:
         for kept in old.iterdir():
             if kept.name not in files:
@@ -88,7 +96,23 @@ def _new_slot(directory: Path) -> Path:
 
 
 def _remove_leftovers(directory: Path, keep: Path | None) -> None:
-    """Slots `current` doesn't point to: what a crash mid-write leaves behind."""
+    """Slots `current` doesn't point to: what a crash mid-write leaves behind.
+
+    Dot-names are left alone: they're work in progress beside the slots (see staging()).
+    """
     for entry in directory.iterdir():
         if entry.is_dir() and not entry.is_symlink() and entry != keep and not entry.name.startswith("."):
             shutil.rmtree(entry, ignore_errors=True)
+
+
+def staging(directory: Path) -> Path:
+    """A fresh directory beside the slots, for files about to be moved into one.
+
+    On the same filesystem, so moving them in is a rename. One per process; a
+    crashed one is cleared the next time the same pid comes round, which is
+    harmless, and `folio delete` takes the whole thread directory anyway.
+    """
+    path = directory / f".staging.{os.getpid()}"
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True)
+    return path
