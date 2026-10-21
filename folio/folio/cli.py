@@ -1,0 +1,178 @@
+"""What you can type, and what happens when you do."""
+
+import argparse
+import sys
+import time
+
+from . import engine, lanes, repos, threads
+from .errors import FolioError
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="folio", description="Threads of work in bottles: each one a bottle, a lane for its commits, and Claude.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    new = commands.add_parser(
+        "new", help="start a thread",
+        description="Start a thread in the repo you're in: a bottle for it, and a lane for its commits, "
+        "fetched from the remote bottle/THREAD. Then `folio claude THREAD` or `folio shell THREAD` to work in it.",
+    )
+    new.add_argument("thread", metavar="THREAD", help="its name: lowercase words joined by '-', e.g. fix-flaky-test")
+    new.add_argument("--from", dest="base", metavar="BRANCH",
+                     help="the branch to start from (default: origin's default branch)")
+    new.set_defaults(run=_new)
+
+    for name, session, what in (("claude", threads.CLAUDE, "Claude"), ("shell", threads.SHELL, "shell")):
+        attach = commands.add_parser(
+            name, help=f"attach to a thread's {what}",
+            description=f"Attach to the thread's {what}, starting its bottle and the session if they've stopped. "
+            "Closing the terminal only detaches: what's running in it carries on.",
+        )
+        attach.add_argument("thread", metavar="THREAD", help="the thread")
+        attach.set_defaults(run=_attach, session=session)
+
+    list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
+    list_.set_defaults(run=_list)
+
+    delete = commands.add_parser(
+        "delete", help="delete a thread",
+        description="Delete a thread: its bottle, its lane and the bottle/THREAD remote, and what folio knows "
+        "about it. Says first what that would lose, and asks you to type the thread's name.",
+    )
+    delete.add_argument("thread", metavar="THREAD", help="the thread")
+    delete.add_argument("--yes", action="store_true", help="don't ask (needed without a terminal)")
+    delete.set_defaults(run=_delete)
+
+    configure = commands.add_parser("configure", help="the repo's spec: its threads' features and memory")
+    configure_commands = configure.add_subparsers(dest="configure_command", required=True, metavar="COMMAND")
+    feature_help = "a feature, optionally with options, e.g. jvm:version=21 (repeatable)"
+    memory_help = "memory for each bottle, in M or G, e.g. 8G, or `all` of this machine's"
+    for name, help_ in (("set", "replace the spec: exactly these features, and this memory"),
+                        ("update", "change the spec: add features (one given again replaces its options), or the memory")):
+        command = configure_commands.add_parser(
+            name, help=help_, description=f"{help_[0].upper()}{help_[1:]}. Bottle checks it before it's saved. "
+            "Threads get it in their next bottle; a bottle already running keeps what it has.",
+        )
+        command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+        command.add_argument("--memory", help=memory_help)
+        command.set_defaults(run=_configure, replace=name == "set", parser=command)
+    show = configure_commands.add_parser("show", help="the repo's spec")
+    show.set_defaults(run=_configure_show)
+
+    repo = commands.add_parser("repo", help="the repos folio knows")
+    repo_commands = repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
+    repo_list = repo_commands.add_parser("list", help="every repo folio has state for, wherever you are")
+    repo_list.set_defaults(run=_repo_list)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.run(args)
+    except FolioError as e:
+        print(f"folio: error: {e}", file=sys.stderr)
+        return 1
+
+
+def _new(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    print(f"Starting thread {args.thread} in {repo.path}...", file=sys.stderr)
+    thread = threads.create(repo, args.thread, args.base)
+    print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}")
+    print(f"Work in it with: folio claude {thread.name}  (or folio shell {thread.name})")
+    return 0
+
+
+def _attach(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    threads.attach(repo, threads.load(repo, args.thread), args.session)
+
+
+def _list(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    all_ = threads.all_(repo)
+    states = threads.states(all_)
+    rows = [("THREAD", "STATE", "ACTIVE", "FEATURES", "BRANCHES")]
+    for thread in all_:
+        row = states[thread.name]
+        rows.append((thread.name, row["state"], _ago(thread.last_active), " ".join(row.get("features", ())) or "-",
+                     " ".join(sorted(lanes.branches(repo.path, thread.name))) or "-"))
+    _table(rows)
+    return 0
+
+
+def _delete(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = threads.load(repo, args.thread)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise FolioError(f"deleting {thread.name} needs --yes when there's no terminal to ask on")
+        lost = threads.losses(repo, thread)
+        if lost:
+            print(f"Deleting {thread.name} loses:")
+            for item in lost:
+                print(f"  {item}")
+        else:
+            print(f"Deleting {thread.name} loses nothing that isn't on your branches or origin's.")
+        try:
+            typed = input(f"Type {thread.name} to delete it: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            typed = None
+            print()
+        if typed != thread.name:
+            print("Not deleted.")
+            return 1
+    threads.delete(repo, thread)
+    print(f"Deleted thread {thread.name}")
+    return 0
+
+
+def _configure(args: argparse.Namespace) -> int:
+    if not args.feature and args.memory is None and not args.replace:
+        args.parser.error("give --feature or --memory")
+    repo = repos.current()
+    spec = dict(repo.spec() or repos.DEFAULT_SPEC)
+    if args.replace:
+        spec = {"features": list(args.feature), **({"memory": args.memory} if args.memory else {})}
+    else:
+        spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
+        if args.memory is not None:
+            spec["memory"] = args.memory
+    spec = engine.validate_spec(spec)
+    repo.save_spec(spec)
+    print(f"Set {repo.name}'s spec: {_spec(spec)}")
+    return 0
+
+
+def _configure_show(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    spec = repo.spec()
+    print(_spec(spec) if spec else f"{_spec(repos.DEFAULT_SPEC)} (the default; nothing set yet)")
+    return 0
+
+
+def _repo_list(args: argparse.Namespace) -> int:
+    rows = [("REPO", "PATH", "THREADS")]
+    for repo in repos.known():
+        where = str(repo.path) if repo.path.is_dir() else f"{repo.path} (gone)"
+        rows.append((repo.key, where, str(len(threads.all_(repo)))))
+    _table(rows)
+    return 0
+
+
+def _spec(spec: dict) -> str:
+    return f"features [{', '.join(spec.get('features', []))}], memory {spec.get('memory', 'all')}"
+
+
+def _ago(when: float) -> str:
+    seconds = max(0, int(time.time() - when))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return "just now"
+
+
+def _table(rows: list[tuple[str, ...]]) -> None:
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())

@@ -397,7 +397,7 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         run("git", "clone", "-q", self.upstream, self.repo)
         run("git", "-C", self.repo, "branch", "mine")
         remotes = tuple(host.Remote.parse(spec) for spec in (
-            "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out",
+            "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",
         ))
         services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
         proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
@@ -405,7 +405,7 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.env = {**os.environ, "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)
-        for remote in ("up", "theirs", "lane", "origin", "work"):
+        for remote in ("up", "theirs", "lane", "own", "origin", "work"):
             run("git", "-C", self.workspace, "remote", "add", remote, f"http://bottle.host/git/{remote}")
 
     async def git(self, *args) -> subprocess.CompletedProcess:
@@ -447,6 +447,21 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run("git", "-C", self.repo, "rev-parse", "refs/namespaces/t-out/refs/heads/agent"), first)
         delete = await self.git("push", "lane", ":agent")
         self.assertIn("deletion prohibited", delete.stderr)
+
+    async def test_a_remote_that_fetches_what_it_pushes_is_ordinary_git(self) -> None:
+        """Pushing, then seeing the push, tracking it, and git status saying where you are."""
+        await self.git("fetch", "-q", "theirs")
+        await self.git("checkout", "-q", "-b", "agent", "theirs/main")
+        first = self.commit(self.workspace, "agent work")
+        result = await self.git("push", "-q", "-u", "own", "agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "own/agent"), first)
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "--abbrev-ref", "@{u}"), "own/agent")
+        self.commit(self.workspace, "more")
+        status = (await self.git("status", "-sb")).stdout.splitlines()[0]
+        self.assertEqual(status, "## agent...own/agent [ahead 1]")
+        self.assertEqual((await self.git("push", "-q")).returncode, 0)
+        self.assertEqual((await self.git("pull", "-q")).returncode, 0)  # nothing new, and nothing refused
 
     async def test_read_only_remotes_say_where_to_push(self) -> None:
         await self.git("fetch", "-q", "theirs")

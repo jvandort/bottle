@@ -46,6 +46,9 @@ bottle shell foo          # Open a shell at /workspace; run `claude` here
 git fetch bottle-foo      # In your repo: see what the agent pushed
 ```
 
+To keep a line of work going across bottles and terminals, with its own lane of
+branches and Claude running in tmux, see [folio](folio/README.md).
+
 ## Prerequisites
 
 - macOS 26+ on Apple silicon
