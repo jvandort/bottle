@@ -115,8 +115,18 @@ def cmd_list(repo: Repo, argv: list[str]) -> int:
 
 
 def cmd_drop(repo: Repo, argv: list[str]) -> int:
-    if len(argv) != 1:
-        raise Refused("usage: curate drop <branch>")
+    if len(argv) > 1:
+        raise Refused("usage: curate drop [<branch>]")
+    if not argv:
+        # No name means the review you are standing in. HEAD says which that
+        # is, so re-anchor on it first rather than trust the recorded state.
+        repo.recover()
+        active = repo.session()
+        if active is None:
+            raise Refused(f"{named(repo.head) if repo.head else 'HEAD'} is in "
+                          f"no review. `curate list` shows them; `curate drop "
+                          f"<branch>` forgets one.")
+        argv = [active.working]
     name = argv[0]
     for s in repo.sessions():
         if name not in (short(s.clean), s.clean, short(s.working), s.working):

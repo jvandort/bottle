@@ -69,7 +69,8 @@ curate fixup <commit>        fold what you approved into an existing clean
                              commit.  --continue / --abort when it conflicts
 curate resolve               open the current fixup conflict in git's merge tool
 curate list                  every review in this repository
-curate drop <branch>         forget a review started by `start`
+curate drop [<branch>]       forget a review started by `start`; the one
+                             you are in unless you name a branch
 ```
 
 `curate status --porcelain` prints `key=value` lines for scripts.
@@ -206,7 +207,7 @@ You often cannot tell until review mode shows you a list that is far too long
 or far too short.
 
 ```sh
-curate drop <your branch>    # deletes the clean branch too, if nothing was approved onto it
+curate drop                  # deletes the clean branch too, if nothing was approved onto it
 curate start --from <the right one>
 ```
 

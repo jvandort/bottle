@@ -94,3 +94,37 @@ class WrongBase(CurateTestCase):
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
         self.assertEqual(self.repo.short_status(), [], "left in review mode")
         self.assertIn("left review mode; HEAD is 'wip' again", result.stdout)
+
+    def test_drop_with_no_branch_drops_the_review_you_are_in(self) -> None:
+        """You are standing on it; naming it again is busywork."""
+        self.start(self.wrong)
+        self.repo.curate("review")
+        result = self.repo.curate("drop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.branch_exists("curate/wip"))
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
+
+    def test_drop_with_no_branch_works_from_write_mode_too(self) -> None:
+        self.start(self.wrong)
+        result = self.repo.curate("drop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.branch_exists("curate/wip"))
+        self.assertEqual(self.repo.status_fields()["mode"], "write")
+
+    def test_drop_with_no_branch_follows_head_moved_by_git(self) -> None:
+        """HEAD moved behind curate's back still names the review to drop."""
+        self.start(self.wrong)
+        self.repo.curate("review")
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "curate/wip")
+        result = self.repo.curate("drop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
+
+    def test_drop_with_no_branch_refuses_off_any_review(self) -> None:
+        self.start(self.wrong)
+        self.repo.git("switch", "-q", "-c", "elsewhere")
+        result = self.repo.curate("drop")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("curate drop <branch>", result.stderr)
+        self.assertTrue(self.branch_exists("curate/wip"), "dropped a review HEAD is not in")

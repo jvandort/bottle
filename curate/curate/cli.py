@@ -30,7 +30,8 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                --continue / --abort when it conflicts.
   curate resolve               open the current fixup conflict in git's merge tool.
   curate list                  every review in this repository.
-  curate drop <branch>         forget a review started by `start`.
+  curate drop [<branch>]       forget a review started by `start`: the one
+                               you are in, or the one <branch> names.
 
 In review mode your editor does the work: staging is approving, and committing
 extends the clean line. Unstaged is your review to-do list, so the review
