@@ -43,7 +43,7 @@ class AddResult:
 
 def add(path: Path, name: str | None = None, features: list[str] = (), memory: str | None = None) -> AddResult:
     """Register the repo at `path` under `name`. Adding the same repo again is a no-op."""
-    source = _toplevel(path)
+    source = toplevel(path)
     name = name or derive_name(source)
     if not NAME_PATTERN.fullmatch(name):
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
@@ -226,7 +226,7 @@ def name_from_url(url: str) -> str:
     return tail.removesuffix(".git")
 
 
-def _toplevel(path: Path) -> Path:
+def toplevel(path: Path) -> Path:
     """The repo root, which `path` must be (not a subdirectory of it)."""
     if not path.is_dir():
         raise BottleError(f"{path} is not a directory")

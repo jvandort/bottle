@@ -13,6 +13,11 @@ Each bottle has:
   - a container, bottle-<name>, with the repo's objects mounted read-only
   - a checkout at /workspace that borrows those objects via alternates
 
+A bottle made from a spec (`bottle new --spec`) has the same parts, except that
+its repo is optional, its remotes are the ones it was created with, and it
+registers no remote in the repo: what the bottle pushes is for its creator to
+read (see host.py).
+
 Objects the bottle uses from the repo aren't protected from `git gc` on the
 host: if the host deletes a branch a bottle checked out and gc later prunes
 its commits (after git's grace periods, weeks to months), that checkout breaks
@@ -30,7 +35,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, replace
 from typing import NoReturn
 
-from bottle import anchor, auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime
+from bottle import anchor, auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -77,10 +82,10 @@ class Request:
 class Bottle:
     name: str
     id: str
-    repo: str
+    repo: str | None  # the registered repo it was made from; None for a bottle made from a spec
     image: str
     branch: str | None  # None: a detached commit
-    commit: str
+    commit: str  # "" when there's no checkout: a spec bottle with no repo
     created: float
     # "creating" until setup finishes, "ready" after; "broken" if cleanup failed.
     status: str = "creating"
@@ -89,13 +94,33 @@ class Bottle:
     # The VM's memory, as a `container run --memory` value (e.g. 8G); None: all of the machine's.
     memory: str | None = None
     request: Request | None = None
+    # A bottle made from a spec: the spec, canonical; None for one made from a registered repo.
+    spec: dict | None = None
+    # A spec bottle's repo, the toplevel path its objects are mounted from; None: no repo.
+    git_repo: str | None = None
+    # The remotes it's served; None: origin, host and work, as for a bottle made from a registered repo.
+    remotes: tuple[host.Remote, ...] | None = None
+    # Its creator's addition to ~/BOTTLE.md (`bottle new --context`).
+    context: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
+        if self.remotes is not None:  # dicts, when read from JSON
+            object.__setattr__(self, "remotes", tuple(
+                host.Remote(**r) if isinstance(r, dict) else r for r in self.remotes))
         if isinstance(self.request, dict):
             object.__setattr__(self, "request", Request(**self.request))
         elif self.request is None:  # recorded before bottle kept requests
             object.__setattr__(self, "request", Request(self.branch))
+
+    @property
+    def from_spec(self) -> bool:
+        return self.spec is not None
+
+    @property
+    def served(self) -> tuple[host.Remote, ...]:
+        """The remotes it's served, the defaults included."""
+        return self.remotes if self.remotes is not None else default_remotes(self.name)
 
     @property
     def environment(self) -> str:
@@ -105,7 +130,7 @@ class Bottle:
     @property
     def checkout(self) -> str:
         """What's checked out, for display: the branch, or the detached commit."""
-        return self.branch or f"({self.commit[:12]})"
+        return self.branch or (f"({self.commit[:12]})" if self.commit else "-")
 
     @property
     def network(self) -> str:
@@ -166,7 +191,7 @@ def default_name(repo: str, taken: set[str]) -> str:
 
 def create(
     repo_name: str, image: str = images.BASE, branch: str | None = None, name: str | None = None,
-    features: list[str] = (), memory: str | None = None,
+    features: list[str] = (), memory: str | None = None, context: str = "",
 ) -> Bottle:
     request = Request(branch, repos.canonical_features(list(features)), memory and repos.canonical_memory(memory))
     repo, start, installed = _plan(repo_name, request)
@@ -182,8 +207,65 @@ def create(
 
     bottle = Bottle(
         name, uuid.uuid4().hex, repo.name, image, start.branch, start.commit, time.time(),
-        features=tuple(installed), memory=_memory(repo, request), request=request,
+        features=tuple(installed), memory=_memory(repo, request), request=request, context=context,
     )
+    bottle = _bring_up(bottle, repo, tag)
+    log.info("%s: created from %s at %s (%s), features %s, network %s",
+             name, repo.name, start.branch, start.commit[:12], ", ".join(installed) or "none", bottle.network)
+    return bottle
+
+
+def create_from_spec(
+    spec: dict, name: str, git_repo: Path | None = None, remotes: list[str] | None = None,
+    checkout: str | None = None, context: str = "", image: str = images.BASE,
+) -> Bottle:
+    """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
+
+    `name` is the creator's choice, and the bottle's identity: there's no
+    default, so a creator never has to find out what it got, and a taken name
+    is refused rather than numbered. `git_repo` is the repo whose objects are mounted and whose remotes are
+    served; without one the bottle has an empty /workspace and no remotes.
+    `remotes` are `--git-remote` specs (see host.Remote); None serves origin
+    and host, read-only. `checkout` is a branch or commit of `git_repo`
+    (default: origin's default branch, else what the repo has checked out).
+    Nothing is registered in the repo: the bottle's creator reads what it
+    pushes, from the namespaces it chose.
+    """
+    spec = specs.canonical(spec)
+    installed = [f.spec for f in features_.resolve(list(spec["features"]))]
+    if git_repo is None:
+        if remotes or checkout:
+            raise BottleError("--git-remote and --checkout need --git-repo")
+        repo, start, served = None, repos.Start(None, ""), ()
+    else:
+        path = repos.toplevel(git_repo)
+        repo = repos.Repo(repos.derive_name(path), path)
+        start = _start_at(repo, checkout)
+        served = _parse_remotes(remotes)
+    existing = load()
+    if not repos.NAME_PATTERN.fullmatch(name):
+        raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
+    if name in existing:
+        raise BottleError(f"a bottle named {name!r} already exists")
+    if repo is not None:
+        _refuse_a_second_writer(repo, served, existing.values())
+    prereqs.ensure_container()
+    tag = features_.ensure_built(image, installed)
+    auth.ensure_logged_in(installed)
+
+    bottle = Bottle(
+        name, uuid.uuid4().hex, None, image, start.branch, start.commit, time.time(),
+        features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
+        git_repo=str(repo.path) if repo else None, remotes=served, context=context,
+    )
+    bottle = _bring_up(bottle, repo, tag)
+    log.info("%s: created from a spec, %s, features %s, network %s", name,
+             f"{repo.path} at {bottle.checkout}" if repo else "no repo", ", ".join(installed) or "none", bottle.network)
+    return bottle
+
+
+def _bring_up(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
+    """Create the bottle's network and container from `tag`, and set it up; roll it all back on failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if runtime.container_info(bottle.container) is not None:
         raise BottleError(f"a container named {bottle.container} already exists; choose another name with --name")
@@ -192,7 +274,8 @@ def create(
         runtime.network_create(bottle.network, {runtime.OWNER_LABEL: bottle.id})
         _anchor()
         _run_container(bottle, repo, tag)
-        register_remote(repo, bottle)  # so the repo can fetch what the bottle pushes
+        if not bottle.from_spec:
+            register_remote(repo, bottle)  # so the repo can fetch what the bottle pushes
     except BaseException as failure:
         log.warning("%s: creating failed, rolling back: %s", bottle.name, _describe(failure))
         try:
@@ -202,9 +285,59 @@ def create(
         raise
     bottle = replace(bottle, status="ready")
     _save(bottle)
-    log.info("%s: created from %s at %s (%s), features %s, network %s",
-             name, repo.name, start.branch, start.commit[:12], ", ".join(installed) or "none", bottle.network)
     return bottle
+
+
+def _start_at(repo: repos.Repo, checkout: str | None) -> repos.Start:
+    """Where `--checkout` starts: a branch (the repo's, else origin's), else any commit; by default, as `bottle new REPO`."""
+    if checkout is None:
+        return repos.default_start(repo)
+    try:
+        return repos.Start(checkout, repos.resolve_branch(repo, checkout))
+    except BottleError:
+        pass
+    try:
+        return repos.Start(None, git("rev-parse", "--verify", "--quiet", f"{checkout}^{{commit}}", repo=repo.path))
+    except BottleError:
+        raise BottleError(f"{repo.path} has no branch or commit {checkout!r}") from None
+
+
+def _parse_remotes(specs_: list[str] | None) -> tuple[host.Remote, ...]:
+    """The remotes a spec bottle is served: those given, or origin and host, read-only."""
+    if specs_ is None:
+        return (host.Remote(ORIGIN, host.UPSTREAM), host.Remote(HOST_REMOTE, host.HEADS))
+    remotes = tuple(host.Remote.parse(spec) for spec in specs_)
+    names = [r.name for r in remotes]
+    for name in sorted({n for n in names if names.count(n) > 1}):
+        raise BottleError(f"remote {name} given twice")
+    pushed = [r.push_namespace for r in remotes if r.push]
+    for namespace in sorted({n for n in pushed if pushed.count(n) > 1}):
+        raise BottleError(f"two remotes push into namespace {namespace}; each namespace has one writer")
+    return remotes
+
+
+def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], others) -> None:
+    """Refuse a namespace another bottle already pushes into, in the same repo: each has one writer.
+
+    Bottles made from a registered repo count too, with their work lanes.
+    """
+    ours = {r.push_namespace for r in remotes if r.push}
+    if not ours:
+        return
+    mine = repos.objects_dir(repo)
+    for other in others:
+        theirs = {r.push_namespace for r in other.served if r.push}
+        shared = ours & theirs
+        if shared and _objects(other) == mine:
+            raise BottleError(
+                f"bottle {other.name} already pushes into namespace {min(shared)} of {repo.path}; "
+                "each namespace has one writer"
+            )
+
+
+def _objects(bottle: Bottle) -> Path | None:
+    directory = git_dir(bottle)
+    return directory / "objects" if directory else None
 
 
 def _plan(repo_name: str, request: Request) -> tuple[repos.Repo, repos.Start, list[str]]:
@@ -237,7 +370,7 @@ def _anchor(excluding: str | None = None) -> None:
     anchor.ensure({b.network for b in load().values() if b.name != excluding})
 
 
-def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
+def _run_container(bottle: Bottle, repo: repos.Repo | None, tag: str) -> None:
     """Start a fresh container for the bottle from `tag`, and set it up from scratch."""
     proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
     # The bottle gets stand-ins, never credentials: the real ones are held by
@@ -245,14 +378,17 @@ def _run_container(bottle: Bottle, repo: repos.Repo, tag: str) -> None:
     runtime.container_run(
         bottle.container, tag, bottle.network,
         env=_container_env(proxy, bottle.features),
-        mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)],
+        mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)] if repo else [],
         labels={runtime.OWNER_LABEL: bottle.id}, memory=bottle.memory,
     )
     verify_contract(bottle)
     trust_egress_ca(bottle)
     # The gateway only exists once the container is on the network, so egress comes second.
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
-    _init_workspace(bottle)
+    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features, bottle.served)
+    if bottle.from_spec:
+        _init_spec_workspace(bottle)
+    else:
+        _init_workspace(bottle)
 
 
 @contextmanager
@@ -298,6 +434,9 @@ def reset(name: str, force: bool = False) -> Bottle:
     nothing until the new image is built. Also repairs a bottle left half-made.
     """
     bottle = get(name)
+    if bottle.from_spec:
+        raise BottleError(f"{name} was made from a spec, so it has nothing to be reset to; "
+                          f"`bottle delete {name}`, then `bottle new --spec` again")
     repo, start, installed = _plan(bottle.repo, bottle.request)
     auth.ensure_logged_in(installed)
     if not force and bottle.status == "ready" and runtime.container_state(bottle.container) is not None:
@@ -338,8 +477,10 @@ def merge_features(defaults: tuple[str, ...] | list[str], extra: list[str]) -> l
 
 
 def git_dir(bottle: Bottle) -> Path | None:
-    """The git dir of the bottle's repo, served to it as origin; None if the repo is gone."""
+    """The git dir of the bottle's repo, which its remotes are served from; None if it has none, or it's gone."""
     try:
+        if bottle.from_spec:
+            return repos.objects_dir(repos.Repo("", Path(bottle.git_repo))).parent if bottle.git_repo else None
         return repos.objects_dir(repos.get(bottle.repo)).parent
     except BottleError:
         return None
@@ -445,8 +586,83 @@ def context(bottle: Bottle) -> str:
     (the claude feature links ~/.claude/CLAUDE.md to it). Nothing in it changes
     over the bottle's life (no commits), so it never goes stale.
     """
+    if bottle.from_spec:
+        return _spec_context(bottle)
     at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
-    return CONTEXT.format(user=USER, workspace=WORKSPACE, repo=bottle.repo, at=at, remote=host_remote(bottle))
+    text = CONTEXT.format(user=USER, workspace=WORKSPACE, repo=bottle.repo, at=at, remote=host_remote(bottle))
+    return text + (f"\n{bottle.context}" if bottle.context else "")
+
+
+def _spec_context(bottle: Bottle) -> str:
+    """~/BOTTLE.md for a bottle made from a spec: what the bottle is, and nothing about how to work in it.
+
+    How to work -- branches, pushing, merging -- is its creator's to say, in
+    the context it adds; this says what's there.
+    """
+    lines = [f"# Bottle\n\nYou're `{USER}`, running in a bottle: a sandboxed Linux VM with passwordless sudo.\n"]
+    if bottle.git_repo:
+        at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
+        lines.append(f"- `{WORKSPACE}` is a checkout of `{Path(bottle.git_repo).name}`, {at}.")
+        if bottle.remotes:
+            lines.append("  Its remotes are served by the host:")
+            lines += [f"  - `{r.name}`: {_describe_remote(r)}" for r in bottle.remotes]
+        else:
+            lines.append("  It has no remotes.")
+    else:
+        lines.append(f"- `{WORKSPACE}` is empty: this bottle has no repo.")
+    lines.append("- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY`\n"
+                 "  (already set). There's no DNS, and private addresses are blocked.")
+    text = "\n".join(lines) + "\n"
+    return text + (f"\n{bottle.context}" if bottle.context else "")
+
+
+def _describe_remote(remote: host.Remote) -> str:
+    if remote.fetch == host.UPSTREAM:
+        what = "the repo's upstream, up to date whenever you fetch."
+    elif remote.fetch == host.HEADS:
+        what = "the user's own branches, as they stand in their repo."
+    else:
+        what = "refs the host keeps for this bottle."
+    if remote.push is None:
+        return f"{what} Read-only."
+    # Fetching reads other refs than pushing writes (a two-lane exchange, say), so say so,
+    # or an agent fetching to check its push finds nothing and pushes again.
+    echo = "" if remote.push == remote.fetch else " Fetching it doesn't show your own pushes."
+    return f"{what} You can push to it: pushes can't rewrite or delete what's already there.{echo}"
+
+
+def _init_spec_workspace(bottle: Bottle) -> None:
+    """Check out a spec bottle's branch or commit at /workspace, borrowing the mounted objects, with its remotes.
+
+    Without a repo, just the context. No branch tracks anything: which remote
+    a branch pulls from is its creator's to decide.
+    """
+    script = ["set -e"]
+    if bottle.git_repo:
+        commit = shlex.quote(bottle.commit)
+        if bottle.branch:
+            branch = shlex.quote(bottle.branch)
+            script += [f"git init -q -b {branch} {WORKSPACE}"]
+            point_head = f"update-ref refs/heads/{branch} {commit}"
+        else:
+            script += [f"git init -q {WORKSPACE}"]
+            point_head = f"update-ref --no-deref HEAD {commit}"
+        script += [
+            f"echo {OBJECTS_MOUNT} > {WORKSPACE}/.git/objects/info/alternates",
+            f"git -C {WORKSPACE} {point_head}",
+            f"git -C {WORKSPACE} reset -q --hard",
+        ]
+        names = [r.name for r in bottle.remotes]
+        script += [f"git -C {WORKSPACE} remote add {name} {GIT_URL}/{name}" for name in names]
+        if ORIGIN in names:
+            script += [f"git -C {WORKSPACE} config checkout.defaultRemote {ORIGIN}"]
+        if names:
+            script += [f"git -C {WORKSPACE} fetch -q --multiple {' '.join(names)}"]
+    script += [f"printf '%s' {shlex.quote(context(bottle))} > \"$HOME/{CONTEXT_FILE}\""]
+    try:
+        runtime.container_exec(bottle.container, ["sh", "-c", "\n".join(script)], user=USER)
+    except BottleError as e:
+        raise BottleError(f"setting up {WORKSPACE} failed: {e}") from None
 
 
 def _init_workspace(bottle: Bottle) -> None:
@@ -523,6 +739,8 @@ def ensure_running(name: str) -> Bottle:
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
     state = runtime.container_state(bottle.container)
+    if state is None and bottle.from_spec:
+        raise BottleError(f"{name}'s container is gone; `bottle delete {name}`, then `bottle new --spec` again")
     if state is None:
         raise BottleError(f"{name}'s container is gone; recreate it with `bottle reset {name}`, or `bottle delete {name}`")
     if state == "running" and not runtime.host_has_address(runtime.network_gateway(bottle.network)):
@@ -542,7 +760,7 @@ def ensure_running(name: str) -> Bottle:
         verify_contract(bottle)
         trust_egress_ca(bottle)
         point_at_egress(bottle)
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features)
+    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features, bottle.served)
     return bottle
 
 
@@ -629,6 +847,25 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     )
 
 
+# A bottle made from a registered repo is served origin, host and work, and
+# work is a two-lane exchange named after the bottle. All of this goes when
+# bottles from a registered repo do: a spec bottle's creator names its remotes.
+ORIGIN, HOST_REMOTE, WORK_REMOTE = "origin", "host", "work"
+OUT, IN = "out", "in"
+
+
+def lane(bottle: str, direction: str) -> str:
+    """The git namespace for one direction of a bottle's exchange with its host:
+    `out`, which the bottle writes and the host reads, or `in`, the reverse."""
+    return f"bottle-{bottle}-{direction}"
+
+
+def default_remotes(bottle: str) -> tuple[host.Remote, ...]:
+    """origin, host and work, with work reading the bottle's in lane and writing its out lane."""
+    return (host.Remote(ORIGIN, host.UPSTREAM), host.Remote(HOST_REMOTE, host.HEADS),
+            host.Remote(WORK_REMOTE, host.NS + lane(bottle, IN), host.NS + lane(bottle, OUT)))
+
+
 def host_remote(bottle: Bottle) -> str:
     """What the host repo calls this bottle, as a git remote."""
     return f"bottle-{bottle.name}"
@@ -648,7 +885,7 @@ def register_remote(repo: repos.Repo, bottle: Bottle) -> None:
     which collapses however many values a key has to the one value here.
     """
     name = host_remote(bottle)
-    out, in_ = host.lane(bottle.name, host.OUT), host.lane(bottle.name, host.IN)
+    out, in_ = lane(bottle.name, OUT), lane(bottle.name, IN)
     settings = {
         "url": str(repo.path),
         "fetch": f"+refs/heads/*:refs/remotes/{name}/*",
@@ -729,6 +966,36 @@ def list_all() -> list[tuple[Bottle, str]]:
     return result
 
 
+def status(names: list[str] = ()) -> list[dict]:
+    """Every bottle's state and what it was made from, or just those `names`, for `bottle status --json`.
+
+    A name with no bottle gets a row with state "missing", so a caller can
+    tell a bottle that's gone from a command that failed.
+    """
+    states = {bottle.name: (bottle, state) for bottle, state in list_all()}
+    rows = []
+    for name in names or list(states):
+        if name not in states:
+            rows.append({"name": name, "state": "missing"})
+            continue
+        bottle, state = states[name]
+        rows.append({
+            "name": bottle.name, "state": state, "created": bottle.created,
+            "repo": bottle.repo, "git_repo": bottle.git_repo or (str(_repo_path(bottle)) if bottle.repo else None),
+            "branch": bottle.branch, "commit": bottle.commit or None,
+            "features": sorted(bottle.features), "memory": bottle.memory or repos.ALL_MEMORY, "spec": bottle.spec,
+            "remotes": [r.spec for r in bottle.served] if bottle.git_repo or bottle.repo else [],
+        })
+    return rows
+
+
+def _repo_path(bottle: Bottle) -> Path | None:
+    try:
+        return repos.get(bottle.repo).path
+    except BottleError:
+        return None  # the repo's been removed since
+
+
 def _refuse_to_lose_work(bottle: Bottle, action: str) -> None:
     """Raise unless the bottle's work is all in its repo. Starts a stopped bottle to check."""
     name = bottle.name
@@ -759,7 +1026,8 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
     (marked broken) so the next delete can retry.
     """
     bottle = get(name)
-    if not force and bottle.status == "ready" and runtime.container_state(bottle.container) is not None:
+    # A spec bottle's creator decides what's worth keeping before it deletes one.
+    if not force and not bottle.from_spec and bottle.status == "ready" and runtime.container_state(bottle.container) is not None:
         _refuse_to_lose_work(bottle, "delete")
     failures = []
     for step, action in (
@@ -767,7 +1035,7 @@ def delete(name: str, force: bool = False, keep_image: bool = False) -> None:
         ("container", lambda: runtime.container_delete(bottle.container, bottle.owner)),
         ("anchor", lambda: _anchor(excluding=bottle.name)),  # off the network, or it can't be deleted
         ("network", lambda: runtime.network_delete(bottle.network)),
-        ("remote", lambda: forget_remote(bottle)),
+        ("remote", lambda: None if bottle.from_spec else forget_remote(bottle)),
         ("egress CA", lambda: ca.forget(bottle.name)),
     ):
         try:

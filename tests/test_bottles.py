@@ -149,10 +149,11 @@ class FakeRuntime:
         self.workspace_script = argv[-1]
         return ""
 
-    def ensure_egress(self, bottle, network, git_dir=None, features=()):
+    def ensure_egress(self, bottle, network, git_dir=None, features=(), remotes=None):
         self._step("ensure_egress")
         self.egress_git_dir = git_dir
         self.egress_features = tuple(features)
+        self.egress_remotes = remotes
         self.egress.add(bottle)
         return "http://192.168.128.1:3128"
 
@@ -223,6 +224,7 @@ class CreateTest(BottleTestCase):
         fake = self.fake()
         bottles.create("example")
         self.assertEqual(fake.egress_git_dir, self.repo_path / ".git")
+        self.assertEqual(fake.egress_remotes, bottles.default_remotes("example"))
         self.assertIn("remote add origin http://bottle.host/git/origin", fake.workspace_script)
         self.assertIn("remote add host http://bottle.host/git/host", fake.workspace_script)
         self.assertIn("fetch -q --multiple origin host", fake.workspace_script)
@@ -842,13 +844,13 @@ class WorkspaceTestCase(BottleTestCase):
         return self.commit(self.workspace, message)
 
     def ref(self, name: str) -> str:
-        lane = host.lane(self.bottle.name, host.OUT)
+        lane = bottles.lane(self.bottle.name, bottles.OUT)
         return self.host("rev-parse", f"refs/namespaces/{lane}/refs/heads/{name}")
 
     def agent_push(self, branch: str = "main") -> None:
         """What `git push work` does in a bottle: an ordinary push, which the host
         puts in the bottle's lane by running receive-pack with GIT_NAMESPACE."""
-        lane = host.lane(self.bottle.name, host.OUT)
+        lane = bottles.lane(self.bottle.name, bottles.OUT)
         receive_pack = f"git --namespace={lane} -c receive.denyCurrentBranch=ignore receive-pack"
         run("git", "-C", self.workspace, "push", "-q", "--receive-pack", receive_pack,
             str(self.repo_path), f"HEAD:refs/heads/{branch}")
@@ -894,7 +896,7 @@ class HostRemoteTest(WorkspaceTestCase):
         self.agent_push("feature")           # the lane the host reads moves on
         review = self.commit(self.repo_path, "host: address this please")
         self.host("push", "-q", self.remote(), "feature")
-        lane = host.lane(self.bottle.name, host.IN)
+        lane = bottles.lane(self.bottle.name, bottles.IN)
         self.assertEqual(self.host("rev-parse", f"refs/namespaces/{lane}/refs/heads/feature"), review)
 
     def test_registering_twice_leaves_one_of_each_setting(self) -> None:
@@ -1137,7 +1139,7 @@ class ResetTest(WorkspaceTestCase):
             bottles.reset("example")
         self.assertIn(remote, self.host("remote").split())
         self.assertEqual(self.host("config", f"remote.{remote}.uploadpack"),
-                         f"git --namespace={host.lane(self.bottle.name, host.OUT)} upload-pack")
+                         f"git --namespace={bottles.lane(self.bottle.name, bottles.OUT)} upload-pack")
 
     def test_gets_the_repos_current_default_features_and_keeps_its_own(self) -> None:
         with mock.patch.object(bottles, "_run_container"), mock.patch.object(bottles.features_, "ensure_built"):
@@ -1197,3 +1199,241 @@ class ResetTest(WorkspaceTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpecBottleTest(BottleTestCase):
+    """`bottle new --spec`: features and memory from a spec, a repo and remotes only if given."""
+
+    SPEC = {"features": [], "memory": "all"}
+
+    def create(self, name: str = "t", **kwargs) -> bottles.Bottle:
+        return bottles.create_from_spec(dict(self.SPEC), name, **kwargs)
+
+    def test_with_no_repo_there_is_nothing_to_mount_or_serve(self) -> None:
+        fake = self.fake()
+        bottle = self.create()
+        self.assertEqual((bottle.name, bottle.repo, bottle.git_repo, bottle.remotes, bottle.status), ("t", None, None, (), "ready"))
+        self.assertEqual(fake.run_args["mounts"], [])
+        self.assertIsNone(fake.egress_git_dir)
+        self.assertNotIn("git init", fake.workspace_script)
+        self.assertIn('> "$HOME/BOTTLE.md"', fake.workspace_script)
+        self.assertIn("`/workspace` is empty: this bottle has no repo.", bottles.context(bottle))
+
+    def test_a_repo_is_mounted_and_served_from_read_only_by_default(self) -> None:
+        fake = self.fake()
+        bottle = self.create(git_repo=self.repo_path)
+        self.assertEqual((bottle.git_repo, bottle.branch, bottle.commit), (str(self.repo_path), "main", self.head))
+        [mount] = fake.run_args["mounts"]
+        self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/repo/objects"))
+        self.assertEqual(fake.egress_git_dir, self.repo_path / ".git")
+        self.assertEqual(fake.egress_remotes, (host.Remote("origin", host.UPSTREAM), host.Remote("host", host.HEADS)))
+        self.assertIn("fetch -q --multiple origin host", fake.workspace_script)
+        self.assertNotIn("branch.main.remote", fake.workspace_script)  # tracking is the creator's to set
+
+    def test_serves_the_remotes_it_was_given(self) -> None:
+        fake = self.fake()
+        bottle = self.create(git_repo=self.repo_path, remotes=["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"])
+        self.assertEqual([r.spec for r in fake.egress_remotes], ["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"])
+        self.assertIn("remote add up http://bottle.host/git/up", fake.workspace_script)
+        self.assertIn("fetch -q --multiple up work", fake.workspace_script)
+        self.assertNotIn("checkout.defaultRemote", fake.workspace_script)  # no origin to default to
+        self.assertEqual(bottles.get(bottle.name).remotes, bottle.remotes)  # survives the JSON round trip
+
+    def test_registers_nothing_in_the_repo(self) -> None:
+        self.fake()
+        self.create(git_repo=self.repo_path, remotes=["work:fetch=ns/t-in,push=ns/t-out"])
+        self.assertEqual(run("git", "-C", self.repo_path, "remote"), "")
+
+    def test_checks_out_a_branch_or_a_commit(self) -> None:
+        self.fake()
+        run("git", "-C", self.repo_path, "branch", "feature")
+        self.assertEqual(self.create("a", git_repo=self.repo_path, checkout="feature").branch, "feature")
+        detached = self.create("b", git_repo=self.repo_path, checkout=self.head[:10])
+        self.assertEqual((detached.branch, detached.commit), (None, self.head))
+        with self.assertRaisesRegex(BottleError, "no branch or commit 'nope'"):
+            self.create(git_repo=self.repo_path, checkout="nope")
+
+    def test_memory_and_features_come_from_the_spec(self) -> None:
+        fake = self.fake()
+        with mock.patch.object(bottles.repos.runtime, "host_memory_mib", return_value=16384), \
+                mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-tools"):
+            bottle = bottles.create_from_spec({"features": ["tools"], "memory": "8G"}, "t")
+        self.assertEqual((bottle.features, bottle.memory, fake.run_args["memory"]), (("tools",), "8G", "8G"))
+        self.assertEqual(bottle.spec, {"features": ["tools"], "memory": "8G"})
+
+    def test_refuses_remotes_without_a_repo(self) -> None:
+        self.fake()
+        for kwargs in ({"remotes": ["origin:fetch=upstream"]}, {"checkout": "main"}):
+            with self.subTest(kwargs), self.assertRaisesRegex(BottleError, "need --git-repo"):
+                self.create(**kwargs)
+
+    def test_refuses_a_subdirectory_for_the_repo(self) -> None:
+        self.fake()
+        (self.repo_path / "sub").mkdir()
+        with self.assertRaisesRegex(BottleError, "inside a git repo"):
+            self.create(git_repo=self.repo_path / "sub")
+
+    def test_refuses_a_remote_twice_or_a_namespace_with_two_writers(self) -> None:
+        self.fake()
+        for remotes, message in (
+            (["a:fetch=heads", "a:fetch=upstream"], "remote a given twice"),
+            (["a:fetch=heads,push=ns/x", "b:fetch=heads,push=ns/x"], "two remotes push into namespace x"),
+        ):
+            with self.subTest(remotes), self.assertRaisesRegex(BottleError, message):
+                self.create(git_repo=self.repo_path, remotes=remotes)
+
+    def test_each_namespace_has_one_writer_across_bottles(self) -> None:
+        self.fake()
+        self.create("a", git_repo=self.repo_path, remotes=["work:fetch=ns/t-in,push=ns/t-out"])
+        with self.assertRaisesRegex(BottleError, "bottle a already pushes into namespace t-out"):
+            self.create("b", git_repo=self.repo_path, remotes=["mine:fetch=heads,push=ns/t-out"])
+        # Reading another bottle's namespace is fine; so is writing one in another repo.
+        self.create("c", git_repo=self.repo_path, remotes=["peek:fetch=ns/t-out"])
+        other = self.make_repo("other")
+        self.create("d", git_repo=other, remotes=["work:fetch=ns/t-in,push=ns/t-out"])
+
+    def test_a_taken_name_is_refused_not_numbered(self) -> None:
+        self.fake()
+        self.create("a")
+        with self.assertRaisesRegex(BottleError, "a bottle named 'a' already exists"):
+            self.create("a")
+        bottles.create("example")
+        with self.assertRaisesRegex(BottleError, "a bottle named 'example' already exists"):
+            self.create("example")
+
+    def test_refuses_an_invalid_name(self) -> None:
+        self.fake()
+        for name in ("", "-a", "a/b", "a b"):
+            with self.subTest(name), self.assertRaisesRegex(BottleError, "invalid name"):
+                self.create(name)
+
+    def test_a_bottle_from_a_repo_writes_its_lane(self) -> None:
+        self.fake()
+        bottles.create("example")
+        with self.assertRaisesRegex(BottleError, "bottle example already pushes into namespace bottle-example-out"):
+            self.create(git_repo=self.repo_path, remotes=["work:fetch=heads,push=ns/bottle-example-out"])
+
+    def test_context_is_facts_then_the_creators_own(self) -> None:
+        self.fake()
+        bottle = self.create(git_repo=self.repo_path, remotes=["origin:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"],
+                             context="# Thread\n\nWork on `t`.\n")
+        context = bottles.context(bottle)
+        self.assertIn("checkout of `example`, on the `main` branch.", context)
+        self.assertIn("- `origin`: the repo's upstream, up to date whenever you fetch. Read-only.", context)
+        self.assertIn("- `work`: refs the host keeps for this bottle. You can push to it", context)
+        self.assertIn("Fetching it doesn't show your own pushes.", context)
+        self.assertNotIn("Messy history", context)  # how to work is the creator's to say
+        self.assertTrue(context.endswith("\n# Thread\n\nWork on `t`.\n"))
+
+    def test_a_bottle_from_a_repo_takes_context_too(self) -> None:
+        self.fake()
+        bottle = bottles.create("example", context="More.\n")
+        self.assertTrue(bottles.context(bottle).endswith("\nMore.\n"))
+        self.assertIn("Messy history", bottles.context(bottle))
+
+    def test_cant_be_reset(self) -> None:
+        self.fake()
+        bottle = self.create()
+        with self.assertRaisesRegex(BottleError, "made from a spec"):
+            bottles.reset(bottle.name)
+
+    def test_delete_doesnt_guard_unsaved_work(self) -> None:
+        fake = self.fake()
+        bottle = self.create(git_repo=self.repo_path)
+        with mock.patch.object(bottles, "_refuse_to_lose_work") as refuse, \
+                mock.patch.object(bottles, "forget_remote") as forget:
+            bottles.delete(bottle.name)
+        refuse.assert_not_called()
+        forget.assert_not_called()
+        self.assertEqual(fake.containers, {})
+
+
+class DefaultRemotesTest(unittest.TestCase):
+    def test_origin_host_and_the_bottles_lanes(self) -> None:
+        self.assertEqual(bottles.default_remotes("b"), (
+            host.Remote("origin", host.UPSTREAM), host.Remote("host", host.HEADS),
+            host.Remote("work", "ns/bottle-b-in", "ns/bottle-b-out"),
+        ))
+
+
+class StatusTest(BottleTestCase):
+    def test_every_bottle_or_those_named(self) -> None:
+        fake = self.fake()
+        a = bottles.create("example")
+        b = bottles.create_from_spec({"features": []}, "spec", git_repo=self.repo_path,
+                                     remotes=["work:fetch=ns/t-in,push=ns/t-out"])
+        fake.containers[b.container] = "stopped"
+        self.assertEqual([(r["name"], r["state"]) for r in bottles.status()], [("example", "running"), ("spec", "stopped")])
+        [row, missing] = bottles.status(["spec", "gone"])
+        self.assertEqual(missing, {"name": "gone", "state": "missing"})
+        self.assertEqual(row | {"created": None}, {
+            "name": "spec", "state": "stopped", "created": None, "repo": None, "git_repo": str(self.repo_path),
+            "branch": "main", "commit": self.head, "features": [], "memory": "all",
+            "spec": {"features": [], "memory": "all"}, "remotes": ["work:fetch=ns/t-in,push=ns/t-out"],
+        })
+        self.assertEqual(bottles.status([a.name])[0]["remotes"],
+                         ["origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-example-in,push=ns/bottle-example-out"])
+        self.assertEqual(json.loads(json.dumps(bottles.status())), bottles.status())
+
+
+class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
+    """A spec bottle's setup script, run for real against an egress proxy serving its remotes."""
+
+    async def asyncSetUp(self) -> None:
+        from bottle import egress
+
+        host._last_pull.clear()
+        self.fake_runtime = self.fake()
+        run("git", "-C", self.repo_path, "branch", "feature")
+        self.bottle = bottles.create_from_spec(
+            {"features": []}, "t", git_repo=self.repo_path, checkout="feature",
+            remotes=["origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/t-in,push=ns/t-out"],
+            context="Extra.\n",
+        )
+        services = host.HostServices(bottles.git_dir(self.bottle), self.tmp / "view.git", remotes=self.bottle.remotes)
+        proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
+        self.addAsyncCleanup(self._close, proxy)
+        self.workspace, self.home = self.tmp / "workspace", self.tmp / "home"
+        self.home.mkdir()
+        self.env = {**__import__("os").environ, "HOME": str(self.home),
+                    "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
+        script = (self.fake_runtime.workspace_script.replace(bottles.OBJECTS_MOUNT, str(self.repo_path / ".git/objects"))
+                  .replace(bottles.WORKSPACE, str(self.workspace)))
+        result = await self.run_(["sh", "-c", script])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @staticmethod
+    async def _close(server) -> None:
+        server.close()
+        await server.wait_closed()
+
+    async def run_(self, argv):
+        import subprocess
+
+        return await __import__("asyncio").to_thread(
+            subprocess.run, argv, cwd=self.tmp, env=self.env, capture_output=True, text=True)
+
+    async def git(self, *args):
+        return await self.run_(["git", "-C", str(self.workspace), *args])
+
+    async def test_checks_out_the_branch_borrowing_the_repos_objects(self) -> None:
+        self.assertEqual(run("git", "-C", self.workspace, "symbolic-ref", "--short", "HEAD"), "feature")
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(run("git", "-C", self.workspace, "count-objects"), "0 objects, 0 kilobytes")
+        self.assertEqual(run("git", "-C", self.workspace, "status", "--porcelain"), "")
+
+    async def test_fetched_its_remotes(self) -> None:
+        self.assertIn("host/feature", run("git", "-C", self.workspace, "branch", "-r", "--format=%(refname:short)").split())
+        self.assertEqual(run("git", "-C", self.workspace, "remote").split(), ["host", "origin", "work"])
+
+    async def test_writes_the_context(self) -> None:
+        # The script had /workspace rewritten to the stand-in, and so did the context in it.
+        expected = bottles.context(self.bottle).replace(bottles.WORKSPACE, str(self.workspace))
+        self.assertEqual((self.home / "BOTTLE.md").read_text(), expected)
+
+    async def test_a_push_to_work_lands_in_its_namespace(self) -> None:
+        commit = self.commit(self.workspace, "agent work")
+        result = await self.git("push", "work", "feature")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.repo_path, "rev-parse", "refs/namespaces/t-out/refs/heads/feature"), commit)
+        self.assertNotEqual(run("git", "-C", self.repo_path, "rev-parse", "feature"), commit)

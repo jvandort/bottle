@@ -2,37 +2,37 @@
 
 Requests to http://bottle.host/ never leave the host: the bottle's egress proxy
 answers them itself, serving the bottle's repo over git's smart HTTP protocol
-with `git http-backend`. A bottle has three remotes, each exactly what it says:
+with `git http-backend`. A bottle is served the remotes it was created with,
+each a Remote at http://bottle.host/git/<name>. What a fetch sees is one of
+three views:
 
-  origin  http://bottle.host/git/origin
+  upstream
       The repo's upstream: the host repo's refs/remotes/origin/*, served as
       branches (so `git checkout release` works in the bottle), plus tags.
-      Read-only. Pull-through: before serving, the host runs `git fetch origin`
-      in the repo (throttled, never prompting), so the bottle gets the real
-      upstream's latest even if nobody fetched on the host.
+      Pull-through: before serving, the host runs `git fetch origin` in the
+      repo (throttled, never prompting), so the bottle gets the real upstream's
+      latest even if nobody fetched on the host.
 
-  host    http://bottle.host/git/host
-      The host repo's own branches. Read-only: the bottle reads them to build on
-      what the user has (`git rebase host/main`) and writes nothing here.
+  heads
+      The host repo's own refs, as they are: what the bottle reads to build on
+      what the user has (`git rebase host/main`).
 
-  work    http://bottle.host/git/work
-      The bottle's half of a two-lane exchange with the host, in git namespaces
-      (gitnamespaces(7)). Each lane has exactly one writer, so neither side's
-      push is ever rejected for what the other did:
+  ns/<namespace>
+      The refs in one git namespace (gitnamespaces(7)) of the host repo, and
+      nothing else.
 
-          fetch  GIT_NAMESPACE=bottle-<name>-in    written by the host
-          push   GIT_NAMESPACE=bottle-<name>-out   written by the bottle
+A remote that takes pushes writes one namespace. A namespace is what confines
+the push -- every ref receive-pack resolves is inside it, and the host's own
+refs aren't advertised -- so git behaves like git in the bottle while being
+unable to name anything else. Pushes are also append-only, refusing
+force-pushes and deletes, so what someone has already read never changes
+underneath them. bottle's hooks/pre-receive only refuses a push that arrives
+with no namespace at all; the repo's own hooks never run.
 
-      A namespace is what confines the push -- every ref receive-pack resolves
-      is inside it, and the host's own refs aren't advertised -- so git behaves
-      like git in the bottle while being unable to name anything else. The out
-      lane also refuses force-pushes and deletes, so what a reviewer has already
-      read never changes underneath them. bottle's hooks/pre-receive only
-      refuses a push that arrives with no namespace at all; the repo's own hooks
-      never run.
-
-      The host writes the in lane itself, through an ordinary git remote in its
-      own repo; bottled never serves that direction.
+Reading one namespace and writing another makes a two-lane exchange, each lane
+with one writer, so neither side's push is ever rejected for what the other
+did: the bottle writes one lane, and whoever created it writes the other,
+directly in its own repo. bottled never serves that direction.
 
 Nothing is mirrored or watched: every request sees the repo as it is right now.
 """
@@ -42,6 +42,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import subprocess
 import time
 import zlib
@@ -49,23 +50,70 @@ from dataclasses import dataclass
 from http.client import parse_headers
 from pathlib import Path
 
+from bottle.errors import BottleError
+
 log = logging.getLogger("bottle.egress")
 
 HOST = "bottle.host"
 GIT_PATH = "/git"
-ORIGIN, HOST_REMOTE, WORK_REMOTE = "origin", "host", "work"
-OUT, IN = "out", "in"
 MAX_BODY = 64 * 1024 * 1024
 HOOKS = Path(__file__).resolve().parent / "hooks"
 
 
-def lane(bottle: str, direction: str) -> str:
-    """The git namespace for one direction of a bottle's exchange with its host.
+# What a remote's fetch can see: the upstream (served as origin is), the repo's
+# own branches (as host is), or one namespace, NS + its name.
+UPSTREAM, HEADS, NS = "upstream", "heads", "ns/"
+# Remote and namespace names: one path segment, so a remote is one URL segment
+# and a namespace is flat. Namespaces nest rather than concatenate, so `a/b`
+# would mean refs/namespaces/a/refs/namespaces/b/, not what anyone expects.
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
-    Flat by necessity: namespaces nest rather than concatenate, so `a/b` would
-    mean refs/namespaces/a/refs/namespaces/b/ and not what anyone expects.
-    """
-    return f"bottle-{bottle}-{direction}"
+
+@dataclass(frozen=True)
+class Remote:
+    """One remote a bottle is served: http://bottle.host/git/<name>."""
+
+    name: str
+    fetch: str  # UPSTREAM, HEADS, or NS + a namespace
+    push: str | None = None  # NS + the namespace pushes go into; None: read-only
+
+    @property
+    def fetch_namespace(self) -> str | None:
+        return self.fetch.removeprefix(NS) if self.fetch.startswith(NS) else None
+
+    @property
+    def push_namespace(self) -> str | None:
+        return self.push.removeprefix(NS) if self.push else None
+
+    @property
+    def spec(self) -> str:
+        """As `--git-remote` takes it: work:fetch=ns/x-in,push=ns/x-out."""
+        return f"{self.name}:fetch={self.fetch}" + (f",push={self.push}" if self.push else "")
+
+    @classmethod
+    def parse(cls, spec: str) -> "Remote":
+        """A remote from its spec: NAME:fetch=VIEW[,push=ns/NAMESPACE]."""
+        usage = f"invalid remote {spec!r}: use NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being {UPSTREAM}, {HEADS} or ns/NAMESPACE"
+        name, colon, rest = spec.partition(":")
+        if not colon or not NAME.fullmatch(name):
+            raise BottleError(usage)
+        settings: dict[str, str] = {}
+        for item in rest.split(","):
+            key, equals, value = item.partition("=")
+            if not equals or key not in ("fetch", "push") or key in settings:
+                raise BottleError(usage)
+            settings[key] = value
+        fetch, push = settings.get("fetch"), settings.get("push")
+        if fetch is None or not (fetch in (UPSTREAM, HEADS) or _namespace_view(fetch)):
+            raise BottleError(usage)
+        if push is not None and not _namespace_view(push):
+            raise BottleError(f"invalid remote {spec!r}: push takes ns/NAMESPACE, the namespace pushes go into")
+        return cls(name, fetch, push)
+
+
+def _namespace_view(view: str) -> bool:
+    return view.startswith(NS) and NAME.fullmatch(view.removeprefix(NS)) is not None
+
 # At most one pull-through fetch per repo per this many seconds.
 PULL_THROUGH_INTERVAL = 60
 PULL_THROUGH_TIMEOUT = 120
@@ -84,35 +132,39 @@ class HttpRequest:
 class HostServices:
     """What one bottle may ask of the host."""
 
-    git_dir: Path | None = None  # the repo served as origin and host, or None for no repo
-    view_dir: Path | None = None  # where the origin view is written (default: under BOTTLE_HOME)
-    bottle: str | None = None  # whose git namespace pushes are written into
+    git_dir: Path | None = None  # the repo every remote is served from, or None for no repo
+    view_dir: Path | None = None  # where the upstream view is written (default: under BOTTLE_HOME)
+    remotes: tuple[Remote, ...] = ()
+
+    def served(self) -> dict[str, Remote]:
+        return {remote.name: remote for remote in self.remotes}
 
     async def handle(self, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         """Answer a request to bottle.host; returns an outcome for the log."""
-        remote, _, path_info = request.path.removeprefix(GIT_PATH + "/").partition("/")
-        known = (ORIGIN, HOST_REMOTE, WORK_REMOTE)
-        if self.git_dir is not None and request.path.startswith(GIT_PATH + "/") and remote in known:
+        name, _, path_info = request.path.removeprefix(GIT_PATH + "/").partition("/")
+        remote = self.served().get(name)
+        if self.git_dir is not None and request.path.startswith(GIT_PATH + "/") and remote is not None:
             return await self._git(remote, "/" + path_info, request, writer)
         await _respond(writer, 404, "Not Found", b"no such bottle.host service\n")
         return "not-found"
 
-    async def _git(self, remote: str, path_info: str, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
+    async def _git(self, remote: Remote, path_info: str, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         push = "git-receive-pack" in path_info or "service=git-receive-pack" in request.query
-        if push and remote != WORK_REMOTE:
-            await _respond(writer, 403, "Forbidden", b"read-only; push to work instead\n")
+        if push and remote.push is None:
+            writable = [r.name for r in self.served().values() if r.push is not None]
+            hint = f"; push to {' or '.join(writable)} instead" if writable else ""
+            await _respond(writer, 403, "Forbidden", f"read-only{hint}\n".encode())
             return "denied"
         config: dict[str, str] = {}
         namespace = None
-        if remote == ORIGIN:
-            if not push and "info/refs" in path_info:  # once per fetch, at its start
+        if not push and remote.fetch == UPSTREAM:
+            if "info/refs" in path_info:  # once per fetch, at its start
                 await pull_through(self.git_dir)
             root = await asyncio.to_thread(write_view, self.git_dir, self.view_dir or default_view_dir(self.git_dir))
         else:
             root = self.git_dir
-            if remote == WORK_REMOTE:
-                # Read the lane the host writes; write the lane this bottle writes.
-                namespace = lane(self.bottle, OUT if push else IN) if self.bottle else None
+            # A fetch reads its namespace, if it has one; a push writes its own.
+            namespace = remote.push_namespace if push else remote.fetch_namespace
             if push:
                 config = {
                     "http.receivepack": "true",

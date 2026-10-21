@@ -86,13 +86,47 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--no-cache", action="store_true", help="rebuild every step")
     build.set_defaults(run=_build, parser=build)
 
+    spec = commands.add_parser("spec", help="check a spec: a bottle's features and memory, as a file")
+    spec_commands = spec.add_subparsers(dest="spec_command", required=True, metavar="COMMAND")
+    spec_validate = spec_commands.add_parser(
+        "validate",
+        help="check a spec as `bottle new --spec` would, and print it in canonical form",
+        description="Check a spec file as `bottle new --spec` would: its features exist, their options are "
+        "valid and every required one is set, and the memory fits this machine. Prints it in canonical form.",
+    )
+    spec_validate.add_argument("file", metavar="FILE", help='the spec, e.g. {"features": ["tools"], "memory": "8G"}')
+    spec_validate.add_argument("--json", action="store_true", help="print the canonical spec as JSON")
+    spec_validate.set_defaults(run=_spec_validate, parser=spec_validate)
+
     new = commands.add_parser(
         "new",
-        help="create a bottle from a repo",
-        description="Create a bottle: REPO's branch checked out at /workspace, in its own VM. "
-        "NAME defaults to the repo's name, then REPO-2, REPO-3, ...",
+        help="create a bottle from a repo, or from a spec",
+        usage="bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--memory MEMORY] [--name NAME] [--context FILE]\n"
+        "       bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]",
+        description="Create a bottle, in its own VM: REPO's branch checked out at /workspace, with REPO's "
+        "default features; or, with --spec, the spec's features and memory, and --git-repo checked out if "
+        "given. From REPO, NAME defaults to the repo's name, then REPO-2, REPO-3, ...; with --spec it's "
+        "required, and a name that's taken is refused.",
     )
-    new.add_argument("repo", metavar="REPO", help="the repo to create a bottle from (added with `bottle repo add`)")
+    new.add_argument(
+        "repo", metavar="REPO", nargs="?", help="the repo to create a bottle from (added with `bottle repo add`)"
+    )
+    new.add_argument("--spec", metavar="FILE", help="create the bottle from this spec, instead of from REPO")
+    new.add_argument(
+        "--git-repo", metavar="PATH",
+        help="with --spec: the repo whose objects are mounted, read-only, and whose remotes are served",
+    )
+    new.add_argument(
+        "--git-remote", action="append", metavar="REMOTE",
+        help="with --git-repo: a remote to serve, NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being upstream, "
+        "heads or ns/NAMESPACE (repeatable; default: origin:fetch=upstream and host:fetch=heads)",
+    )
+    new.add_argument(
+        "--checkout", metavar="REF",
+        help="with --git-repo: the branch or commit to check out (default: origin's default branch, "
+        "else what the repo has checked out)",
+    )
+    new.add_argument("--context", metavar="FILE", help="add this file to what the bottle tells its agent (~/BOTTLE.md)")
     new.add_argument(
         "--feature", action="append", default=[], metavar="FEATURE",
         help="a feature to add to the repo's defaults, optionally with options, e.g. jvm:version=17 "
@@ -109,8 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     new.set_defaults(run=_new, parser=new)
 
-    list_ = commands.add_parser("list", help="list bottles", description="List bottles.")
-    list_.set_defaults(run=_list, parser=list_)
+    status = commands.add_parser(
+        "status", help="show bottles' state",
+        description="Show every bottle's state, or just those named. A name with no bottle shows as missing.",
+    )
+    status.add_argument("names", nargs="*", metavar="BOTTLE", help="the bottles to show (default: all)")
+    status.add_argument("--json", action="store_true", help="print JSON: one object per bottle, with what it was made from")
+    status.set_defaults(run=_status, parser=status)
 
     shell = commands.add_parser("shell", help="open a shell in a bottle", description="Open a shell in a bottle, starting it if needed.")
     shell.add_argument("name", metavar="BOTTLE", help="the bottle to open a shell in")
@@ -331,20 +370,64 @@ def _auth_logout(args: argparse.Namespace) -> int:
     return 0
 
 
+def _spec_validate(args: argparse.Namespace) -> int:
+    import json
+
+    from bottle import specs
+
+    spec = specs.read(Path(args.file).expanduser())
+    if args.json:
+        print(json.dumps(spec))
+    else:
+        print(f"Valid: features {_features(spec['features'])} and memory {spec['memory']}")
+    return 0
+
+
 def _new(args: argparse.Namespace) -> int:
-    from bottle import bottles
+    from bottle import bottles, images
 
-    print(f"Creating a bottle from {args.repo}...", file=sys.stderr)
-    from bottle import images
+    context = _read_context(args.context)
+    if args.spec is None:
+        if args.repo is None:
+            args.parser.error("give REPO, or --spec FILE")
+        for flag, value in (("--git-repo", args.git_repo), ("--git-remote", args.git_remote), ("--checkout", args.checkout)):
+            if value is not None:
+                args.parser.error(f"{flag} goes with --spec; a bottle from REPO is served REPO itself")
+        print(f"Creating a bottle from {args.repo}...", file=sys.stderr)
+        bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature, args.memory, context)
+    else:
+        from bottle import specs
 
-    bottle = bottles.create(args.repo, images.BASE, args.branch, args.name, args.feature, args.memory)
+        for flag, value in (("REPO", args.repo), ("--feature", args.feature or None),
+                            ("--branch", args.branch), ("--memory", args.memory)):
+            if value is not None:
+                args.parser.error(f"{flag} goes with a bottle from REPO; with --spec, use --git-repo, "
+                                  "--checkout, and the spec's features and memory")
+        if args.name is None:
+            args.parser.error("--spec needs --name: a bottle from a spec is named by its creator")
+        spec = specs.read(Path(args.spec).expanduser())
+        print("Creating a bottle from a spec...", file=sys.stderr)
+        git_repo = Path(args.git_repo).expanduser() if args.git_repo else None
+        bottle = bottles.create_from_spec(spec, args.name, git_repo, args.git_remote, args.checkout, context)
     print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
 
 
+def _read_context(path: str | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return Path(path).expanduser().read_text()
+    except OSError as e:
+        raise BottleError(f"can't read context {path}: {e.strerror or e}") from None
+
+
 def _describe(bottle) -> str:
     at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
+    if bottle.from_spec:
+        source = f"{bottle.git_repo} at {at}" if bottle.git_repo else "no repo"
+        return f"bottle '{bottle.name}' from a spec, with {source} and features {_settings(bottle)}"
     return f"bottle '{bottle.name}' from repo '{bottle.repo}' at {at} with features {_settings(bottle)}"
 
 
@@ -355,13 +438,24 @@ def _shell(args: argparse.Namespace) -> int:
     return 0  # not reached: shell replaces this process
 
 
-def _list(args: argparse.Namespace) -> int:
+def _status(args: argparse.Namespace) -> int:
+    import json
+
     from bottle import bottles
 
-    rows = [("NAME", "REPO", "BRANCH", "FEATURES", "MEMORY", "STATE")]
-    rows += [(b.name, b.repo, b.checkout, " ".join(sorted(b.features)) or "-", b.memory or "all", state)
-             for b, state in bottles.list_all()]
-    _table(rows)
+    rows = bottles.status(args.names)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    table = [("NAME", "REPO", "BRANCH", "FEATURES", "MEMORY", "STATE")]
+    for row in rows:
+        if row["state"] == "missing":
+            table.append((row["name"], "-", "-", "-", "-", "missing"))
+            continue
+        checkout = row["branch"] or (f"({row['commit'][:12]})" if row["commit"] else "-")
+        table.append((row["name"], row["repo"] or row["git_repo"] or "-", checkout,
+                      " ".join(row["features"]) or "-", row["memory"], row["state"]))
+    _table(table)
     return 0
 
 

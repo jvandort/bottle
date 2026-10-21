@@ -27,7 +27,11 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.repo = self.tmp / "repo"
         run("git", "clone", "-q", self.upstream, self.repo)
         run("git", "-C", self.repo, "branch", "mine")
-        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", bottle="b")
+        # What a bottle made from a registered repo is served (see bottles.default_remotes).
+        remotes = tuple(host.Remote.parse(spec) for spec in (
+            "origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out",
+        ))
+        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
         self.services = services
         proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
         self.addAsyncCleanup(self._close, proxy)
@@ -192,10 +196,11 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("deletion prohibited", result.stderr)
         self.assertEqual(self.pushed(), pushed)
 
-    async def test_push_without_a_bottle_is_refused(self) -> None:
-        # Fail closed: with no lane a push would write the host's own refs.
+    async def test_push_without_a_namespace_is_refused(self) -> None:
+        # Fail closed: with no namespace a push would write the host's own refs.
+        # Remote.parse never makes such a remote; this is the hook catching one anyway.
         await self.work()
-        self.services.bottle = None
+        self.services.remotes = (host.Remote("work", host.HEADS, host.NS),)
         result = await self.push("work")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no namespace", result.stderr)
@@ -348,3 +353,107 @@ class RelayCgiTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemoteParseTest(unittest.TestCase):
+    def test_parses(self) -> None:
+        for spec, remote in (
+            ("origin:fetch=upstream", host.Remote("origin", host.UPSTREAM)),
+            ("host:fetch=heads", host.Remote("host", host.HEADS)),
+            ("work:fetch=ns/t-in,push=ns/t-out", host.Remote("work", "ns/t-in", "ns/t-out")),
+            ("mine:push=ns/x,fetch=ns/x", host.Remote("mine", "ns/x", "ns/x")),
+            ("up:fetch=upstream,push=ns/x", host.Remote("up", host.UPSTREAM, "ns/x")),
+        ):
+            with self.subTest(spec):
+                self.assertEqual(host.Remote.parse(spec), remote)
+
+    def test_round_trips(self) -> None:
+        for spec in ("origin:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"):
+            self.assertEqual(host.Remote.parse(spec).spec, spec)
+
+    def test_namespaces(self) -> None:
+        remote = host.Remote.parse("work:fetch=ns/t-in,push=ns/t-out")
+        self.assertEqual((remote.fetch_namespace, remote.push_namespace), ("t-in", "t-out"))
+        self.assertEqual((host.Remote("o", host.UPSTREAM).fetch_namespace, host.Remote("o", host.UPSTREAM).push_namespace), (None, None))
+
+    def test_refuses(self) -> None:
+        for spec in (
+            "origin", "origin:", ":fetch=heads", "a/b:fetch=heads", "x:push=ns/y", "x:fetch=everything",
+            "x:fetch=ns/", "x:fetch=ns/a/b", "x:fetch=heads,push=heads", "x:fetch=heads,fetch=heads",
+            "x:fetch=heads,pull=ns/y", "x:fetch=heads,push=ns/-y",
+        ):
+            with self.subTest(spec), self.assertRaises(host.BottleError):
+                host.Remote.parse(spec)
+
+
+class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
+    """Remotes a caller named itself: the same views and the same rules as the defaults, under its names."""
+
+    async def asyncSetUp(self) -> None:
+        host._last_pull.clear()
+        self.upstream = self.make_repo("upstream")
+        run("git", "-C", self.upstream, "branch", "release")
+        self.repo = self.tmp / "repo"
+        run("git", "clone", "-q", self.upstream, self.repo)
+        run("git", "-C", self.repo, "branch", "mine")
+        remotes = tuple(host.Remote.parse(spec) for spec in (
+            "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out",
+        ))
+        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
+        proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
+        self.addAsyncCleanup(RemotesTest._close, proxy)
+        self.env = {**os.environ, "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
+        self.workspace = self.tmp / "workspace"
+        run("git", "init", "-q", "-b", "main", self.workspace)
+        for remote in ("up", "theirs", "lane", "origin", "work"):
+            run("git", "-C", self.workspace, "remote", "add", remote, f"http://bottle.host/git/{remote}")
+
+    async def git(self, *args) -> subprocess.CompletedProcess:
+        return await asyncio.to_thread(
+            subprocess.run, ["git", *args], cwd=self.workspace, env=self.env, capture_output=True, text=True
+        )
+
+    async def ls_remote(self, remote: str) -> set[str]:
+        result = await self.git("ls-remote", f"http://bottle.host/git/{remote}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {line.split("\t")[1] for line in result.stdout.splitlines()}
+
+    async def test_each_view(self) -> None:
+        self.assertEqual(await self.ls_remote("up"), {"HEAD", "refs/heads/main", "refs/heads/release"})
+        self.assertTrue({"refs/heads/main", "refs/heads/mine"} <= await self.ls_remote("theirs"))
+        self.assertEqual(await self.ls_remote("lane"), set())  # nothing in t-in yet
+        run("git", "-C", self.repo, "update-ref", "refs/namespaces/t-in/refs/heads/handed", "HEAD")
+        self.assertEqual(await self.ls_remote("lane"), {"refs/heads/handed"})
+
+    async def test_names_it_wasnt_given_arent_served(self) -> None:
+        for remote in ("origin", "work"):
+            with self.subTest(remote):
+                result = await self.git("ls-remote", f"http://bottle.host/git/{remote}")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no such bottle.host service", result.stderr)
+
+    async def test_a_push_lands_in_its_namespace_append_only(self) -> None:
+        self.assertEqual((await self.git("fetch", "-q", "theirs")).returncode, 0)
+        await self.git("checkout", "-q", "-b", "agent", "theirs/main")
+        first = self.commit(self.workspace, "agent work")
+        result = await self.git("push", "lane", "agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "refs/namespaces/t-out/refs/heads/agent"), first)
+        self.assertNotIn("refs/heads/agent", run("git", "-C", self.repo, "for-each-ref", "--format=%(refname)").split())
+        await self.git("reset", "-q", "--hard", "HEAD~")
+        self.commit(self.workspace, "a rewrite")
+        rewrite = await self.git("push", "--force", "lane", "agent")
+        self.assertNotEqual(rewrite.returncode, 0)
+        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "refs/namespaces/t-out/refs/heads/agent"), first)
+        delete = await self.git("push", "lane", ":agent")
+        self.assertIn("deletion prohibited", delete.stderr)
+
+    async def test_read_only_remotes_say_where_to_push(self) -> None:
+        await self.git("fetch", "-q", "theirs")
+        await self.git("checkout", "-q", "-b", "agent", "theirs/main")
+        self.commit(self.workspace, "agent work")
+        for remote in ("up", "theirs"):
+            with self.subTest(remote):
+                result = await self.git("push", remote, "agent")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("403", result.stderr)

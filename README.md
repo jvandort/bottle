@@ -61,10 +61,11 @@ and a Linux kernel) as necessary, and asks before installing anything.
 | --- | --- |
 | `bottle repo add` / `list` / `set` / `update` | Register a repo, and set its bottles' default features and memory |
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
-| `bottle new` | Create a bottle from a repo |
+| `bottle new` | Create a bottle from a repo, or from a spec |
+| `bottle spec validate` | Check a spec, and print it in canonical form |
 | `bottle shell` | Open a shell in a bottle, at `/workspace` |
 | `bottle exec` | Run one command in a bottle |
-| `bottle list` | List bottles and their state |
+| `bottle status` | List bottles and their state |
 | `bottle start` / `stop` / `reset` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
 | `bottle daemon start` / `stop` | Manage `bottled`, the background network process |
@@ -249,7 +250,7 @@ attached to and the stand-in it wants, and `requiredOptions`, the options a user
 has to set).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME] [--memory MEMORY]`
+### `bottle new REPO [--feature FEATURE]... [--branch BRANCH] [--name NAME] [--memory MEMORY] [--context FILE]`
 
 Creates a bottle: a VM with `REPO`'s `BRANCH` checked out at `/workspace`,
 and the repo's default features plus any given (a feature given again replaces
@@ -286,6 +287,46 @@ repo's (see `bottle repo add`), and stays with the bottle when it's reset.
 bottle new reponame --feature tools --feature jvm --feature claude
 ```
 
+`--context FILE` adds the file contents to the end of `~/BOTTLE.md`.
+
+### `bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]`
+
+Creates a bottle from a **spec**: a file giving its features and memory, owned
+by whoever creates the bottle. Bottle keeps no specs, and no repo registry is
+involved. `NAME` is required, and is the bottle's identity: there's no default,
+and a name that's taken is refused.
+
+```json
+{"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
+```
+
+`--git-repo PATH` is the repo whose objects are mounted read-only, and checked
+out at `/workspace` at `--checkout` (a branch or a commit; by default as for
+`bottle new REPO`). Without it the bottle has an empty `/workspace`.
+
+Each `--git-remote` serves the bottle one remote, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`.
+What a fetch sees is one of three views: `upstream`, the repo's upstream (as
+`origin` above); `heads`, the repo's own branches (as `host`); or
+`ns/NAMESPACE`, the refs in one git namespace of the repo. With `push`, pushes
+go into that namespace, append-only, as `work`'s do, and no other bottle may
+push into the same one. Without any `--git-remote`, the bottle gets `origin`
+and `host`, both read-only.
+
+```sh
+bottle new --spec spec.json --name foo-fix-tests --git-repo ~/src/foo --checkout main \
+  --git-remote origin:fetch=upstream \
+  --git-remote host:fetch=heads \
+  --git-remote work:fetch=ns/foo-in,push=ns/foo-out
+```
+
+### `bottle spec validate FILE [--json]`
+
+Checks a spec as `bottle new --spec` would: its features exist, their options
+are valid and every required one is set, and the memory fits this machine.
+Prints it in canonical form, with `--json` as JSON: features sorted, each
+one's options sorted and its defaults left out, and the memory as `all` or a
+size.
+
 ### `bottle shell BOTTLE`
 
 Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped.
@@ -302,9 +343,11 @@ bottle exec reponame -- claude -p 'fix the failing test'
 bottle exec reponame cat /workspace/report.json | jq .failures
 ```
 
-### `bottle list`
+### `bottle status [BOTTLE]... [--json]`
 
-Lists bottles, their memory and their state.
+Shows every bottle's state, or just those named; a name with no bottle shows as
+`missing`. With `--json`, one object per bottle with what it was made from: its
+repo, branch and commit, features, memory, spec and remotes.
 
 ### `bottle start BOTTLE` / `bottle stop BOTTLE`
 

@@ -129,3 +129,60 @@ class BuildCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpecCommandsTest(GitTestCase):
+    run_cli = WrapCommandTest.run_cli
+
+    def spec(self, data: str) -> str:
+        path = self.tmp / "spec.json"
+        path.write_text(data)
+        return str(path)
+
+    def test_validate_prints_the_canonical_spec(self) -> None:
+        spec = self.spec('{"features": ["tools", "jvm:version=25"]}')
+        self.assertEqual(self.run_cli("spec", "validate", spec), (0, "Valid: features [jvm, tools] and memory all\n", ""))
+        self.assertEqual(self.run_cli("spec", "validate", "--json", spec),
+                         (0, '{"features": ["jvm", "tools"], "memory": "all"}\n', ""))
+
+    def test_validate_fails_with_bottles_own_message(self) -> None:
+        spec = self.spec('{"features": ["nope"]}')
+        code, out, err = self.run_cli("spec", "validate", "--json", spec)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("no feature named 'nope'", err)
+
+    def test_new_takes_a_repo_or_a_spec_and_their_own_flags(self) -> None:
+        spec = self.spec('{"features": []}')
+        for argv, message in (
+            ((), "give REPO, or --spec FILE"),
+            (("repo", "--git-repo", "x"), "--git-repo goes with --spec"),
+            (("repo", "--checkout", "main"), "--checkout goes with --spec"),
+            (("--spec", spec, "repo"), "REPO goes with a bottle from REPO"),
+            (("--spec", spec, "--feature", "tools"), "--feature goes with a bottle from REPO"),
+            (("--spec", spec, "--memory", "8G"), "--memory goes with a bottle from REPO"),
+            (("--spec", spec), "--spec needs --name"),
+        ):
+            with self.subTest(argv):
+                code, _, err = self.run_cli("new", *argv)
+                self.assertEqual(code, 2)
+                self.assertIn(message, err)
+
+    def test_new_from_a_spec(self) -> None:
+        spec = self.spec('{"features": ["tools"]}')
+        context = self.tmp / "context.md"
+        context.write_text("More.\n")
+        repo = self.make_repo()
+        bottle = mock.Mock(from_spec=True, git_repo=str(repo), branch="main", commit="c" * 40, features=("tools",), memory=None)
+        bottle.name = "project"
+        with mock.patch("bottle.bottles.create_from_spec", return_value=bottle) as create:
+            code, out, _ = self.run_cli("new", "--spec", spec, "--git-repo", str(repo), "--git-remote", "origin:fetch=upstream",
+                                        "--checkout", "main", "--name", "project", "--context", str(context))
+        self.assertEqual(code, 0)
+        create.assert_called_once_with({"features": ["tools"], "memory": "all"}, "project", repo, ["origin:fetch=upstream"],
+                                       "main", "More.\n")
+        self.assertIn(f"Created bottle 'project' from a spec, with {repo} at main (cccccccccccc)", out)
+
+    def test_status_shows_missing_bottles(self) -> None:
+        self.assertEqual(self.run_cli("status", "gone", "--json"), (0, '[\n  {\n    "name": "gone",\n    "state": "missing"\n  }\n]\n', ""))
+        code, out, _ = self.run_cli("status", "gone")
+        self.assertEqual(out.splitlines()[1].split(), ["gone", "-", "-", "-", "-", "missing"])
