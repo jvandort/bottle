@@ -21,8 +21,14 @@ IMAGES = Path(__file__).resolve().parent.parent / "containers" / "images"
 # The image every bottle starts from: the bottle contract. Not user-selectable;
 # other images here would be alternative foundations meeting the same contract.
 BASE = "base"
-# A stage built on another bottle image, e.g. `FROM bottle/base:latest`.
-FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
+# Where bottle's images are named: on no registry. A name without a host in
+# it (bottle/base) is taken to be Docker Hub's, and `container` stores it as
+# docker.io/bottle/base, but looks it up as written, which can find another
+# image stored under the short name instead of the one just built. localhost
+# is a host, so the name is stored and found as it is.
+REPOSITORY = "localhost/bottle"
+# A stage built on another bottle image, e.g. `FROM localhost/bottle/base:latest`.
+FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*localhost/bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
 
 
 def available() -> list[str]:
@@ -36,7 +42,7 @@ INPUTS_LABEL = "bottle.inputs"
 
 
 def tag(name: str) -> str:
-    return f"bottle/{name}:latest"
+    return f"{REPOSITORY}/{name}:latest"
 
 
 def tree_hash(path: Path) -> str:
@@ -80,7 +86,7 @@ def build_order(name: str) -> list[str]:
         if image not in available():
             if not path:
                 _require(image)
-            raise BottleError(f"{path[-1]} is built from bottle/{image}, but there's no containers/images/{image}")
+            raise BottleError(f"{path[-1]} is built from {REPOSITORY}/{image}, but there's no containers/images/{image}")
         for dependency in dependencies(image):
             visit(dependency, [*path, image])
         order.append(image)

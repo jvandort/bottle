@@ -112,7 +112,7 @@ class FakeRuntime:
         info = self.container_info(name)
         if info is None:
             return
-        if owner is not None and not bottles.runtime._owned(info, *owner):
+        if owner is not None and not bottles.runtime._owned(info, owner):
             raise BottleError(f"container {name} isn't this bottle's; leaving it alone")
         self.containers.pop(name)
 
@@ -236,7 +236,7 @@ class CreateTest(BottleTestCase):
     def test_container_gets_image_proxy_and_read_only_objects(self) -> None:
         fake = self.fake()
         self.create()
-        self.assertEqual(fake.run_args["image"], "bottle/base:latest")
+        self.assertEqual(fake.run_args["image"], "localhost/bottle/base:latest")
         self.assertEqual(fake.run_args["env"]["HTTPS_PROXY"], "http://192.168.128.1:3128")
         self.assertEqual(fake.run_args["env"]["http_proxy"], "http://192.168.128.1:3128")
         [mount] = fake.run_args["mounts"]
@@ -302,12 +302,12 @@ class CreateTest(BottleTestCase):
 
         def ensure_built(image, feature_ids):
             fake.calls.append(f"ensure_built {image} {feature_ids}")
-            return "bottle/base:with-tools"
+            return "localhost/bottle/base:with-tools"
 
         with mock.patch.object(bottles.features_, "ensure_built", side_effect=ensure_built):
             bottle = self.create(features=["tools"])
         self.assertEqual(fake.calls[0], "ensure_built base ['tools']")
-        self.assertEqual(fake.run_args["image"], "bottle/base:with-tools")
+        self.assertEqual(fake.run_args["image"], "localhost/bottle/base:with-tools")
         self.assertEqual((bottle.features, bottle.environment), (("tools",), "base+tools"))
         self.assertEqual(bottles.get("example").features, ("tools",))  # survives the JSON round trip
 
@@ -316,7 +316,7 @@ class CreateTest(BottleTestCase):
         resolved = [SimpleNamespace(id="tools", spec="tools", agent_context=str),
                     SimpleNamespace(id="jvm", spec="jvm", agent_context=str)]
         with mock.patch.object(bottles.features_, "resolve", return_value=resolved), \
-                mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-jvm.tools"):
+                mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-jvm.tools"):
             bottle = self.create(features=["jvm"])
         self.assertEqual(bottle.features, ("tools", "jvm"))
         self.assertEqual(bottle.environment, "base+jvm+tools")
@@ -529,7 +529,7 @@ class ContractTest(BottleTestCase):
     def test_image_defaults_to_base(self) -> None:
         fake = self.fake()
         self.assertEqual(self.create().image, "base")
-        self.assertEqual(fake.run_args["image"], "bottle/base:latest")
+        self.assertEqual(fake.run_args["image"], "localhost/bottle/base:latest")
 
     def run_contract_script(self):
         """Run the script verify_contract would have run in a bottle, on this machine instead."""
@@ -579,7 +579,7 @@ class StandinTest(BottleTestCase):
         """`bottle auth login claude` must find nothing that looks like a token."""
         fake = self.fake()
         self.create()  # the fake runtime reports on a bottle that exists
-        with mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-claude"), \
+        with mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-claude"), \
                 bottles.throwaway(["claude"]):
             pass
         self.assertEqual(fake.run_args["env"], bottles._proxy_env("http://192.168.128.1:3128"))
@@ -645,15 +645,12 @@ class OwnershipTest(BottleTestCase):
         self.assertIn(bottle.container, fake.containers)
         self.assertEqual(bottles.get("example").status, "broken")
 
-    def test_containers_from_before_labels_are_recognised_by_network(self) -> None:
-        info = bottles.runtime.ContainerInfo("running", {}, ["bottle-abc"])
-        self.assertTrue(bottles.runtime._owned(info, "abc", "bottle-abc"))
-        self.assertFalse(bottles.runtime._owned(info, "abc", "bottle-other"))
-
-    def test_the_label_decides_when_present(self) -> None:
-        info = bottles.runtime.ContainerInfo("running", {"bottle.id": "abc"}, ["bottle-other"])
-        self.assertTrue(bottles.runtime._owned(info, "abc", "bottle-abc"))
-        self.assertFalse(bottles.runtime._owned(info, "xyz", "bottle-other"))
+    def test_the_label_decides(self) -> None:
+        info = bottles.runtime.ContainerInfo("running", {"bottle.id": "abc"}, ["bottle-abc"])
+        self.assertTrue(bottles.runtime._owned(info, "abc"))
+        self.assertFalse(bottles.runtime._owned(info, "xyz"))
+        # Unlabelled, it's no bottle's, whatever network it's on.
+        self.assertFalse(bottles.runtime._owned(bottles.runtime.ContainerInfo("running", {}, ["bottle-abc"]), "abc"))
 
     def test_containers_are_labelled(self) -> None:
         fake = self.fake()
@@ -669,7 +666,7 @@ class OwnershipTest(BottleTestCase):
 
 class DeleteImageTest(BottleTestCase):
     def create_with(self, fake, features, name=None):
-        tag = f"bottle/base:with-{'.'.join(sorted(features))}" if features else "bottle/base:latest"
+        tag = f"localhost/bottle/base:with-{'.'.join(sorted(features))}" if features else "localhost/bottle/base:latest"
         with mock.patch.object(bottles.features_, "ensure_built", return_value=tag), \
                 mock.patch.object(bottles.features_, "resolve", side_effect=lambda specs: [SimpleNamespace(id=s, spec=s, overrides=(), agent_context=str) for s in specs]), \
                 mock.patch.object(bottles.features_, "image_tag", return_value=tag):
@@ -694,13 +691,13 @@ class DeleteImageTest(BottleTestCase):
         fake = self.fake()
         self.create_with(fake, [])
         bottles.delete("example")
-        self.assertIn("bottle/base:latest", fake.built_images)
+        self.assertIn("localhost/bottle/base:latest", fake.built_images)
 
     def test_rollback_keeps_the_freshly_built_image(self) -> None:
         fake = self.fake(fail="init_workspace")
         with self.assertRaises(BottleError):
             self.create_with(fake, ["tools"])
-        self.assertIn("bottle/base:with-tools", fake.built_images)
+        self.assertIn("localhost/bottle/base:with-tools", fake.built_images)
 
 
 class StartStopTest(BottleTestCase):
@@ -907,7 +904,7 @@ class SpecBottleTest(BottleTestCase):
     def test_memory_and_features_come_from_the_spec(self) -> None:
         fake = self.fake()
         with mock.patch.object(bottles.specs.runtime, "host_memory_mib", return_value=16384), \
-                mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-tools"):
+                mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-tools"):
             bottle = bottles.create({"features": ["tools"], "memory": "8G"}, "t")
         self.assertEqual((bottle.features, bottle.memory, fake.run_args["memory"]), (("tools",), "8G", "8G"))
         self.assertEqual(bottle.spec, {"features": ["tools"], "memory": "8G"})

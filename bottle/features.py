@@ -528,7 +528,7 @@ def image_tag(image: str, features: list[Feature]) -> str:
     if not features:
         return images.tag(image)
     parts = sorted(f.id if not f.overrides else f"{f.id}-{hashlib.sha256(f.spec.encode()).hexdigest()[:8]}" for f in features)
-    return f"bottle/{image}:with-{'.'.join(parts)}"
+    return f"{images.REPOSITORY}/{image}:with-{'.'.join(parts)}"
 
 
 def dockerfile(image: str, features: list[Feature]) -> str:
@@ -595,7 +595,7 @@ def remove_stale() -> list[str]:
     in_use = runtime.images_in_use()
     removed = []
     for ref in runtime.images():
-        if not ref.name.startswith("bottle/") or ref.digest in in_use:
+        if not ref.name.startswith(f"{images.REPOSITORY}/") or ref.digest in in_use:
             continue
         labels = runtime.image_labels(ref.name) or {}
         if labels.get(images.INPUTS_LABEL) != _expected_inputs(ref.name, labels):
@@ -607,7 +607,7 @@ def remove_stale() -> list[str]:
 def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
     """The inputs hash an image with this tag and labels should have now; None if it can't be built any more."""
     repository, _, _ = tag.partition(":")
-    image = repository.removeprefix("bottle/")
+    image = repository.removeprefix(f"{images.REPOSITORY}/")
     try:
         if FEATURES_LABEL not in labels:
             return images.inputs_hash(image)

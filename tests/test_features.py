@@ -434,18 +434,18 @@ class ImageTest(FeatureTestCase):
         self.feature("tools")
         self.feature("claude")
         tag = features.image_tag("base", features.resolve(["tools", "claude"]))
-        self.assertEqual(tag, "bottle/base:with-claude.tools")
+        self.assertEqual(tag, "localhost/bottle/base:with-claude.tools")
         self.assertEqual(features.image_tag("base", features.resolve(["claude", "tools"])), tag)
-        self.assertEqual(features.image_tag("base", []), "bottle/base:latest")
+        self.assertEqual(features.image_tag("base", []), "localhost/bottle/base:latest")
 
     def test_tag_distinguishes_options(self) -> None:
         self.feature("jvm", options={"version": {"type": "string", "default": "25"}})
         default = features.image_tag("base", features.resolve(["jvm"]))
         explicit_default = features.image_tag("base", features.resolve(["jvm:version=25"]))
         other = features.image_tag("base", features.resolve(["jvm:version=17"]))
-        self.assertEqual(default, "bottle/base:with-jvm")
+        self.assertEqual(default, "localhost/bottle/base:with-jvm")
         self.assertEqual(explicit_default, default)  # setting an option to its default changes nothing
-        self.assertRegex(other, r"^bottle/base:with-jvm-[0-9a-f]{8}$")
+        self.assertRegex(other, r"^localhost/bottle/base:with-jvm-[0-9a-f]{8}$")
 
     def test_dockerfile(self) -> None:
         self.feature("tools", containerEnv={"EDITOR": "vim"})
@@ -454,7 +454,7 @@ class ImageTest(FeatureTestCase):
 
         text = features.dockerfile("base", features.resolve(["jvm"]))
 
-        self.assertTrue(text.splitlines()[1] == "FROM bottle/base:latest")
+        self.assertTrue(text.splitlines()[1] == "FROM localhost/bottle/base:latest")
         self.assertLess(text.index("COPY tools "), text.index("COPY jvm "))
         self.assertIn("_REMOTE_USER=genie", text)
         self.assertIn("VERSION=21 ./install.sh", text)
@@ -484,8 +484,8 @@ class BuildTest(FeatureTestCase):
 
     def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
         with mock.patch.object(features.images, "is_current", return_value=False):
-            self.assertEqual(features.ensure_built("base", ["jvm"]), "bottle/base:with-jvm.tools")
-        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools", "remove stale"])
+            self.assertEqual(features.ensure_built("base", ["jvm"]), "localhost/bottle/base:with-jvm.tools")
+        self.assertEqual(self.built, ["image base", "localhost/bottle/base:with-jvm.tools", "remove stale"])
 
     def test_ensure_built_skips_a_current_combination(self) -> None:
         with mock.patch.object(features.images, "is_current", return_value=True):
@@ -499,13 +499,13 @@ class BuildTest(FeatureTestCase):
         self.assertNotEqual(features.inputs_hash("base", [tools, jvm]), before)
 
     def test_no_features_is_just_the_image(self) -> None:
-        self.assertEqual(features.ensure_built("base", []), "bottle/base:latest")
+        self.assertEqual(features.ensure_built("base", []), "localhost/bottle/base:latest")
         self.assertEqual(self.built, ["image base"])
 
     def test_build_always_rebuilds_the_combination(self) -> None:
         with mock.patch.object(features.images, "is_current", return_value=True):
             features.build("base", ["jvm"])
-        self.assertEqual(self.built, ["image base", "bottle/base:with-jvm.tools", "remove stale"])
+        self.assertEqual(self.built, ["image base", "localhost/bottle/base:with-jvm.tools", "remove stale"])
 
 
 class RemoveStaleTest(FeatureTestCase):
@@ -526,14 +526,17 @@ class RemoveStaleTest(FeatureTestCase):
 
     def test_deletes_stale_unused_bottle_images_only(self) -> None:
         removed = self.run_with({
-            "bottle/base:with-tools": ("sha256:a", {"bottle.features": "tools", "bottle.inputs": self.current}),
-            "bottle/base:with-old": ("sha256:b", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
-            "bottle/base:with-in-use": ("sha256:c", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
-            "bottle/base:with-gone": ("sha256:d", {"bottle.features": "no-such-feature", "bottle.inputs": "x"}),
-            "bottle/base:with-unlabeled": ("sha256:e", {"bottle.features": "tools"}),
+            "localhost/bottle/base:with-tools": ("sha256:a", {"bottle.features": "tools", "bottle.inputs": self.current}),
+            "localhost/bottle/base:with-old": ("sha256:b", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
+            "localhost/bottle/base:with-in-use": ("sha256:c", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
+            "localhost/bottle/base:with-gone": ("sha256:d", {"bottle.features": "no-such-feature", "bottle.inputs": "x"}),
+            "localhost/bottle/base:with-unlabeled": ("sha256:e", {"bottle.features": "tools"}),
             "debian:13": ("sha256:f", {}),
+            # Not bottle's: named without localhost/, it's someone else's.
+            "bottle/base:with-old": ("sha256:g", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
         }, in_use={"sha256:c"})
-        self.assertEqual(removed, ["bottle/base:with-old", "bottle/base:with-gone", "bottle/base:with-unlabeled"])
+        self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
+                                   "localhost/bottle/base:with-unlabeled"])
         self.assertEqual(self.deleted, removed)
 
 

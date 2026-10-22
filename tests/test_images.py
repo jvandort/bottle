@@ -30,13 +30,13 @@ class BuildCommandTest(unittest.IsolatedAsyncioTestCase):
         process = mock.AsyncMock()
         process.wait.return_value = returncode
         with mock.patch.object(runtime.asyncio, "create_subprocess_exec", return_value=process) as exec_:
-            await runtime.build(Path("/ctx"), "bottle/base:latest", {"http_proxy": "http://gw:1"}, **kwargs)
+            await runtime.build(Path("/ctx"), "localhost/bottle/base:latest", {"http_proxy": "http://gw:1"}, **kwargs)
         return list(exec_.call_args.args)
 
     async def test_command(self) -> None:
         self.assertEqual(
             await self.run_build(),
-            ["container", "build", "--tag", "bottle/base:latest", "--progress", "auto",
+            ["container", "build", "--tag", "localhost/bottle/base:latest", "--progress", "auto",
              "--build-arg", "http_proxy=http://gw:1", "/ctx"],
         )
 
@@ -47,8 +47,16 @@ class BuildCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--quiet", cmd)
 
     async def test_failure(self) -> None:
-        with self.assertRaisesRegex(BottleError, "building bottle/base:latest failed"):
+        with self.assertRaisesRegex(BottleError, "building localhost/bottle/base:latest failed"):
             await self.run_build(returncode=1)
+
+
+class TagTest(unittest.TestCase):
+    def test_images_are_named_in_full(self) -> None:
+        # On no registry, so stored and looked up as written: looked up by the
+        # short name, an image an older `container` stored under it would be found instead.
+        self.assertEqual(images.tag("base"), "localhost/bottle/base:latest")
+        self.assertEqual(images.FROM_BOTTLE.findall("FROM localhost/bottle/base:latest\nFROM bottle/tools\n"), ["base"])
 
 
 class DependencyTest(unittest.TestCase):
@@ -72,34 +80,34 @@ class DependencyTest(unittest.TestCase):
 
     def test_from_lines(self) -> None:
         self.image("base", "FROM debian:13\n")
-        self.image("a", "FROM --platform=linux/arm64 bottle/base:latest AS builder\nFROM bottle/base\n")
+        self.image("a", "FROM --platform=linux/arm64 localhost/bottle/base:latest AS builder\nFROM localhost/bottle/base\n")
         self.assertEqual(images.dependencies("a"), ["base"])
         self.assertEqual(images.dependencies("base"), [])
 
     def test_order_is_dependencies_first(self) -> None:
         self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM bottle/base:latest\n")
-        self.image("agent", "FROM bottle/tools:latest\n")
-        self.image("multi", "FROM bottle/agent:latest AS a\nFROM bottle/tools:latest\n")
+        self.image("tools", "FROM localhost/bottle/base:latest\n")
+        self.image("agent", "FROM localhost/bottle/tools:latest\n")
+        self.image("multi", "FROM localhost/bottle/agent:latest AS a\nFROM localhost/bottle/tools:latest\n")
         self.assertEqual(images.build_order("multi"), ["base", "tools", "agent", "multi"])
 
     def test_cycle(self) -> None:
-        self.image("a", "FROM bottle/b\n")
-        self.image("b", "FROM bottle/a\n")
+        self.image("a", "FROM localhost/bottle/b\n")
+        self.image("b", "FROM localhost/bottle/a\n")
         with self.assertRaisesRegex(BottleError, "cycle: a -> b -> a"):
             images.build_order("a")
 
     def test_missing_dependency(self) -> None:
-        self.image("a", "FROM bottle/ghost\n")
-        with self.assertRaisesRegex(BottleError, "a is built from bottle/ghost, but there's no containers/images/ghost"):
+        self.image("a", "FROM localhost/bottle/ghost\n")
+        with self.assertRaisesRegex(BottleError, "a is built from localhost/bottle/ghost, but there's no containers/images/ghost"):
             images.build_order("a")
 
     def test_ensure_built_builds_whats_missing_or_stale(self) -> None:
         self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM bottle/base:latest\n")
+        self.image("tools", "FROM localhost/bottle/base:latest\n")
         built = []
-        for exists, expected in ((set(), ["base", "tools"]), ({"bottle/base:latest"}, ["tools"]),
-                                 ({"bottle/base:latest", "bottle/tools:latest"}, [])):
+        for exists, expected in ((set(), ["base", "tools"]), ({"localhost/bottle/base:latest"}, ["tools"]),
+                                 ({"localhost/bottle/base:latest", "localhost/bottle/tools:latest"}, [])):
             built.clear()
             with self.subTest(exists=exists), \
                     mock.patch.object(images, "is_current", side_effect=lambda t, inputs: t in exists), \
@@ -110,11 +118,11 @@ class DependencyTest(unittest.TestCase):
 
     def test_build_rebuilds_the_image_but_not_built_dependencies(self) -> None:
         self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM bottle/base:latest\n")
+        self.image("tools", "FROM localhost/bottle/base:latest\n")
         built = []
         with mock.patch.object(images, "is_current", return_value=True), \
                 mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append((n, no_cache))):
-            self.assertEqual(images.build("tools", no_cache=True), "bottle/tools:latest")
+            self.assertEqual(images.build("tools", no_cache=True), "localhost/bottle/tools:latest")
         self.assertEqual(built, [("tools", True)])
 
 
@@ -137,12 +145,12 @@ class StalenessTest(unittest.TestCase):
 
     def test_is_current_compares_the_label(self) -> None:
         with mock.patch.object(images.runtime, "image_labels", return_value={"bottle.inputs": "abc"}):
-            self.assertTrue(images.is_current("bottle/base:latest", "abc"))
-            self.assertFalse(images.is_current("bottle/base:latest", "def"))
+            self.assertTrue(images.is_current("localhost/bottle/base:latest", "abc"))
+            self.assertFalse(images.is_current("localhost/bottle/base:latest", "def"))
         with mock.patch.object(images.runtime, "image_labels", return_value=None):
-            self.assertFalse(images.is_current("bottle/base:latest", "abc"))  # missing
+            self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # missing
         with mock.patch.object(images.runtime, "image_labels", return_value={}):
-            self.assertFalse(images.is_current("bottle/base:latest", "abc"))  # built before labels
+            self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # built before labels
 
 
 class BuildImageTest(unittest.TestCase):
@@ -178,7 +186,7 @@ class BuildImageTest(unittest.TestCase):
             writer.close()
 
         with mock.patch.object(images.runtime, "build", side_effect=fake_build), self.assertLogs("bottle.egress"):
-            self.assertEqual(images.build("base", no_cache=True), "bottle/base:latest")
+            self.assertEqual(images.build("base", no_cache=True), "localhost/bottle/base:latest")
 
         self.ensure_container.assert_called_once()
         self.builder_start.assert_called_once()
@@ -229,7 +237,7 @@ class BuildImageTest(unittest.TestCase):
     def test_failing_to_stop_the_builder_doesnt_fail_the_build(self) -> None:
         self.builder_stop.side_effect = BottleError("nope")
         with mock.patch.object(images.runtime, "build", mock.AsyncMock()), mock.patch("sys.stderr"):
-            self.assertEqual(images.build("base"), "bottle/base:latest")
+            self.assertEqual(images.build("base"), "localhost/bottle/base:latest")
 
 
 if __name__ == "__main__":

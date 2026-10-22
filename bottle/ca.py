@@ -125,7 +125,6 @@ def certificate(bottle: str, hosts: Iterable[str]) -> str | None:
     missing; the bottle's CAs for other hosts are removed.
     """
     patterns = _patterns(hosts)
-    _remove_shared_ca()
     keep = _ensure(bottle, patterns) if patterns else None
     if hosts_dir(bottle).is_dir():
         # Not another start's staging directory, which is hidden.
@@ -138,14 +137,6 @@ def certificate(bottle: str, hosts: Iterable[str]) -> str | None:
 def forget(bottle: str) -> None:
     """Remove `bottle`'s CAs, when the bottle is deleted."""
     shutil.rmtree(hosts_dir(bottle), ignore_errors=True)
-
-
-def _remove_shared_ca() -> None:
-    """Remove the one CA every bottle trusted, from before CAs were per bottle and constrained."""
-    for name in ("ca.crt", "ca.key", "leaf.key"):
-        path = bottle_home() / "ca" / name
-        if path.is_file():
-            path.unlink()
 
 
 def _ensure(bottle: str, patterns: list[str]) -> Path:

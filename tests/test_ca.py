@@ -85,14 +85,6 @@ class GenerateTest(CATestCase):
         self.assertFalse(ca.hosts_dir("b").exists())
         ca.forget("b")  # and again, with nothing there
 
-    def test_the_ca_every_bottle_shared_is_removed(self) -> None:
-        shared = self.home / "ca"
-        shared.mkdir(parents=True)
-        for name in ("ca.crt", "ca.key", "leaf.key"):
-            (shared / name).write_text("from before CAs were per bottle")
-        ca.certificate("b", HOSTS)
-        self.assertEqual([p.name for p in shared.iterdir()], ["b"])
-
     def test_not_a_bottles_name(self) -> None:
         for bottle in ("", "..", ".hidden", "a/b"):
             with self.subTest(bottle), self.assertRaises(BottleError):

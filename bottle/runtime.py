@@ -217,17 +217,16 @@ def _container_info(info: dict) -> ContainerInfo:
     )
 
 
-def container_delete(name: str, owner: tuple[str, str] | None = None) -> None:
+def container_delete(name: str, owner: str | None = None) -> None:
     """Stop and delete `name`; a no-op if it doesn't exist.
 
-    With `owner` (label value, network), delete only a container that's
-    provably that owner's: labelled with it, or (made before labels) attached
-    to its network. Anything else is left alone and reported.
+    With `owner`, delete only a container labelled as that owner's. Anything
+    else is left alone and reported.
     """
     info = container_info(name)
     if info is None:
         return
-    if owner is not None and not _owned(info, *owner):
+    if owner is not None and not _owned(info, owner):
         raise BottleError(f"container {name} isn't this bottle's; leaving it alone")
     _run("delete", "--force", name)
 
@@ -235,10 +234,8 @@ def container_delete(name: str, owner: tuple[str, str] | None = None) -> None:
 OWNER_LABEL = "bottle.id"
 
 
-def _owned(info: ContainerInfo, owner: str, network: str) -> bool:
-    if OWNER_LABEL in info.labels:
-        return info.labels[OWNER_LABEL] == owner
-    return network in info.networks
+def _owned(info: ContainerInfo, owner: str) -> bool:
+    return info.labels.get(OWNER_LABEL) == owner
 
 
 def _label_options(labels: dict[str, str] | None) -> list[str]:

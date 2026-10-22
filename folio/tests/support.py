@@ -47,8 +47,9 @@ class FolioTestCase(unittest.TestCase):
         return git("-C", str(repo), "rev-parse", "HEAD")
 
     def folio(self, *args: str, cwd: Path | None = None, input: str | None = None) -> subprocess.CompletedProcess:
+        # Never this terminal for stdin, even with no input: folio would think it had one to ask on, and wait.
         return subprocess.run([sys.executable, str(FOLIO), *args], cwd=cwd or self.repo, env=self.env,
-                              capture_output=True, text=True, input=input)
+                              capture_output=True, text=True, input=input or "")
 
     def ok(self, *args: str, cwd: Path | None = None) -> str:
         result = self.folio(*args, cwd=cwd)

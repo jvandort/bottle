@@ -117,11 +117,6 @@ class Bottle:
     def container(self) -> str:
         return f"bottle-{namespace()}{self.name}"
 
-    @property
-    def owner(self) -> tuple[str, str]:
-        """What proves a container is this bottle's: its label value and network."""
-        return self.id, self.network
-
 
 def registry_path():
     return bottle_home() / "bottles.json"
@@ -323,7 +318,7 @@ def throwaway(feature_specs: list[str]):
     finally:
         for cleanup in (
             lambda: daemon.release_egress(name),
-            lambda: runtime.container_delete(name, (token, name)),
+            lambda: runtime.container_delete(name, token),
             lambda: runtime.network_delete(name),
         ):
             try:
@@ -633,7 +628,7 @@ def delete(name: str) -> None:
     failures = []
     for step, action in (
         ("egress", lambda: daemon.release_egress(bottle.name)),
-        ("container", lambda: runtime.container_delete(bottle.container, bottle.owner)),
+        ("container", lambda: runtime.container_delete(bottle.container, bottle.id)),
         ("anchor", lambda: _anchor(excluding=bottle.name)),  # off the network, or it can't be deleted
         ("network", lambda: runtime.network_delete(bottle.network)),
         ("egress CA", lambda: ca.forget(bottle.name)),
