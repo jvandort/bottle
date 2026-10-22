@@ -365,7 +365,7 @@ def _container_env(proxy: str, features: tuple[str, ...] | list[str]) -> dict[st
 
 def context(bottle: Bottle) -> str:
     """What the agent should know about its bottle, written to ~/BOTTLE.md when its workspace is set up:
-    what the bottle is, and nothing about how to work in it.
+    what the bottle is, what its features give it, and nothing about how to work in it.
 
     Agent-neutral: agent features point their own instruction files at it
     (the claude feature links ~/.claude/CLAUDE.md to it).
@@ -386,6 +386,12 @@ def context(bottle: Bottle) -> str:
         lines.append(f"- `{WORKSPACE}` is empty: this bottle has no repo.")
     lines.append("- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY`\n"
                  "  (already set). There's no DNS, and private addresses are blocked.")
+    # Each feature's own word on what it gives the agent (customizations.bottle.context).
+    told = [(f.id, f.agent_context()) for f in features_.resolve(list(bottle.features))]
+    told = [(feature_id, text) for feature_id, text in told if text]
+    if told:
+        lines.append("\n## Features")
+        lines += [f"\n### Feature '{feature_id}'\n\n{text}" for feature_id, text in told]
     text = "\n".join(lines) + "\n"
     return text + (f"\n{bottle.context}" if bottle.context else "")
 

@@ -257,6 +257,13 @@ class CreateTest(BottleTestCase):
         bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, git_repo="/src/r")
         self.assertIn("checkout of `r`, at a detached commit.", bottles.context(bottle))
 
+    def test_context_has_what_each_feature_says(self) -> None:
+        bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("jvm:version=21", "tools"))
+        context = bottles.context(bottle)
+        self.assertIn("\n## Features\n\n### Feature 'jvm'\n\nTemurin JDK 21 is the default `java`", context)
+        self.assertIn("\n### Feature 'tools'\n\n", context)
+        self.assertNotIn("## Features", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
+
     def test_workspace_script_quotes_values(self) -> None:
         run("git", "-C", self.repo_path, "branch", "we$rd;branch")
         fake = self.fake()
@@ -306,7 +313,8 @@ class CreateTest(BottleTestCase):
 
     def test_records_feature_dependencies(self) -> None:
         self.fake()
-        resolved = [SimpleNamespace(spec="tools"), SimpleNamespace(spec="jvm")]
+        resolved = [SimpleNamespace(id="tools", spec="tools", agent_context=str),
+                    SimpleNamespace(id="jvm", spec="jvm", agent_context=str)]
         with mock.patch.object(bottles.features_, "resolve", return_value=resolved), \
                 mock.patch.object(bottles.features_, "ensure_built", return_value="bottle/base:with-jvm.tools"):
             bottle = self.create(features=["jvm"])
@@ -663,7 +671,7 @@ class DeleteImageTest(BottleTestCase):
     def create_with(self, fake, features, name=None):
         tag = f"bottle/base:with-{'.'.join(sorted(features))}" if features else "bottle/base:latest"
         with mock.patch.object(bottles.features_, "ensure_built", return_value=tag), \
-                mock.patch.object(bottles.features_, "resolve", side_effect=lambda specs: [SimpleNamespace(id=s, spec=s, overrides=()) for s in specs]), \
+                mock.patch.object(bottles.features_, "resolve", side_effect=lambda specs: [SimpleNamespace(id=s, spec=s, overrides=(), agent_context=str) for s in specs]), \
                 mock.patch.object(bottles.features_, "image_tag", return_value=tag):
             return self.create(features=features, name=name), tag
 

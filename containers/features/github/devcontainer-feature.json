@@ -26,7 +26,8 @@
             "standin": "GH_TOKEN"
           }
         }
-      }
+      },
+      "context": "`gh` is installed. It and git are already authenticated to github.com by the egress proxy. SSH URLs for github.com are fetched over https."
     }
   }
 }

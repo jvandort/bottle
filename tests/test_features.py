@@ -15,6 +15,14 @@ class RealFeaturesTest(unittest.TestCase):
             with self.subTest(feature_id):
                 features.load(feature_id)
 
+    def test_every_shipped_feature_tells_the_agent_about_itself(self) -> None:
+        for feature_id in features.available():
+            with self.subTest(feature_id):
+                [feature] = [f for f in features.resolve([f"{feature_id}:server=x" if feature_id == "teamcity" else feature_id])
+                             if f.id == feature_id]
+                self.assertTrue(feature.agent_context())
+                self.assertNotIn("${", feature.agent_context())
+
     def test_claude_options(self) -> None:
         self.assertEqual(
             features.load("claude").option_env(),
@@ -273,6 +281,21 @@ class LoadTest(FeatureTestCase):
                 with self.assertRaisesRegex(BottleError, message):
                     features.load("a")
                 __import__("shutil").rmtree(self.root / "a")
+
+    def test_context_fills_in_options(self) -> None:
+        self.feature("a", options={"server": {"type": "string", "default": ""}, "ro": {"type": "boolean", "default": True}},
+                     customizations={"bottle": {"context": "Talks to ${server}; read-only: ${ro}.\n"}})
+        [configured] = features.resolve(["a:server=ci.example.com"])
+        self.assertEqual(configured.agent_context(), "Talks to ci.example.com; read-only: true.")
+
+    def test_context_validation(self) -> None:
+        self.assert_invalid("context must be a string", customizations={"bottle": {"context": ["x"]}})
+        __import__("shutil").rmtree(self.root / "a")
+        self.assert_invalid(r"context: \$\{ghost\} names no option", customizations={"bottle": {"context": "${ghost}"}})
+
+    def test_no_context_says_nothing(self) -> None:
+        self.feature("a")
+        self.assertEqual(features.load("a").agent_context(), "")
 
     def test_other_tools_customizations_fail_loudly(self) -> None:
         self.assert_invalid("customizations: unsupported: vscode", customizations={"vscode": {"extensions": []}})

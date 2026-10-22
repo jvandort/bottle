@@ -15,7 +15,7 @@ error, so a feature never silently loses behavior it asked for:
   installsAfter (local feature ids); customizations.bottle (below).
 
 customizations.bottle declares what a feature needs from bottle itself:
-credentials, and options a user has to set.
+credentials, options a user has to set, and what to tell the agent.
 
 A credential is a secret bottle keeps on the host and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
@@ -74,6 +74,13 @@ declare: it refuses the feature unless the user set the option.
 
   "customizations": {"bottle": {"requiredOptions": ["server"]}}
 
+context is what the agent in a bottle with the feature should know about it,
+added to its ~/BOTTLE.md under a heading of its own: Markdown, a sentence or
+two, saying what it can now do, not how the feature was installed. `${option}`
+is the value of one of the feature's options.
+
+  "customizations": {"bottle": {"context": "The `teamcity` command talks to ${server}."}}
+
 Features are requested as specs: an id, optionally with option values, e.g.
 `jvm:version=17` or `name:a=1,b=true`. Unset options take their defaults.
 """
@@ -99,7 +106,7 @@ REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
-BOTTLE_KEYS = {"credentials", "requiredOptions"}
+BOTTLE_KEYS = {"credentials", "requiredOptions", "context"}
 CREDENTIAL_KEYS = {"description", "login", "inject"}
 LOGIN_KEYS = {"command", "capture"}
 INJECT_KEYS = {"hosts", "header", "value", "standin"}
@@ -158,6 +165,8 @@ class Feature:
     installs_after: tuple[str, ...]
     credentials: tuple[Credential, ...] = ()
     required_options: tuple[str, ...] = ()
+    # What to tell the agent about it, with ${option} where an option's value goes.
+    context: str = ""
     # Option values set explicitly (not defaulted), from the feature's spec.
     overrides: tuple[tuple[str, str | bool], ...] = ()
 
@@ -225,6 +234,10 @@ class Feature:
         if "//" in filled or "/" in filled:
             raise BottleError(f"{where}: {filled!r} must be a host, reached over https, with no path")
         return filled
+
+    def agent_context(self) -> str:
+        """What to tell the agent about this feature, with its options filled in; "" for nothing."""
+        return OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), self.context).strip()
 
     def configured(self, settings: dict[str, str]) -> "Feature":
         """This feature with options set from a spec's `name=value` strings."""
@@ -317,7 +330,7 @@ def _options(options, fail) -> dict[str, Option]:
 
 
 def _customizations(customizations, options, fail) -> dict:
-    """What the feature asks of bottle: its credentials, and the options a user has to set."""
+    """What the feature asks of bottle: its credentials, the options a user has to set, and its context."""
     if not isinstance(customizations, dict):
         raise fail("customizations must be an object")
     unsupported = sorted(set(customizations) - {"bottle"})
@@ -339,9 +352,17 @@ def _customizations(customizations, options, fail) -> dict:
         if name not in options:
             known = ", ".join(sorted(options)) or "none"
             raise fail(f"customizations.bottle.requiredOptions: no option {name!r} (options: {known})")
+    context = bottle.get("context", "")
+    if not isinstance(context, str):
+        raise fail("customizations.bottle.context must be a string")
+    for name in OPTION_REFERENCE.findall(context):
+        if name not in options:
+            known = ", ".join(sorted(options)) or "none"
+            raise fail(f"customizations.bottle.context: ${{{name}}} names no option of this feature (options: {known})")
     return {
         "credentials": tuple(_credential(name, spec, options, fail) for name, spec in credentials.items()),
         "required_options": tuple(required),
+        "context": context,
     }
 
 

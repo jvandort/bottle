@@ -61,7 +61,8 @@
             "standin": "CLAUDE_CODE_OAUTH_TOKEN"
           }
         }
-      }
+      },
+      "context": "Claude Code (`claude`) is installed, and already logged in through the egress proxy."
     }
   }
 }

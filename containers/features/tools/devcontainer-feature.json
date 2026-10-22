@@ -2,8 +2,13 @@
   "id": "tools",
   "version": "1.0.0",
   "name": "Tools",
-  "description": "A minimal environment for doing useful work: ripgrep, fd, jq, curl, vim, tmux and friends.",
+  "description": "A minimal environment for doing useful work.",
   "containerEnv": {
     "EDITOR": "vim"
+  },
+  "customizations": {
+    "bottle": {
+      "context": "`rg`, `fd`, `jq`, `curl`, `vim`, `less`, `unzip` and `tmux` are installed."
+    }
   }
 }

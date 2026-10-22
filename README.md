@@ -216,8 +216,9 @@ bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `containerEnv`, `dependsOn` / `installsAfter` naming local features, and
 `customizations.bottle` (the credentials a feature needs, the hosts each one is
-attached to and the stand-in it wants, and `requiredOptions`, the options a user
-has to set).
+attached to and the stand-in it wants, `requiredOptions`, the options a user
+has to set, and `context`, a sentence or two for the agent about what the
+feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
 
 ### `bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]`
@@ -269,7 +270,8 @@ bottle new --spec spec.json --name foo-fix-tests --git-repo ~/src/foo --checkout
 ```
 
 `--context FILE` adds the file's contents to the end of `~/BOTTLE.md`, which
-says what the bottle and its remotes are, and nothing about how to work in it.
+says what the bottle, its remotes and its features are, and nothing about how
+to work in it.
 
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.

@@ -20,13 +20,6 @@ else
   rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 fi
 
-# Without sudo, pip falls back to ~/.local, which isn't on Debian's PATH.
-# Login shells get it: `bottle shell` runs bash -l, as does ssh.
+# Without sudo, pip puts console scripts in ~/.local/bin. Debian's ~/.profile
+# puts that on PATH, but only if it exists when a login shell starts.
 install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$_REMOTE_USER_HOME/.local/bin"
-cat > /etc/profile.d/python.sh <<'SH'
-# Console scripts from `pip install` without sudo land in ~/.local/bin.
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) PATH="$HOME/.local/bin:$PATH"; export PATH ;;
-esac
-SH

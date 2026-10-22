@@ -12,5 +12,10 @@
       "default": false,
       "description": "Keep Debian's PEP 668 marker, so pip refuses to install outside a virtualenv."
     }
+  },
+  "customizations": {
+    "bottle": {
+      "context": "`python` is Debian's Python 3, with `pip` and `venv`."
+    }
   }
 }

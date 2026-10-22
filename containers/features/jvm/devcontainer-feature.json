@@ -29,5 +29,10 @@
   },
   "containerEnv": {
     "JAVA_HOME": "/usr/lib/jvm/default-jdk"
+  },
+  "customizations": {
+    "bottle": {
+      "context": "Temurin JDK ${version} is the default `java`, at `$JAVA_HOME`. Every JDK installed is at `/usr/lib/jvm/jdk-<version>`."
+    }
   }
 }

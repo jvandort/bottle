@@ -40,7 +40,8 @@
             "value": "Bearer ${credential}"
           }
         }
-      }
+      },
+      "context": "The `teamcity` command is available, set up for ${server} and already authenticated by the egress proxy. Read-only (GET requests only): ${readOnly}."
     }
   }
 }
