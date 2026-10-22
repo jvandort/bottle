@@ -14,11 +14,10 @@
   login's URL (`claude setup-token` prints it there), so it wants a quiet mode
   in bottle that keeps a login's output.
 - **Make `bottle new` and `delete` faster.** Timed from bottle.log, with the
-  image built: `new` 4.0s, `delete` 2.1s, `pause` 1.6s before its delete. The
-  anchor is about 1.5s of each `new` and `delete`; that's bottle's
-  (docs/TODO.md, Network). The rest:
-  - **~0.3s per `container exec`.** `new` makes three in setting up (contract,
-    CA, workspace); `pause` five (list-panes, kill-server, two archives,
+  image built, on apple/container (retime on smolvm, which has no anchor):
+  `new` 4.0s, `delete` 2.1s, `pause` 1.6s before its delete. Of that:
+  - **~0.3s per `exec`.** `new` makes four in setting up (contract, CA,
+    bottle.host, workspace); `pause` five (list-panes, kill-server, two archives,
     work.txt). Fold them where the output allows.
   - **The workspace's first fetch** (part of 1.2s with the CA and egress) has
     the host `git fetch origin` before serving origin. A new bottle could

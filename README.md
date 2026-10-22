@@ -5,7 +5,7 @@
 Bottle manages sandboxed Linux VMs for coding agents, on macOS. Let the agent run with full
 permissions inside. Take back only the commits you want.
 
-- **A real VM per bottle.** Its own kernel, via [apple/container](https://github.com/apple/container),
+- **A real VM per bottle.** Its own kernel, via [smolvm](https://github.com/smol-machines/smolvm),
   with everything it needs already installed. Starts in about a second.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through the host. Your
@@ -13,10 +13,11 @@ permissions inside. Take back only the commits you want.
 - **Git in, git out.** The repo is mounted read-only, and the bottle is served the git remotes
   it's given. One that takes pushes writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
-- **Network on a leash.** Egress only through a proxy on your machine, so a bottle gets your DNS and
-  VPN routes but not your local network, even as root.
+- **Network on a leash.** No proxy to configure: every connection a bottle opens is made from
+  your machine, after `bottled` decides it, so a bottle gets your VPN routes but not your local
+  network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
-  the proxy attaches it there. The bottle talks to the proxy and never holds the token.
+  `bottled` attaches it there. The bottle never holds the token.
 - **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
   file. Images are prebuilt, and rebuilt when they go stale.
@@ -33,7 +34,7 @@ it without you watching.
 A bottle is **not** a box for a hostile agent. Egress allows any public destination, so anything
 inside a bottle — the repo, and anything you put there — can leave. Treat a bottle's contents as
 the agent's to read and to send: don't put a secret in one you wouldn't hand to the agent
-directly. Credentials bottle itself manages stay out of the bottle: the egress proxy attaches them
+directly. Credentials bottle itself manages stay out of the bottle: `bottled` attaches them
 (see `bottle auth login`), so they're never there to leave, though the bottle can still spend them
 against the hosts they're attached to.
 
@@ -52,19 +53,19 @@ folio claude fix-it       # A thread: a bottle, a lane for its commits, and Clau
 Bottle on its own:
 
 ```sh
-echo '{"features": ["tools", "claude"]}' > spec.json
+echo '{"features": ["tools", "claude"], "memory": "4G"}' > spec.json
 bottle new --spec spec.json --name foo --git-repo ~/path/to/foo
 bottle shell foo          # Open a shell at /workspace; run `claude` here
 ```
 
 ## Prerequisites
 
-- macOS 26+ on Apple silicon
+- macOS on Apple silicon
 - [Homebrew](https://brew.sh)
 - Python 3.11+
 
-Bottle sets up what it depends on (apple/container, its services
-and a Linux kernel) as necessary, and asks before installing anything.
+Bottle installs smolvm (`brew install smol-machines/tap/smolvm`) when it's
+missing, and asks first.
 
 ## Commands
 
@@ -78,9 +79,8 @@ and a Linux kernel) as necessary, and asks before installing anything.
 | `bottle status` | List bottles and their state |
 | `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
-| `bottle daemon start` / `stop` | Manage `bottled`, the background network process |
-| `bottle shutdown` | Stop every running bottle and the anchor, then `bottled` |
-| `bottle egress` | Run a bottle's egress proxy by hand, for testing |
+| `bottle daemon start` / `stop` | Manage `bottled`, which decides bottles' connections |
+| `bottle shutdown` | Stop every running bottle, then `bottled` |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
@@ -95,18 +95,18 @@ command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
 captures the credential it prints and stores it in the macOS Keychain; a
 credential with no such command is asked for instead.
 
-A credential never enters a bottle. bottled hands it to that bottle's egress
-proxy, which attaches it as a header to the bottle's requests to the hosts the
+A credential never enters a bottle. bottled keeps it, and attaches it as a header to the bottle's requests to the hosts the
 feature named — `claude` names `api.anthropic.com`, `github` names `github.com`
 and its API, `teamcity` names its `server`. The agent can spend the credential
 against those hosts and can't read it, so an agent that sends everything it
 holds to a stranger sends no token.
 
-Tools in the bottle talk to those hosts over HTTPS as usual. A CONNECT tunnel is
-opaque, so for those hosts only, the proxy terminates it: it completes the
+Tools in the bottle talk to those hosts over HTTPS as usual. TLS is opaque, so
+for those hosts only, bottled takes the connection itself: it completes the
 bottle's TLS handshake with a certificate from the bottle's **egress CA**,
 reads the request, attaches the credential, and makes its own verified HTTPS
-connection to the server. Every other destination is tunnelled untouched. The
+connection to the server. Every other connection goes straight to where it
+was headed, untouched. The
 host is also reachable when it's a private address, since configuring it is
 what naming it means; nothing else about that host opens up.
 
@@ -116,7 +116,7 @@ trust store (and at `NODE_EXTRA_CA_CERTS`, for Node tools); a bottle whose
 features name no credential hosts has none. The CA carries a name constraint
 permitting only the hosts the bottle's credentials name, which the bottle's own
 TLS clients enforce: a certificate for any other site is refused, whoever signs
-it, so nothing but those hosts' traffic can be read by the proxy. A constraint
+it, so nothing but those hosts' traffic can be read by bottled. A constraint
 on a host also covers the names below it (`github.com` covers
 `gist.github.com`); that is how X.509 name constraints work. The keys never
 leave your machine, your machine never trusts any of them, and `bottle delete`
@@ -240,7 +240,7 @@ branch, or, if there's no origin, whatever the repo has checked out. Without
 `--git-repo` the bottle has an empty `/workspace`.
 
 Each `--git-remote` serves the bottle one remote, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`,
-live, through its egress proxy. What a fetch sees is one of three views:
+live, at `http://bottle.host/`, which bottled answers. What a fetch sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
   Fetching first fetches your repo's `origin` on the host (at most once a
@@ -281,8 +281,8 @@ directory.
 Checks a spec as `bottle new --spec` would: its features exist, their options
 are valid and every required one is set, and the memory fits this machine.
 Prints it in canonical form, with `--json` as JSON: features sorted, each
-one's options sorted and its defaults left out, and the memory as `all` or a
-size.
+one's options sorted and its defaults left out, and the memory as a size.
+Every spec gives its memory.
 
 ### `bottle shell BOTTLE`
 
@@ -325,34 +325,21 @@ one.
 
 ### `bottle shutdown`
 
-Stops every running bottle and the anchor, then `bottled`.
-
-The anchor is one small idle VM (about 290 MB of memory) attached to every
-bottle's network. It works around an apple/container bug
-([#2051](https://github.com/apple/container/issues/2051)) where restarting one
-bottle could cut off another's network; bottle starts it whenever a bottle
-needs it. If a bottle still reports that its network lost its bridge, run
-`bottle shutdown && container system stop` and try again.
+Stops every running bottle, then `bottled`.
 
 ### `bottle daemon start` / `bottle daemon stop`
 
-Starts or stops `bottled`, the background process that gives bottles network
-access. It starts automatically when a command needs it, and restores network
-access for every running bottle when it starts. While it's stopped, running
-bottles have no network access.
+Starts or stops `bottled`, the background process that decides bottles'
+connections. smolvm asks it about each TCP connection a bottle opens, before
+making it: public destinations, IPv4 and IPv6, go straight there; private
+addresses are refused, but for a credential's own host; `bottle.host` is
+answered by bottled itself, with the bottle's git remotes. A refused
+connection is reset. DNS is smolvm's, which asks the Mac's resolver. Logs one
+line per connection, in `~/.bottle/logs`.
 
-### `bottle egress BOTTLE --listen HOST:PORT [--allow PATTERN]...`
-
-Runs a bottle's egress proxy: an HTTP proxy (CONNECT and plain HTTP) that makes
-connections from the host, so they use the host's DNS and VPN routes. Public
-destinations are allowed. Private addresses are refused unless the hostname
-matches an `--allow` pattern; the host's own loopback and link-local addresses
-are always refused. Logs one line per connection. Bottle will start these
-itself; the command exists for testing.
-
-```sh
-bottle egress mybottle --listen 192.168.128.1:3128 --allow '*.corp.example.com'
-```
+bottled starts automatically when a command needs it, and when it starts it
+picks up the bottles that were running. While it's stopped, running bottles
+can't open connections.
 
 </details>
 
@@ -363,3 +350,14 @@ Run the tests from the repo root:
 ```sh
 python3 -m unittest
 ```
+
+Where smolvm is installed (or `BOTTLE_SMOLVM` names one), that includes two
+suites that run real machines, and take minutes the first time, while they
+pull and build images:
+
+- `tests/test_smolvm_contract.py`: what bottle relies on smolvm for. Run it
+  for a smolvm version bottle hasn't been checked with.
+- `tests/test_end_to_end.py`: a real bottle through `bin/bottle`, in its own
+  `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
+
+Elsewhere they're skipped.

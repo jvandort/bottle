@@ -93,7 +93,7 @@ terminal it needs `--yes`.
 threads is made from: `set` replaces it, `update` adds features (a feature
 given again replaces its options) or changes the memory. Bottle checks the
 spec before folio saves it. A repo with no spec gets `tools`, which has the
-shpool every thread runs in; add `claude` for Claude.
+shpool every thread runs in, and 2G of memory; add `claude` for Claude.
 
 ```sh
 folio configure set --feature tools --feature claude --feature jvm:version=21 --memory 8G
