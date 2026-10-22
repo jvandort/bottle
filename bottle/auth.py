@@ -7,8 +7,8 @@ the feature's own login command (e.g. `claude setup-token`) in a throwaway
 bottle with that feature, attached to your terminal, and captures the
 credential from its output.
 
-A credential never enters a bottle. bottled hands it to that bottle's egress
-proxy (injections_for), which puts it in place of the stand-in on the bottle's
+A credential never enters a bottle. bottled hands it to that bottle's
+gateway (injections_for), which puts it in place of the stand-in on the bottle's
 requests to the hosts the feature named, on HTTPS connections the machine
 makes (see egress.py). The agent can spend the credential against those
 hosts, and can't read it -- so a bottle that leaks everything it holds leaks
@@ -129,7 +129,7 @@ def login(name: str) -> None:
     if login is None:
         value = getpass.getpass(f"{d.credential.description}: ")
     else:
-        from bottle import bottles  # bottles imports features, runtime, daemon; only logging in needs it
+        from bottle import bottles  # bottles imports features, smolvm, daemon; only logging in needs it
 
         print(f"Starting a throwaway bottle with {d.feature} to run `{' '.join(login.command)}`...", file=sys.stderr)
         with bottles.throwaway([d.feature]) as argv_for:
@@ -202,10 +202,10 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
 
 
 def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
-    """What the egress proxy attaches for a bottle with these features: one per injected credential.
+    """What bottled attaches for a bottle with these features: one per injected credential.
 
     Read from the Keychain here, in bottled, so the value goes no further than
-    the proxy. A credential that isn't logged in is left out; the bottle then
+    the gateway. A credential that isn't logged in is left out; the bottle then
     reaches the host unauthenticated, and the server says so.
 
     A request to a host that several patterns match is served by the first
@@ -248,7 +248,7 @@ def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:
     """The fake tokens a bottle with these features gets, by variable name.
 
     A stand-in is not a credential and not a secret: it is what makes a tool
-    believe it's logged in, so it will make the request the proxy then
+    believe it's logged in, so it will make the request bottled then
     authenticates. bottle sets these when it creates a bottle -- but never in
     the throwaway bottle a login command runs in, which must find nothing.
     """

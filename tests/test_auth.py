@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from bottle import auth, features, runtime
+from bottle import auth, features, smolvm
 from bottle.errors import BottleError
 
 # What `claude setup-token` printed, as recorded with `script` (token replaced).
@@ -132,7 +132,7 @@ class StandinTest(unittest.TestCase):
 
 
 class InjectedCredentialTest(unittest.TestCase):
-    """A credential the egress proxy holds: nothing about it enters the bottle."""
+    """A credential bottled holds: nothing about it enters the bottle."""
 
     specs = ["teamcity:server=https://ci.corp.example.com", "tools"]
 
@@ -259,10 +259,9 @@ class EnsureLoggedInTest(unittest.TestCase):
 class ExecEnvTest(unittest.TestCase):
     def test_nothing_from_the_host_reaches_a_session(self) -> None:
         """A bottle's environment is its image's: no credential is ever handed in here."""
-        with mock.patch.object(runtime.os, "execvp") as execvp, mock.patch.dict(os.environ, {"TOKEN": "tok-secret"}):
-            runtime.container_exec_interactive("c", ["bash"])
-        argv = execvp.call_args.args[1]
-        self.assertNotIn("--env", argv)
+        with mock.patch.dict(os.environ, {"TOKEN": "tok-secret"}):
+            argv = smolvm.exec_command("m", ["bash"], user="genie", tty=True)
+        self.assertNotIn("-e", argv)
         self.assertFalse(any("tok-secret" in arg for arg in argv))
 
 

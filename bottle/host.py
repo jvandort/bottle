@@ -1,10 +1,10 @@
-"""Host services: what a bottle can ask of the host, through its egress proxy.
+"""Host services: what a bottle can ask of the host, at bottle.host.
 
-Requests to http://bottle.host/ never leave the host: the bottle's egress proxy
-answers them itself, serving the bottle's repo over git's smart HTTP protocol
-with `git http-backend`. A bottle is served the remotes it was created with,
-each a Remote at http://bottle.host/git/<name>. What a fetch sees is one of
-three views:
+Requests to http://bottle.host/ never leave the host: the decider hands them
+to bottled, which answers them itself, serving the bottle's repo over git's
+smart HTTP protocol with `git http-backend`. A bottle is served the remotes it
+was created with, each a Remote at http://bottle.host/git/<name>. What a fetch
+sees is one of three views:
 
   upstream
       The repo's upstream: the host repo's refs/remotes/origin/*, served as
@@ -55,6 +55,10 @@ from bottle.errors import BottleError
 log = logging.getLogger("bottle.egress")
 
 HOST = "bottle.host"
+# Where a bottle whose driver carries its sockets reaches bottle.host: its
+# /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
+# uses, which smolvm hands to the decider like any other.
+ADDRESS = "192.0.2.1"
 GIT_PATH = "/git"
 MAX_BODY = 64 * 1024 * 1024
 HOOKS = Path(__file__).resolve().parent / "hooks"

@@ -9,38 +9,30 @@ import platform
 import shutil
 import subprocess
 import sys
-from pathlib import Path
-
-from bottle import runtime
+from bottle import smolvm
 from bottle.errors import BottleError
 
-MIN_MACOS = 26
-# Where `container system kernel set --recommended` installs the default kernel.
-KERNEL = Path.home() / "Library/Application Support/com.apple.container/kernels/default.kernel-arm64"
+# The smolvm tests/test_smolvm_contract.py last passed with; others may work, unchecked.
+SMOLVM_TESTED = "1.31.2"
 
 
 @functools.cache
-def ensure_container() -> None:
-    """apple/container installed, its services running, and a kernel installed."""
-    _require_host()
-    if shutil.which("container") is None:
+def ensure_smolvm() -> None:
+    """smolvm installed (see smolvm.py), or the one $BOTTLE_SMOLVM names."""
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise BottleError("bottle runs on macOS on Apple silicon")
+    binary = smolvm.binary()
+    if shutil.which(binary) is None:
+        if binary != "smolvm":
+            raise BottleError(f"BOTTLE_SMOLVM is {binary}, which isn't there")
         if shutil.which("brew") is None:
-            raise BottleError("bottle installs apple/container with Homebrew; install it from https://brew.sh")
-        _install("apple/container", ["brew", "install", "container"])
-    if not runtime.services_running():
-        runtime.start_services()  # the kernel is handled below
-    if not KERNEL.exists():
-        _install("the recommended Linux kernel for containers", ["container", "system", "kernel", "set", "--recommended"])
-
-
-def _require_host() -> None:
-    if platform.system() != "Darwin":
-        raise BottleError("bottle only runs on macOS")
-    if platform.machine() != "arm64":
-        raise BottleError("apple/container requires Apple silicon")
-    version = platform.mac_ver()[0]
-    if int(version.split(".")[0]) < MIN_MACOS:
-        raise BottleError(f"macOS {MIN_MACOS}+ required (found {version})")
+            raise BottleError("bottle installs smolvm with Homebrew; install it from https://brew.sh")
+        _install("smolvm", ["brew", "install", "smol-machines/tap/smolvm"])
+    version = subprocess.run([binary, "--version"], capture_output=True, text=True).stdout.split()
+    if version[1:2] != [SMOLVM_TESTED]:
+        found = version[1] if len(version) > 1 else "an unknown version"
+        print(f"bottle: smolvm is {found}; bottle was checked with {SMOLVM_TESTED} "
+              "(tests/test_smolvm_contract.py checks another)", file=sys.stderr)
 
 
 def _install(what: str, cmd: list[str]) -> None:

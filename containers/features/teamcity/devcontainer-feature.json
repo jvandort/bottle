@@ -2,7 +2,7 @@
   "id": "teamcity",
   "version": "1.0.0",
   "name": "TeamCity CLI",
-  "description": "JetBrains' TeamCity CLI, authenticated by the egress proxy: the bottle talks to its server without ever holding the token.",
+  "description": "JetBrains' TeamCity CLI, authenticated by the host: the bottle talks to its server without ever holding the token.",
   "documentationURL": "https://www.jetbrains.com/help/teamcity/teamcity-cli.html",
   "containerEnv": {
     "TEAMCITY_NO_UPDATE": "1"
@@ -41,7 +41,7 @@
           }
         }
       },
-      "context": "The `teamcity` command is available, set up for ${server} and already authenticated by the egress proxy. Read-only (GET requests only): ${readOnly}."
+      "context": "The `teamcity` command is available, set up for ${server} and already authenticated by the host. Read-only (GET requests only): ${readOnly}."
     }
   }
 }

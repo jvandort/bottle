@@ -126,14 +126,14 @@ def main(argv: list[str] | None = None) -> int:
     delete.set_defaults(run=_delete, parser=delete)
 
     shutdown = commands.add_parser(
-        "shutdown", help="stop every bottle, the anchor and bottled",
-        description="Stop every running bottle and the anchor (the idle VM that keeps bottles' networks up), then bottled."
+        "shutdown", help="stop every bottle and bottled",
+        description="Stop every running bottle, then bottled."
     )
     shutdown.set_defaults(run=_shutdown, parser=shutdown)
 
     daemon = commands.add_parser(
         "daemon",
-        help="control bottled, which gives bottles network access (started automatically when needed)",
+        help="control bottled, which decides bottles' connections (started automatically when needed)",
     )
     daemon_commands = daemon.add_subparsers(dest="daemon_command", required=True, metavar="COMMAND")
     daemon_start = daemon_commands.add_parser("start", help="start bottled in the background")
@@ -143,20 +143,6 @@ def main(argv: list[str] | None = None) -> int:
         "stop", help="stop bottled; running bottles lose network access until it's started again"
     )
     daemon_stop.set_defaults(run=_daemon_stop, parser=daemon_stop)
-
-    egress = commands.add_parser(
-        "egress",
-        help="run a bottle's egress proxy (normally started by bottle itself)",
-        description="Run an HTTP proxy that makes connections on the host's behalf. "
-        "Public destinations are allowed; private ones only via --allow hostnames.",
-    )
-    egress.add_argument("name", metavar="BOTTLE", help="the bottle this proxy serves, used in logs")
-    egress.add_argument("--listen", required=True, metavar="HOST:PORT", help="address to listen on")
-    egress.add_argument(
-        "--allow", action="append", default=[], metavar="PATTERN",
-        help="hostname pattern allowed to reach private addresses (repeatable)",
-    )
-    egress.set_defaults(run=_egress, parser=egress)
 
     args = parser.parse_args(argv)
     store.log_to_file("bottled" if args.run is _daemon_start and args.foreground else "bottle")
@@ -204,7 +190,7 @@ def _table(rows: list[tuple[str, ...]]) -> None:
 def _auth_list(args: argparse.Namespace) -> int:
     from bottle import auth
 
-    # Every credential is held by the egress proxy, so what's worth showing is
+    # Every credential is held by bottled, so what's worth showing is
     # where it's spent: the hosts it's attached to, as the feature declares
     # them (${option} is filled in from a bottle's own options).
     rows = [("CREDENTIAL", "FEATURE", "STATUS", "ATTACHED TO", "DESCRIPTION")]
@@ -321,8 +307,6 @@ def _delete(args: argparse.Namespace) -> int:
 def _build(args: argparse.Namespace) -> int:
     from bottle import features, images
 
-    # Show the proxy's denials and failures; they explain most network errors in a build.
-    _log_to_stderr(logging.WARNING)
     print(f"Built {features.build(images.BASE, args.feature, args.no_cache)}")
     return 0
 
@@ -386,26 +370,4 @@ def _daemon_start(args: argparse.Namespace) -> int:
         asyncio.run(daemon.serve())
     except KeyboardInterrupt:
         pass
-    return 0
-
-
-def _egress(args: argparse.Namespace) -> int:
-    import asyncio
-
-    from bottle import egress
-
-    host, _, port = args.listen.rpartition(":")
-    if not host or not port.isdigit():
-        args.parser.error(f"--listen must be HOST:PORT, got {args.listen!r}")
-    # Run by hand: its connections on stdout, stamped, as well as in bottle.log.
-    stdout = logging.StreamHandler(sys.stdout)
-    stdout.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    logging.getLogger().addHandler(stdout)
-    policy = egress.Policy(allow_private=tuple(args.allow))
-    try:
-        asyncio.run(egress.serve(args.name, host.strip("[]"), int(port), policy))
-    except KeyboardInterrupt:
-        pass
-    except OSError as e:
-        raise BottleError(f"cannot listen on {args.listen}: {e.strerror}") from None
     return 0

@@ -10,6 +10,13 @@ from tests.support import GitTestCase
 
 
 class CliTestCase(GitTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Every spec gives its memory, which is checked against the machine's.
+        patcher = mock.patch("bottle.specs.host_memory_mib", return_value=16384)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def run_cli(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -31,7 +38,7 @@ class LogTest(CliTestCase):
 
     def test_each_command_and_how_it_went_are_logged(self) -> None:
         spec = self.tmp / "spec.json"
-        spec.write_text('{"features": []}')
+        spec.write_text('{"features": [], "memory": "2G"}')
         self.run_cli("spec", "validate", str(spec))
         self.run_cli("spec", "validate", str(self.tmp / "nope.json"))
         log = self.log()
@@ -77,10 +84,10 @@ class SpecCommandsTest(CliTestCase):
         return str(path)
 
     def test_validate_prints_the_canonical_spec(self) -> None:
-        spec = self.spec('{"features": ["tools", "jvm:version=25"]}')
-        self.assertEqual(self.run_cli("spec", "validate", spec), (0, "Valid: features [jvm, tools] and memory all\n", ""))
+        spec = self.spec('{"features": ["tools", "jvm:version=25"], "memory": "2G"}')
+        self.assertEqual(self.run_cli("spec", "validate", spec), (0, "Valid: features [jvm, tools] and memory 2G\n", ""))
         self.assertEqual(self.run_cli("spec", "validate", "--json", spec),
-                         (0, '{"features": ["jvm", "tools"], "memory": "all"}\n', ""))
+                         (0, '{"features": ["jvm", "tools"], "memory": "2G"}\n', ""))
 
     def test_validate_fails_with_bottles_own_message(self) -> None:
         spec = self.spec('{"features": ["nope"]}')
@@ -89,7 +96,7 @@ class SpecCommandsTest(CliTestCase):
         self.assertIn("no feature named 'nope'", err)
 
     def test_new_needs_a_spec_and_a_name(self) -> None:
-        spec = self.spec('{"features": []}')
+        spec = self.spec('{"features": [], "memory": "2G"}')
         for argv, message in (
             ((), "the following arguments are required: --spec, --name"),
             (("--spec", spec), "the following arguments are required: --name"),
@@ -103,7 +110,7 @@ class SpecCommandsTest(CliTestCase):
                 self.assertIn(message, err)
 
     def test_new_from_a_spec(self) -> None:
-        spec = self.spec('{"features": ["tools"]}')
+        spec = self.spec('{"features": ["tools"], "memory": "2G"}')
         context = self.tmp / "context.md"
         context.write_text("More.\n")
         repo = self.make_repo()
@@ -113,7 +120,7 @@ class SpecCommandsTest(CliTestCase):
             code, out, _ = self.run_cli("new", "--spec", spec, "--git-repo", str(repo), "--git-remote", "origin:fetch=upstream",
                                         "--checkout", "main", "--name", "project", "--context", str(context))
         self.assertEqual(code, 0)
-        create.assert_called_once_with({"features": ["tools"], "memory": "all"}, "project", repo, ["origin:fetch=upstream"],
+        create.assert_called_once_with({"features": ["tools"], "memory": "2G"}, "project", repo, ["origin:fetch=upstream"],
                                        "main", "More.\n")
         self.assertIn(f"Created bottle 'project', with {repo} at main (cccccccccccc)", out)
 

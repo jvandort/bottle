@@ -41,8 +41,8 @@ class NewTest(FolioTestCase):
 
     def test_the_repos_spec_is_checked_and_saved_first(self) -> None:
         self.ok("new", "fix-it")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "all"})
-        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "all"})
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G"})
 
     def test_refuses_a_bad_name_or_a_taken_one(self) -> None:
         for name in ("Fix", "fix_it", "fix-", "fix--it", "fix/it"):
@@ -238,7 +238,7 @@ class DeleteTest(FolioTestCase):
 
 class ConfigureTest(FolioTestCase):
     def test_show_the_default_until_set(self) -> None:
-        self.assertEqual(self.ok("configure", "show"), "features [tools], memory all (the default; nothing set yet)\n")
+        self.assertEqual(self.ok("configure", "show"), "features [tools], memory 2G (the default; nothing set yet)\n")
 
     def test_set_replaces_and_update_adds(self) -> None:
         self.assertEqual(self.ok("configure", "set", "--feature", "tools", "--feature", "jvm:version=17", "--memory", "8G"),
@@ -246,7 +246,7 @@ class ConfigureTest(FolioTestCase):
         self.ok("configure", "update", "--feature", "jvm:version=21", "--feature", "claude")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
         self.ok("configure", "set", "--feature", "python")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["python"], "memory": "all"})
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["python"], "memory": "2G"})
 
     def test_bottle_checks_it_before_its_saved(self) -> None:
         self.ok("configure", "set", "--feature", "tools")
@@ -254,7 +254,14 @@ class ConfigureTest(FolioTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "bottle: error: no feature named 'nope'\n"
                                         "folio: error: `bottle spec validate` failed (exit 1)\n")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "all"})
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+
+    def test_a_spec_saved_before_memory_was_needed_gets_the_default(self) -> None:
+        repo = repos.current(self.repo)
+        for saved in ({"features": ["tools"], "memory": "all"}, {"features": ["tools"]}):
+            with self.subTest(saved):
+                repo.save_spec(saved)
+                self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
 
     def test_update_needs_something_to_change(self) -> None:
         self.assertEqual(self.folio("configure", "update").returncode, 2)

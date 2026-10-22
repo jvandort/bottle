@@ -19,7 +19,7 @@ credentials, options a user has to set, and what to tell the agent.
 
 A credential is a secret bottle keeps on the host and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
-it belongs to, and the egress proxy attaches it to the bottle's requests to
+it belongs to, and bottled attaches it to the bottle's requests to
 those hosts (see bottle/egress.py).
 
   "customizations": {"bottle": {"credentials": {"teamcity": {
@@ -94,7 +94,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from bottle import images, runtime
+from bottle import images
 from bottle.errors import BottleError
 
 FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
@@ -135,7 +135,7 @@ class Login:
 
 @dataclass(frozen=True)
 class Inject:
-    """Where a credential belongs, so the egress proxy can attach it there."""
+    """Where a credential belongs, so bottled can attach it there."""
 
     hosts: tuple[str, ...]  # `host` or `host:port`; `${option}` is an option's value
     value: str  # the header value, with ${credential} where the real one goes
@@ -149,7 +149,7 @@ class Inject:
 class Credential:
     name: str
     description: str
-    # Where it goes: onto the bottle's requests, by the egress proxy.
+    # Where it goes: onto the bottle's requests, by bottled.
     inject: Inject
     login: Login | None = None
 
@@ -576,31 +576,30 @@ def ensure_built(image: str, specs: list[str]) -> str:
     """Build `image` with the features in `specs` if missing or stale; return its tag."""
     features = resolve(specs)
     tag = image_tag(image, features)
-    with images.building():
-        built = images.ensure_built(image)
-        if features and not images.is_current(tag, inputs_hash(image, features)):
-            print(f"Building {tag}...", file=sys.stderr)
-            _build(image, features, tag)
-            built = True
+    built = images.ensure_built(image)
+    if features and not images.is_current(tag, inputs_hash(image, features)):
+        print(f"Building {tag}...", file=sys.stderr)
+        _build(image, features, tag)
+        built = True
     if built:
         _report_removed(remove_stale())
     return tag
 
 
 def remove_stale() -> list[str]:
-    """Delete bottle's images whose inputs have changed since they were built, unless a container uses one.
+    """Forget bottle's images whose inputs have changed since they were built; delete archives nothing uses.
 
-    Returns the images deleted.
+    An archive goes once no tag points to it and no bottle was made from it:
+    smolvm reads a machine's archive again on every start. Returns the images forgotten.
     """
-    in_use = runtime.images_in_use()
+    from bottle import bottles  # bottles imports this module
+
     removed = []
-    for ref in runtime.images():
-        if not ref.name.startswith(f"{images.REPOSITORY}/") or ref.digest in in_use:
-            continue
-        labels = runtime.image_labels(ref.name) or {}
-        if labels.get(images.INPUTS_LABEL) != _expected_inputs(ref.name, labels):
-            runtime.image_delete(ref.name)
-            removed.append(ref.name)
+    for tag, labels in images.built().items():
+        if labels.get(images.INPUTS_LABEL) != _expected_inputs(tag, labels):
+            images.forget(tag)
+            removed.append(tag)
+    images.remove_unused({b.archive for b in bottles.load().values() if b.archive})
     return removed
 
 
@@ -618,14 +617,13 @@ def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
 
 def build(image: str, specs: list[str], no_cache: bool = False) -> str:
     """Build `image` with the features in `specs`, first building anything missing underneath."""
-    with images.building():
-        if not specs:
-            tag = images.build(image, no_cache)
-        else:
-            features = resolve(specs)
-            tag = image_tag(image, features)
-            images.ensure_built(image)
-            _build(image, features, tag, no_cache)
+    if not specs:
+        tag = images.build(image, no_cache)
+    else:
+        features = resolve(specs)
+        tag = image_tag(image, features)
+        images.ensure_built(image)
+        _build(image, features, tag, no_cache)
     _report_removed(remove_stale())
     return tag
 
@@ -639,7 +637,8 @@ def _build(image: str, features: list[Feature], tag: str, no_cache: bool = False
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp) / "Dockerfile"
         generated.write_text(dockerfile(image, features))
-        images.build_context(FEATURES, tag, inputs_hash(image, features), no_cache, dockerfile=generated)
+        images.build_context(FEATURES, tag, inputs_hash(image, features), no_cache, dockerfile=generated,
+                             labels={FEATURES_LABEL: " ".join(sorted(f.spec for f in features))})
 
 
 def _option_env_name(option: str) -> str:

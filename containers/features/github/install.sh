@@ -19,8 +19,8 @@ rm -rf /var/lib/apt/lists/*
 
 # How this feature is authenticated, since JSON has no room for a comment:
 #
-#   gh and git talk to github.com over https as they always do. The egress
-#   proxy terminates that TLS with a certificate from the egress CA, which
+#   gh and git talk to github.com over https as they always do. bottled
+#   terminates that TLS with a certificate from the egress CA, which
 #   the bottle trusts, for github.com, api.github.com and uploads.github.com,
 #   and puts the token in place of the stand-in on the requests that present
 #   one (see bottle/egress.py). Requests that don't -- a build tool fetching a
@@ -33,14 +33,14 @@ rm -rf /var/lib/apt/lists/*
 #   it. git asks the credential helper below only when GitHub has refused it
 #   without credentials (a private repository, a push), and sends what it
 #   gets as Basic credentials -- the only kind GitHub's git endpoints take a
-#   token in, and the proxy replaces the password in kind. The helper gives
+#   token in, and bottled replaces the password in kind. The helper gives
 #   nothing where GH_TOKEN is unset, such as the bottle a login runs in.
 #
 # What the token can do is what a bottle can do on GitHub, which is why the
 # credential asks for a fine-grained token: pushes that reach GitHub directly
 # don't pass through your repo the way a bottle's lane does.
 
-# git over ssh has no key in a bottle, and the proxy can't attach anything to
+# git over ssh has no key in a bottle, and bottled can't attach anything to
 # it, so GitHub's ssh remotes are fetched and pushed over https instead. With
 # --system, since the tools feature (installed first) owns /etc/gitconfig.
 git config --system url."https://github.com/".insteadOf "git@github.com:"

@@ -19,8 +19,9 @@ from .errors import FolioError
 from .git import git
 
 # What a new repo's bottles get until `folio configure` says otherwise: tools
-# has shpool, which every thread runs in.
-DEFAULT_SPEC = {"features": ["tools"]}
+# has shpool, which every thread runs in; and memory, which every spec gives.
+DEFAULT_MEMORY = "2G"
+DEFAULT_SPEC = {"features": ["tools"], "memory": DEFAULT_MEMORY}
 
 
 @dataclass(frozen=True)
@@ -41,8 +42,15 @@ class Repo:
         return self.directory / "spec.json"
 
     def spec(self) -> dict | None:
-        """The repo's bottle spec, as last saved; None until it has one."""
-        return store.read_json(self.spec_path)
+        """The repo's bottle spec, as last saved; None until it has one.
+
+        One saved before every spec had to give its memory (none, or "all")
+        gets the default.
+        """
+        spec = store.read_json(self.spec_path)
+        if spec is not None and spec.get("memory", "all") == "all":
+            spec = {**spec, "memory": DEFAULT_MEMORY}
+        return spec
 
     def save_spec(self, spec: dict) -> None:
         self.remember()

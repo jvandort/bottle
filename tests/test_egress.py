@@ -11,7 +11,11 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import ca, egress
-from bottle.egress import EgressProxy, Policy
+from bottle.egress import Direct, Flow, Gateway, Policy, Refused
+from tests.support import client_hello
+
+# The address a bottle connected to for the credential's host: never where it goes.
+CONNECTED_TO = "203.0.113.5"
 
 
 def ip(address: str):
@@ -55,7 +59,8 @@ class LoopbackPolicy(Policy):
         return address == ip("127.0.0.1") or super().allows(host, address, private)
 
 
-HOSTS = {"upstream.test": ["127.0.0.1"], "private.test": ["10.0.0.5"], "mixed.test": ["10.0.0.5", "127.0.0.1"]}
+HOSTS = {"upstream.test": ["127.0.0.1"], "elsewhere.test": ["127.0.0.1"], "private.test": ["10.0.0.5"], "mixed.test": ["10.0.0.5", "127.0.0.1"],
+         "metadata.test": ["169.254.169.254"]}
 
 
 async def fake_resolve(host: str, port: int) -> list[str]:
@@ -68,16 +73,8 @@ async def fake_resolve(host: str, port: int) -> list[str]:
     return HOSTS[host]
 
 
-class ProxyTest(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        self.received = asyncio.Queue()
-        upstream = await asyncio.start_server(self.upstream, "127.0.0.1", 0)
-        self.addAsyncCleanup(self.close, upstream)
-        self.upstream_port = upstream.sockets[0].getsockname()[1]
-
-        proxy = await EgressProxy("test", LoopbackPolicy(), fake_resolve).start("127.0.0.1", 0)
-        self.addAsyncCleanup(self.close, proxy)
-        self.proxy_port = proxy.sockets[0].getsockname()[1]
+class Upstream:
+    """A server to reach, and closing the servers a test starts."""
 
     @staticmethod
     async def close(server: asyncio.Server) -> None:
@@ -87,7 +84,7 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
     async def upstream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Echoes raw bytes, or answers an HTTP request after recording its head."""
         first = await reader.read(64 * 1024)
-        if first.startswith(b"GET "):
+        if first.startswith((b"GET ", b"POST ")):
             await self.received.put(first)
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
         else:
@@ -96,101 +93,6 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
                 await writer.drain()
                 first = await reader.read(64 * 1024)
         writer.close()
-
-    async def send(self, request: bytes, port: int | None = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port or self.proxy_port)
-        self.addCleanup(writer.close)
-        writer.write(request)
-        return reader, writer
-
-    async def status(self, request: bytes) -> bytes:
-        reader, _ = await self.send(request)
-        return (await asyncio.wait_for(reader.readline(), 5)).strip()
-
-    async def test_connect_tunnels_bytes(self) -> None:
-        reader, writer = await self.send(f"CONNECT upstream.test:{self.upstream_port} HTTP/1.1\r\n\r\n".encode())
-        self.assertEqual(await reader.readuntil(b"\r\n\r\n"), b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        writer.write(b"ping")
-        self.assertEqual(await asyncio.wait_for(reader.readexactly(4), 5), b"ping")
-
-    async def test_connect_forwards_data_sent_with_the_request(self) -> None:
-        reader, _ = await self.send(f"CONNECT upstream.test:{self.upstream_port} HTTP/1.1\r\n\r\nearly".encode())
-        await reader.readuntil(b"\r\n\r\n")
-        self.assertEqual(await asyncio.wait_for(reader.readexactly(5), 5), b"early")
-
-    async def test_plain_http_is_rewritten_for_the_origin(self) -> None:
-        reader, _ = await self.send(
-            f"GET http://upstream.test:{self.upstream_port}/pkg?x=1 HTTP/1.1\r\n"
-            f"Host: upstream.test:{self.upstream_port}\r\nProxy-Connection: keep-alive\r\n"
-            f"Proxy-Authorization: Basic secret\r\nAccept: */*\r\n\r\n".encode()
-        )
-        response = await asyncio.wait_for(reader.read(), 5)
-        head = (await self.received.get()).decode()
-
-        self.assertTrue(response.endswith(b"hello"))
-        self.assertTrue(head.startswith("GET /pkg?x=1 HTTP/1.1\r\n"))
-        self.assertIn("Accept: */*", head)
-        self.assertIn("Connection: close", head)
-        self.assertNotIn("Proxy-", head)
-
-    async def test_plain_http_without_host_header_gets_one(self) -> None:
-        reader, _ = await self.send(f"GET http://upstream.test:{self.upstream_port}/ HTTP/1.0\r\n\r\n".encode())
-        await asyncio.wait_for(reader.read(), 5)
-        self.assertIn(f"Host: upstream.test:{self.upstream_port}", (await self.received.get()).decode())
-
-    async def test_private_destination_denied(self) -> None:
-        self.assertEqual(await self.status(b"CONNECT private.test:443 HTTP/1.1\r\n\r\n"), b"HTTP/1.1 403 Forbidden")
-
-    async def test_private_ip_literal_denied(self) -> None:
-        with self.assertLogs("bottle.egress") as logs:
-            status = await self.status(b"CONNECT 192.168.1.1:22 HTTP/1.1\r\n\r\n")
-            await asyncio.sleep(0.05)
-        self.assertEqual(status, b"HTTP/1.1 403 Forbidden")
-        self.assertIn("denied", logs.output[-1])
-
-    async def test_denied_addresses_are_skipped(self) -> None:
-        # mixed.test resolves to a private address first; it must be skipped, not connected to.
-        status = await self.status(f"CONNECT mixed.test:{self.upstream_port} HTTP/1.1\r\n\r\n".encode())
-        self.assertEqual(status, b"HTTP/1.1 200 Connection Established")
-
-    async def test_unresolvable_host(self) -> None:
-        self.assertEqual(await self.status(b"CONNECT nowhere.test:443 HTTP/1.1\r\n\r\n"), b"HTTP/1.1 502 Bad Gateway")
-
-    async def test_refused_connection(self) -> None:
-        closed = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-        port = closed.sockets[0].getsockname()[1]
-        await self.close(closed)
-        self.assertEqual(await self.status(f"CONNECT upstream.test:{port} HTTP/1.1\r\n\r\n".encode()), b"HTTP/1.1 502 Bad Gateway")
-
-    async def test_malformed_requests(self) -> None:
-        for request in (
-            b"nonsense\r\n\r\n",
-            b"GET /origin-form HTTP/1.1\r\nHost: x\r\n\r\n",
-            b"GET https://example.com/ HTTP/1.1\r\n\r\n",
-            b"CONNECT no-port HTTP/1.1\r\n\r\n",
-        ):
-            with self.subTest(request):
-                self.assertEqual(await self.status(request), b"HTTP/1.1 400 Bad Request")
-
-    async def test_oversized_headers(self) -> None:
-        request = b"CONNECT upstream.test:1 HTTP/1.1\r\nX: " + b"a" * egress.MAX_HEADER_BYTES + b"\r\n\r\n"
-        self.assertEqual(await self.status(request), b"HTTP/1.1 431 Request Header Fields Too Large")
-
-    async def test_logs_each_connection(self) -> None:
-        with self.assertLogs("bottle.egress") as logs:
-            reader, _ = await self.send(f"GET http://upstream.test:{self.upstream_port}/ HTTP/1.1\r\n\r\n".encode())
-            await asyncio.wait_for(reader.read(), 5)
-            await asyncio.sleep(0.05)
-        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/ -> 127.0.0.1 ok 200 up=\d+ down=\d+")
-
-    async def test_a_tunnel_is_logged_without_a_status(self) -> None:
-        with self.assertLogs("bottle.egress") as logs:
-            reader, writer = await self.send(f"CONNECT upstream.test:{self.upstream_port} HTTP/1.1\r\n\r\n".encode())
-            await reader.readline()
-            writer.write(b"GET / HTTP/1.1\r\n\r\n")
-            await asyncio.wait_for(reader.read(), 5)
-            await asyncio.sleep(0.05)
-        self.assertRegex(logs.output[-1], rf"test CONNECT upstream.test:{self.upstream_port} -> 127.0.0.1 ok up=")
 
 
 class StatusTest(unittest.TestCase):
@@ -210,12 +112,13 @@ class StatusTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("openssl"), "needs openssl to make a certificate")
 class InjectionTest(unittest.IsolatedAsyncioTestCase):
-    """What the proxy attaches for the bottle, and where.
+    """What bottled attaches for the bottle, and where.
 
-    The bottle talks HTTPS through CONNECT, as to anywhere. For an injected
-    host the proxy answers the TLS handshake itself, with a certificate from
-    the egress CA (the bottle trusts it), and the upstream is a TLS server,
-    because that is the only kind an injected request has.
+    The bottle talks HTTPS to an address, as to anywhere, and smolvm hands
+    bottled the flow with its ClientHello. For an injected host bottled
+    answers the TLS handshake itself, with a certificate from the egress CA
+    (the bottle trusts it), and the upstream is a TLS server, because that is
+    the only kind an injected request has.
     """
 
     async def asyncSetUp(self) -> None:
@@ -232,7 +135,7 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         serving.load_cert_chain(certificate, key)
         self.received = asyncio.Queue()
         upstream = await asyncio.start_server(self.upstream, "127.0.0.1", 0, ssl=serving)
-        self.addAsyncCleanup(ProxyTest.close, upstream)
+        self.addAsyncCleanup(Upstream.close, upstream)
         self.upstream_port = upstream.sockets[0].getsockname()[1]
 
         # The proxy trusts the upstream's certificate; the bottle trusts the egress CA.
@@ -250,13 +153,29 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
             standin="stand-in", credential="real-token",
         )
-        proxy = EgressProxy(
+        self.gateway = Gateway(
             "test", self.recording_policy(), fake_resolve, injections=(injection,),
             certificates=functools.partial(ca.server_context, "test", ("upstream.test",)),
         )
-        server = await proxy.start("127.0.0.1", 0)
-        self.addAsyncCleanup(ProxyTest.close, server)
+        server = await asyncio.start_server(self.decider, "127.0.0.1", 0)
+        self.addAsyncCleanup(Upstream.close, server)
         self.port = server.sockets[0].getsockname()[1]
+
+    # How much of the flow smolvm shows the decider: what arrived (None), or just
+    # this many bytes, as when the guest's ClientHello comes after smolvm stops waiting.
+    shown: int | None = None
+    connected_to = CONNECTED_TO
+
+    async def decider(self, reader, writer) -> None:
+        """What the decider does with a flow smolvm hands it: decide, and serve it if it's bottled's."""
+        first = await reader.read(64 * 1024) if self.shown is None else await reader.readexactly(self.shown)
+        flow = Flow(self.connected_to, self.connected_port, first)
+        try:
+            decision = await self.gateway.decide(flow)
+        except Refused:
+            writer.close()
+            return
+        await self.gateway.serve(flow, decision, reader, writer)
 
     def recording_policy(self) -> Policy:
         asked = self.asked
@@ -268,17 +187,15 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
 
         return Recording()
 
-    upstream = ProxyTest.upstream
+    upstream = Upstream.upstream
 
     async def tunnel(self, host: str = "upstream.test", port: int | None = None,
                      trust: ssl.SSLContext | None = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """What a bottle's HTTPS client does: CONNECT, then TLS inside the tunnel."""
-        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        """What a bottle's HTTPS client does: TLS to the host's address, which smolvm hands bottled."""
+        self.connected_port = port or self.upstream_port
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(
+            "127.0.0.1", self.port, ssl=trust or self.bottle_trusts, server_hostname=host), 5)
         self.addCleanup(writer.close)
-        writer.write(f"CONNECT {host}:{port or self.upstream_port} HTTP/1.1\r\n\r\n".encode())
-        self.assertEqual(await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5),
-                         b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await asyncio.wait_for(writer.start_tls(trust or self.bottle_trusts, server_hostname=host), 5)
         return reader, writer
 
     async def send(self, request: bytes) -> bytes:
@@ -301,6 +218,26 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Authorization: Bearer real-token", head)
         self.assertNotIn("stand-in", head)
         self.assertIn("Accept: */*", head)
+
+    async def test_a_clienthello_smolvm_didnt_wait_for_still_gets_the_credential(self) -> None:
+        for shown in (0, 10):  # none of it, and a part without the name
+            with self.subTest(shown=shown):
+                self.shown = shown
+                head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+                self.assertIn("Authorization: Bearer real-token", head)
+
+    async def test_a_late_clienthello_for_another_host_goes_where_the_bottle_connected_untouched(self) -> None:
+        self.shown, self.connected_to = 0, "127.0.0.1"
+        # Not the egress CA's: the bottle's TLS goes through to the server, whose certificate it sees.
+        anything = ssl.create_default_context()
+        anything.check_hostname, anything.verify_mode = False, ssl.CERT_NONE
+        reader, writer = await self.tunnel("elsewhere.test", trust=anything)
+        writer.write(b"GET / HTTP/1.1\r\nHost: elsewhere.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        response = await asyncio.wait_for(reader.read(), 5)
+        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
+        self.assertTrue(response.endswith(b"hello"))
+        self.assertIn("Authorization: Bearer stand-in", head)
+        self.assertNotIn("real-token", head)
 
     async def test_a_request_that_doesnt_ask_for_the_credential_goes_without_it(self) -> None:
         # Over TLS all the same: the upstream speaks nothing else.
@@ -344,8 +281,9 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             await self.head_of(b"GET /v1/public HTTP/1.1\r\nHost: upstream.test\r\n\r\n")
             await asyncio.sleep(0.05)
-        self.assertRegex(logs.output[-2], rf"test GET upstream.test:{self.upstream_port}/v1/models \+credential -> 127.0.0.1 ok 200 ")
-        self.assertRegex(logs.output[-1], rf"test GET upstream.test:{self.upstream_port}/v1/public -> 127.0.0.1 ok 200 ")
+        port = self.upstream_port
+        self.assertRegex(logs.output[-2], rf"test {CONNECTED_TO}:{port} \(upstream.test\) \+credential -> 127.0.0.1 ok 200 ")
+        self.assertRegex(logs.output[-1], rf"test {CONNECTED_TO}:{port} \(upstream.test\) -> 127.0.0.1 ok 200 ")
         self.assertNotIn("real-token", "\n".join(logs.output))
 
     async def test_with_the_credential_nothing_else_the_bottle_sent_under_that_name_leaves(self) -> None:
@@ -378,7 +316,7 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(gone, head)
                 self.assertIn("X-GitHub-Api-Version: 2022-11-28", head)
 
-    async def test_a_request_for_another_host_inside_the_tunnel_is_refused(self) -> None:
+    async def test_a_request_for_another_host_inside_the_tls_is_refused(self) -> None:
         response = await self.send(b"GET https://elsewhere.test/ HTTP/1.1\r\n\r\n")
         self.assertTrue(response.startswith(b"HTTP/1.1 400 "))
         self.assertTrue(self.received.empty())
@@ -394,12 +332,8 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_credentials_host_may_be_private_but_only_for_an_injected_request(self) -> None:
         await self.head_of(b"GET / HTTP/1.1\r\n\r\n")
         self.assertEqual(self.asked[-1], ("upstream.test", True))
-        # Another port is an ordinary tunnel. Nothing listens there: what
-        # matters is what the policy was asked.
-        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
-        self.addCleanup(writer.close)
-        writer.write(b"CONNECT upstream.test:1 HTTP/1.1\r\n\r\n")
-        await asyncio.wait_for(reader.readline(), 5)
+        # Another port is an ordinary flow, judged by the policy alone.
+        await self.gateway.decide(Flow("127.0.0.1", 1, client_hello("upstream.test")))
         self.assertEqual(self.asked[-1], ("upstream.test", False))
 
     async def test_a_destination_the_bottle_may_not_reach_gets_no_certificate(self) -> None:
@@ -410,28 +344,24 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
             return ca.server_context("test", ("upstream.test",), host)
 
         injections = tuple(egress.Injection(host=h, header="Authorization", value="Bearer real-token")
-                           for h in ("169.254.169.254", "nowhere.test"))
-        proxy = EgressProxy("test", LoopbackPolicy(), fake_resolve, injections=injections, certificates=certificates)
-        server = await proxy.start("127.0.0.1", 0)
-        self.addAsyncCleanup(ProxyTest.close, server)
-        for target, status in (("169.254.169.254:443", b"403"), ("nowhere.test:443", b"502")):
-            with self.subTest(target):
-                reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
-                self.addCleanup(writer.close)
-                writer.write(f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
-                self.assertTrue((await asyncio.wait_for(reader.read(), 5)).startswith(b"HTTP/1.1 " + status))
+                           for h in ("metadata.test", "nowhere.test"))
+        gateway = Gateway("test", LoopbackPolicy(), fake_resolve, injections=injections, certificates=certificates)
+        for name, status in (("metadata.test", 403), ("nowhere.test", 502)):
+            with self.subTest(name), self.assertRaises(Refused) as refused:
+                await gateway.decide(Flow(CONNECTED_TO, 443, client_hello(name)))
+            self.assertEqual(refused.exception.status, status)
         self.assertEqual(minted, [])
 
-    async def test_plain_http_to_the_host_gets_no_credential(self) -> None:
-        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
-        self.addCleanup(writer.close)
-        writer.write(b"GET http://upstream.test/ HTTP/1.1\r\n\r\n")
-        await asyncio.wait_for(reader.read(), 5)
-        self.assertEqual(self.asked, [("upstream.test", False)])
+    async def test_plain_http_to_a_credentials_host_and_port_gets_no_credential(self) -> None:
+        # A credential goes only on TLS: a Host header doesn't claim one.
+        decision = await self.gateway.decide(
+            Flow("127.0.0.1", self.upstream_port, b"GET / HTTP/1.1\r\nHost: upstream.test\r\n\r\n"))
+        self.assertEqual(decision, Direct(("127.0.0.1",)))
+        self.assertTrue(all(private is False for _, private in self.asked))
 
 
 class InjectionMatchTest(unittest.TestCase):
-    """Which tunnels the proxy terminates to attach a credential."""
+    """Which flows bottled terminates to attach a credential."""
 
     injections = (
         egress.Injection(host="ci.test", header="Authorization", value="Bearer ci-token"),
@@ -439,9 +369,9 @@ class InjectionMatchTest(unittest.TestCase):
     )
 
     def injection_for(self, target: str, certificates=lambda host: None) -> egress.Injection | None:
-        proxy = EgressProxy("test", Policy(), fake_resolve, injections=self.injections, certificates=certificates)
+        gateway = Gateway("test", Policy(), fake_resolve, injections=self.injections, certificates=certificates)
         host, _, port = target.rpartition(":")
-        return proxy._injection_for(egress.Request("CONNECT", host, int(port), None))
+        return gateway._injection_at(host, int(port))
 
     def test_the_host_a_credential_claims(self) -> None:
         self.assertEqual(self.injection_for("ci.test:443"), self.injections[0])

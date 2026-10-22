@@ -1,31 +1,37 @@
 """Bottle images, built from containers/images/<name>/ in this repo.
 
-Builds reach the network only through a temporary egress proxy on the host.
-The builder VM's own DNS goes through container's gateway forwarder, which
-stops answering when any other host process holds port 53 (VPN clients and
-local resolvers commonly do): https://github.com/apple/container/issues/402.
-Going through the host also gives builds the host's routes, e.g. a VPN.
+smolvm boots images but doesn't build them, so bottle builds them on top of
+smolvm's machines: buildah runs in a machine made for the build, its inputs
+sent in over exec's stdin, and the archive it pushes comes back over stdout.
+The builder's connections are decided like a bottle's, with no credentials.
+
+Built images are OCI archives in $BOTTLE_HOME/images, with an index of each
+tag's archive and labels. An archive's name carries its inputs' hash, so
+rebuilding a tag never replaces an archive a machine was made from: smolvm
+reads it again on every start.
 """
 
-import asyncio
 import hashlib
+import os
 import re
+import shlex
+import subprocess
 import sys
-from contextlib import contextmanager
+import tarfile
+import uuid
 from pathlib import Path
 
-from bottle import egress, prereqs, runtime
+from bottle import prereqs, smolvm
 from bottle.errors import BottleError
+from bottle.store import bottle_home, read_json, write_json
 
 IMAGES = Path(__file__).resolve().parent.parent / "containers" / "images"
 # The image every bottle starts from: the bottle contract. Not user-selectable;
 # other images here would be alternative foundations meeting the same contract.
 BASE = "base"
-# Where bottle's images are named: on no registry. A name without a host in
-# it (bottle/base) is taken to be Docker Hub's, and `container` stores it as
-# docker.io/bottle/base, but looks it up as written, which can find another
-# image stored under the short name instead of the one just built. localhost
-# is a host, so the name is stored and found as it is.
+# Where bottle's images are named: on no registry. A name without a host in it
+# (bottle/base) is taken to be Docker Hub's; localhost is a host, so a
+# Dockerfile's FROM finds the image built here.
 REPOSITORY = "localhost/bottle"
 # A stage built on another bottle image, e.g. `FROM localhost/bottle/base:latest`.
 FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*localhost/bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
@@ -64,7 +70,7 @@ def inputs_hash(name: str) -> str:
 
 
 def is_current(image: str, expected: str) -> bool:
-    labels = runtime.image_labels(image)
+    labels = built_labels(image)
     return labels is not None and labels.get(INPUTS_LABEL) == expected
 
 
@@ -125,62 +131,141 @@ def _build_one(name: str, no_cache: bool = False) -> None:
 
 
 def build_context(
-    context: Path, image: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None
+    context: Path, image: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
+    labels: dict[str, str] | None = None,
 ) -> None:
-    """Build `context` into `image`, reaching the network only through a temporary egress proxy.
+    """Build `context` into `image`, in a builder machine (see _build).
 
-    `inputs` is the hash of what the image is built from, recorded as a label.
+    `inputs` is the hash of what the image is built from, recorded as a label,
+    with `labels`. The bottle images its Dockerfile is built FROM are loaded
+    into the builder first.
     """
-    prereqs.ensure_container()
-    with building():
-        # The builder VM must be running before its network's gateway exists on the host.
-        _start_builder()
-        gateway = runtime.network_gateway()
-        asyncio.run(_build_via_proxy(context, image, gateway, no_cache, dockerfile, {INPUTS_LABEL: inputs}))
+    prereqs.ensure_smolvm()
+    bases = {}
+    for name in FROM_BOTTLE.findall((dockerfile or context / "Dockerfile").read_text()):
+        archive = archive_of(tag(name))
+        if archive is None:
+            raise BottleError(f"{tag(name)} isn't built")
+        bases[tag(name)] = archive
+    _build(context, image, {INPUTS_LABEL: inputs, **(labels or {})}, no_cache, dockerfile, bases)
 
 
-# The builder VM holds its memory (about 2 GB) for as long as it runs, so bottle
-# stops it when it's done building, if bottle started it. A builder that was
-# already running (someone else's build) is left running.
-_building_depth = 0
-_started_builder = False
+# --- the store -----------------------------------------------------------------
 
 
-@contextmanager
-def building():
-    """Keep the builder running for every build inside this block; stop it at the end if bottle started it.
+def store() -> Path:
+    return bottle_home() / "images"
 
-    Nests, so building an image and the images underneath it starts the builder once.
+
+def _index_path() -> Path:
+    return store() / "index.json"
+
+
+def archive_of(image: str) -> Path | None:
+    """The archive `image` (a tag) was last built into, or None."""
+    entry = (read_json(_index_path()) or {}).get(image)
+    return store() / entry["archive"] if entry and (store() / entry["archive"]).exists() else None
+
+
+def built_labels(image: str) -> dict[str, str] | None:
+    """The labels `image` was last built with, or None if it's not built."""
+    entry = (read_json(_index_path()) or {}).get(image)
+    return dict(entry["labels"]) if entry and archive_of(image) else None
+
+
+def built() -> dict[str, dict[str, str]]:
+    """Every built tag, with its labels."""
+    return {image: dict(entry["labels"]) for image, entry in (read_json(_index_path()) or {}).items()}
+
+
+def forget(image: str) -> None:
+    """Drop `image` from the index; its archive goes once nothing uses it (remove_unused)."""
+    index = read_json(_index_path()) or {}
+    if index.pop(image, None) is not None:
+        write_json(_index_path(), index)
+
+
+def remove_unused(in_use: set[str]) -> None:
+    """Delete archives no tag points to and no machine was made from (`in_use`, archive names)."""
+    current = {entry["archive"] for entry in (read_json(_index_path()) or {}).values()}
+    for path in store().glob("*.tar") if store().is_dir() else ():
+        if path.name not in current | in_use:
+            path.unlink()
+
+
+# --- building --------------------------------------------------------------------
+
+# The builder: buildah, in a machine made for each build and gone after it.
+BUILDER_IMAGE = "quay.io/buildah/stable"
+# Where the build's inputs go in the builder, sent as a tar over exec's stdin:
+# the context, the Dockerfile, and the bottle images a Dockerfile is built FROM.
+INPUTS = "/build"
+# Where buildah pushes the archive, in the builder, for exec to carry out.
+OUT = "/tmp/bottle-image.tar"
+
+
+def _build(context: Path, image: str, image_labels: dict[str, str], no_cache: bool = False,
+           dockerfile: Path | None = None, bases: dict[str, Path] | None = None) -> Path:
+    """Build `context` into an archive for `image`, in a builder machine; return the archive.
+
+    `bases` are the bottle images the Dockerfile is built FROM, by tag, and
+    the archives they're in: loaded into the builder first, under those tags.
+    Everything goes in and out over exec, so the builder needs no mounts.
     """
-    global _building_depth, _started_builder
-    _building_depth += 1
+    from bottle import daemon  # daemon's auth imports features, which imports this module
+
+    inputs = image_labels.get("bottle.inputs", "")[:12] or "unlabelled"
+    name = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', image)}-{inputs}.tar"
+    store().mkdir(parents=True, exist_ok=True)
+    buildah = "buildah --storage-driver vfs"
+    # Progress on stderr, the user's to see as a build's is; stdout is for the archive.
+    script = ["set -e", "exec >&2"]
+    for base, path in (bases or {}).items():
+        script.append(f"id=$({buildah} pull -q oci-archive:{INPUTS}/bases/{shlex.quote(path.name)})")
+        script.append(f'{buildah} tag "$id" {shlex.quote(base)}')
+    build_args = [f"--label {shlex.quote(f'{k}={v}')}" for k, v in image_labels.items()]
+    script.append(
+        f"{buildah} build --isolation chroot {'--no-cache ' if no_cache else ''}{' '.join(build_args)} "
+        f"-t {shlex.quote(image)} -f {INPUTS}/Dockerfile {INPUTS}/context"
+    )
+    script.append(f"{buildah} push {shlex.quote(image)} oci-archive:{OUT}:{shlex.quote(image)}")
+
+    builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
+    sent = bottle_home() / "build" / f"{builder}.tar"
+    partial = store() / f".{name}.partial"
     try:
-        yield
+        sent.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(sent, "w") as tar:
+            tar.add(context, "context")
+            tar.add(dockerfile or context / "Dockerfile", "Dockerfile")
+            for path in (bases or {}).values():
+                tar.add(path, f"bases/{path.name}")
+        smolvm.create(builder, BUILDER_IMAGE, mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
+        # Bound with no features: the public network, no credentials, as a bottle would have it.
+        decider, token = daemon.bind_decider(builder)
+        smolvm.start(builder, decider, token)
+        _in_builder(builder, ["sh", "-c", f"mkdir -p {INPUTS} && tar -x -C {INPUTS}"], f"sending {image}'s inputs",
+                    stdin=sent)
+        _in_builder(builder, ["sh", "-c", "\n".join(script)], f"building {image}")
+        with partial.open("wb") as out:
+            _in_builder(builder, ["cat", OUT], f"reading {image} out of the builder", stdout=out)
+        partial.replace(store() / name)
     finally:
-        _building_depth -= 1
-        if _building_depth == 0 and _started_builder:
-            _started_builder = False
+        sent.unlink(missing_ok=True)
+        partial.unlink(missing_ok=True)
+        for cleanup in (lambda: daemon.release_egress(builder), lambda: smolvm.delete(builder)):
             try:
-                runtime.builder_stop()
+                cleanup()
             except BottleError as e:
-                print(f"bottle: couldn't stop the image builder: {e}", file=sys.stderr)
+                print(f"bottle: cleaning up {builder}: {e}", file=sys.stderr)
+    index = read_json(_index_path()) or {}
+    index[image] = {"archive": name, "labels": image_labels}
+    write_json(_index_path(), index)
+    return store() / name
 
 
-def _start_builder() -> None:
-    global _started_builder
-    if not _started_builder and not runtime.builder_running():
-        _started_builder = True
-    runtime.builder_start()
-
-
-async def _build_via_proxy(
-    context: Path, image: str, gateway: str, no_cache: bool, dockerfile: Path | None, labels: dict[str, str]
-) -> None:
-    server = await egress.EgressProxy(f"build {image}", egress.Policy()).start(gateway, 0)
-    port = server.sockets[0].getsockname()[1]
-    proxy = f"http://{gateway}:{port}"
-    # BuildKit predefines these args: they reach RUN steps but aren't stored in the image,
-    # and changing them (e.g. a new port per build) doesn't invalidate the cache.
-    build_args = {key: proxy for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
-    async with server:
-        await runtime.build(context, image, build_args, no_cache, dockerfile, labels)
+def _in_builder(builder: str, argv: list[str], what: str, stdin: Path | None = None, stdout=None) -> None:
+    """Run `argv` in the builder, `stdin` a file to give it; stderr goes to the user."""
+    with stdin.open("rb") if stdin else open(os.devnull, "rb") as source:
+        if subprocess.run(smolvm.exec_command(builder, argv), stdin=source, stdout=stdout).returncode != 0:
+            raise BottleError(f"{what} failed")

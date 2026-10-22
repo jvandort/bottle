@@ -1,8 +1,6 @@
 # bottle/base: the bottle contract, and nothing else. Features add the rest.
 #
 # The contract is what bottle's own commands rely on inside a bottle:
-#   - tini as PID 1, running bottle-entrypoint, which mirrors proxy settings
-#     into /etc/environment and runs the command (sshd by default)
 #   - the genie user, UID 1000, with passwordless sudo
 #   - /workspace, owned by genie: the checkout
 #   - git: setting up /workspace, pushing work back to the host, and
@@ -43,12 +41,6 @@ RUN groupadd --gid 1000 genie \
  # Enable passwordless sudo
  && echo 'genie ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/genie \
  && chmod 0440 /etc/sudoers.d/genie \
- # A bottle's proxy is the only way out and arrives as environment, but sudo
- # resets the environment, so `sudo apt-get install` runs with no proxy and no
- # DNS to fall back on. Carry the proxy settings across, and nothing else.
- && echo 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"' \
-      > /etc/sudoers.d/proxy \
- && chmod 0440 /etc/sudoers.d/proxy \
  # Verify the sudoers files are valid
  && visudo -c -q \
  && install -d -o genie -g genie /workspace \
@@ -65,7 +57,7 @@ RUN rm -f /etc/ssh/ssh_host_* \
 COPY entrypoint.sh /usr/local/bin/bottle-entrypoint
 COPY profile.sh /etc/profile.d/bottle.sh
 
-# ENV reaches `container exec`; SSH sessions only see /etc/environment (via PAM).
+# ENV reaches `smolvm machine exec`; SSH sessions only see /etc/environment (via PAM).
 # The egress CA's certificate is installed at NODE_EXTRA_CA_CERTS when a
 # bottle starts (CA_CERTIFICATE in bottle/bottles.py); keep the two in sync.
 ENV LANG=C.UTF-8 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bottle-egress.crt

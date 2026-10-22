@@ -1,13 +1,12 @@
-"""Egress CAs: what lets the egress proxy read a bottle's HTTPS to the hosts a credential names.
+"""Egress CAs: what lets bottled read a bottle's HTTPS to the hosts a credential names.
 
 A credential is attached as a request header, and a header can only be
-attached to a request the proxy can read. A tool that talks HTTPS through
-CONNECT sends the proxy an opaque tunnel, and many tools only talk HTTPS (gh,
-and Claude Code for everything but inference). So for those hosts the proxy
-answers the CONNECT itself: it completes the bottle's TLS handshake with a
-certificate for the host, signed by the bottle's CA, reads the request,
-attaches the credential, and makes its own verified TLS connection to the real
-server (see egress.py).
+attached to a request bottled can read, and many tools only talk HTTPS (gh,
+and Claude Code for everything but inference). So for those hosts the decider
+redirects the bottle's flow to bottled, which completes the bottle's TLS
+handshake itself with a certificate for the host, signed by the bottle's CA,
+reads the request, attaches the credential, and makes its own verified TLS
+connection to the real server (see egress.py).
 
 Each bottle has a CA of its own, and that CA can only vouch for the hosts the
 bottle's credentials name: its certificate carries a critical name
@@ -207,7 +206,7 @@ def _name_constraints(patterns: list[str]) -> str:
 
 
 def _permits(patterns: list[str], host: str) -> bool:
-    """Whether `host` is one of `patterns`: the hosts a bottle's proxy terminates tunnels for."""
+    """Whether `host` is one of `patterns`: the hosts bottled terminates a bottle's TLS for."""
     return any(host == p or (p.startswith("*.") and host.endswith(p[1:]) and len(host) > len(p) - 1)
                for p in patterns)
 
@@ -224,7 +223,7 @@ def server_context(bottle: str, hosts: Iterable[str], host: str) -> ssl.SSLConte
 
     `host` must be one of `hosts`, and the CA must exist: bottle makes it
     when the bottle starts. Minted on first use and kept for LEAF_REFRESH.
-    HTTP/1.1 only (ALPN), since the proxy reads the request itself.
+    HTTP/1.1 only (ALPN), since bottled reads the request itself.
     """
     patterns, host = _patterns(hosts), host.lower()
     if not _permits(patterns, host):

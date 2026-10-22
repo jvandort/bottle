@@ -1,60 +1,18 @@
-import asyncio
-import json
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import images, runtime
+from bottle import daemon, images
 from bottle.errors import BottleError
-
-
-class RuntimeTest(unittest.TestCase):
-    def test_network_gateway(self) -> None:
-        inspect = [{"id": "default", "status": {"ipv4Gateway": "192.168.64.1", "ipv4Subnet": "192.168.64.0/24"}}]
-        result = subprocess.CompletedProcess([], 0, stdout=json.dumps(inspect), stderr="")
-        with mock.patch.object(runtime.subprocess, "run", return_value=result) as run:
-            self.assertEqual(runtime.network_gateway(), "192.168.64.1")
-        self.assertEqual(run.call_args.args[0], ["container", "network", "inspect", "default"])
-
-    def test_failures_raise_with_stderr(self) -> None:
-        result = subprocess.CompletedProcess([], 1, stdout="", stderr="network not found")
-        with mock.patch.object(runtime.subprocess, "run", return_value=result):
-            with self.assertRaisesRegex(BottleError, "network not found"):
-                runtime.network_gateway("nope")
-
-
-class BuildCommandTest(unittest.IsolatedAsyncioTestCase):
-    async def run_build(self, returncode: int = 0, **kwargs) -> list[str]:
-        process = mock.AsyncMock()
-        process.wait.return_value = returncode
-        with mock.patch.object(runtime.asyncio, "create_subprocess_exec", return_value=process) as exec_:
-            await runtime.build(Path("/ctx"), "localhost/bottle/base:latest", {"http_proxy": "http://gw:1"}, **kwargs)
-        return list(exec_.call_args.args)
-
-    async def test_command(self) -> None:
-        self.assertEqual(
-            await self.run_build(),
-            ["container", "build", "--tag", "localhost/bottle/base:latest", "--progress", "auto",
-             "--build-arg", "http_proxy=http://gw:1", "/ctx"],
-        )
-
-    async def test_never_quiet(self) -> None:
-        cmd = await self.run_build(no_cache=True)
-        self.assertIn("--no-cache", cmd)
-        self.assertNotIn("-q", cmd)
-        self.assertNotIn("--quiet", cmd)
-
-    async def test_failure(self) -> None:
-        with self.assertRaisesRegex(BottleError, "building localhost/bottle/base:latest failed"):
-            await self.run_build(returncode=1)
+from tests.support import GitTestCase
 
 
 class TagTest(unittest.TestCase):
     def test_images_are_named_in_full(self) -> None:
-        # On no registry, so stored and looked up as written: looked up by the
-        # short name, an image an older `container` stored under it would be found instead.
+        # On no registry: a name without a host would be taken to be Docker Hub's.
         self.assertEqual(images.tag("base"), "localhost/bottle/base:latest")
         self.assertEqual(images.FROM_BOTTLE.findall("FROM localhost/bottle/base:latest\nFROM bottle/tools\n"), ["base"])
 
@@ -144,100 +102,160 @@ class StalenessTest(unittest.TestCase):
         self.assertEqual(len({before, after_edit, after_chmod, images.tree_hash(self.dir)}), 4)
 
     def test_is_current_compares_the_label(self) -> None:
-        with mock.patch.object(images.runtime, "image_labels", return_value={"bottle.inputs": "abc"}):
+        with mock.patch.object(images, "built_labels", return_value={"bottle.inputs": "abc"}):
             self.assertTrue(images.is_current("localhost/bottle/base:latest", "abc"))
             self.assertFalse(images.is_current("localhost/bottle/base:latest", "def"))
-        with mock.patch.object(images.runtime, "image_labels", return_value=None):
+        with mock.patch.object(images, "built_labels", return_value=None):
             self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # missing
-        with mock.patch.object(images.runtime, "image_labels", return_value={}):
+        with mock.patch.object(images, "built_labels", return_value={}):
             self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # built before labels
 
 
 class BuildImageTest(unittest.TestCase):
-    def setUp(self) -> None:
-        for name, value in {
-            "ensure_container": mock.patch.object(images.prereqs, "ensure_container"),
-            "builder_start": mock.patch.object(images.runtime, "builder_start"),
-            "builder_running": mock.patch.object(images.runtime, "builder_running", return_value=False),
-            "builder_stop": mock.patch.object(images.runtime, "builder_stop"),
-            "gateway": mock.patch.object(images.runtime, "network_gateway", return_value="127.0.0.1"),
-        }.items():
-            setattr(self, name, value.start())
-            self.addCleanup(value.stop)
-
     def test_base_is_available(self) -> None:
         self.assertIn("base", images.available())
 
     def test_unknown_image(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no image named 'nope'; available: .*base"):
+        with mock.patch.object(images.prereqs, "ensure_smolvm") as ensure_smolvm, \
+                self.assertRaisesRegex(BottleError, "no image named 'nope'; available: .*base"):
             images.build("nope")
-        self.ensure_container.assert_not_called()
+        ensure_smolvm.assert_not_called()
 
-    def test_builds_through_a_live_proxy(self) -> None:
-        seen = {}
-
-        async def fake_build(context, tag, build_args, no_cache, dockerfile, labels):
-            seen.update(context=context, tag=tag, args=build_args, no_cache=no_cache, labels=labels)
-            # The proxy must be serving while the build runs: ask it for something it refuses.
-            host, port = build_args["https_proxy"].removeprefix("http://").split(":")
-            reader, writer = await asyncio.open_connection(host, int(port))
-            writer.write(b"CONNECT 127.0.0.1:22 HTTP/1.1\r\n\r\n")
-            seen["proxy_answer"] = (await reader.readline()).strip()
-            writer.close()
-
-        with mock.patch.object(images.runtime, "build", side_effect=fake_build), self.assertLogs("bottle.egress"):
-            self.assertEqual(images.build("base", no_cache=True), "localhost/bottle/base:latest")
-
-        self.ensure_container.assert_called_once()
-        self.builder_start.assert_called_once()
-        self.assertEqual(seen["context"], images.IMAGES / "base")
-        self.assertTrue(seen["no_cache"])
-        self.assertEqual(set(seen["args"]), {"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"})
-        self.assertEqual(len(set(seen["args"].values())), 1)
-        self.assertRegex(seen["args"]["http_proxy"], r"^http://127\.0\.0\.1:\d+$")
-        self.assertEqual(seen["proxy_answer"], b"HTTP/1.1 403 Forbidden")
-        self.assertEqual(seen["labels"], {"bottle.inputs": images.inputs_hash("base")})
-
-    def test_builder_starts_before_the_gateway_is_read(self) -> None:
-        order = []
-        self.builder_start.side_effect = lambda: order.append("builder")
-        self.gateway.side_effect = lambda: order.append("gateway") or "127.0.0.1"
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
-            images.build("base")
-        self.assertEqual(order, ["builder", "gateway"])
-
-
-    def test_stops_the_builder_it_started(self) -> None:
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
-            images.build("base")
-        self.builder_stop.assert_called_once()
-
-    def test_leaves_a_builder_that_was_already_running(self) -> None:
-        self.builder_running.return_value = True
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock()):
-            images.build("base")
-        self.builder_stop.assert_not_called()
-
-    def test_builds_inside_one_session_share_the_builder(self) -> None:
-        order = []
-        self.builder_stop.side_effect = lambda: order.append("stop")
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock(side_effect=lambda *a: order.append("build"))):
-            with images.building():
-                images.build("base")
-                self.builder_running.return_value = True  # it's running now: bottle started it
-                images.build("base")
-        self.assertEqual(order, ["build", "build", "stop"])
-
-    def test_a_failed_build_still_stops_the_builder(self) -> None:
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock(side_effect=BottleError("boom"))), \
-                self.assertRaises(BottleError):
-            images.build("base")
-        self.builder_stop.assert_called_once()
-
-    def test_failing_to_stop_the_builder_doesnt_fail_the_build(self) -> None:
-        self.builder_stop.side_effect = BottleError("nope")
-        with mock.patch.object(images.runtime, "build", mock.AsyncMock()), mock.patch("sys.stderr"):
+    def test_an_image_is_built_by_smolvm_from_its_directory(self) -> None:
+        with mock.patch.object(images.prereqs, "ensure_smolvm"), mock.patch.object(images, "_build") as build:
             self.assertEqual(images.build("base"), "localhost/bottle/base:latest")
+        context, tag, labels = build.call_args.args[:3]
+        self.assertEqual((context, tag), (images.IMAGES / "base", "localhost/bottle/base:latest"))
+        self.assertEqual(labels, {images.INPUTS_LABEL: images.inputs_hash("base")})
+
+
+class StoreTest(GitTestCase):
+    """Bottle's images: built in a builder machine, kept as OCI archives named for their inputs, while one is used."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.calls: list[tuple] = []
+        self.scripts: list[str] = []
+        self.sent: list[str] = []  # the names in the inputs' tar
+        self.build_status, self.readable = 0, True
+        contexts = self.tmp / "containers"
+        (contexts / "images" / "base").mkdir(parents=True)
+        (contexts / "images" / "base" / "Dockerfile").write_text("FROM debian\n")
+        self.contexts = contexts
+
+        def bind(bottle, *args, **kwargs):
+            self.calls.append(("bind", bottle))
+            return "127.0.0.1:47329", "token"
+
+        for target, name, fake in (
+            (images.smolvm, "create", lambda name, image, mounts, env, memory_mib, cpus:
+                self.calls.append(("create", image, tuple(mounts)))),
+            (images.smolvm, "start", lambda name, decider, token: self.calls.append(("start", decider, token))),
+            (images.smolvm, "delete", lambda name: self.calls.append(("delete",))),
+            (daemon, "bind_decider", bind),
+            (daemon, "release_egress", lambda bottle: self.calls.append(("release", bottle))),
+            (images.subprocess, "run", self.in_builder),
+        ):
+            patcher = mock.patch.object(target, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def in_builder(self, command, stdin=None, stdout=None):
+        """An exec in the builder: the build script, or reading the archive out."""
+        argv = command[command.index("--") + 1:]
+        if "tar -x" in argv[-1]:
+            with tarfile.open(fileobj=stdin) as tar:
+                self.sent = tar.getnames()
+            return subprocess.CompletedProcess(command, 0)
+        if argv[0] == "cat":
+            if self.readable:
+                stdout.write(b"the archive")
+            return subprocess.CompletedProcess(command, 0 if self.readable else 1)
+        self.scripts.append(argv[-1])
+        return subprocess.CompletedProcess(command, self.build_status)
+
+    def build(self, tag: str, inputs: str, bases=None) -> Path:
+        return images._build(self.contexts / "images" / "base", tag, {"bottle.inputs": inputs}, bases=bases)
+
+    def test_a_build_runs_in_a_machine_bound_like_a_bottle_and_gone_after(self) -> None:
+        self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        [create, bind, start, release, delete] = self.calls
+        self.assertEqual(create, ("create", images.BUILDER_IMAGE, ()))  # no mounts: everything goes over exec
+        self.assertEqual(bind[0], "bind")
+        self.assertEqual(start, ("start", "127.0.0.1:47329", "token"))
+        self.assertEqual((release, delete), (("release", bind[1]), ("delete",)))
+
+    def test_its_inputs_go_in_over_stdin(self) -> None:
+        base = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.build("localhost/bottle/base:with-tools", "bbbb" * 16, bases={"localhost/bottle/base:latest": base})
+        self.assertLessEqual({"context", "context/Dockerfile", "Dockerfile", f"bases/{base.name}"}, set(self.sent))
+        self.assertEqual(list((self.bottle_home / "build").iterdir()), [])  # the tar sent is gone after
+
+    def test_its_progress_is_on_stderr_and_the_archive_comes_out_on_stdout(self) -> None:
+        archive = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.assertIn("exec >&2", self.scripts[-1])
+        self.assertIn(f"oci-archive:{images.OUT}:", self.scripts[-1])
+        self.assertEqual(archive.read_bytes(), b"the archive")
+
+    def test_a_build_is_kept_under_its_inputs(self) -> None:
+        archive = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.assertEqual(archive.name, "localhost_bottle_base_latest-aaaaaaaaaaaa.tar")
+        self.assertEqual(images.archive_of("localhost/bottle/base:latest"), archive)
+        self.assertEqual(images.built_labels("localhost/bottle/base:latest"), {"bottle.inputs": "aaaa" * 16})
+
+    def test_the_builder_loads_the_images_it_builds_on(self) -> None:
+        base = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.build("localhost/bottle/base:with-tools", "bbbb" * 16, bases={"localhost/bottle/base:latest": base})
+        script = self.scripts[-1]
+        self.assertIn(f"pull -q oci-archive:{images.INPUTS}/bases/{base.name}", script)
+        self.assertIn('tag "$id" localhost/bottle/base:latest', script)
+        self.assertLess(script.index("pull"), script.index(" build "))
+
+    def test_a_rebuild_leaves_the_archive_a_machine_was_made_from(self) -> None:
+        old = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        new = self.build("localhost/bottle/base:latest", "bbbb" * 16)
+        self.assertNotEqual(old, new)
+        images.remove_unused({old.name})
+        self.assertTrue(old.exists() and new.exists())
+        images.remove_unused(set())
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
+
+    def test_a_failed_build_is_an_error_keeps_nothing_and_cleans_up(self) -> None:
+        for what in ("build", "read"):
+            with self.subTest(what):
+                self.calls.clear()
+                self.build_status, self.readable = (1, True) if what == "build" else (0, False)
+                with self.assertRaises(BottleError):
+                    self.build("localhost/bottle/base:latest", "aaaa" * 16)
+                self.assertIsNone(images.archive_of("localhost/bottle/base:latest"))
+                self.assertEqual(list(images.store().iterdir()), [])
+                self.assertEqual([c[0] for c in self.calls[-2:]], ["release", "delete"])
+
+
+class BuildContextTest(GitTestCase):
+    def test_a_features_build_loads_the_base_it_is_built_from(self) -> None:
+        dockerfile = self.tmp / "Dockerfile"
+        dockerfile.write_text("FROM localhost/bottle/base:latest\nRUN true\n")
+        base = self.tmp / "base.tar"
+        with mock.patch.object(images, "archive_of", return_value=base) as archive_of, \
+                mock.patch.object(images, "_build") as build, \
+                mock.patch.object(images.prereqs, "ensure_smolvm"):
+            images.build_context(self.tmp, "localhost/bottle/base:with-tools", "inputs", dockerfile=dockerfile,
+                                 labels={"bottle.features": "tools"})
+        archive_of.assert_called_with("localhost/bottle/base:latest")
+        args = build.call_args.args
+        self.assertEqual(args[1:3], ("localhost/bottle/base:with-tools",
+                                     {"bottle.inputs": "inputs", "bottle.features": "tools"}))
+        self.assertEqual(args[5], {"localhost/bottle/base:latest": base})
+
+    def test_a_base_that_isnt_built_is_an_error(self) -> None:
+        dockerfile = self.tmp / "Dockerfile"
+        dockerfile.write_text("FROM localhost/bottle/base:latest\n")
+        with mock.patch.object(images, "archive_of", return_value=None), \
+                mock.patch.object(images.prereqs, "ensure_smolvm"), \
+                self.assertRaisesRegex(BottleError, "isn't built"):
+            images.build_context(self.tmp, "t", "inputs", dockerfile=dockerfile)
 
 
 if __name__ == "__main__":

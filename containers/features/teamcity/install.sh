@@ -32,12 +32,12 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 
 # The CLI's configuration, which is all it needs to work here. The server is
-# addressed over https, as usual: the egress proxy terminates that TLS with a
+# addressed over https, as usual: bottled terminates that TLS with a
 # certificate from the egress CA, which the bottle trusts, and attaches the
 # access token (see bottle/egress.py). One thing in it is bottle's doing:
 #
 #   The token is a placeholder, and no secret: the CLI refuses to make a
-#   request until it has been logged in to a server, and the proxy replaces
+#   request until it has been logged in to a server, and bottled replaces
 #   this header on the way out. bottle delivers nothing here -- an injected
 #   credential never enters a bottle -- so what a tool needs in order to
 #   believe it is configured is the feature's business, which is this.

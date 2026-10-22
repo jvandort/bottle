@@ -516,28 +516,26 @@ class RemoveStaleTest(FeatureTestCase):
         self.current = features.inputs_hash("base", [tools])
         self.deleted: list[str] = []
 
-    def run_with(self, images: dict[str, tuple[str, dict]], in_use: set[str]) -> list[str]:
-        refs = [features.runtime.ImageRef(name, digest) for name, (digest, _) in images.items()]
-        with mock.patch.object(features.runtime, "images", return_value=refs), \
-                mock.patch.object(features.runtime, "images_in_use", return_value=in_use), \
-                mock.patch.object(features.runtime, "image_labels", side_effect=lambda n: images[n][1]), \
-                mock.patch.object(features.runtime, "image_delete", side_effect=self.deleted.append):
+    def run_with(self, images: dict[str, dict], bottles: dict) -> list[str]:
+        self.kept: set[str] = set()
+        from bottle import bottles as bottles_
+        with mock.patch.object(features.images, "built", return_value=images), \
+                mock.patch.object(features.images, "forget", side_effect=self.deleted.append), \
+                mock.patch.object(features.images, "remove_unused", side_effect=self.kept.update), \
+                mock.patch.object(bottles_, "load", return_value=bottles):
             return features.remove_stale()
 
-    def test_deletes_stale_unused_bottle_images_only(self) -> None:
+    def test_forgets_stale_images_and_keeps_every_archive_a_bottle_was_made_from(self) -> None:
         removed = self.run_with({
-            "localhost/bottle/base:with-tools": ("sha256:a", {"bottle.features": "tools", "bottle.inputs": self.current}),
-            "localhost/bottle/base:with-old": ("sha256:b", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
-            "localhost/bottle/base:with-in-use": ("sha256:c", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
-            "localhost/bottle/base:with-gone": ("sha256:d", {"bottle.features": "no-such-feature", "bottle.inputs": "x"}),
-            "localhost/bottle/base:with-unlabeled": ("sha256:e", {"bottle.features": "tools"}),
-            "debian:13": ("sha256:f", {}),
-            # Not bottle's: named without localhost/, it's someone else's.
-            "bottle/base:with-old": ("sha256:g", {"bottle.features": "tools", "bottle.inputs": "outdated"}),
-        }, in_use={"sha256:c"})
+            "localhost/bottle/base:with-tools": {"bottle.features": "tools", "bottle.inputs": self.current},
+            "localhost/bottle/base:with-old": {"bottle.features": "tools", "bottle.inputs": "outdated"},
+            "localhost/bottle/base:with-gone": {"bottle.features": "no-such-feature", "bottle.inputs": "x"},
+            "localhost/bottle/base:with-unlabeled": {"bottle.features": "tools"},
+        }, bottles={"a": mock.Mock(archive="old.tar"), "b": mock.Mock(archive=None)})
         self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
                                    "localhost/bottle/base:with-unlabeled"])
         self.assertEqual(self.deleted, removed)
+        self.assertEqual(self.kept, {"old.tar"})
 
 
 if __name__ == "__main__":

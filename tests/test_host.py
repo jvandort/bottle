@@ -3,14 +3,31 @@ import os
 import subprocess
 import zlib
 import unittest
-from unittest import mock
 
 from bottle import egress, host
 from tests.support import GitTestCase, run
 
 
+async def serve_bottle_host(services: host.HostServices) -> tuple[asyncio.Server, dict[str, str]]:
+    """bottle.host as a bottle reaches it: each connection a flow to host.ADDRESS, decided and served.
+
+    Returns the server, and an environment pointing git's http://bottle.host/ at it.
+    """
+    gateway = egress.Gateway("t", egress.Policy(), services=services)
+
+    async def decider(reader, writer) -> None:
+        flow = egress.Flow(host.ADDRESS, 80, await reader.read(64 * 1024))
+        await gateway.serve(flow, await gateway.decide(flow), reader, writer)
+
+    server = await asyncio.start_server(decider, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.http://127.0.0.1:{port}/.insteadOf",
+           "GIT_CONFIG_VALUE_0": "http://bottle.host/", "BOTTLE_HOST_PORT": str(port)}
+    return server, env
+
+
 class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
-    """Real git in a bottle-style workspace, talking to origin and host through the egress proxy.
+    """Real git in a bottle-style workspace, talking to origin and host at bottle.host, as the decider hands it on.
 
     upstream stands in for the repo's real remote (e.g. GitHub); repo is the
     host repo, a clone of it with local branches of its own.
@@ -33,9 +50,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         ))
         services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
         self.services = services
-        proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
-        self.addAsyncCleanup(self._close, proxy)
-        self.env = {**os.environ, "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
+        server, self.env = await serve_bottle_host(services)
+        self.addAsyncCleanup(self._close, server)
         # The same setup as a bottle's /workspace.
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)
@@ -218,7 +234,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     # --- other requests -------------------------------------------------------------
 
     async def request(self, raw: bytes) -> bytes:
-        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["http_proxy"].rsplit(":", 1)[1]))
+        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["BOTTLE_HOST_PORT"]))
         writer.write(raw)
         response = await reader.read()
         writer.close()
@@ -227,21 +243,15 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_other_paths_are_not_found(self) -> None:
         for path in (b"/nope", b"/git", b"/git/other/info/refs"):
             with self.subTest(path):
-                response = await self.request(b"GET http://bottle.host" + path + b" HTTP/1.1\r\n\r\n")
+                response = await self.request(b"GET " + path + b" HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
                 self.assertTrue(response.startswith(b"HTTP/1.1 404"), response[:40])
 
-    async def test_connect_to_the_host_is_refused(self) -> None:
-        self.assertTrue((await self.request(b"CONNECT bottle.host:443 HTTP/1.1\r\n\r\n")).startswith(b"HTTP/1.1 403"))
 
 
 class NoServicesTest(unittest.IsolatedAsyncioTestCase):
-    async def test_a_proxy_without_services_refuses_bottle_host(self) -> None:
-        proxy = await egress.EgressProxy("t", egress.Policy()).start("127.0.0.1", 0)
-        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.sockets[0].getsockname()[1])
-        writer.write(b"GET http://bottle.host/git/origin/info/refs HTTP/1.1\r\n\r\n")
-        self.assertTrue((await reader.read()).startswith(b"HTTP/1.1 403"))
-        writer.close()
-        proxy.close()
+    async def test_a_gateway_without_services_refuses_bottle_host(self) -> None:
+        with self.assertRaises(egress.Refused):
+            await egress.Gateway("t", egress.Policy()).decide(egress.Flow(host.ADDRESS, 80, b"GET / HTTP/1.1\r\n\r\n"))
 
 
 class FakeWriter:
@@ -400,9 +410,8 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
             "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",
         ))
         services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
-        proxy = await egress.EgressProxy("t", egress.Policy(), services=services).start("127.0.0.1", 0)
-        self.addAsyncCleanup(RemotesTest._close, proxy)
-        self.env = {**os.environ, "http_proxy": f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"}
+        server, self.env = await serve_bottle_host(services)
+        self.addAsyncCleanup(RemotesTest._close, server)
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)
         for remote in ("up", "theirs", "lane", "own", "origin", "work"):

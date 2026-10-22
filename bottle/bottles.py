@@ -6,12 +6,11 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a host-only network, bottle-<id>, reaching only the host, and held up by
-    the anchor (see anchor.py) for as long as it exists
-  - an egress proxy on that network's gateway, served by bottled, which also
-    serves the bottle's git remotes (see host.py)
-  - a container, bottle-<name>, with its repo's objects mounted read-only, if
-    it has a repo
+  - a smolvm machine, bottle-<name> (see smolvm.py), with its repo's objects
+    mounted read-only, if it has a repo
+  - a token at bottled's decider, which smolvm asks about each of the
+    machine's connections before making them, and which serves the bottle's git
+    remotes at bottle.host (see decider.py, egress.py, host.py)
   - a checkout at /workspace that borrows those objects via alternates
 
 What it installs, and its memory, come from a spec its creator owns (see
@@ -26,18 +25,18 @@ breaks, and the bottle has to be made again.
 """
 
 import logging
+import os
 import re
 import shlex
-import subprocess
 import sys
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NoReturn
 
-from bottle import anchor, auth, ca, daemon, features as features_, host, images, prereqs, repos, runtime, specs
+from bottle import auth, ca, daemon, features as features_, host, images, prereqs, repos, smolvm, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -47,7 +46,6 @@ log = logging.getLogger("bottle.bottles")
 OBJECTS_MOUNT = "/mnt/repo/objects"
 WORKSPACE = "/workspace"
 USER = "genie"
-NO_PROXY = "localhost,127.0.0.1"
 CONTEXT_FILE = "BOTTLE.md"  # in genie's home
 GIT_URL = f"http://{host.HOST}{host.GIT_PATH}"
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -57,7 +55,6 @@ ORIGIN, HOST_REMOTE = "origin", "host"
 # What bottle relies on inside every bottle, checked (as genie) whenever one
 # starts. Documented in containers/images/base/Dockerfile; keep them in sync.
 CONTRACT = (
-    ("tini is PID 1", '[ "$(cat /proc/1/comm)" = tini ]'),
     ("bottle-entrypoint is installed", "test -x /usr/local/bin/bottle-entrypoint"),
     ("the genie user has UID 1000", '[ "$(id -un)" = genie ] && [ "$(id -u)" = 1000 ]'),
     ("genie has passwordless sudo", "sudo -n true"),
@@ -83,7 +80,7 @@ class Bottle:
     status: str = "creating"
     # Features installed on top of the image, as specs (e.g. jvm:version=17), including dependencies.
     features: tuple[str, ...] = ()
-    # The VM's memory, as a `container run --memory` value (e.g. 8G); None: all of the machine's.
+    # The VM's memory, a size in M or G (e.g. 8G), from its spec. None only in records from before specs had to say.
     memory: str | None = None
     # The spec it was made from, canonical.
     spec: dict = field(default_factory=dict)
@@ -93,6 +90,8 @@ class Bottle:
     remotes: tuple[host.Remote, ...] = ()
     # Its creator's addition to ~/BOTTLE.md (`bottle new --context`).
     context: str = ""
+    # The image archive its machine was made from, which is kept while it exists.
+    archive: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -110,11 +109,7 @@ class Bottle:
         return self.branch or (f"({self.commit[:12]})" if self.commit else "-")
 
     @property
-    def network(self) -> str:
-        return f"bottle-{self.id}"
-
-    @property
-    def container(self) -> str:
+    def machine(self) -> str:
         return f"bottle-{namespace()}{self.name}"
 
 
@@ -124,7 +119,9 @@ def registry_path():
 
 def load() -> dict[str, Bottle]:
     data = read_json(registry_path()) or {"bottles": {}}
-    return {name: Bottle(**entry) for name, entry in data["bottles"].items()}
+    known = {f.name for f in fields(Bottle)}
+    # Keys a record from an older bottle may have (its driver, say) are left out.
+    return {name: Bottle(**{k: v for k, v in entry.items() if k in known}) for name, entry in data["bottles"].items()}
 
 
 def get(name: str) -> Bottle:
@@ -186,7 +183,7 @@ def create(
         raise BottleError(f"a bottle named {name!r} already exists")
     if repo is not None:
         _refuse_a_second_writer(repo, served, existing.values())
-    prereqs.ensure_container()
+    prereqs.ensure_smolvm()
     tag = features_.ensure_built(image, installed)
     auth.ensure_logged_in(installed)
 
@@ -196,21 +193,19 @@ def create(
         git_repo=str(repo.path) if repo else None, remotes=served, context=context,
     )
     bottle = _bring_up(bottle, repo, tag)
-    log.info("%s: created, %s, features %s, network %s", name,
-             f"{repo.path} at {bottle.checkout}" if repo else "no repo", ", ".join(installed) or "none", bottle.network)
+    log.info("%s: created, %s, features %s", name,
+             f"{repo.path} at {bottle.checkout}" if repo else "no repo", ", ".join(installed) or "none")
     return bottle
 
 
 def _bring_up(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
-    """Create the bottle's network and container from `tag`, and set it up; roll it all back on failure."""
+    """Create the bottle's machine from `tag`, and set it up; roll it all back on failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
-    if runtime.container_info(bottle.container) is not None:
-        raise BottleError(f"a container named {bottle.container} already exists; choose another name with --name")
+    if smolvm.state(bottle.machine) is not None:
+        raise BottleError(f"a machine named {bottle.machine} already exists; choose another name with --name")
     _save(bottle)
     try:
-        runtime.network_create(bottle.network, {runtime.OWNER_LABEL: bottle.id})
-        _anchor()
-        _run_container(bottle, repo, tag)
+        bottle = _run_machine(bottle, repo, tag)
     except BaseException as failure:
         log.warning("%s: creating failed, rolling back: %s", bottle.name, _describe(failure))
         try:
@@ -273,27 +268,55 @@ def _objects(bottle: Bottle) -> Path | None:
     return directory / "objects" if directory else None
 
 
-def _anchor(excluding: str | None = None) -> None:
-    """Have the anchor on every bottle's network but `excluding`'s, which is about to be deleted."""
-    anchor.ensure({b.network for b in load().values() if b.name != excluding})
-
-
-def _run_container(bottle: Bottle, repo: repos.Repo | None, tag: str) -> None:
-    """Start a fresh container for the bottle from `tag`, and set it up from scratch."""
-    proxy = daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT)
-    # The bottle gets stand-ins, never credentials: the real ones are held by
-    # the egress proxy (see auth.py), and a throwaway bottle gets neither.
-    runtime.container_run(
-        bottle.container, tag, bottle.network,
-        env=_container_env(proxy, bottle.features),
-        mounts=[runtime.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)] if repo else [],
-        labels={runtime.OWNER_LABEL: bottle.id}, memory=bottle.memory,
+def _run_machine(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
+    """Create and start a fresh machine for the bottle from `tag`'s archive, and set it up from scratch."""
+    archive = images.archive_of(tag)
+    if archive is None:
+        raise BottleError(f"{tag} isn't built")
+    # Recorded first, so the archive is kept from the moment a machine could have been made from it.
+    bottle = replace(bottle, archive=archive.name)
+    _save(bottle)
+    # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open.
+    smolvm.create(
+        bottle.machine, str(archive),
+        mounts=[smolvm.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)] if repo else [],
+        env=_machine_env(bottle.features), memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
     )
+    _start_machine(bottle)
     verify_contract(bottle)
     trust_egress_ca(bottle)
-    # The gateway only exists once the container is on the network, so egress comes second.
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features, bottle.remotes)
+    point_at_host(bottle)
     _init_workspace(bottle)
+    return bottle
+
+
+def _start_machine(bottle: Bottle) -> None:
+    """Start the bottle's machine, its flows decided by bottled under a token new for this run."""
+    decider, token = daemon.bind_decider(bottle.name, git_dir(bottle), bottle.features, bottle.remotes)
+    smolvm.start(bottle.machine, decider, token)
+
+
+def _memory_mib(memory: str | None) -> int:
+    """A machine's memory in MiB, from its spec's size (8G, 512M). It takes it as the guest touches it."""
+    match = re.fullmatch(r"([1-9][0-9]*)([MG])", (memory or "").strip().upper())
+    if match is None:
+        raise BottleError(f'a bottle needs its memory, a size in M or G, e.g. "8G" (not {memory!r})')
+    return int(match.group(1)) * (1024 if match.group(2) == "G" else 1)
+
+
+def point_at_host(bottle: Bottle) -> None:
+    """Give the bottle bottle.host, at the address whose flows the decider hands to bottled's git service."""
+    entry = f"{host.ADDRESS} {host.HOST}"
+    script = f"grep -qsx {shlex.quote(entry)} /etc/hosts || echo {shlex.quote(entry)} >> /etc/hosts"
+    try:
+        _exec(bottle, ["sh", "-c", script], user="root")
+    except BottleError as e:
+        raise BottleError(f"giving {bottle.machine} bottle.host failed: {e}") from None
+
+
+def _exec(bottle: Bottle, argv: list[str], user: str | None = None, input: str | None = None) -> str:
+    """Run a command in the bottle's running machine and return its output."""
+    return smolvm.exec_(bottle.machine, argv, user=user, input=input)
 
 
 @contextmanager
@@ -304,23 +327,21 @@ def throwaway(feature_specs: list[str]):
     the throwaway bottle, attached to a terminal. Everything is removed on exit.
     """
     tag = features_.ensure_built(images.BASE, feature_specs)
-    token = uuid.uuid4().hex[:12]
-    name = f"bottle-throwaway-{token}"
+    name = f"bottle-throwaway-{uuid.uuid4().hex[:12]}"
     log.info("%s: throwaway bottle with %s", name, ", ".join(feature_specs) or "no features")
     try:
-        runtime.network_create(name, {runtime.OWNER_LABEL: token})
-        proxy = daemon.proxy_url(runtime.network_gateway(name), daemon.EGRESS_PORT)
-        runtime.container_run(name, tag, name, env=_proxy_env(proxy), mounts=[], labels={runtime.OWNER_LABEL: token})
-        # No features, so no credentials and no egress CA: a login starts from
+        archive = images.archive_of(tag)
+        if archive is None:
+            raise BottleError(f"{tag} isn't built")
+        # No spec to say how much memory: smolvm's own default, for a login command.
+        smolvm.create(name, str(archive), mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
+        # Bound with no features, so no credentials and no egress CA: a login starts from
         # nothing, and mustn't find its own credential attached to what it sends.
-        daemon.ensure_egress(name, name)
-        yield lambda argv: runtime.exec_command(name, argv, user=USER, tty=True)
+        decider, secret = daemon.bind_decider(name)
+        smolvm.start(name, decider, secret)
+        yield lambda argv: smolvm.exec_command(name, argv, user=USER, tty=True)
     finally:
-        for cleanup in (
-            lambda: daemon.release_egress(name),
-            lambda: runtime.container_delete(name, token),
-            lambda: runtime.network_delete(name),
-        ):
+        for cleanup in (lambda: daemon.release_egress(name), lambda: smolvm.delete(name)):
             try:
                 cleanup()
             except Exception as e:
@@ -337,25 +358,16 @@ def git_dir(bottle: Bottle) -> Path | None:
         return None
 
 
-def _proxy_env(proxy: str) -> dict[str, str]:
-    env = {}
-    for key in ("http_proxy", "https_proxy"):
-        env[key] = env[key.upper()] = proxy
-    env["no_proxy"] = env["NO_PROXY"] = NO_PROXY
-    return env
+def _machine_env(features: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """What a bottle's machine is created with: the stand-ins its features asked for, never credentials.
 
-
-def _container_env(proxy: str, features: tuple[str, ...] | list[str]) -> dict[str, str]:
-    """What `container run` sets for a bottle: the proxy, and the stand-ins its features asked for.
-
-    `container exec` sees these; SSH sessions only see /etc/environment, so the
-    base image's entrypoint mirrors them there, and BOTTLE_MIRROR_ENV tells it
-    which ones beyond the proxy variables to mirror.
+    Every exec sees these. SSH sessions only see /etc/environment, so the base
+    image's entrypoint mirrors there the ones BOTTLE_MIRROR_ENV names.
     """
     standins = auth.standins_for(features)
     if not standins:
-        return _proxy_env(proxy)
-    return _proxy_env(proxy) | standins | {"BOTTLE_MIRROR_ENV": " ".join(sorted(standins))}
+        return {}
+    return standins | {"BOTTLE_MIRROR_ENV": " ".join(sorted(standins))}
 
 
 def context(bottle: Bottle) -> str:
@@ -379,8 +391,8 @@ def context(bottle: Bottle) -> str:
             lines.append("  It has no remotes.")
     else:
         lines.append(f"- `{WORKSPACE}` is empty: this bottle has no repo.")
-    lines.append("- The network is reachable only through the HTTP proxy in `HTTPS_PROXY`/`HTTP_PROXY`\n"
-                 "  (already set). There's no DNS, and private addresses are blocked.")
+    lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
+                 "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     # Each feature's own word on what it gives the agent (customizations.bottle.context).
     told = [(f.id, f.agent_context()) for f in features_.resolve(list(bottle.features))]
     told = [(feature_id, text) for feature_id, text in told if text]
@@ -435,7 +447,7 @@ def _init_workspace(bottle: Bottle) -> None:
             script += [f"git -C {WORKSPACE} fetch -q --multiple {' '.join(names)}"]
     script += [f"printf '%s' {shlex.quote(context(bottle))} > \"$HOME/{CONTEXT_FILE}\""]
     try:
-        runtime.container_exec(bottle.container, ["sh", "-c", "\n".join(script)], user=USER)
+        _exec(bottle, ["sh", "-c", "\n".join(script)], user=USER)
     except BottleError as e:
         raise BottleError(f"setting up {WORKSPACE} failed: {e}") from None
 
@@ -446,78 +458,45 @@ def start(name: str) -> Bottle:
 
 
 def stop(name: str) -> None:
-    """Stop the bottle's VM and egress. Its checkout and changes are kept."""
+    """Stop the bottle's machine, and its token at the decider. Its checkout and changes are kept."""
     bottle = get(name)
-    daemon.release_egress(bottle.name)
-    if not runtime.services_running():
-        return  # so nothing is running
-    if runtime.container_state(bottle.container) == "running":
-        runtime.container_stop(bottle.container)
+    if smolvm.state(bottle.machine) == "running":
+        smolvm.stop(bottle.machine)
         log.info("%s: stopped", name)
+    daemon.release_egress(bottle.name)
 
 
 def shutdown() -> tuple[list[str], bool]:
-    """Stop every running bottle, the anchor, then bottled. Returns the stopped bottles and whether bottled was running."""
+    """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running."""
     stopped = []
-    if runtime.services_running():
-        for bottle in load().values():
-            if runtime.container_state(bottle.container) == "running":
-                runtime.container_stop(bottle.container)
-                log.info("%s: stopped (shutdown)", bottle.name)
-                stopped.append(bottle.name)
-        anchor.remove()
+    for bottle in load().values():
+        if smolvm.state(bottle.machine) == "running":
+            smolvm.stop(bottle.machine)
+            daemon.release_egress(bottle.name)
+            log.info("%s: stopped (shutdown)", bottle.name)
+            stopped.append(bottle.name)
     return stopped, daemon.stop()
 
 
 def ensure_running(name: str) -> Bottle:
-    """Start the bottle's container and egress if they aren't running."""
+    """Start the bottle's machine if it isn't running, bound to the decider."""
     bottle = get(name)
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
-    state = runtime.container_state(bottle.container)
+    state = smolvm.state(bottle.machine)
     if state is None:
-        raise BottleError(f"{name}'s container is gone; `bottle delete {name}`, then `bottle new` again")
-    if state == "running" and not runtime.host_has_address(runtime.network_gateway(bottle.network)):
-        # Running but cut off: another network took its bridge (see anchor.py). Restarting
-        # the VM would take the bridge back and cut that network off instead; only
-        # restarting container's services gives each network a bridge of its own again.
-        log.warning("%s: running, but this machine has no address on %s (its bridge is gone)", name, bottle.network)
-        raise BottleError(
-            f"{name}'s network lost its bridge on this machine, an apple/container bug; to repair it, "
-            "run `bottle shutdown && container system stop`, then try again"
-        )
-    _anchor()
+        raise BottleError(f"{bottle.name}'s machine is gone; `bottle delete {bottle.name}`, then `bottle new` again")
     if state != "running":
-        prereqs.ensure_container()
-        runtime.container_start(bottle.container)
-        log.info("%s: started", name)
+        prereqs.ensure_smolvm()
+        _start_machine(bottle)
+        log.info("%s: started", bottle.name)
         verify_contract(bottle)
         trust_egress_ca(bottle)
-        point_at_egress(bottle)
-    daemon.ensure_egress(bottle.name, bottle.network, git_dir(bottle), bottle.features, bottle.remotes)
+        point_at_host(bottle)
+    else:
+        # Running, so its token is kept: bottled, if it had stopped, binds it again as it starts.
+        daemon.start()
     return bottle
-
-
-def current_proxy_env(bottle: Bottle) -> dict[str, str]:
-    """The proxy settings for the bottle's network as it is now.
-
-    The ones `container run` gave it can be stale: a network's subnet isn't
-    kept when container's services restart (as when the machine does), so the
-    gateway the egress proxy listens on can move.
-    """
-    return _proxy_env(daemon.proxy_url(runtime.network_gateway(bottle.network), daemon.EGRESS_PORT))
-
-
-def point_at_egress(bottle: Bottle) -> None:
-    """Point SSH sessions, which only see /etc/environment, at the egress proxy's current address."""
-    env = current_proxy_env(bottle)
-    script = f'for var in {" ".join(env)}; do sed -i "/^$var=/d" /etc/environment; done; cat >> /etc/environment'
-    try:
-        runtime.container_exec(
-            bottle.container, ["sh", "-c", script], user="root", input="".join(f"{k}={v}\n" for k, v in env.items())
-        )
-    except BottleError as e:
-        raise BottleError(f"pointing {bottle.container} at its egress proxy failed: {e}") from None
 
 
 def trust_egress_ca(bottle: Bottle) -> None:
@@ -525,9 +504,8 @@ def trust_egress_ca(bottle: Bottle) -> None:
 
     Every time a bottle starts, so a bottle made before its CA, or whose
     credential hosts have changed since, trusts the current one, and a bottle
-    with no credential hosts trusts none. It's what lets the egress proxy
-    attach a credential to the bottle's HTTPS (see ca.py); the key stays on
-    the machine.
+    with no credential hosts trusts none. It's what lets bottled attach a
+    credential to the bottle's HTTPS (see ca.py); the key stays on the Mac.
     """
     certificate = ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
     if certificate is None:
@@ -539,9 +517,9 @@ def trust_egress_ca(bottle: Bottle) -> None:
             f"else mv {CA_CERTIFICATE}.new {CA_CERTIFICATE} && update-ca-certificates --fresh >/dev/null; fi"
         )
     try:
-        runtime.container_exec(bottle.container, ["sh", "-c", script], user="root", input=certificate)
+        _exec(bottle, ["sh", "-c", script], user="root", input=certificate)
     except BottleError as e:
-        raise BottleError(f"installing the egress CA in {bottle.container} failed: {e}") from None
+        raise BottleError(f"installing the egress CA in {bottle.machine} failed: {e}") from None
 
 
 def verify_contract(bottle: Bottle) -> None:
@@ -576,20 +554,19 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    runtime.container_exec_interactive(
-        bottle.container, argv, user=USER, workdir=WORKSPACE, tty=tty, env=current_proxy_env(bottle)
-    )
+    command = smolvm.exec_command(bottle.machine, argv, user=USER, workdir=WORKSPACE, tty=tty)
+    os.execvp(command[0], command)
 
 
 def _in_bottle(bottle: Bottle, argv: list[str]) -> str:
-    return runtime.container_exec(bottle.container, argv, user=USER).strip()
+    return _exec(bottle, argv, user=USER).strip()
 
 
 def list_all() -> list[tuple[Bottle, str]]:
-    """Every bottle with its current state: the container's, unless setup never finished."""
+    """Every bottle with its current state: its machine's, unless setup never finished."""
     result = []
     for bottle in sorted(load().values(), key=lambda b: b.created):
-        state = bottle.status if bottle.status != "ready" else (runtime.container_state(bottle.container) or "missing")
+        state = bottle.status if bottle.status != "ready" else (smolvm.state(bottle.machine) or "missing")
         result.append((bottle, state))
     return result
 
@@ -611,7 +588,7 @@ def status(names: list[str] = ()) -> list[dict]:
             "name": bottle.name, "state": state, "created": bottle.created,
             "git_repo": bottle.git_repo,
             "branch": bottle.branch, "commit": bottle.commit or None,
-            "features": sorted(bottle.features), "memory": bottle.memory or specs.ALL_MEMORY, "spec": bottle.spec,
+            "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
             "remotes": [r.spec for r in bottle.remotes],
         })
     return rows
@@ -626,11 +603,10 @@ def delete(name: str) -> None:
     """
     bottle = get(name)
     failures = []
+    # The registry says the machine is the bottle's: smolvm has no labels to ask.
     for step, action in (
         ("egress", lambda: daemon.release_egress(bottle.name)),
-        ("container", lambda: runtime.container_delete(bottle.container, bottle.id)),
-        ("anchor", lambda: _anchor(excluding=bottle.name)),  # off the network, or it can't be deleted
-        ("network", lambda: runtime.network_delete(bottle.network)),
+        ("machine", lambda: smolvm.delete(bottle.machine)),
         ("egress CA", lambda: ca.forget(bottle.name)),
     ):
         try:
@@ -647,7 +623,7 @@ def delete(name: str) -> None:
 
 
 def _remove_stale_images() -> None:
-    """Delete images whose features or base have changed since they were built, if no container uses one.
+    """Delete images whose features or base have changed since they were built, if no bottle uses one.
 
     An image that's still current is kept, even with nothing using it: it's a
     cache, and the next bottle with those features starts without a build.

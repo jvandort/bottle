@@ -18,8 +18,8 @@ rm -rf /var/lib/apt/lists/*
 
 # How this feature is authenticated, since JSON has no room for a comment:
 #
-#   Claude Code talks to https://api.anthropic.com as it always does. The
-#   egress proxy terminates that TLS with a certificate from the egress CA,
+#   Claude Code talks to https://api.anthropic.com as it always does. bottled
+#   terminates that TLS with a certificate from the egress CA,
 #   which the bottle trusts (NODE_EXTRA_CA_CERTS, set by the base image), and
 #   puts the subscription token in place of the stand-in Claude Code sends
 #   (see bottle/egress.py) -- on inference, and on the organization's managed
@@ -30,7 +30,7 @@ rm -rf /var/lib/apt/lists/*
 #   the throwaway bottle `bottle auth login claude` runs `claude setup-token`
 #   in finds nothing to mistake for a login. The stand-in is what puts Claude
 #   Code in subscription-token mode, so it sends the Authorization header (and
-#   the OAuth beta header the API wants with such a token) that the proxy then
+#   the OAuth beta header the API wants with such a token) that bottled then
 #   replaces on the way out.
 
 # Settings for the bottle's user, so Claude starts working straight away:

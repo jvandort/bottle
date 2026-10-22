@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     configure = commands.add_parser("configure", help="the repo's spec: its threads' features and memory")
     configure_commands = configure.add_subparsers(dest="configure_command", required=True, metavar="COMMAND")
     feature_help = "a feature, optionally with options, e.g. jvm:version=21 (repeatable)"
-    memory_help = "memory for each bottle, in M or G, e.g. 8G, or `all` of this machine's"
+    memory_help = f"memory for each bottle, in M or G, e.g. 8G (default: {repos.DEFAULT_MEMORY})"
     for name, help_ in (("set", "replace the spec: exactly these features, and this memory"),
                         ("update", "change the spec: add features (one given again replaces its options), or the memory")):
         command = configure_commands.add_parser(
@@ -200,7 +200,7 @@ def _configure(args: argparse.Namespace) -> int:
     repo = repos.current()
     spec = dict(repo.spec() or repos.DEFAULT_SPEC)
     if args.replace:
-        spec = {"features": list(args.feature), **({"memory": args.memory} if args.memory else {})}
+        spec = {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY}
     else:
         spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
         if args.memory is not None:
@@ -228,7 +228,7 @@ def _repo_list(args: argparse.Namespace) -> int:
 
 
 def _spec(spec: dict) -> str:
-    return f"features [{', '.join(spec.get('features', []))}], memory {spec.get('memory', 'all')}"
+    return f"features [{', '.join(spec.get('features', []))}], memory {spec['memory']}"
 
 
 def _size(size: int) -> str:
