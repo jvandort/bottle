@@ -28,9 +28,13 @@ never clashes. The repo key is the repo's name and a hash of its path.
 
 - **Its bottle** is made from the repo's spec (see `folio configure`), with
   the repo checked out at `/workspace`. In it, Claude and a shell each run in a
-  tmux session of their own, started the first time you attach to it.
-  Attaching starts the bottle and the session if they've stopped. Closing the
-  terminal only detaches it, and whatever is running carries on.
+  [shpool](https://github.com/shell-pool/shpool) session of their own, started
+  the first time you attach to it. Attaching starts the bottle and the session
+  if they've stopped. Closing the terminal only detaches it, and whatever is
+  running carries on. shpool passes output straight through, so your terminal's
+  own scrollback, mouse wheel and selection work; a reattach replays the
+  session's last 10000 lines into that scrollback. Detach with Ctrl+Space
+  Ctrl+Q, or by closing the terminal. tmux is there too, to start in one.
 - **Its lane** is two git namespaces in your repo: one the agent pushes into
   and you read, one you push into and it reads. Neither side's push is ever
   refused for what the other did, so conflicts are always the agent's to
@@ -89,7 +93,7 @@ terminal it needs `--yes`.
 threads is made from: `set` replaces it, `update` adds features (a feature
 given again replaces its options) or changes the memory. Bottle checks the
 spec before folio saves it. A repo with no spec gets `tools`, which has the
-tmux every thread runs in; add `claude` for Claude.
+shpool every thread runs in; add `claude` for Claude.
 
 ```sh
 folio configure set --feature tools --feature claude --feature jvm:version=21 --memory 8G

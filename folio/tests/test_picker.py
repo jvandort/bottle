@@ -3,7 +3,7 @@ import io
 from contextlib import redirect_stdout
 from unittest import mock
 
-from folio import cli, picker, repos
+from folio import cli, picker, repos, threads
 from folio.picker import NEW, Choice, Picker
 from tests.support import FOLIO, FolioTestCase
 
@@ -99,7 +99,7 @@ class ChoosingTest(FolioTestCase):
 
     def test_a_new_thread_from_the_picker_is_made_and_attached_to(self) -> None:
         code, _, attach = self.run_cli("shell", chosen=picker.NEW, typed="fresh")
-        self.assertEqual(attach.call_args.args, (f"{self.repo_.key}-fresh", ["tmux", "attach", "-d", "-t", "=shell"]))
+        self.assertEqual(attach.call_args.args, (f"{self.repo_.key}-fresh", ["sh", "-c", threads.ATTACH, "attach", "shell"]))
 
     def test_only_claude_and_shell_offer_a_new_thread(self) -> None:
         for command in ("pause", "delete"):
@@ -175,8 +175,8 @@ class TerminalTest(FolioTestCase):
         code, out = self.drive(["claude"], b"jj\r")  # past + new thread and newer, to older
         self.assertEqual(code, 0, out[-500:])
         self.assertIn(b"older", out)
-        self.assertEqual(self.calls("exec")[-1][1:], [f"{repos.current(self.repo).key}-older", "--", "tmux", "attach",
-                                                      "-d", "-t", "=claude"])
+        self.assertEqual(self.calls("exec")[-1][1:], [f"{repos.current(self.repo).key}-older", "--", "sh", "-c",
+                                                      threads.ATTACH, "attach", "claude"])
 
     def test_leaving_with_q(self) -> None:
         self.ok("new", "only")

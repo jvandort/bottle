@@ -88,7 +88,7 @@ class PauseAndResumeTest(PauseTestCase):
         self.assertEqual((self.claude / "projects" / "-workspace" / "memory" / "fact.md").read_text(), "remembered")
         self.assertFalse((self.claude / "plugins").exists())
         self.assertEqual((self.claude / "settings.json").read_text(), '{"from": "the old bottle"}')  # /model and all
-        self.assertEqual(self.calls("exec")[-1][-4:], ["attach", "-d", "-t", "=claude"])
+        self.assertEqual(self.calls("exec")[-1][-2:], ["attach", "claude"])
 
     def test_a_resumed_thread_has_no_snapshot_left_to_go_stale(self) -> None:
         self.ok("pause", "fix-it")
@@ -100,10 +100,8 @@ class PauseAndResumeTest(PauseTestCase):
     def test_the_sessions_are_stopped_before_the_snapshot(self) -> None:
         self.ok("claude", "fix-it")
         self.ok("pause", "fix-it")
-        tmux = [c[3:5] for c in self.calls("exec") if c[3] == "tmux"]
-        self.assertIn(["tmux", "kill-server"], tmux)
         execs = self.calls("exec")
-        kill = execs.index(["exec", self.bottle, "--", "tmux", "kill-server"])
+        kill = next(i for i, c in enumerate(execs) if c[3:5] == ["kill", "-HUP"])
         archive = next(i for i, c in enumerate(execs) if c[-1] == snapshots.workspace_out("/workspace"))
         self.assertLess(kill, archive)
 

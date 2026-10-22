@@ -1,8 +1,9 @@
 # TODO
 
-- **A spec without `claude` fails tersely.** `folio claude` then gets tmux's
-  "can't find session", since the session's command exits at once. Say that
-  the repo's spec has no `claude`, and how to add it.
+- **A spec without `claude` fails confusingly.** `folio claude` then gets a
+  plain shell: the session's command exits at once, and shpool starts a shell
+  in its place when it's attached to. Say that the repo's spec has no
+  `claude`, and how to add it.
 - **A resumed workspace keeps its old remotes.** `.git/config` comes back from
   the snapshot, so a thread paused before its remotes changed (`work`, before
   `agent` and `user`) resumes with the old ones, and the new bottle serves
@@ -27,5 +28,3 @@
   directions, because the loop has two.
 - `--git-repo` with a URL, and folio on a different machine from its sandboxes.
   The design keeps both possible: no writable mounts, and everything over exec.
-- tmux UX: the prefix key (Ctrl+B is also Claude Code's background key), mouse
-  handling, scrollback, the status bar.

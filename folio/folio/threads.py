@@ -17,9 +17,11 @@ record:
 A thread has a snapshot only while it has no bottle: attaching to one drops
 it, since the bottle is where the work is from then on.
 
-Inside the bottle, Claude and a shell each run in a tmux session of their own,
-started by one exec and attached to by another, so closing a terminal only
-detaches it, and whatever the session started keeps running.
+Inside the bottle, Claude and a shell each run in a shpool session of their
+own, started by one exec and attached to by another, so closing a terminal only
+detaches it, and whatever the session started keeps running. shpool passes the
+session's output straight through, so it's the terminal's own scrollback that
+has it.
 """
 
 import json
@@ -48,6 +50,15 @@ SESSIONS = {
             'then exec claude --continue; else exec claude; fi',
     SHELL: "exec bash -l",
 }
+# What a session's programs are told their terminal is. Not the one attached,
+# whose TERM the bottle may have no terminfo for, and which a session outlives.
+TERM = "xterm-256color"
+# Attaches to the session named by $1. shpool loses a session's screen if a
+# terminal attaches before it has a size, which an exec's can lack at first.
+ATTACH = """\
+for i in $(seq 20); do [ "$(stty size)" = "0 0" ] || exec shpool attach -f "$1"; sleep 0.1; done
+echo "folio: the terminal has no size, so it wasn't attached" >&2; exit 1
+"""
 SNAPSHOT = (snapshots.WORKSPACE_ARCHIVE, snapshots.CLAUDE_ARCHIVE, snapshots.WORK)
 
 
@@ -172,9 +183,9 @@ def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
     _ensure_session(thread, session)
     # The bottle has the work now, so a snapshot would only be out of date.
     _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}), dict.fromkeys(SNAPSHOT))
-    # -d detaches anything else on it: closing a terminal doesn't hang up its
-    # attach inside the VM, and tmux sizes a window to its smallest client.
-    engine.attach(thread.bottle, ["tmux", "attach", "-d", "-t", f"={session}"])
+    # -f detaches anything else on it: closing a terminal doesn't hang up its
+    # attach inside the VM.
+    engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session])
 
 
 def _ensure_running(repo: Repo, thread: Thread) -> None:
@@ -222,12 +233,15 @@ def pause(repo: Repo, thread: Thread) -> None:
 
 
 def _stop_sessions(thread: Thread) -> None:
-    """Stop the bottle's tmux server, and wait (a while) for what ran in it to exit."""
-    panes = engine.run(thread.bottle, ["tmux", "list-panes", "-a", "-F", "#{pane_pid}"], check=False).stdout.split()
-    engine.run(thread.bottle, ["tmux", "kill-server"], check=False)
-    pids = " ".join(pid for pid in panes if pid.isdigit())
+    """Hang up the bottle's sessions, and wait (a while) for them to exit.
+
+    The hangup is folio's own: `shpool kill` follows its SIGHUP with a SIGKILL
+    half a second later, too soon for Claude to have written its conversation out.
+    """
+    pids = [str(s["shell_pid"]) for s in _sessions(thread)]
     if pids:
-        engine.run(thread.bottle, ["sh", "-c", f"for i in $(seq 50); do alive=; for p in {pids}; do "
+        engine.run(thread.bottle, ["kill", "-HUP", *pids], check=False)
+        engine.run(thread.bottle, ["sh", "-c", f"for i in $(seq 50); do alive=; for p in {' '.join(pids)}; do "
                                                "kill -0 $p 2>/dev/null && alive=1; done; "
                                                '[ -z "$alive" ] && exit 0; sleep 0.2; done'])
 
@@ -249,10 +263,22 @@ def _resume(repo: Repo, thread: Thread) -> None:
         raise
 
 
+def _sessions(thread: Thread) -> list[dict]:
+    """The bottle's shpool sessions, as `shpool list --json` has them."""
+    listed = engine.run(thread.bottle, ["shpool", "list", "--json"], check=False)
+    return json.loads(listed.stdout)["sessions"] if listed.returncode == 0 else []
+
+
 def _ensure_session(thread: Thread, session: str) -> None:
-    if engine.run(thread.bottle, ["tmux", "has-session", "-t", f"={session}"], check=False).returncode == 0:
-        return
-    engine.run(thread.bottle, ["tmux", "new-session", "-d", "-s", session, "-c", WORKSPACE, SESSIONS[session]])
+    listed = next((s for s in _sessions(thread) if s["name"] == session), None)
+    if listed is not None:
+        if engine.run(thread.bottle, ["kill", "-0", str(listed["shell_pid"])], check=False).returncode == 0:
+            return
+        # Its program exited, but shpool keeps the session, and attaching to it
+        # would start a plain shell in its place.
+        engine.run(thread.bottle, ["shpool", "kill", session], check=False)
+    engine.run(thread.bottle, ["env", f"TERM={TERM}", "shpool", "attach", "--background", "--dir", WORKSPACE,
+                               "--cmd", shlex.join(["sh", "-c", SESSIONS[session]]), session])
 
 
 def losses(repo: Repo, thread: Thread) -> list[str]:

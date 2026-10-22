@@ -1,0 +1,14 @@
+# shpool keeps a session running while no terminal is attached, and passes its
+# output straight through, so the terminal's own scrollback, wheel and
+# selection work. What it holds itself is only what a reattach replays: the
+# last 10000 lines, pushed into the terminal's scrollback. The vterm engine,
+# because vt100's replay positions lines by absolute row, so on a terminal
+# shorter than the replay they overwrite each other instead of scrolling.
+prompt_prefix = ""
+session_restore_mode = { lines = 10000 }
+session_restore_engine = "vterm"
+# A new session gets the environment of the `shpool attach` that made it --
+# folio's exec, so what `container exec` has, as tmux's sessions did. Without
+# it, shpool's own: an openssh PATH, without /usr/local/bin or ~/.local/bin,
+# and nothing of a feature's containerEnv but what's in /etc/environment.
+forward_env = true

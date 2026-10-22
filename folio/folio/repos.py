@@ -19,7 +19,7 @@ from .errors import FolioError
 from .git import git
 
 # What a new repo's bottles get until `folio configure` says otherwise: tools
-# has tmux, which every thread runs in.
+# has shpool, which every thread runs in.
 DEFAULT_SPEC = {"features": ["tools"]}
 
 

@@ -40,7 +40,7 @@ against the hosts they're attached to.
 ## Quick start
 
 Bottle is the sandbox. To work in one -- a line of work with its own lane of branches, Claude
-running in tmux, and pause and resume -- use [folio](folio/README.md), which drives bottle for
+running in a session you can detach from, and pause and resume -- use [folio](folio/README.md), which drives bottle for
 you:
 
 ```sh
@@ -158,7 +158,7 @@ bottle build --feature tools --feature claude
 Features, in the [Dev Container feature](https://containers.dev/implementors/features/)
 format (a `devcontainer-feature.json` and an `install.sh` per directory):
 
-- `tools`: a minimal working environment (ripgrep, fd, jq, curl, vim, tmux, ...).
+- `tools`: a minimal working environment (ripgrep, fd, jq, curl, vim, tmux, shpool, ...).
 - `jvm`: Eclipse Temurin JDKs, from Adoptium's signed apt repository. Options:
   `version` (default `25`), the default `java` and `JAVA_HOME`; and
   `additionalVersions`, more JDKs alongside it, e.g. `17,21`. Every JDK is in

@@ -5,19 +5,24 @@ It keeps its bottles in $FAKE_BOTTLE_STATE, a JSON file, and logs every call
 there. A bottle's /workspace is a real clone of its --git-repo, beside the
 state file, and `exec` runs commands in it, with /workspace rewritten and
 $HOME a home of the bottle's own, which starts with the settings.json an image
-would give it; tmux is pretended, by keeping each bottle's sessions in the
+would give it; shpool is pretended, by keeping each bottle's sessions in the
 state. Failures look like
 bottle's: `bottle: error: ...` on stderr, exit 1.
 """
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 STATE = Path(os.environ["FAKE_BOTTLE_STATE"])
+# A pretended session's pid: above Linux's highest, so no process has it. A
+# session in a bottle's "exited" is one whose program has, and that shpool lists
+# all the same, with a pid that kill -0 doesn't find.
+NO_PID, EXITED_PID = 4194305, 4194306
 
 
 def load() -> dict:
@@ -85,16 +90,20 @@ def main(argv: list[str]) -> int:
             bottle = bottles[name]
             bottle["state"] = "running"  # as bottle exec does: it starts a stopped bottle
             match command:
-                case ["tmux", "has-session", "-t", target]:
-                    return 0 if target.removeprefix("=") in bottle["sessions"] else 1
-                case ["tmux", "new-session", "-d", "-s", session, "-c", _, what]:
-                    bottle["sessions"][session] = what
-                    save(state)
-                case ["tmux", "attach", *_]:
+                case ["shpool", "list", "--json"]:
+                    exited = bottle.get("exited", [])
+                    print(json.dumps({"sessions": [{"name": n, "shell_pid": EXITED_PID if n in exited else NO_PID}
+                                                   for n in bottle["sessions"]]}))
+                case ["env", _, "shpool", "attach", "--background", "--dir", _, "--cmd", what, session]:
+                    bottle["sessions"][session] = shlex.split(what)[2]
+                case ["kill", "-0", pid]:
+                    return 0 if pid == str(NO_PID) else 1
+                case ["shpool", "kill", session]:
+                    del bottle["sessions"][session]
+                    bottle["exited"] = [n for n in bottle.get("exited", []) if n != session]
+                case ["sh", "-c", _, "attach", _]:
                     pass  # attached; the call log is the evidence
-                case ["tmux", "list-panes", *_]:
-                    return 0  # no real processes to wait for
-                case ["tmux", "kill-server"]:
+                case ["kill", "-HUP", *_]:
                     bottle["sessions"] = {}
                 case _:
                     rewritten = [arg.replace("/workspace", bottle["workspace"]) for arg in command]

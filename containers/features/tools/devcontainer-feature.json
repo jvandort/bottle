@@ -8,7 +8,7 @@
   },
   "customizations": {
     "bottle": {
-      "context": "`rg`, `fd`, `jq`, `curl`, `vim`, `less`, `unzip` and `tmux` are installed."
+      "context": "`rg`, `fd`, `jq`, `curl`, `vim`, `less`, `unzip`, `tmux` and `shpool` are installed."
     }
   }
 }

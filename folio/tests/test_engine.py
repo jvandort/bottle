@@ -32,7 +32,7 @@ class EngineTest(unittest.TestCase):
 
     def test_a_failure_the_caller_expects_says_nothing(self) -> None:
         with self.run_with(1) as run:
-            self.assertEqual(engine.run("b", ["tmux", "has-session"], check=False).returncode, 1)
+            self.assertEqual(engine.run("b", ["shpool", "list"], check=False).returncode, 1)
         self.assertIs(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
 
     def test_start_is_on_this_terminal(self) -> None:
@@ -46,5 +46,5 @@ class EngineTest(unittest.TestCase):
 
     def test_exec_puts_the_command_after_a_double_dash(self) -> None:
         with self.run_with() as run, mock.patch.object(engine, "command", return_value=["bottle"]):
-            engine.run("b", ["tmux", "-V"])
-        self.assertEqual(run.call_args.args[0], ["bottle", "exec", "b", "--", "tmux", "-V"])
+            engine.run("b", ["shpool", "version"])
+        self.assertEqual(run.call_args.args[0], ["bottle", "exec", "b", "--", "shpool", "version"])

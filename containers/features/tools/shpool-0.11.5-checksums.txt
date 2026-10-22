@@ -1,0 +1,2 @@
+3bee99f36ddfa01e87edc0186b469bd796917bff8ca420101b574bf75b338c0f  shpool-aarch64-unknown-linux-gnu.tar.gz
+490b3a3b71bd32c2860ac23348fd45a7eb78524205a6b7a7435fc9b24c6e52ed  shpool-x86_64-unknown-linux-gnu.tar.gz
