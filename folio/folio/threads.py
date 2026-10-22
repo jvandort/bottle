@@ -76,6 +76,10 @@ def directory(repo: Repo, name: str) -> Path:
     return repo.directory / name
 
 
+def exists(repo: Repo, name: str) -> bool:
+    return NAME.fullmatch(name) is not None and store.current_slot(directory(repo, name)) is not None
+
+
 def load(repo: Repo, name: str) -> Thread:
     slot = store.current_slot(directory(repo, name)) if NAME.fullmatch(name) else None
     if slot is None:

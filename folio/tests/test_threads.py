@@ -109,8 +109,23 @@ class AttachTest(FolioTestCase):
         self.assertIn("What was pushed is in your repo: `git fetch bottle/fix-it`", result.stderr)
         self.assertIn("`folio delete fix-it` removes what's left of the thread", result.stderr)
 
-    def test_an_unknown_thread(self) -> None:
-        result = self.folio("claude", "nope")
+    def test_an_unknown_thread_is_started_and_attached_to(self) -> None:
+        for session in ("claude", "shell"):
+            with self.subTest(session):
+                name = f"new-{session}"
+                self.assertIn(f"Started thread {name}", self.ok(session, name))
+                bottle = f"{repos.current(self.repo).key}-{name}"
+                self.assertEqual(self.calls("exec")[-1], ["exec", bottle, "--", "tmux", "attach", "-d", "-t", f"={session}"])
+        self.assertIn("new-claude", git("-C", str(self.repo), "remote"))
+
+    def test_an_unknown_thread_with_a_bad_name_starts_nothing(self) -> None:
+        result = self.folio("claude", "Nope")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid thread name 'Nope'", result.stderr)
+        self.assertEqual(list(self.fake()["bottles"]), [self.bottle])
+
+    def test_an_unknown_thread_elsewhere(self) -> None:
+        result = self.folio("pause", "nope")
         self.assertIn("no thread named 'nope'", result.stderr)
         self.assertIn("(threads: fix-it)", result.stderr)
 

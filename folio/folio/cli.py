@@ -30,7 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, session, what in (("claude", threads.CLAUDE, "Claude"), ("shell", threads.SHELL, "shell")):
         attach = commands.add_parser(
             name, help=f"attach to a thread's {what}",
-            description=f"Attach to the thread's {what}, starting its bottle and the session if they've stopped. "
+            description=f"Attach to the thread's {what}, starting its bottle and the session if they've stopped, "
+            "or starting the thread itself, as `folio new` does, if there's none of that name. "
             "Closing the terminal only detaches: what's running in it carries on.",
         )
         attach.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
@@ -95,13 +96,18 @@ def _new(args: argparse.Namespace) -> int:
 def _start(repo: repos.Repo, name: str, base: str | None = None) -> threads.Thread:
     print(f"Starting thread {name} in {repo.path}...", file=sys.stderr)
     thread = threads.create(repo, name, base)
-    print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}")
+    # Flushed: attaching next replaces this process, and with it anything still buffered.
+    print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}",
+          flush=True)
     return thread
 
 
 def _thread(args: argparse.Namespace, repo: repos.Repo, new: bool = False) -> threads.Thread | None:
-    """The thread the command names, else the one chosen in the picker; None if none was."""
+    """The thread the command names (started, if it's new and the command may start one), else the one
+    chosen in the picker; None if none was."""
     if args.thread is not None:
+        if new and not threads.exists(repo, args.thread):
+            return _start(repo, args.thread)
         return threads.load(repo, args.thread)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise FolioError(f"give the thread: `folio {args.command} THREAD` (choosing one needs a terminal)")
