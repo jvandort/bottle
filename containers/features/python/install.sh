@@ -21,5 +21,7 @@ else
 fi
 
 # Without sudo, pip puts console scripts in ~/.local/bin. Debian's ~/.profile
-# puts that on PATH, but only if it exists when a login shell starts.
-install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$_REMOTE_USER_HOME/.local/bin"
+# puts that on PATH, but only if it exists when a login shell starts. ~/.local
+# is named too, or install makes it root's, and nothing else can go in it
+# (pip --user's ~/.local/lib, shpool's ~/.local/run).
+install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$_REMOTE_USER_HOME/.local" "$_REMOTE_USER_HOME/.local/bin"
