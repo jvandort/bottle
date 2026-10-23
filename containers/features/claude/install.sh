@@ -38,6 +38,10 @@ rm -rf /var/lib/apt/lists/*
 # sandbox), no confirmation before bypass mode, a theme, no spinner tips, and
 # the renderer.
 #
+# attribution is empty for commits and pull requests, so Claude adds no
+# Co-Authored-By trailer or "Generated with" line. What a bottle commits is
+# reviewed and adopted by whoever integrates it, and the history is theirs.
+#
 # tui defaults to "default" rather than Claude Code's own "fullscreen".
 # Fullscreen captures the mouse and copies a selection to the system clipboard
 # instead of leaving it to the terminal -- via pbcopy, wl-copy, xclip or xsel,
@@ -56,7 +60,8 @@ cat > "$home/.claude/settings.json" <<JSON
   "skipDangerousModePermissionPrompt": true,
   "theme": "$THEME",
   "tui": "$TUI",
-  "spinnerTipsEnabled": false
+  "spinnerTipsEnabled": false,
+  "attribution": { "commit": "", "pr": "" }
 }
 JSON
 
