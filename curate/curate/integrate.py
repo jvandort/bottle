@@ -254,16 +254,35 @@ def rewrite(commits: list[str], adopt: set[str]) -> dict[str, str]:
 
 def finish_review(repo: Repo, session: Session) -> list[str]:
     """Drop the review and delete both its lines. What was deleted, and where
-    each one was."""
+    each one was.
+
+    A line another review still needs, or the branch you are on, is left.
+    """
+    others = {line for s in repo.sessions() if s.slug != session.slug
+              for line in (s.clean, s.working)}
     gone = []
     for ref in (session.clean, session.working):
         tip = rev(ref)
-        if tip is not None:
+        if tip is not None and ref not in others and ref != repo.head:
             git("branch", "-D", short(ref))
             gone.append(f"{named(ref)} (was {tip[:8]})")
     shutil.rmtree(session.dir, ignore_errors=True)
     run(["update-ref", "-d", session.ref])
     return gone
+
+
+def earlier(repo: Repo, session: Session) -> list[Session]:
+    """The reviews this one was copied from, newest first: earlier versions
+    of the same work. The chain ends at one already dropped."""
+    found: list[Session] = []
+    slug = session.copied_from
+    while slug and slug != session.slug and all(s.slug != slug for s in found):
+        prior = Session(repo, slug)
+        if not prior.exists:
+            break
+        found.append(prior)
+        slug = prior.copied_from
+    return found
 
 
 def cmd_integrate(repo: Repo, argv: list[str]) -> int:
@@ -314,7 +333,10 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         raise Refused(f"{named(target)} is at {new_tip[:8]}, but switching to it "
                       f"failed: {switched.stderr.strip()}\nThe review is still here.")
     repo.recover()
+    # Read before the review goes: what it was copied from is in its state.
+    priors = earlier(repo, session)
     gone = finish_review(repo, session)
+    ended = [(prior.working, finish_review(repo, prior)) for prior in priors]
 
     how = (f"fast-forwarded from {old_target[:8]}" if old_target
            else "a new branch")
@@ -325,4 +347,8 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         print(f"        adopted {count} of them as yours.")
     if gone:
         print(f"        the review is over; deleted {', and '.join(gone)}.")
+    for working, deleted in ended:
+        what = f"; deleted {', and '.join(deleted)}" if deleted else ""
+        print(f"        so is the review of {named(working)} it was copied "
+              f"from{what}.")
     return 0

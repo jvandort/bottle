@@ -85,6 +85,9 @@ class Session:
         self.clean = read(self.dir / "clean")
         self.working = read(self.dir / "working")
         self.base = read(self.dir / "base")
+        # The review this one was copied from, if it was: the earlier version
+        # of the same work, and finished when this one is integrated.
+        self.copied_from = read(self.dir / "copied-from")
 
     @property
     def exists(self) -> bool:

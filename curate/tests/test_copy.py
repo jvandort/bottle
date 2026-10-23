@@ -72,10 +72,10 @@ class SameBase(Copying):
             line for line in self.old.splitlines() if "feature-1" in line))
         self.assertIn("feature-1", self.repo.curate("list").stdout)
 
-    def test_it_says_how_to_drop_either_one(self) -> None:
+    def test_it_says_how_to_undo_it_and_when_the_old_one_ends(self) -> None:
         out = self.copy()
         self.assertIn("curate drop feature-2` undoes the copy", out)
-        self.assertIn("curate drop feature-1` once you are happy", out)
+        self.assertIn("'feature-1' is untouched, and ends when this one is integrated", out)
 
     def test_dropping_the_copy_deletes_its_clean_line_and_nothing_else(self) -> None:
         """Every commit on it is still on the old one, so nothing is lost."""

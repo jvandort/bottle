@@ -236,8 +236,8 @@ curate review --copy feature-1
 The clean line and your approvals come across, and since approval is content,
 what the rebase changed is exactly what shows up as unreviewed. It is a copy:
 the review of `feature-1` is left exactly as it was, so if the copy is wrong,
-`curate drop` it and nothing else is touched. Once you are happy with the new
-one, drop the old.
+`curate drop` it and nothing else is touched. The old review stays until the
+new one is integrated, which ends both.
 
 **If the rebase moved onto a newer base**, the clean line is replayed onto it
 and your approvals merged across, so what upstream did never lands on your
@@ -284,7 +284,10 @@ questions are answered.
 Then it happens: the destination moves, you are switched to it -- your files
 already match it, so nothing on disk changes -- and the review is over. It is
 dropped, and both its lines are deleted; everything they held is on the
-destination now. Their old tips are printed, in case.
+destination now. So is every review it was copied from, by `transfer` or
+`--copy`: those were earlier versions of the same work. Their old tips are
+printed, in case. `curate drop` never follows that chain: dropping a copy you
+got wrong leaves the review it came from exactly as it was.
 
 ## Starting from the wrong base
 
@@ -329,7 +332,8 @@ You can only *look* at one at a time, because there is one working tree.
 
 ```
 .git/curate/mode, active          which mode, which review
-.git/curate/sessions/<clean>/     one per review: the two index files, fixup state
+.git/curate/sessions/<clean>/     one per review: the two index files, fixup state,
+                                  and the review it was copied from, if it was
 refs/curate/<clean branch>        the approved set, as a real commit, with a reflog
 ```
 

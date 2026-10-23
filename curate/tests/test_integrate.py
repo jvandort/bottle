@@ -187,3 +187,63 @@ class Curated(Integrating):
     def test_a_clean_line_with_only_some_of_it_is_refused(self) -> None:
         self.repo.git("add", "c.txt")                  # approved, not committed
         self.assertIn("not all of what you approved", self.refused("--into", "main"))
+
+
+class Copied(Integrating):
+    """feature-1 reviewed, then rebased into feature-2 and feature-3 with more
+    on top each time, each review copied from the one before."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo.git("branch", "-m", "feature-1")
+        self.commit("Add b", {"b.txt": "B\n"}, by=GENIE)
+        self.review_all()
+        self.repo.curate("write")
+        self.next_version("feature-2", {"b.txt": "B\n", "c.txt": "C\n"}, "feature-1")
+
+    def next_version(self, name: str, files: dict[str, str], copying: str) -> None:
+        self.repo.git("switch", "-q", "-c", name, self.base)
+        self.commit(f"squashed into {name}", files, by=GENIE)
+        result = self.repo.curate("review", "--copy", copying)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.repo.git("add", "-A")
+
+    def branches(self) -> str:
+        return self.repo.git("branch", "--list", "feature*", "curate/*")
+
+    def test_integrating_the_copy_ends_the_review_it_came_from(self) -> None:
+        out = self.integrate("--into", "main", "--adopt", "genie")
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
+        self.assertEqual(self.branches(), "")
+        self.assertIn("so is the review of 'feature-1' it was copied from", out)
+
+    def test_and_every_review_before_that(self) -> None:
+        self.repo.curate("write")
+        self.next_version("feature-3", {"b.txt": "B\n", "c.txt": "C\n", "d.txt": "D\n"},
+                          "feature-2")
+        out = self.integrate("--into", "main", "--adopt", "genie")
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
+        self.assertEqual(self.branches(), "")
+        self.assertIn("'feature-2' it was copied from", out)
+        self.assertIn("'feature-1' it was copied from", out)
+
+    def test_one_dropped_by_hand_already_is_simply_not_there(self) -> None:
+        self.repo.curate("drop", "feature-1")
+        self.integrate("--into", "main", "--adopt", "genie")
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
+
+    def test_reviews_that_are_not_earlier_versions_are_left_alone(self) -> None:
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "-c", "unrelated", self.base)
+        self.commit("Something else", {"e.txt": "E\n"})
+        self.start(self.base)
+        self.repo.git("switch", "-q", "feature-2")
+        self.repo.curate("review")
+        self.integrate("--into", "main", "--adopt", "genie")
+        self.assertIn("unrelated", self.repo.curate("list").stdout)
+        self.assertIn("curate/unrelated", self.branches())
+
+    def test_dropping_a_copy_leaves_the_review_it_came_from(self) -> None:
+        self.repo.curate("write")
+        self.repo.curate("drop", "feature-2")
+        self.assertIn("feature-1", self.repo.curate("list").stdout)

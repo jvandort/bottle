@@ -109,6 +109,8 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     write(session.dir / "clean", f"refs/heads/{clean_name}")
     write(session.dir / "working", head)
     write(session.dir / "base", base)
+    if source:
+        write(session.dir / "copied-from", source.slug)
     session.clean, session.working = f"refs/heads/{clean_name}", head
 
     idx = session.index("review")
@@ -126,8 +128,8 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     print(f"        `curate review` to start reading; `curate write` to go back.")
     if source:
         print(f"        Wrong base? `curate drop {working_name}` undoes the copy.")
-        print(f"        The review of {named(source.working)} is untouched; `curate "
-              f"drop {short(source.working)}` once you are happy with this one.")
+        print(f"        The review of {named(source.working)} is untouched, and "
+              f"ends when this one is integrated.")
     else:
         print(f"        Wrong base? `curate drop {working_name}` undoes all of this, "
               f"while nothing is approved.")
