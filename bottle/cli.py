@@ -11,10 +11,10 @@ log = logging.getLogger("bottle.cli")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bottle", description="Sandboxed Linux environments for agents.")
-    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    commands = parser.add_subparsers(required=True)
 
     auth = commands.add_parser("auth", help="log in once; bottles get the credentials their features need")
-    auth_commands = auth.add_subparsers(dest="auth_command", required=True, metavar="COMMAND")
+    auth_commands = auth.add_subparsers(required=True)
     auth_list = auth_commands.add_parser("list", help="list credentials features declare, and which are set")
     auth_list.set_defaults(run=_auth_list, parser=auth_list)
     auth_login = auth_commands.add_parser(
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     build.set_defaults(run=_build, parser=build)
 
     spec = commands.add_parser("spec", help="check a spec: a bottle's features and memory, as a file")
-    spec_commands = spec.add_subparsers(dest="spec_command", required=True, metavar="COMMAND")
+    spec_commands = spec.add_subparsers(required=True)
     spec_validate = spec_commands.add_parser(
         "validate",
         help="check a spec as `bottle new --spec` would, and print it in canonical form",
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         "daemon",
         help="control bottled, which decides bottles' connections (started automatically when needed)",
     )
-    daemon_commands = daemon.add_subparsers(dest="daemon_command", required=True, metavar="COMMAND")
+    daemon_commands = daemon.add_subparsers(required=True)
     daemon_start = daemon_commands.add_parser("start", help="start bottled in the background")
     daemon_start.add_argument("--foreground", action="store_true", help="run in this process instead")
     daemon_start.set_defaults(run=_daemon_start, parser=daemon_start)

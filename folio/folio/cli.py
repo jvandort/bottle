@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="folio", description="Threads of work in bottles: each one a bottle, a lane for its commits, and Claude.",
     )
-    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    commands = parser.add_subparsers(required=True)
 
     new = commands.add_parser(
         "new", help="start a thread",
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
             "Closing the terminal only detaches: what's running in it carries on.",
         )
         attach.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-        attach.set_defaults(run=_attach, session=session)
+        attach.set_defaults(run=_attach, command=name, session=session)
 
     pause = commands.add_parser(
         "pause", help="snapshot a thread and delete its bottle",
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         "`folio shell` resumes it, in a new bottle made from the repo's spec as it is then.",
     )
     pause.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-    pause.set_defaults(run=_pause)
+    pause.set_defaults(run=_pause, command="pause")
 
     list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
     list_.set_defaults(run=_list)
@@ -56,10 +56,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     delete.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
     delete.add_argument("--yes", action="store_true", help="don't ask (needed without a terminal)")
-    delete.set_defaults(run=_delete)
+    delete.set_defaults(run=_delete, command="delete")
 
     configure = commands.add_parser("configure", help="the repo's spec: its threads' features and memory")
-    configure_commands = configure.add_subparsers(dest="configure_command", required=True, metavar="COMMAND")
+    configure_commands = configure.add_subparsers(required=True)
     feature_help = "a feature, optionally with options, e.g. jvm:version=21 (repeatable)"
     memory_help = f"memory for each bottle, in M or G, e.g. 8G (default: {repos.DEFAULT_MEMORY})"
     for name, help_ in (("set", "replace the spec: exactly these features, and this memory"),
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     show.set_defaults(run=_configure_show)
 
     repo = commands.add_parser("repo", help="the repos folio knows")
-    repo_commands = repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
+    repo_commands = repo.add_subparsers(required=True)
     repo_list = repo_commands.add_parser("list", help="every repo folio has state for, wherever you are")
     repo_list.set_defaults(run=_repo_list)
 
