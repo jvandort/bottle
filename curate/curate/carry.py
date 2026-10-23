@@ -216,6 +216,11 @@ def ours_where_conflicted(tree: str, tip: str, paths: list[str]) -> str:
 
 def report(source: Session, carried: Carried) -> None:
     print(f"curate: copied the review of {named(source.working)}.")
+    what_carried(carried)
+
+
+def what_carried(carried: Carried) -> None:
+    """What happened to the clean line and the approvals on the way."""
     if carried.replayed:
         print(f"        {len(carried.replayed)} clean commit(s) replayed onto the new base.")
     for s in carried.upstream:

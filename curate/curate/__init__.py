@@ -10,6 +10,7 @@ One module per seam, and the dependencies run one way:
     carry     copying a review onto a rebased branch, and finding its base
     start     beginning one: the base, and naming the clean line
     transfer  copying the review you are in onto the branch that replaced it
+    base      moving the review you are in onto a new base, in place
     integrate shipping a finished review, adopting others' commits on the way
     fixup     folding into an existing clean commit, and its conflicts
     gitverb   `curate git <command>`: borrow write mode for one command

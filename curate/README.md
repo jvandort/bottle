@@ -72,6 +72,8 @@ curate fixup <commit>        fold what you approved into an existing clean
 curate resolve               open the current fixup conflict in git's merge tool
 curate transfer [<branch>]   copy this review onto the branch that replaced
                              its working line: fetch, choose, copy, come back
+curate update-base [<base>]  move this review onto a new base, for a working
+                             line rebased in place
 curate integrate             ship a finished review onto a branch, new or
                              fast-forwarded, and end the review
 curate list                  every review in this repository
@@ -252,6 +254,22 @@ judged by where it left the old base's branch, that branch's upstream, and the
 usual mainlines -- curate asks rather than assumes, with the old base and the
 branches on it named above the list. Off a terminal it refuses, and `--from`
 says.
+
+## When the branch is rebased where it stands
+
+Rebase the working line itself onto a newer base -- `git rebase origin/main` on
+the branch under review -- and the review's base is still the old one, so
+everything upstream did since shows up as unreviewed. Move the review with it:
+
+```sh
+curate update-base origin/main
+```
+
+It is the copy above, onto the same branch: the clean line is replayed onto the
+new base, your approvals are merged across, and the new base is recorded, with
+the same fallbacks when something conflicts. With no base named, a terminal
+gets the same list as a copy, the current base marked. You come back in the
+mode you were in, and it prints the command that goes back to the old base.
 
 ## Shipping a finished review
 

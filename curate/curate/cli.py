@@ -3,6 +3,7 @@
 import sys
 from typing import Callable
 
+from .base import cmd_update_base
 from .commands import cmd_drop, cmd_list, cmd_status
 from .errors import Refused
 from .fixup import cmd_fixup, cmd_resolve
@@ -40,6 +41,10 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                name does. Fetches, then asks which branch, and
                                its base if that moved. The old review is
                                untouched.
+  curate update-base [<base>]  move this review onto a new base, for a working
+                               line rebased in place: the clean line replayed
+                               onto it and your approvals carried, so what
+                               upstream did is not yours to review.
   curate integrate             ship a finished review: fast-forward a branch,
                                or make a new one, with the clean line if you
                                curated one and the working line if not. Asks
@@ -67,6 +72,7 @@ COMMANDS: dict[str, Callable[[Repo, list[str]], int]] = {
     "list": cmd_list,
     "drop": cmd_drop,
     "transfer": cmd_transfer,
+    "update-base": cmd_update_base,
     "integrate": cmd_integrate,
 }
 MODE_VERBS = ("write", "review", "switch")
