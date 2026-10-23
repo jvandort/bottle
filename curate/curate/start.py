@@ -1,6 +1,7 @@
 """Beginning a review: choosing the base, and naming the clean line."""
 
 import uuid
+from dataclasses import dataclass
 
 from .carry import Carried, carry, choose_base, find, report
 from .errors import Refused
@@ -53,12 +54,36 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     head = repo.head
     if not head:
         raise Refused("HEAD is detached. The working line has to be a branch.")
-    working_name = short(head)
-
     current = repo.session()
     if current and repo.mode == "review" and repo.consistent():
         raise Refused("finish the current review first: `curate write`")
+    source = find(repo, copy_arg) if copy_arg else None
+    begin(repo, prepare(repo, head, base_arg=base_arg, clean_arg=clean_arg,
+                        source=source))
+    return 0
 
+
+@dataclass
+class Beginning:
+    """A review that can begin: every check passed, and nothing written but
+    objects, so refusing here or anywhere before leaves nothing behind."""
+    session: Session
+    working: str                     # refs/heads/<name>
+    base: str
+    source: Session | None
+    carried: Carried
+
+    @property
+    def clean_name(self) -> str:
+        return short(self.session.clean)
+
+
+def prepare(repo: Repo, working: str, base_arg: str | None = None,
+            clean_arg: str | None = None,
+            source: Session | None = None) -> Beginning:
+    """Everything `start` checks and works out, for a working line that need
+    not be checked out -- nor exist yet, when `transfer` is about to make it."""
+    working_name = short(working)
     if rev(f"refs/heads/{CLEAN_PREFIX}") is not None:
         # Refs are paths, so this branch rules out the whole namespace. Curate
         # could dodge it with a different name, but then the rule people have
@@ -82,41 +107,46 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     if rev(f"refs/heads/{clean_name}") is not None:
         raise Refused(f"branch {clean_name} already exists")
 
-    source = find(repo, copy_arg) if copy_arg else None
-    if source and source.working == head:
-        raise Refused(f"that is the review of {named(head)}, the branch you are on")
+    if source and source.working == working:
+        raise Refused(f"that is the review of {named(working)}, the branch you are on")
 
     if base_arg:
         base = rev(base_arg)
         if base is None:
             raise Refused(f"cannot resolve {base_arg}")
     elif source:
-        base = choose_base(source, head)
+        base = choose_base(source, working)
     elif interactive():
         # Asking beats guessing: --from is the one argument that decides what
         # the review contains, so a person present gets to see and confirm it.
-        base = ask_for_base(head, repo.clean_lines())
+        base = ask_for_base(working, repo.clean_lines())
     else:
         upstream = rev(f"{working_name}@{{upstream}}")
         if upstream is None:
             raise Refused("no upstream to infer a base from; pass --from <base>")
-        base = git("merge-base", head, upstream)
+        base = git("merge-base", working, upstream)
 
     # Copying writes objects and no refs, so a copy that is refused part way
     # leaves nothing behind, exactly like a start that is.
     carried = (carry(repo, source, base) if source else
                Carried(base, git("rev-parse", f"{base}^{{tree}}")))
+    session.clean, session.working = f"refs/heads/{clean_name}", working
+    return Beginning(session, working, base, source, carried)
+
+
+def begin(repo: Repo, b: Beginning) -> None:
+    """Write what `prepare` worked out: the clean line, and the review."""
+    session, source, carried = b.session, b.source, b.carried
     with uninterrupted():
-        git("branch", clean_name, carried.tip)
+        git("branch", b.clean_name, carried.tip)
         repo.stamp()                       # before any other state exists
         session.id = uuid.uuid4().hex
         write(session.dir / "id", session.id)
-        write(session.dir / "clean", f"refs/heads/{clean_name}")
-        write(session.dir / "working", head)
-        write(session.dir / "base", base)
+        write(session.dir / "clean", session.clean)
+        write(session.dir / "working", b.working)
+        write(session.dir / "base", b.base)
         if source:
             write(session.dir / "copied-from", source.id)
-        session.clean, session.working = f"refs/heads/{clean_name}", head
 
         idx = session.index("review")
         idx.unlink(missing_ok=True)
@@ -126,9 +156,10 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
         session.record("write")
     install(repo)
 
+    working_name = short(b.working)
     if source:
         report(source, carried)
-    print(f"curate: clean line '{clean_name}' at {carried.tip[:8]}, "
+    print(f"curate: clean line '{b.clean_name}' at {carried.tip[:8]}, "
           f"working line '{working_name}'.")
     print(f"        `curate review` to start reading; `curate write` to go back.")
     if source:
@@ -138,4 +169,3 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     else:
         print(f"        Wrong base? `curate drop {working_name}` undoes all of this, "
               f"while nothing is approved.")
-    return 0

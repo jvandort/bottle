@@ -113,6 +113,29 @@ class Transfer(CurateTestCase):
         self.assertIn("is the clean line of a review", result.stderr)
         self.assertEqual(self.repo.git("for-each-ref", "refs/heads", "refs/curate"), before)
 
+    def test_what_start_would_refuse_is_refused_before_the_switch(self) -> None:
+        """The clean line's name collides, which start finds -- and used to,
+        after transfer had already moved you onto the new branch."""
+        self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        self.repo.git("branch", "curate/feature-2/x", self.base)
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("collides", result.stderr)
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/curate/feature-1")
+        self.assertEqual(self.repo.git("branch", "--list", "feature-2"), "")
+
+    def test_a_switch_git_refuses_puts_everything_back(self) -> None:
+        self.agent_pushes("feature-2", self.base,
+                          {"a.txt": "A1\na2\na3\n", "b.txt": "B\n", "c.txt": "C\n"})
+        self.repo.write("c.txt", "in the way\n")
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("git switch feature-2 failed", result.stderr)
+        self.assertEqual(self.repo.git("branch", "--list", "feature-2"), "")
+        fields = self.repo.status_fields()
+        self.assertEqual((fields["mode"], fields["working"]),
+                         ("review", "refs/heads/feature-1"))
+
     def test_a_local_branch_that_diverged_is_refused(self) -> None:
         self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
         self.repo.git("branch", "feature-2", self.base)

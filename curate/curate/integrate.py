@@ -337,8 +337,8 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         git("update-ref", "-m", "curate integrate", target, new_tip,
             *([old_target] if old_target else []))
         # Not a checkout: your files already match the destination, so this is
-        # HEAD and the index, as a mode switch is. Worded as git words a
-        # checkout, so `git switch -` still goes back.
+        # HEAD and the index, as a mode switch is. The reflog says what the
+        # `git switch` this replaces said.
         git("symbolic-ref", "-m", f"checkout: moving from "
             f"{short(session.working)} to {short(target)}", "HEAD", target)
         git("reset", "-q")

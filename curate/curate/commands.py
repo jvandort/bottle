@@ -1,10 +1,11 @@
 """Reporting on reviews, and forgetting them."""
 
+from .carry import names_for
 from .errors import Refused
 from .gitcmd import git, only_on, rev
 from .hooks import foreign, me
 from .modes import switch_mode
-from .state import Repo, named, short
+from .state import Repo, Session, named, short
 
 
 def problems(repo: Repo) -> list[str]:
@@ -49,6 +50,15 @@ def problems(repo: Repo) -> list[str]:
     return wrong
 
 
+def based_on(session: Session) -> str:
+    """The base as a person would recognise it: what it is called, if
+    anything calls it anything, and what it says."""
+    names = names_for(session.base, session, session.working)
+    called = f" ({', '.join(names)})" if names else ""
+    subject = git("log", "-1", "--format=%s", session.base, check=False)
+    return f"{session.base[:8]}{called} {subject}"
+
+
 def cmd_status(repo: Repo, argv: list[str]) -> int:
     porcelain = "--porcelain" in argv
     wrong = problems(repo)
@@ -60,6 +70,7 @@ def cmd_status(repo: Repo, argv: list[str]) -> int:
         fields.update({
             "clean": session.clean,
             "working": session.working,
+            "base": session.base,
             "fixup": "pending" if session.fixup_pending else "none",
         })
     fields["consistent"] = "yes" if consistent else "no"
@@ -78,6 +89,7 @@ def cmd_status(repo: Repo, argv: list[str]) -> int:
         print(f"mode:            {fields['mode']}")
         print(f"working branch:  {short(fields['working'])}")
         print(f"clean branch:    {short(fields['clean'])}")
+        print(f"base:            {based_on(session)}")
         if fields["fixup"] == "pending":
             print("fixup:           paused on a conflict -- `curate resolve`, "
                   "then `curate fixup --continue`")
@@ -136,9 +148,10 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
         # something: a commit approved onto it that no other ref has. A copied
         # review starts with commits on it, but the review it was copied from
         # still has them, so those are not lost.
-        empty = s.base and rev(s.clean) == s.base
-        lost = [] if empty or rev(s.clean) is None else only_on(s.clean, s.ref)
-        if not lost and rev(s.clean) is not None:
+        tip = rev(s.clean)
+        empty = s.base and tip == s.base
+        lost = [] if empty or tip is None else only_on(s.clean, s.ref)
+        if not lost and tip is not None:
             # First, and allowed to fail: a clean line checked out in another
             # worktree stays, and so does the review, rather than claiming both.
             git("branch", "-D", short(s.clean))
@@ -149,6 +162,9 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
                   f"{named(s.clean)}, has {len(lost)} commit{plural} no other "
                   f"branch has, so it is left alone -- `git branch -D "
                   f"{short(s.clean)}` if you want that work gone too.")
+        elif tip is None:
+            print(f"dropped the review of {named(s.working)}; its clean line "
+                  f"{named(s.clean)} was already gone.")
         else:
             why = ("nothing had been approved onto it" if empty else
                    "every commit on it is on another branch too")

@@ -13,6 +13,15 @@ class Start(CurateTestCase):
         self.assertEqual(fields["mode"], "write")
         self.assertEqual(self.repo.git("rev-parse", fields["clean"]), base)
 
+    def test_status_says_where_the_clean_line_starts(self) -> None:
+        base = self.make_base()
+        self.repo.write("f.txt", "ONE\ntwo\nthree\n")
+        self.repo.commit_all("their work")
+        self.start(base)
+        self.assertEqual(self.repo.status_fields()["base"], base)
+        self.assertRegex(self.repo.curate("status").stdout,
+                         rf"(?m)^base: +{base[:8]} .*base$")
+
     def test_refuses_on_a_detached_head(self) -> None:
         base = self.make_base()
         self.repo.git("checkout", "-q", "--detach")
@@ -138,6 +147,14 @@ class WrongBase(CurateTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertTrue(self.branch_exists("curate/wip"))
         self.assertIn("wip", self.repo.curate("list").stdout)
+
+    def test_drop_says_so_when_the_clean_line_was_already_gone(self) -> None:
+        self.start(self.wrong)
+        self.repo.git("branch", "-D", "curate/wip")
+        result = self.repo.curate("drop", "wip")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("was already gone", result.stdout)
+        self.assertNotIn("deleted", result.stdout)
 
     def test_drop_with_no_branch_works_from_write_mode_too(self) -> None:
         self.start(self.wrong)

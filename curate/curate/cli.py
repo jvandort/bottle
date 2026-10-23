@@ -27,8 +27,9 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                whatever mode you are in, then come back. So
                                `curate git pull` without leaving the review.
   curate switch                toggle between the two.
-  curate status                which mode you are in, the two branches, and
-                               anything wrong that curate cannot put right.
+  curate status                which mode you are in, the two branches, the
+                               base the clean line starts at, and anything
+                               wrong that curate cannot put right.
                                For what is unreviewed, use `git status`.
   curate fixup <commit>        fold what you have approved into an existing
                                clean commit, instead of appending a fix to it.
