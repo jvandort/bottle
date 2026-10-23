@@ -207,12 +207,13 @@ You often cannot tell until review mode shows you a list that is far too long
 or far too short.
 
 ```sh
-curate drop                  # deletes the clean branch too, if nothing was approved onto it
+curate drop                  # deletes the clean branch too, unless that would lose a commit
 curate start --from <the right one>
 ```
 
-Once you have committed something to the clean line, `drop` leaves the branch
-alone and tells you how to delete it by hand.
+`drop` deletes the clean branch unless it has commits no other ref has. Once you
+have committed something to the clean line and not pushed or branched it
+anywhere, `drop` leaves the branch alone and tells you how to delete it by hand.
 
 ## Leaving
 

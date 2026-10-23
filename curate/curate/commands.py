@@ -3,7 +3,7 @@
 import shutil
 
 from .errors import Refused
-from .gitcmd import rev, run
+from .gitcmd import only_on, rev, run
 from .hooks import foreign, me
 from .modes import switch_mode
 from .state import Repo, named, short
@@ -139,20 +139,26 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
                 switch_mode(repo, "write")
                 print(f"curate: left review mode; HEAD is {named(s.working)} again.")
             repo.set_state(repo.mode, None)
-        # The clean branch is ours to delete only while it holds nothing. Once
-        # something has been approved onto it, it is work, and work stays.
-        untouched = s.base and rev(s.clean) == s.base
+        # The clean branch is ours to delete unless deleting it loses
+        # something: a commit approved onto it that no other ref has. A copied
+        # review starts with commits on it, but the review it was copied from
+        # still has them, so those are not lost.
+        empty = s.base and rev(s.clean) == s.base
+        lost = [] if empty or rev(s.clean) is None else only_on(s.clean, s.ref)
         shutil.rmtree(s.dir, ignore_errors=True)
         run(["update-ref", "-d", s.ref])
-        if untouched:
-            run(["branch", "-D", short(s.clean)])
-            print(f"dropped the review of {named(s.working)}, and deleted its "
-                  f"clean line {named(s.clean)}: nothing had been approved onto it.")
-            print(f"`curate start --from <base>` begins again.")
-        else:
+        if lost:
+            plural = "" if len(lost) == 1 else "s"
             print(f"dropped the review of {named(s.working)}. Its clean line, "
-                  f"{named(s.clean)}, has commits approved onto it, so the branch "
-                  f"is left alone -- `git branch -D {short(s.clean)}` if you want "
-                  f"that work gone too.")
+                  f"{named(s.clean)}, has {len(lost)} commit{plural} no other "
+                  f"branch has, so it is left alone -- `git branch -D "
+                  f"{short(s.clean)}` if you want that work gone too.")
+        else:
+            run(["branch", "-D", short(s.clean)])
+            why = ("nothing had been approved onto it" if empty else
+                   "every commit on it is on another branch too")
+            print(f"dropped the review of {named(s.working)}, and deleted its "
+                  f"clean line {named(s.clean)}: {why}.")
+            print(f"`curate start --from <base>` begins again.")
         return 0
     raise Refused(f"no review of {name}")

@@ -85,6 +85,32 @@ class WrongBase(CurateTestCase):
         self.assertEqual(self.repo.curate("drop", "wip").returncode, 0)
         self.assertTrue(self.branch_exists("curate/wip"), "approved work was deleted")
 
+    def test_the_reviews_own_approvals_do_not_count_as_another_branch(self) -> None:
+        """The approved set is a commit on top of the clean line, so it reaches
+        every commit there. It goes with the review, so it cannot vouch for them."""
+        self.start(self.base)
+        self.repo.curate("review")
+        self.repo.git("add", "f.txt")
+        self.repo.git("commit", "-q", "-m", "Rename the thing")
+        self.repo.write("f.txt", "ONE\nTWO\nthree\n")
+        self.repo.git("add", "f.txt")                  # approved, not committed
+        self.repo.curate("write")
+        self.repo.curate("drop", "wip")
+        self.assertTrue(self.branch_exists("curate/wip"), "approved work was deleted")
+
+    def test_drop_deletes_a_clean_branch_whose_commits_another_branch_has(self) -> None:
+        """Pushed, or copied into another review: deleting it loses nothing."""
+        self.start(self.base)
+        self.repo.curate("review")
+        self.repo.git("add", "f.txt")
+        self.repo.git("commit", "-q", "-m", "Rename the thing")
+        self.repo.curate("write")
+        self.repo.git("branch", "elsewhere", "curate/wip")
+        result = self.repo.curate("drop", "wip")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.branch_exists("curate/wip"))
+        self.assertIn("on another branch too", result.stdout)
+
     def test_dropping_the_review_you_are_in_leaves_review_mode_first(self) -> None:
         """Realising the base is wrong happens in review mode, not out of it."""
         self.start(self.wrong)

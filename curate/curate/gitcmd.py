@@ -77,6 +77,18 @@ def tree_of(spec: str) -> str | None:
     return p.stdout.strip() if p.returncode == 0 else None
 
 
+def only_on(ref: str, *ignoring: str) -> list[str]:
+    """The commits on `ref` that no other ref can reach, newest first.
+
+    What is lost by deleting `ref`, give or take a reflog. `ignoring` names
+    refs that go with it. Refs cannot contain glob characters, so a full ref
+    name is safe as an --exclude pattern.
+    """
+    excludes = [f"--exclude={r}" for r in (ref, *ignoring)]
+    out = git("rev-list", ref, "--not", *excludes, "--all")
+    return out.split()
+
+
 def parents_of(commit: str) -> list[str]:
     return git("rev-list", "--parents", "-n", "1", commit).split()[1:]
 
