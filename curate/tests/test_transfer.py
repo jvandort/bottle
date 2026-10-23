@@ -104,6 +104,15 @@ class Transfer(CurateTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("has a review already", result.stderr)
 
+    def test_a_clean_line_is_refused_wherever_it_was_pushed(self) -> None:
+        """Its local branch is a review's clean line, which no branch name says."""
+        self.repo.git("push", "-q", "agent", "curate/feature-1")
+        before = self.repo.git("for-each-ref", "refs/heads", "refs/curate")
+        result = self.repo.curate("transfer", "agent/curate/feature-1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is the clean line of a review", result.stderr)
+        self.assertEqual(self.repo.git("for-each-ref", "refs/heads", "refs/curate"), before)
+
     def test_a_local_branch_that_diverged_is_refused(self) -> None:
         self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
         self.repo.git("branch", "feature-2", self.base)

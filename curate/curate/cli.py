@@ -104,6 +104,17 @@ def main(argv: list[str]) -> int:
     if repo.state.is_dir() and verb_now != "hook":
         install_hooks(repo, quiet=True)
 
+    try:
+        # Re-anchor on HEAD, here and only here: whatever git did since the
+        # last command, every command starts from where HEAD actually is, and
+        # from then on says what it changes. Not for hooks, which run on
+        # every `git add` and have one job each.
+        if verb_now != "hook":
+            repo.recover()
+    except Refused as e:
+        print(f"curate: {e}", file=sys.stderr)
+        return 1
+
     if not argv:
         # Bare `curate` answers "where am I?" if there is an answer, and
         # explains itself if there is not.
@@ -124,7 +135,6 @@ def main(argv: list[str]) -> int:
             if rest:
                 # `review --copy <branch>` says how to begin a review, so it
                 # only makes sense where there is none to switch into.
-                repo.recover()
                 if repo.session() is not None:
                     raise Refused(f"{rest[0]} begins a review, and this "
                                   f"branch already has one")

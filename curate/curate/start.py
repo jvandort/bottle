@@ -1,11 +1,13 @@
 """Beginning a review: choosing the base, and naming the clean line."""
 
+import uuid
+
 from .carry import Carried, carry, choose_base, find, report
 from .errors import Refused
 from .gitcmd import git, rev, run
 from .hooks import install
 from .state import CLEAN_PREFIX, Repo, Session, encode, named, short, write
-from .ui import ask_for_base, interactive
+from .ui import ask_for_base, interactive, uninterrupted
 
 
 def branch_conflict(name: str) -> str | None:
@@ -93,7 +95,7 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     elif interactive():
         # Asking beats guessing: --from is the one argument that decides what
         # the review contains, so a person present gets to see and confirm it.
-        base = ask_for_base(head)
+        base = ask_for_base(head, repo.clean_lines())
     else:
         upstream = rev(f"{working_name}@{{upstream}}")
         if upstream is None:
@@ -104,21 +106,24 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     # leaves nothing behind, exactly like a start that is.
     carried = (carry(repo, source, base) if source else
                Carried(base, git("rev-parse", f"{base}^{{tree}}")))
-    git("branch", clean_name, carried.tip)
-    repo.stamp()                       # before any other state exists
-    write(session.dir / "clean", f"refs/heads/{clean_name}")
-    write(session.dir / "working", head)
-    write(session.dir / "base", base)
-    if source:
-        write(session.dir / "copied-from", source.slug)
-    session.clean, session.working = f"refs/heads/{clean_name}", head
+    with uninterrupted():
+        git("branch", clean_name, carried.tip)
+        repo.stamp()                       # before any other state exists
+        session.id = uuid.uuid4().hex
+        write(session.dir / "id", session.id)
+        write(session.dir / "clean", f"refs/heads/{clean_name}")
+        write(session.dir / "working", head)
+        write(session.dir / "base", base)
+        if source:
+            write(session.dir / "copied-from", source.id)
+        session.clean, session.working = f"refs/heads/{clean_name}", head
 
-    idx = session.index("review")
-    idx.unlink(missing_ok=True)
-    git("read-tree", carried.approved, index=idx)
-    run(["update-index", "--refresh"], index=idx)   # non-zero means work to review
-    repo.set_state("write", session)
-    session.record("write")
+        idx = session.index("review")
+        idx.unlink(missing_ok=True)
+        git("read-tree", carried.approved, index=idx)
+        run(["update-index", "--refresh"], index=idx)   # non-zero means work to review
+        repo.set_state("write", session)
+        session.record("write")
     install(repo)
 
     if source:

@@ -1,9 +1,7 @@
 """Reporting on reviews, and forgetting them."""
 
-import shutil
-
 from .errors import Refused
-from .gitcmd import only_on, rev, run
+from .gitcmd import git, only_on, rev
 from .hooks import foreign, me
 from .modes import switch_mode
 from .state import Repo, named, short
@@ -53,9 +51,6 @@ def problems(repo: Repo) -> list[str]:
 
 def cmd_status(repo: Repo, argv: list[str]) -> int:
     porcelain = "--porcelain" in argv
-    # Re-anchor first, like every other command: a report that says `away`
-    # about a branch switch curate has already absorbed is a false alarm.
-    repo.recover()
     wrong = problems(repo)
     session = repo.session()
     consistent = repo.consistent()
@@ -118,9 +113,8 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
     if len(argv) > 1:
         raise Refused("usage: curate drop [<branch>]")
     if not argv:
-        # No name means the review you are standing in. HEAD says which that
-        # is, so re-anchor on it first rather than trust the recorded state.
-        repo.recover()
+        # No name means the review you are standing in: the one HEAD names,
+        # since every command re-anchors on HEAD before it runs.
         active = repo.session()
         if active is None:
             raise Refused(f"{named(repo.head) if repo.head else 'HEAD'} is in "
@@ -138,15 +132,17 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
                 # being dropped is the live one. Do it rather than refuse.
                 switch_mode(repo, "write")
                 print(f"curate: left review mode; HEAD is {named(s.working)} again.")
-            repo.set_state(repo.mode, None)
         # The clean branch is ours to delete unless deleting it loses
         # something: a commit approved onto it that no other ref has. A copied
         # review starts with commits on it, but the review it was copied from
         # still has them, so those are not lost.
         empty = s.base and rev(s.clean) == s.base
         lost = [] if empty or rev(s.clean) is None else only_on(s.clean, s.ref)
-        shutil.rmtree(s.dir, ignore_errors=True)
-        run(["update-ref", "-d", s.ref])
+        if not lost and rev(s.clean) is not None:
+            # First, and allowed to fail: a clean line checked out in another
+            # worktree stays, and so does the review, rather than claiming both.
+            git("branch", "-D", short(s.clean))
+        repo.forget(s)
         if lost:
             plural = "" if len(lost) == 1 else "s"
             print(f"dropped the review of {named(s.working)}. Its clean line, "
@@ -154,7 +150,6 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
                   f"branch has, so it is left alone -- `git branch -D "
                   f"{short(s.clean)}` if you want that work gone too.")
         else:
-            run(["branch", "-D", short(s.clean)])
             why = ("nothing had been approved onto it" if empty else
                    "every commit on it is on another branch too")
             print(f"dropped the review of {named(s.working)}, and deleted its "

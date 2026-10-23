@@ -63,7 +63,6 @@ def cmd_git(repo: Repo, argv: list[str]) -> int:
     if not argv:
         raise Refused("usage: curate git <command> [args...]")
 
-    repo.recover()
     repo.require_consistent()
     session = repo.session()
     if session is None or repo.mode != "review":

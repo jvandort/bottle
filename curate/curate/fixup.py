@@ -209,7 +209,6 @@ def finish(repo: Repo, session: Session, new: str) -> int:
 
 
 def cmd_fixup(repo: Repo, argv: list[str]) -> int:
-    repo.recover()
     repo.require_consistent()
     session = repo.session()
     if session is None:
@@ -328,7 +327,6 @@ def continue_fixup(repo: Repo, session: Session) -> int:
 
 
 def cmd_resolve(repo: Repo, argv: list[str]) -> int:
-    repo.recover()
     session = repo.session()
     if session is None or not session.fixup_pending:
         raise Refused("no conflict to resolve")

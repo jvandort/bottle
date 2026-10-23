@@ -130,12 +130,21 @@ class WrongBase(CurateTestCase):
         self.assertFalse(self.branch_exists("curate/wip"))
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
 
+    def test_drop_leaves_a_clean_line_checked_out_elsewhere_and_its_review(self) -> None:
+        self.start(self.wrong)
+        self.repo.git("worktree", "add", "-q", str(self.repo.path.parent / "other"),
+                      "curate/wip")
+        result = self.repo.curate("drop", "wip")
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.branch_exists("curate/wip"))
+        self.assertIn("wip", self.repo.curate("list").stdout)
+
     def test_drop_with_no_branch_works_from_write_mode_too(self) -> None:
         self.start(self.wrong)
         result = self.repo.curate("drop")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.branch_exists("curate/wip"))
-        self.assertEqual(self.repo.status_fields()["mode"], "write")
+        self.assertEqual(self.repo.status_fields()["mode"], "none")
 
     def test_drop_with_no_branch_follows_head_moved_by_git(self) -> None:
         """HEAD moved behind curate's back still names the review to drop."""

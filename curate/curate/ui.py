@@ -1,11 +1,15 @@
 """Asking the person things, when there is a person to ask."""
 
 import os
+import signal
 import sys
+import threading
+from contextlib import contextmanager
+from typing import Iterator
 
 from .gitcmd import git, rev, run
 from .pick import Row, choose
-from .state import CLEAN_PREFIX, named, short
+from .state import named, short
 
 PAST_THE_GUESS = 10        # how far the base list goes below the best guess
 LONGEST_LIST = 500         # and how far it goes at most
@@ -19,6 +23,24 @@ def interactive() -> bool:
     except (AttributeError, ValueError):
         return False
     return tty and os.environ.get("TERM", "") not in ("", "dumb")
+
+
+@contextmanager
+def uninterrupted() -> Iterator[None]:
+    """Ctrl-C ignored until the block is done, by the git it runs as well.
+
+    For the stretch after every question is answered, where refs move one at a
+    time: stopped half way, a command leaves a state that it refuses to pick up
+    again. Nothing in such a block waits on a person, so the wait is short.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def default_base(head: str) -> tuple[str, str, str] | tuple[None, None, None]:
@@ -52,24 +74,26 @@ def suggestion(head: str, base: str, via: str, tip: str) -> str:
             f"({named(via)} has {behind} commit{plural} since)")
 
 
-def ask_for_base(head: str) -> str:
-    return pick_base(head, *default_base(head))
+def ask_for_base(head: str, hide: set[str]) -> str:
+    return pick_base(head, *default_base(head), hide=hide)
 
 
 def decorations(refs: str) -> str:
-    """%D without curate's own refs and without HEAD: what a person names."""
+    """%D without HEAD: what a person names."""
     names = []
     for name in refs.split(", "):
         name = name.removeprefix("HEAD -> ")
-        if name and name != "HEAD" and not name.startswith(f"{CLEAN_PREFIX}/"):
+        if name and name != "HEAD":
             names.append(name)
     return ", ".join(names)
 
 
-def history(tip: str, guess: str | None) -> list[tuple[str, str, str]]:
+def history(tip: str, guess: str | None,
+            hide: set[str]) -> list[tuple[str, str, str]]:
     """(oid, subject, refs) down the first-parent line from `tip`, as far as
-    a little past the guess."""
+    a little past the guess. `hide` is refs not to name commits by."""
     out = git("log", "--first-parent", f"-n{LONGEST_LIST}",
+              *[f"--decorate-refs-exclude={ref}" for ref in sorted(hide)],
               "--format=%H%x1f%s%x1f%D", tip)
     found, past = [], None
     for line in out.splitlines():
@@ -91,12 +115,14 @@ def history(tip: str, guess: str | None) -> list[tuple[str, str, str]]:
 
 def pick_base(head: str, guess: str | None, via: str | None,
               tip: str | None, header: list[str] | None = None,
-              marks: dict[str, str] | None = None) -> str:
-    """The base from a list. `marks` labels commits besides the guess."""
+              marks: dict[str, str] | None = None,
+              hide: set[str] | None = None) -> str:
+    """The base from a list. `marks` labels commits besides the guess; `hide`
+    is refs it names none of them by -- the clean lines."""
     marks = marks or {}
     rows: list[Row] = []
     cursor = 0
-    for oid, subject, refs in history(head, guess):
+    for oid, subject, refs in history(head, guess, hide or set()):
         if oid == guess:
             cursor = len(rows)
         named_here = f"({refs}) {subject}" if refs else subject

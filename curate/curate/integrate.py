@@ -15,7 +15,6 @@ and both its lines deleted. Their old tips are printed, so nothing is out of
 reach.
 """
 
-import shutil
 import tempfile
 from dataclasses import dataclass
 
@@ -24,8 +23,8 @@ from .errors import Refused
 from .gitcmd import commit_tree, git, metadata, parents_of, rev, run, tree_of
 from .modes import switch_mode
 from .pick import Row, choose, choose_many
-from .state import CLEAN_PREFIX, Repo, Session, named, short
-from .ui import interactive
+from .state import Repo, Session, named, short
+from .ui import interactive, uninterrupted
 
 
 @dataclass
@@ -187,15 +186,21 @@ def can_take(branch: str, tip: str) -> bool:
 
 
 def destination(session: Session, tip: str, into: str | None) -> str:
-    """refs/heads/<name>: an existing branch to fast-forward, or a new one."""
-    ours = {session.working, session.clean}
+    """refs/heads/<name>: an existing branch to fast-forward, or a new one.
+
+    Never this review's working line, nor any review's clean line: what is on
+    a clean line is what that review approved, and nothing else puts it there.
+    Another review's working line is fine -- moving one is how its review gets
+    more to read.
+    """
+    taken = session.repo.clean_lines() | {session.working}
 
     def check(name: str) -> tuple[str | None, str]:
         ref = f"refs/heads/{name}"
         if run(["check-ref-format", "--branch", name]).returncode != 0:
             return None, f"{name!r} is not a branch name"
-        if ref in ours or name.startswith(f"{CLEAN_PREFIX}/"):
-            return None, f"{name} belongs to the review"
+        if ref in taken:
+            return None, f"{name} belongs to a review"
         if rev(ref) is not None and not can_take(ref, tip):
             return None, f"{name} cannot be fast-forwarded to this"
         if checked_out_elsewhere(ref):
@@ -218,7 +223,7 @@ def destination(session: Session, tip: str, into: str | None) -> str:
     for line in out.splitlines():
         ref, when, subject = line.split("\x1f")
         name = short(ref)
-        if ref in ours or name.startswith(f"{CLEAN_PREFIX}/") or not can_take(ref, tip):
+        if ref in taken or not can_take(ref, tip):
             continue
         rows.append(Row([name, when, subject], value=ref,
                         tag="best guess" if name in guesses else ""))
@@ -252,36 +257,37 @@ def rewrite(commits: list[str], adopt: set[str]) -> dict[str, str]:
     return new
 
 
-def finish_review(repo: Repo, session: Session) -> list[str]:
+def finish_review(repo: Repo, session: Session, keep: str) -> list[str]:
     """Drop the review and delete both its lines. What was deleted, and where
     each one was.
 
-    A line another review still needs, or the branch you are on, is left.
+    A line another review still needs is left, and so is `keep`: the branch
+    the work was integrated into, which an earlier version was reviewed on
+    when the copy was stacked on top of it.
     """
     others = {line for s in repo.sessions() if s.slug != session.slug
               for line in (s.clean, s.working)}
     gone = []
     for ref in (session.clean, session.working):
         tip = rev(ref)
-        if tip is not None and ref not in others and ref != repo.head:
+        if tip is not None and ref not in others and ref != keep:
             git("branch", "-D", short(ref))
             gone.append(f"{named(ref)} (was {tip[:8]})")
-    shutil.rmtree(session.dir, ignore_errors=True)
-    run(["update-ref", "-d", session.ref])
+    repo.forget(session)
     return gone
 
 
 def earlier(repo: Repo, session: Session) -> list[Session]:
     """The reviews this one was copied from, newest first: earlier versions
-    of the same work. The chain ends at one already dropped."""
+    of the same work. The chain ends at one already dropped -- by its id,
+    since a review started since on the same branch is not an earlier one."""
+    by_id = {s.id: s for s in repo.sessions()}
     found: list[Session] = []
-    slug = session.copied_from
-    while slug and slug != session.slug and all(s.slug != slug for s in found):
-        prior = Session(repo, slug)
-        if not prior.exists:
-            break
+    prior = by_id.get(session.copied_from)
+    while (prior is not None and prior.slug != session.slug
+           and all(s.slug != prior.slug for s in found)):
         found.append(prior)
-        slug = prior.copied_from
+        prior = by_id.get(prior.copied_from)
     return found
 
 
@@ -305,7 +311,6 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
             raise Refused(f"unexpected argument: {flag}")
         i += 2
 
-    repo.recover()
     repo.require_consistent()
     session = repo.session()
     if session is None:
@@ -321,25 +326,27 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
     commits = git("rev-list", "--reverse", "--topo-order", tip, f"^{session.base}",
                   *([f"^{target}"] if rev(target) else [])).split()
 
-    # Every question is answered. From here on, things change.
-    new_tip = rewrite(commits, adopted).get(tip, tip) if commits else tip
-    old_target = rev(target)
-    if repo.mode == "review":
-        switch_mode(repo, "write")
-    git("update-ref", "-m", "curate integrate", target, new_tip,
-        *([old_target] if old_target else []))
-    switched = run(["switch", short(target)])
-    if switched.returncode != 0:
-        raise Refused(f"{named(target)} is at {new_tip[:8]}, but switching to it "
-                      f"failed: {switched.stderr.strip()}\nThe review is still here.")
-    # HEAD has left the review, so it is no longer the one you are in. Said
-    # here rather than left to recover(), which would take HEAD landing on an
-    # earlier version's working line as a reason to make that review active.
-    repo.set_state("write", None)
-    # Read before the review goes: what it was copied from is in its state.
-    priors = earlier(repo, session)
-    gone = finish_review(repo, session)
-    ended = [(prior.working, finish_review(repo, prior)) for prior in priors]
+    # Every question is answered. From here on, things change, and stopping
+    # half way would leave a destination moved and a review that refuses to
+    # integrate again -- so nothing stops it.
+    with uninterrupted():
+        new_tip = rewrite(commits, adopted).get(tip, tip) if commits else tip
+        old_target = rev(target)
+        if repo.mode == "review":
+            switch_mode(repo, "write")
+        git("update-ref", "-m", "curate integrate", target, new_tip,
+            *([old_target] if old_target else []))
+        # Not a checkout: your files already match the destination, so this is
+        # HEAD and the index, as a mode switch is. Worded as git words a
+        # checkout, so `git switch -` still goes back.
+        git("symbolic-ref", "-m", f"checkout: moving from "
+            f"{short(session.working)} to {short(target)}", "HEAD", target)
+        git("reset", "-q")
+        # Read before the review goes: what it was copied from is in its state.
+        priors = earlier(repo, session)
+        gone = finish_review(repo, session, keep=target)
+        ended = [(prior.working, finish_review(repo, prior, keep=target))
+                 for prior in priors]
 
     how = (f"fast-forwarded from {old_target[:8]}" if old_target
            else "a new branch")

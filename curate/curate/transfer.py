@@ -17,7 +17,7 @@ from .modes import switch_mode
 from .pick import Row, choose
 from .start import cmd_start
 from .state import CLEAN_PREFIX, Repo, Session, named, short
-from .ui import interactive
+from .ui import interactive, uninterrupted
 
 
 def remote_of(branch: str) -> str | None:
@@ -69,8 +69,7 @@ def branch_name(ref: str) -> str:
 
 
 def branches(prefix: str, skip: set[str]) -> list[Row]:
-    """The branches under `prefix`, newest first, as rows to choose from.
-    Clean lines are left out, wherever they were pushed."""
+    """The branches under `prefix`, newest first, as rows to choose from."""
     # Unstripped: str.strip() counts \x1f as whitespace, and would eat an
     # empty field at either end of the output.
     out = run(["for-each-ref", "--sort=-committerdate",
@@ -79,7 +78,7 @@ def branches(prefix: str, skip: set[str]) -> list[Row]:
     rows = []
     for line in out.splitlines():
         symref, ref, name, when, subject = line.split("\x1f")
-        if symref or ref in skip or branch_name(ref).startswith(f"{CLEAN_PREFIX}/"):
+        if symref or ref in skip:
             continue
         rows.append(Row([name, when, subject], value=ref))
     return rows
@@ -88,7 +87,7 @@ def branches(prefix: str, skip: set[str]) -> list[Row]:
 def choose_line(source: Session, fetched: list[str] | None) -> str:
     up = git("rev-parse", "--symbolic-full-name",
              f"{short(source.working)}@{{upstream}}", check=False)
-    skip = {source.working, up}
+    skip = {source.working, up} | source.repo.clean_lines()
     if fetched is None:
         rows = branches("refs/remotes/", skip)
     else:
@@ -128,7 +127,6 @@ def git_ok(*args: str) -> bool:
 def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     if len(argv) > 1:
         raise Refused("usage: curate transfer [<branch>]")
-    repo.recover()
     repo.require_consistent()
     source = repo.session()
     if source is None:
@@ -152,6 +150,8 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     local, tip = local_for(chosen)
     if local == source.working:
         raise Refused(f"that is {named(local)}, the branch under review already")
+    if local in repo.clean_lines():
+        raise Refused(f"{named(local)} is the clean line of a review")
     if any(s.working == local for s in repo.sessions()):
         raise Refused(f"{named(local)} has a review already: "
                       f"`git switch {short(local)} && curate review`")
@@ -159,22 +159,26 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         raise Refused(f"branch {CLEAN_PREFIX}/{short(local)} already exists")
     base = choose_base(source, tip)
 
-    # Every question is answered. From here on, things change.
-    mode = repo.mode
-    if mode == "review":
-        switch_mode(repo, "write")
-    if rev(local) is None:
-        git("branch", "--track", short(local), chosen)
-    elif tip != local:
-        git("update-ref", local, tip)             # fast-forward, checked above
-    switched = run(["switch", short(local)])
-    if switched.returncode != 0:
+    # Every question is answered. From here on, things change, and stopping
+    # between the switch and the copy would leave you on the new branch with
+    # no review to transfer again -- so nothing stops it.
+    with uninterrupted():
+        mode = repo.mode
+        if mode == "review":
+            switch_mode(repo, "write")
+        if rev(local) is None:
+            git("branch", "--track", short(local), chosen)
+        elif tip != local:
+            git("update-ref", local, tip)             # fast-forward, checked above
+        switched = run(["switch", short(local)])
+        if switched.returncode != 0:
+            if mode == "review":
+                switch_mode(repo, "review")
+            raise Refused(f"git switch {short(local)} failed: "
+                          f"{switched.stderr.strip()}")
+        repo.leave()                              # HEAD has left the review
+        if cmd_start(repo, ["--copy", short(source.working), "--from", base]) != 0:
+            return 1
         if mode == "review":
             switch_mode(repo, "review")
-        raise Refused(f"git switch {short(local)} failed: {switched.stderr.strip()}")
-    repo.set_state("write", None)             # HEAD has left the review
-    if cmd_start(repo, ["--copy", short(source.working), "--from", base]) != 0:
-        return 1
-    if mode == "review":
-        switch_mode(repo, "review")
-    return 0
+        return 0

@@ -12,7 +12,6 @@ class NoReview(Refused):
 
 
 def switch_mode(repo: Repo, to: str) -> int:
-    repo.recover()
     repo.require_consistent()
     session = repo.session()
     if session is None:

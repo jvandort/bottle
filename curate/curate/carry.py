@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from .errors import Refused
 from .gitcmd import (commit_tree, git, merge_tree, metadata, parents_of, rev,
                      run, tree_of)
-from .state import CLEAN_PREFIX, Repo, Session, named, short
+from .state import Repo, Session, named, short
 from .ui import default_base, interactive, pick_base
 
 # Where a base is usually found, in the order a person would name it.
@@ -58,7 +58,7 @@ def subject(commit: str) -> str:
 def excluded(source: Session, head: str) -> list[str]:
     """Refs that would name the old base by the branches under review: true,
     and no help in finding the line it came from."""
-    refs = [f"refs/heads/{CLEAN_PREFIX}/*", "refs/curate/*"]
+    refs = [*source.repo.clean_lines(), "refs/curate/*"]
     for line in (source.working, head):
         refs.append(line)
         up = git("rev-parse", "--symbolic-full-name", f"{short(line)}@{{upstream}}",
@@ -142,7 +142,8 @@ def choose_base(source: Session, head: str) -> str:
             f"{named(head)} looks to be based on {where}, not on the old base "
             f"{source.base[:8]} ({said}). Pass --from <base> to say which.")
     return pick_base(head, best, via, tip, header=header,
-                     marks={source.base: "old base"})
+                     marks={source.base: "old base"},
+                     hide=source.repo.clean_lines())
 
 
 # -- the copy --------------------------------------------------------------

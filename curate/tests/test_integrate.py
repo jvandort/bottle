@@ -86,6 +86,15 @@ class Adopting(Integrating):
         self.assertIn("none of these commits is by 'bob'",
                       self.refused("--into", "main", "--adopt", "bob"))
 
+    def test_another_reviews_clean_line_is_refused_whatever_it_is_called(self) -> None:
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "-c", "other", self.base)
+        self.repo.curate("start", "--from", self.base, "--clean", "other-clean")
+        self.repo.git("switch", "-q", "feature")
+        self.repo.curate("review")
+        self.assertIn("other-clean belongs to a review",
+                      self.refused("--into", "other-clean", "--adopt", "genie"))
+
     def test_a_branch_that_cannot_fast_forward_is_refused(self) -> None:
         self.repo.git("update-ref", "refs/heads/main", self.repo.git(
             "commit-tree", self.repo.tree_of(self.base), "-p", self.base, "-m", "moved"))
@@ -242,6 +251,20 @@ class Copied(Integrating):
         self.integrate("--into", "main", "--adopt", "genie")
         self.assertIn("unrelated", self.repo.curate("list").stdout)
         self.assertIn("curate/unrelated", self.branches())
+
+    def test_a_review_started_since_on_the_same_branch_is_not_an_earlier_one(self) -> None:
+        """Dropped by hand, then reviewed again: same branch, same clean line
+        name, and nothing to do with the copy."""
+        self.repo.curate("write")
+        self.repo.curate("drop", "feature-1")
+        self.repo.git("switch", "-q", "feature-1")
+        self.commit("New work", {"n.txt": "N\n"}, by=GENIE)
+        self.start(self.base)
+        self.repo.git("switch", "-q", "feature-2")
+        self.repo.curate("review")
+        self.integrate("--into", "main", "--adopt", "genie")
+        self.assertIn("feature-1", self.repo.curate("list").stdout)
+        self.assertEqual(self.repo.git("log", "-1", "--format=%s", "feature-1"), "New work")
 
     def test_dropping_a_copy_leaves_the_review_it_came_from(self) -> None:
         self.repo.curate("write")

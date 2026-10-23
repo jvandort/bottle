@@ -6,6 +6,7 @@ can be deleted freely.
 """
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -85,8 +86,13 @@ class Session:
         self.clean = read(self.dir / "clean")
         self.working = read(self.dir / "working")
         self.base = read(self.dir / "base")
-        # The review this one was copied from, if it was: the earlier version
-        # of the same work, and finished when this one is integrated.
+        # Which review this is, as opposed to which clean line it has: a review
+        # dropped and started again on the same branch has the same slug, and
+        # is not the same review. Older reviews have no id; their slug stands
+        # in, and no newer review can match it, since each gets an id of its own.
+        self.id = read(self.dir / "id") or slug
+        # The id of the review this one was copied from, if it was: the earlier
+        # version of the same work, and finished when this one is integrated.
         self.copied_from = read(self.dir / "copied-from")
 
     @property
@@ -227,7 +233,27 @@ class Repo:
             return []
         return [Session(self, d.name) for d in sorted(root.iterdir()) if d.is_dir()]
 
-    def set_state(self, mode: str, session: Session | None) -> None:
+    def clean_lines(self) -> set[str]:
+        """Every review's clean line: the branches only curate writes to.
+        What a review records, never what a branch happens to be called."""
+        return {s.clean for s in self.sessions()}
+
+    def forget(self, session: Session) -> None:
+        """The review is over: its state and its record of approvals go, and
+        it is no longer the one you are in. Its branches are the caller's."""
+        active = self.session()
+        shutil.rmtree(session.dir, ignore_errors=True)
+        run(["update-ref", "-d", session.ref])
+        if active is not None and active.slug == session.slug:
+            self.leave()
+
+    def leave(self) -> None:
+        """No review is the one you are in, and so there is no mode."""
+        write(self.state / "version", str(STATE_VERSION))
+        write(self.state / "mode", "none")
+        write(self.state / "active", "")
+
+    def set_state(self, mode: str, session: Session) -> None:
         """Three writes, deliberately not made atomic.
 
         A crash between them leaves a mode and an active session that disagree
@@ -246,7 +272,7 @@ class Repo:
         """
         write(self.state / "version", str(STATE_VERSION))
         write(self.state / "mode", mode)
-        write(self.state / "active", session.slug if session else "")
+        write(self.state / "active", session.slug)
 
     # -- the invariant ------------------------------------------------------
 
@@ -334,4 +360,4 @@ class Repo:
             if self.mode == "review":
                 active.index("review").unlink(missing_ok=True)
                 active.rebuild("review")
-            self.set_state("write", None)
+            self.leave()

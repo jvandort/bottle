@@ -121,11 +121,11 @@ class MovingHead(CurateTestCase):
         self.repo.git("add", "-A")
         self.repo.git("commit", "-q", "-m", "Everything")     # so git allows it
 
-    def test_it_stays_in_write_mode_and_says_so(self) -> None:
+    def test_it_leaves_the_review_and_says_so(self) -> None:
         result = self.repo.curate("git", "switch", "-q", "elsewhere")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/elsewhere")
         fields = self.repo.status_fields()
-        self.assertEqual(fields["mode"], "write")
+        self.assertEqual(fields["mode"], "none")
         self.assertEqual(fields["consistent"], "yes")  # leaving the branch in write mode is ordinary
         self.assertIn("no\n        review to come back to", result.stderr)
         self.assertIn("git switch wip && curate review", result.stderr)
