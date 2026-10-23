@@ -172,7 +172,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         if mode == "review":
             switch_mode(repo, "review")
         raise Refused(f"git switch {short(local)} failed: {switched.stderr.strip()}")
-    repo.recover()
+    repo.set_state("write", None)             # HEAD has left the review
     if cmd_start(repo, ["--copy", short(source.working), "--from", base]) != 0:
         return 1
     if mode == "review":

@@ -332,7 +332,10 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
     if switched.returncode != 0:
         raise Refused(f"{named(target)} is at {new_tip[:8]}, but switching to it "
                       f"failed: {switched.stderr.strip()}\nThe review is still here.")
-    repo.recover()
+    # HEAD has left the review, so it is no longer the one you are in. Said
+    # here rather than left to recover(), which would take HEAD landing on an
+    # earlier version's working line as a reason to make that review active.
+    repo.set_state("write", None)
     # Read before the review goes: what it was copied from is in its state.
     priors = earlier(repo, session)
     gone = finish_review(repo, session)

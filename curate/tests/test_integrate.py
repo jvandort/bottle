@@ -247,3 +247,31 @@ class Copied(Integrating):
         self.repo.curate("write")
         self.repo.curate("drop", "feature-2")
         self.assertIn("feature-1", self.repo.curate("list").stdout)
+
+
+class CopiedOnTop(Integrating):
+    """feature reviewed, then more pushed on a branch on top of it, the review
+    transferred there, and that integrated back into feature."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.commit("Add b", {"b.txt": "B\n"}, by=GENIE)
+        self.review_all()
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "-c", "on-top")
+        self.commit("Add c", {"c.txt": "C\n"}, by=GENIE)
+        result = self.repo.curate("review", "--copy", "feature")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.repo.git("add", "-A")
+
+    def test_the_branch_it_came_from_is_kept_and_takes_it(self) -> None:
+        result = self.repo.curate("integrate", "--into", "feature", "--adopt", "genie")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/feature")
+        self.assertEqual(self.repo.git("log", "-1", "--format=%s", "feature"), "Add c")
+        self.assertEqual(self.repo.git("branch", "--list", "on-top", "curate/*"), "")
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
+
+    def test_landing_on_its_working_line_does_not_bring_that_review_back(self) -> None:
+        result = self.repo.curate("integrate", "--into", "feature", "--adopt", "genie")
+        self.assertNotIn("recovered", result.stderr)
