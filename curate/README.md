@@ -72,6 +72,8 @@ curate fixup <commit>        fold what you approved into an existing clean
 curate resolve               open the current fixup conflict in git's merge tool
 curate transfer [<branch>]   copy this review onto the branch that replaced
                              its working line: fetch, choose, copy, come back
+curate integrate             ship a finished review onto a branch, new or
+                             fast-forwarded, and end the review
 curate list                  every review in this repository
 curate drop [<branch>]       forget a review started by `start`; the one
                              you are in unless you name a branch
@@ -250,6 +252,39 @@ judged by where it left the old base's branch, that branch's upstream, and the
 usual mainlines -- curate asks rather than assumes, with the old base and the
 branches on it named above the list. Off a terminal it refuses, and `--from`
 says.
+
+## Shipping a finished review
+
+```sh
+curate integrate
+```
+
+A pull request without the pull request. What ships is the clean line if you
+curated one, and the working line if you did not -- because the history was
+already the way you wanted it, whoever made it so.
+
+It ships only what you finished. Anything unreviewed is refused. So is a
+change in your files that is not committed on the working line, even an
+approved one: whoever writes the working line has not seen it, so it goes
+back to them first. A clean line holding some of what you approved, but not
+all, is refused too; commit the rest there.
+
+Commits by anyone else are yours to decide on, author by author: adopt them,
+rewritten as yours with their original dates and signed if your commits are,
+or keep them as theirs. With one other author that is a single enter. With
+several, every author has a checkbox, and the list can only be confirmed from
+its last row, so each is a decision you made. Off a terminal, `--adopt
+<author>` and `--no-adopt <author>` have to name every one.
+
+Then where: `<new branch…>`, first, starts a branch at the review's base, and
+below it is every branch the line can fast-forward, with the one the base came
+from marked. `--into <branch>` says without asking. Nothing changes until both
+questions are answered.
+
+Then it happens: the destination moves, you are switched to it -- your files
+already match it, so nothing on disk changes -- and the review is over. It is
+dropped, and both its lines are deleted; everything they held is on the
+destination now. Their old tips are printed, in case.
 
 ## Starting from the wrong base
 

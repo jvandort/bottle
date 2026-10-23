@@ -7,6 +7,7 @@ from .commands import cmd_drop, cmd_list, cmd_status
 from .errors import Refused
 from .fixup import cmd_fixup, cmd_resolve
 from .gitverb import cmd_git
+from .integrate import cmd_integrate
 from .hooks import cmd_hook, install as install_hooks
 from .modes import NoReview, switch_mode
 from .start import cmd_start
@@ -38,6 +39,12 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                name does. Fetches, then asks which branch, and
                                its base if that moved. The old review is
                                untouched.
+  curate integrate             ship a finished review: fast-forward a branch,
+                               or make a new one, with the clean line if you
+                               curated one and the working line if not. Asks
+                               whether to adopt others' commits as yours, then
+                               where to; drops the review and both its lines.
+                               --into <branch>, --adopt / --no-adopt <author>.
   curate list                  every review in this repository.
   curate drop [<branch>]       forget a review started by `start`: the one
                                you are in, or the one <branch> names.
@@ -59,6 +66,7 @@ COMMANDS: dict[str, Callable[[Repo, list[str]], int]] = {
     "list": cmd_list,
     "drop": cmd_drop,
     "transfer": cmd_transfer,
+    "integrate": cmd_integrate,
 }
 MODE_VERBS = ("write", "review", "switch")
 INTERNAL = {"hook": cmd_hook}
