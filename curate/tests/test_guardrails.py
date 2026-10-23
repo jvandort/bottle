@@ -63,6 +63,19 @@ class Guardrails(CurateTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
 
+    def test_back_onto_the_clean_line_by_git_an_add_is_not_an_approval(self) -> None:
+        """post-checkout stood the review down when git took HEAD away. Without
+        that, the next `git add` on the clean line -- with no curate command in
+        between to notice -- would be recorded over the approvals."""
+        self.approve_everything()
+        record = "refs/curate/curate%2Fwip"
+        approved = self.repo.git("rev-parse", f"{record}^{{tree}}")
+        self.repo.git("switch", "-q", "elsewhere")
+        self.repo.git("switch", "-q", "curate/wip")
+        self.repo.write("g.txt", "not approved\n")
+        self.repo.git("add", "g.txt")
+        self.assertEqual(self.repo.git("rev-parse", f"{record}^{{tree}}"), approved)
+
     def test_no_index_is_clobbered_after_being_moved(self) -> None:
         """The whole bug: the checkout is survivable, a blind mode switch is not."""
         self.repo.git("add", "f.txt")
