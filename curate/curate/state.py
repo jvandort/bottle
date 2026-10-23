@@ -311,12 +311,10 @@ class Repo:
             session.index(mode).unlink(missing_ok=True)
             if not session.index("review" if mode == "write" else "write").exists():
                 session.rebuild("review" if mode == "write" else "write")
+            # Silently, whatever was active before: HEAD arriving on a
+            # review's branch is how you get back to one, and git switch is how
+            # you move between them. Nothing was skipped and nothing is lost.
             self.set_state(mode, session)
-            if active is not None:
-                # Not worth saying when nothing was active: HEAD arriving on a
-                # review's branch is how you get back to one, not an incident.
-                print(f"curate: recovered; HEAD is {named(head)}, so this is "
-                      f"{mode} mode.", file=sys.stderr)
             return
         if active is not None:
             # HEAD names no review at all. In write mode that is an ordinary

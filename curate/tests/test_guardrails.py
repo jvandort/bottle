@@ -52,6 +52,17 @@ class Guardrails(CurateTestCase):
         self.assertNotIn("moved it out from under", result.stderr)
         self.assertIn("no review here", result.stderr)
 
+    def test_switching_from_one_review_to_another_says_nothing(self) -> None:
+        """git switch between two reviews' working lines is how you move
+        between them; no command was skipped, so there is nothing to report."""
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "elsewhere")
+        self.start(self.base)
+        self.repo.git("switch", "-q", "wip")
+        result = self.repo.curate("review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
     def test_no_index_is_clobbered_after_being_moved(self) -> None:
         """The whole bug: the checkout is survivable, a blind mode switch is not."""
         self.repo.git("add", "f.txt")

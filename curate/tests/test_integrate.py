@@ -271,7 +271,4 @@ class CopiedOnTop(Integrating):
         self.assertEqual(self.repo.git("log", "-1", "--format=%s", "feature"), "Add c")
         self.assertEqual(self.repo.git("branch", "--list", "on-top", "curate/*"), "")
         self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
-
-    def test_landing_on_its_working_line_does_not_bring_that_review_back(self) -> None:
-        result = self.repo.curate("integrate", "--into", "feature", "--adopt", "genie")
-        self.assertNotIn("recovered", result.stderr)
+        self.assertEqual(result.stderr, "")
