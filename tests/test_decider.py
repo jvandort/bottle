@@ -66,7 +66,7 @@ class DeciderTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = Path(tmp)
         self.path = self.tmp / "d.sock"
         for patcher in (
-            mock.patch.object(daemon.auth, "intercepted_hosts", return_value=[]),
+            mock.patch.object(daemon.ca, "hosts", return_value=[]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
             mock.patch.object(daemon, "bound_bottles", side_effect=lambda: self.bound),
         ):

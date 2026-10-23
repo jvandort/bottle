@@ -35,7 +35,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from bottle import egress, features
+from bottle import cache, egress, features
 from bottle.errors import BottleError
 from bottle.store import bottle_home
 
@@ -239,9 +239,11 @@ def intercepted_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
     """The host patterns a bottle with these features has its tunnels terminated for, without their ports.
 
     Every host a credential names, logged in or not, so a bottle's egress CA
-    (see ca.py) doesn't change with a login.
+    (see ca.py) doesn't change with a login, and every host whose downloads
+    are cached (see cache.py).
     """
-    return sorted({destination(host)[0].lower() for c in credentials_for(specs) for host in c.inject.hosts})
+    credentials = {destination(host)[0].lower() for c in credentials_for(specs) for host in c.inject.hosts}
+    return sorted(credentials | {c.host for c in cache.cached_for(specs)})
 
 
 def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:

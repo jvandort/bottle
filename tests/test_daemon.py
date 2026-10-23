@@ -37,8 +37,10 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.daemon = Daemon(decider=Decider(self.tmp / "tokens.json"), decider_port=0)
         for patcher in (
             # The features these tests name aren't resolved: what a credential claims is mocked where it matters.
-            mock.patch.object(daemon.auth, "intercepted_hosts", return_value=[]),
+            # The hosts the bottle's CA was made for when it started.
+            mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
+            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
             mock.patch.object(daemon, "bound_bottles", return_value=[]),
         ):
             patcher.start()
@@ -66,7 +68,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     async def test_a_bottles_credentials_reach_its_gateway_and_go_no_further(self) -> None:
-        injections = [daemon.egress.Injection(("ci.test",), "Authorization", "Bearer the-real-credential")]
+        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections) as looked_up:
             reply = await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
         looked_up.assert_called_once_with(("teamcity:server=ci.test",))
@@ -75,16 +77,26 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(binding.gateway.injections, tuple(injections))
 
     async def test_a_bottles_gateway_mints_from_that_bottles_ca(self) -> None:
-        with mock.patch.object(daemon.auth, "intercepted_hosts", return_value=["ci.test"]), \
-                mock.patch.object(daemon.ca, "server_context") as server_context:
+        with mock.patch.object(daemon.ca, "server_context") as server_context:
             await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
             [binding] = self.daemon.decider.bindings.values()
             binding.gateway.certificates("ci.test")
         server_context.assert_called_once_with("b", ("ci.test",), "ci.test")
 
+    async def test_only_what_the_bottles_ca_covers_is_terminated(self) -> None:
+        # Named by its features since the bottle started, whose CA doesn't cover them: reached directly.
+        injections = [daemon.egress.Injection(h, "Authorization", "Bearer x") for h in ("ci.test", "new-ci.test")]
+        caches = [daemon.cache.Cached(h) for h in ("ci.test", "new-files.test")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=caches):
+            await self.request({"op": "bind", "bottle": "b", "features": ["f"]})
+        [binding] = self.daemon.decider.bindings.values()
+        self.assertEqual([i.host for i in binding.gateway.injections], ["ci.test"])
+        self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test"])
+
     async def test_binding_again_reads_the_credentials_again(self) -> None:
         for value in ("Bearer old", "Bearer new"):
-            injections = [daemon.egress.Injection(("ci.test",), "Authorization", value)]
+            injections = [daemon.egress.Injection("ci.test", "Authorization", value)]
             with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
                 await self.request({"op": "bind", "bottle": "b", "features": ["teamcity"]})
         [binding] = self.daemon.decider.bindings.values()
@@ -126,8 +138,9 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         for patcher in (
-            mock.patch.object(daemon.auth, "intercepted_hosts", return_value=[]),
+            mock.patch.object(daemon.ca, "hosts", return_value=[]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
+            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

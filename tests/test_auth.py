@@ -149,6 +149,11 @@ class InjectedCredentialTest(unittest.TestCase):
         with mock.patch.object(auth, "get", return_value=None):
             self.assertEqual(auth.injections_for(self.specs), [])
 
+    def test_the_ca_is_for_credentials_hosts_and_cached_ones(self) -> None:
+        with mock.patch.object(auth.cache, "cached_for", return_value=[auth.cache.Cached("files.example.com")]):
+            hosts = auth.intercepted_hosts(self.specs)
+        self.assertEqual(hosts, ["ci.corp.example.com", "files.example.com"])
+
     def test_one_host_belongs_to_one_credential(self) -> None:
         claimed = features.Credential(
             "other", "Another token",

@@ -74,6 +74,15 @@ class GenerateTest(CATestCase):
         self.assertNotEqual(ca.certificate("b", ("ci.test",)), first)
         self.assertEqual([p.name for p in ca.hosts_dir("b").iterdir()], [ca.ca_dir("b", ("ci.test",)).name])
 
+    def test_the_hosts_a_bottles_ca_was_made_for(self) -> None:
+        self.assertEqual(ca.hosts("b"), [])
+        ca.certificate("b", ["files.example.com", "*.ci.example.com"])
+        self.assertEqual(ca.hosts("b"), ["*.ci.example.com", "files.example.com"])
+        ca.certificate("b", ["files.example.com"])
+        self.assertEqual(ca.hosts("b"), ["files.example.com"])
+        ca.certificate("b", [])
+        self.assertEqual(ca.hosts("b"), [])
+
     def test_no_hosts_no_ca(self) -> None:
         ca.certificate("b", HOSTS)
         self.assertIsNone(ca.certificate("b", ()))

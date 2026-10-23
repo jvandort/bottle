@@ -233,6 +233,30 @@ class LoadTest(FeatureTestCase):
                     features.load("a")
                 __import__("shutil").rmtree(self.root / "a")
 
+    def test_cache(self) -> None:
+        self.feature("a", customizations={"bottle": {"cache": {"hosts": ["repo.example.com", "*.cdn.example.com"],
+                                                               "exclude": ["*/index.json"]}}})
+        self.assertEqual(features.load("a").cache,
+                         features.Cache(("repo.example.com", "*.cdn.example.com"), ("*/index.json",)))
+        self.feature("b")
+        self.assertIsNone(features.load("b").cache)
+
+    def test_a_cache_is_hosts_and_paths(self) -> None:
+        for cache, message in (
+            ([], "cache must be an object"),
+            ({}, "cache.hosts must be a non-empty list"),
+            ({"hosts": []}, "cache.hosts must be a non-empty list"),
+            ({"hosts": ["https://repo.example.com"]}, "must be a lowercase host name"),
+            ({"hosts": ["repo.example.com:8443"]}, "must be a lowercase host name"),
+            ({"hosts": ["Repo.example.com"]}, "must be a lowercase host name"),
+            ({"hosts": ["${server}"]}, "must be a lowercase host name"),
+            ({"hosts": ["repo.example.com"], "exclude": ["index.json"]}, "starting with / or \\*"),
+            ({"hosts": ["repo.example.com"], "ttl": 60}, "cache: unsupported: ttl"),
+        ):
+            with self.subTest(cache):
+                self.assert_invalid(message, customizations={"bottle": {"cache": cache}})
+                __import__("shutil").rmtree(self.root / "a")
+
     def test_required_options(self) -> None:
         self.feature("a", options={"server": {"type": "string", "default": ""}},
                      customizations={"bottle": {"requiredOptions": ["server"]}})

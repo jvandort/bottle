@@ -113,8 +113,8 @@ what naming it means; nothing else about that host opens up.
 Each bottle has an egress CA of its own, made with `openssl` in
 `~/.bottle/ca/<bottle>` when the bottle starts, and installed in that bottle's
 trust store (and at `NODE_EXTRA_CA_CERTS`, for Node tools); a bottle whose
-features name no credential hosts has none. The CA carries a name constraint
-permitting only the hosts the bottle's credentials name, which the bottle's own
+features name no credential or cached hosts has none. The CA carries a name constraint
+permitting only the hosts the bottle's credentials and cache name, which the bottle's own
 TLS clients enforce: a certificate for any other site is refused, whoever signs
 it, so nothing but those hosts' traffic can be read by bottled. A constraint
 on a host also covers the names below it (`github.com` covers
@@ -216,7 +216,8 @@ bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `containerEnv`, `dependsOn` / `installsAfter` naming local features, and
 `customizations.bottle` (the credentials a feature needs, the hosts each one is
-attached to and the stand-in it wants, `requiredOptions`, the options a user
+attached to and the stand-in it wants, `cache`, the hosts whose downloads are
+kept, `requiredOptions`, the options a user
 has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
@@ -336,6 +337,24 @@ addresses are refused, but for a credential's own host; `bottle.host` is
 answered by bottled itself, with the bottle's git remotes. A refused
 connection is reset. DNS is smolvm's, which asks the Mac's resolver. Logs one
 line per connection, in `~/.bottle/logs`.
+
+**The HTTP cache.** Every bottle starts from its image, so a build in a new
+one downloads every dependency again. A feature can name hosts whose
+downloads bottled keeps: it terminates the bottle's TLS to them with the egress
+CA, as for a credential's host, and answers a GET or HEAD from
+`~/.bottle/cache/http/<host>/<path>` when it has the file, for every bottle.
+Only whole 200s are kept, without headers (a hit has no `Content-Type`), unless
+the server marks them `no-store`, `no-cache` or `private`, from GETs with no query, range,
+`Authorization` or cookie, and bottled fetches them with a request of its own,
+following redirects, so a file is the same whoever asked first. Anything else
+goes to the host as it was sent, but that a cached host's cookies are never
+passed on: a bottle that sent one back would never be answered from the
+cache. A kept file is never refreshed, so a feature
+excludes the paths a host changes, such as an index of a package's versions; a request
+with `Cache-Control: no-cache` fetches it again. A file no bottle has used for
+a week is removed, when bottled starts and every 6 hours after; delete the
+directory to empty it sooner. bottled logs each request to a cached host, and
+whether it was a `hit`, `stored`, or `passed` on.
 
 bottled starts automatically when a command needs it, and when it starts it
 picks up the bottles that were running. While it's stopped, running bottles

@@ -13,7 +13,9 @@ answers itself, as the git service (see host.py). And it holds credentials the
 bottle never sees (Injection): for the hosts a feature names, it terminates
 the bottle's TLS with a certificate from the egress CA (see ca.py), puts the
 real token in place of the stand-in on the requests that present one, and
-makes the HTTPS connection to the server itself.
+makes the HTTPS connection to the server itself. For the hosts a feature
+caches (see cache.py), it terminates the bottle's TLS the same way, and
+answers GETs from what earlier bottles downloaded.
 """
 
 import asyncio
@@ -23,14 +25,16 @@ import fnmatch
 import functools
 import ipaddress
 import logging
+import os
 import socket
 import ssl
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from typing import BinaryIO
+from urllib.parse import urljoin, urlsplit
 
-from bottle import host
+from bottle import cache, host
 
 log = logging.getLogger("bottle.egress")
 # Silent unless the application configures logging (the CLI does).
@@ -55,6 +59,15 @@ ROUTING_HEADERS = {
 # Methods a server answers by echoing the request back, credential included,
 # so they're never sent with one. TRACK is IIS's TRACE.
 ECHOING_METHODS = {"TRACE", "TRACK"}
+# A cached host is reached over https, on its own port.
+CACHE_PORT = 443
+# How long a connection to a cached host is kept open for its next request.
+KEEP_ALIVE_TIMEOUT = 60
+# Redirects bottled follows for a download it keeps, which is kept as if it had never been redirected.
+REDIRECTS = {301, 302, 303, 307, 308}
+MAX_REDIRECTS = 5
+# Headers whose request may be answered for whoever sent it alone, so the answer is never kept or shared.
+PERSONAL_HEADERS = {"authorization", "cookie"}
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[[str, int], Awaitable[list[str]]]
@@ -195,7 +208,7 @@ class Flow:
 
 
 # What a redirected flow is for.
-GIT, CREDENTIAL = "git", "credential"
+GIT, CREDENTIAL, CACHE = "git", "credential", "cache"
 # bottled reads the rest of a TLS flow's opening itself, then decides it: the
 # driver showed too little of it to tell whether a credential's host is its name.
 OPENING = "opening"
@@ -210,15 +223,17 @@ class Direct:
 
 @dataclass(frozen=True)
 class Redirect:
-    """bottled is the flow's far end: as bottle.host's git service, to attach `injection`'s credential, or
-    to read the rest of a ClientHello the driver didn't wait for (OPENING), and decide then.
+    """bottled is the flow's far end: as bottle.host's git service, to attach `injection`'s credential, to
+    answer from `cached`'s store, or to read the rest of a ClientHello the driver didn't wait for
+    (OPENING), and decide then.
 
-    `addresses` are where the credential's host may be reached, already judged.
+    `addresses` are where the credential's or cached host may be reached, already judged.
     """
 
     service: str
     injection: Injection | None = None
     addresses: tuple[str, ...] = ()
+    cached: cache.Cached | None = None
 
 
 class Gateway:
@@ -232,6 +247,8 @@ class Gateway:
         services: "host.HostServices | None" = None,
         injections: tuple[Injection, ...] = (),
         certificates: Certificates | None = None,
+        caches: tuple[cache.Cached, ...] = (),
+        store: cache.Store | None = None,
     ) -> None:
         self.name = name
         self.policy = policy
@@ -242,6 +259,9 @@ class Gateway:
         # the certificates that let it: without them, nothing is attached.
         self.injections = tuple(injections) if certificates else ()
         self.certificates = certificates
+        # Hosts whose downloads are kept, in `store`: also only with certificates to read them by.
+        self.caches = tuple(caches) if certificates and store else ()
+        self.store = store
 
     def log_flow(self, target: str, ip: str | None, outcome: str, status: str | None, up: list[int], down: list[int],
              started: float) -> None:
@@ -268,10 +288,12 @@ class Gateway:
             if flow.port == 80 and self.services is not None:
                 return Redirect(GIT)
             raise Refused(403, "Forbidden: no such host service", "denied")
-        if name is None and not opening_read and _opening_unread(flow.first) and any(i.port == flow.port for i in self.injections):
+        terminated_here = any(i.port == flow.port for i in self.injections) or (self.caches and flow.port == CACHE_PORT)
+        if name is None and not opening_read and _opening_unread(flow.first) and terminated_here:
             # smolvm asks with what arrived in its first 100ms, and a busy guest's
             # ClientHello can come later: let through unread, a credential's host
-            # would get the bottle's stand-in, never the credential.
+            # would get the bottle's stand-in, never the credential, and a cached
+            # host's downloads wouldn't be kept.
             if not self.policy.allows("", address, private=True):
                 raise Refused(403, "Forbidden: destination not allowed", "denied")  # the host itself: no name helps
             return Redirect(OPENING)
@@ -281,6 +303,10 @@ class Gateway:
             # Sent to the name, never to the address the bottle chose: the
             # credential goes only where its host's name leads.
             return Redirect(CREDENTIAL, injection, tuple(await self._allowed(name, flow.port, private=True)))
+        cached = self._cached_at(name, flow.port) if name and flow.first[:1] == b"\x16" else None
+        if cached is not None:
+            # Sent to the name too: what's kept under a host's name must be what that host serves.
+            return Redirect(CACHE, addresses=tuple(await self._allowed(name, flow.port, private=False)), cached=cached)
         if not self.policy.allows(name or "", address):
             raise Refused(403, "Forbidden: destination not allowed", "denied")
         if not address.is_global and (not name or address not in await self._addresses(name, flow.port)):
@@ -317,6 +343,10 @@ class Gateway:
             context = await self._certificate(name)
             reader, tls = await self._accept_tls(context, flow.first, reader, writer)
             writer = tls
+            if decision.service == CACHE:
+                target += " cached"
+                ip, status = await self._serve_cached(name, decision, reader, writer, up, down)
+                return
             request = await self._inside(Request("CONNECT", name, flow.port, None), decision.injection, reader)
             if request.injected:
                 target += " +credential"
@@ -356,6 +386,154 @@ class Gateway:
     def _injection_at(self, host: str, port: int) -> Injection | None:
         """The credential for this host and port, if one claims it."""
         return next((i for i in self.injections if i.matches(host, port)), None)
+
+    def _cached_at(self, host: str, port: int) -> cache.Cached | None:
+        """How this host's downloads are kept, if they are."""
+        return next((c for c in self.caches if c.matches(host)), None) if port == CACHE_PORT else None
+
+    async def _serve_cached(
+        self, name: str, decision: Redirect, reader: "_Reader", writer: "_Tls", up: list[int], down: list[int],
+    ) -> tuple[str | None, str | None]:
+        """Answer the requests a bottle sends a cached host over one connection, from the store where it can.
+
+        GETs and HEADs are answered one after another on the same connection,
+        each over a connection of bottled's own to the host when it isn't
+        answered from here. Anything else, or anything with a body, is the
+        connection's last request, relayed as it was sent. Returns the
+        address last connected to and the last status, for the flow's log.
+        """
+        ip, status, keep = None, None, True
+        while keep:
+            if status is not None:
+                try:
+                    if await asyncio.wait_for(reader.at_eof(), KEEP_ALIVE_TIMEOUT):
+                        break
+                except TimeoutError:
+                    break
+            method, target, version, header_lines = await _read_head(reader)
+            url = urlsplit(target)
+            if method == "CONNECT" or (url.scheme and url.scheme != "https") or (url.netloc and url.hostname != name.lower()):
+                raise Refused(400, "Bad Request", "bad-request")
+            headers = _parsed(header_lines)
+            path = url.path or "/"
+            path_and_query = path + (f"?{url.query}" if url.query else "")
+            keep = version == "HTTP/1.1" and "close" not in _tokens(headers.get("connection", ""))
+            if method not in ("GET", "HEAD") or "transfer-encoding" in headers or headers.get("content-length", "0") != "0":
+                ip, upstream_reader, upstream_writer = await self._open(
+                    Request(method, name, CACHE_PORT, None, terminated=True), list(decision.addresses))
+                head = _upstream_head(method, path_and_query, "HTTP/1.1", _to_server(name, header_lines))
+                upstream_writer.write(head)
+                up[0] += len(head)
+                response = bytearray()
+                try:
+                    await _relay(reader, writer, upstream_reader, upstream_writer, up, down, response)
+                finally:
+                    upstream_writer.close()
+                status = _status(response)
+                self._log_request(method, name, path_and_query, "passed", status)
+                break
+            # Kept only where the answer can't depend on who asked, or how.
+            cacheable = (
+                not url.query and "range" not in headers and not PERSONAL_HEADERS & headers.keys()
+                and not decision.cached.excludes(path) and self.store.file(name, path) is not None
+            )
+            if cacheable and not _tokens(headers.get("cache-control", "") + "," + headers.get("pragma", "")) & {"no-cache"}:
+                hit = await asyncio.to_thread(self.store.open, name, path)
+                if hit is not None:
+                    with hit:
+                        size = os.fstat(hit.fileno()).st_size
+                        # No Content-Type: none was kept, and the bottle can tell what a file is as well as bottled can.
+                        if method == "HEAD":
+                            await _send(writer, 200, "OK", [f"Content-Length: {size}"], None, None, keep, down)
+                        else:
+                            await _send(writer, 200, "OK", [], _chunks_of(hit), size, keep, down)
+                    status = "200"
+                    self._log_request(method, name, path, "hit", status)
+                    continue
+            if cacheable and method == "GET":
+                ip, upstream_reader, upstream_writer, response = await self._fetch(
+                    name, path, headers.get("user-agent", ""), list(decision.addresses), up)
+            else:
+                ip, upstream_reader, upstream_writer = await self._open(
+                    Request(method, name, CACHE_PORT, None, terminated=True), list(decision.addresses))
+                head = _upstream_head(method, path_and_query, "HTTP/1.1", _to_server(name, header_lines))
+                upstream_writer.write(head)
+                up[0] += len(head)
+                response = None
+            try:
+                response = response or await _read_response(upstream_reader)
+                length = _body_length(method, response)
+                partial = None
+                if cacheable and method == "GET" and _storable(response, length):
+                    partial = await asyncio.to_thread(self.store.partial, name, path)
+                kept = False
+                # No cookies from a cached host: one the bottle sent back would keep its requests from
+                # being answered from the store, and those set for bottled's own request, perhaps by a
+                # host it was redirected to, were never the bottle's.
+                header_lines = [line for line in _to_client(response.header_lines, length == 0)
+                                if line.split(":", 1)[0].strip().lower() not in ("set-cookie", "set-cookie2")]
+                try:
+                    if length == 0:
+                        await _send(writer, response.status, response.reason, header_lines, None, None, keep, down)
+                    else:
+                        body = _body(upstream_reader, length)
+                        keep = await _send(
+                            writer, response.status, response.reason, header_lines,
+                            _teed(body, partial) if partial else body, length if isinstance(length, int) else None,
+                            keep and length is not None, down,
+                        )
+                    kept = partial is not None and await asyncio.to_thread(partial.commit)
+                finally:
+                    if partial is not None and not kept:
+                        await asyncio.to_thread(partial.discard)
+            finally:
+                upstream_writer.close()
+            status = str(response.status)
+            self._log_request(method, name, path_and_query, "stored" if kept else "fetched" if cacheable and method == "GET" else "passed", status)
+        return ip, status
+
+    async def _fetch(
+        self, name: str, path: str, user_agent: str, addresses: list[str], up: list[int],
+    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter, "_Response"]:
+        """GET `path` from `name` to keep, following redirects: the response, its body still to read.
+
+        The request is bottled's own, not the bottle's, so the file kept for a
+        path is the same whoever asked first. A redirect that can't be
+        followed (to plain http, or somewhere the policy refuses) is the
+        response.
+        """
+        host, port, target = name, CACHE_PORT, path
+        for hop in range(MAX_REDIRECTS + 1):
+            ip, upstream_reader, upstream_writer = await self._open(Request("GET", host, port, None, terminated=True), addresses)
+            authority = host + (f":{port}" if port != CACHE_PORT else "")
+            head = "\r\n".join([
+                f"GET {target} HTTP/1.1", f"Host: {authority}", f"User-Agent: {user_agent or 'bottle'}", "Accept: */*",
+                "Accept-Encoding: identity", "Connection: close", "", "",
+            ]).encode("latin-1")
+            upstream_writer.write(head)
+            up[0] += len(head)
+            try:
+                response = await _read_response(upstream_reader)
+            except BaseException:
+                upstream_writer.close()
+                raise
+            if response.status not in REDIRECTS or hop == MAX_REDIRECTS:
+                return ip, upstream_reader, upstream_writer, response
+            try:
+                location = urlsplit(urljoin(f"https://{authority}{target}", response.headers.get("location", "")))
+                next_port = location.port or CACHE_PORT
+                if location.scheme != "https" or not location.hostname:
+                    return ip, upstream_reader, upstream_writer, response
+                addresses = await self._allowed(location.hostname, next_port, private=False)
+            except (Refused, ValueError):  # a Location that isn't a URL has a port that isn't one
+                return ip, upstream_reader, upstream_writer, response
+            upstream_writer.close()
+            host, port = location.hostname, next_port
+            target = (location.path or "/") + (f"?{location.query}" if location.query else "")
+        raise AssertionError("the last hop is always returned")
+
+    def _log_request(self, method: str, name: str, path: str, outcome: str, status: str | None) -> None:
+        log.info("%s %s https://%s%s %s %s", self.name, method, name, path, outcome, status or "-")
 
     async def _certificate(self, name: str) -> ssl.SSLContext:
         """A TLS server context presenting the egress CA's certificate for `name`."""
@@ -481,11 +659,34 @@ def _forwarded(header_lines: list[str]) -> list[str]:
 
 
 def _parsed(header_lines: list[str]) -> dict[str, str]:
-    parsed = {}
+    """Headers by lowercase name; one sent on several lines is one, its values joined with commas, as HTTP has it."""
+    parsed: dict[str, str] = {}
     for line in header_lines:
         name, _, value = line.partition(":")
-        parsed[name.strip().lower()] = value.strip()
+        name, value = name.strip().lower(), value.strip()
+        parsed[name] = f"{parsed[name]}, {value}" if name in parsed else value
     return parsed
+
+
+def _tokens(value: str) -> set[str]:
+    """A comma-separated header value's tokens, lowercase: Connection's, or Cache-Control's."""
+    return {token.strip().lower() for token in value.split(",") if token.strip()}
+
+
+def _to_server(name: str, header_lines: list[str]) -> list[str]:
+    """A bottle's header lines for a request to `name`, which it gets as its Host, without the routing ones."""
+    dropped = {"host", *ROUTING_HEADERS}
+    return [f"Host: {name}", *(line for line in _forwarded(header_lines) if line.split(":", 1)[0].strip().lower() not in dropped)]
+
+
+def _to_client(header_lines: list[str], bodiless: bool) -> list[str]:
+    """A server's header lines for the bottle, without the framing bottled sets itself.
+
+    A response with no body (to HEAD, a 304) keeps its Content-Length, which
+    is the length of the body it's about, not of its own.
+    """
+    dropped = HOP_HEADERS | {"transfer-encoding"} | (set() if bodiless else {"content-length"})
+    return [line for line in header_lines if line.split(":", 1)[0].strip().lower() not in dropped]
 
 
 def _upstream_head(method: str, path: str, version: str, headers: list[str]) -> bytes:
@@ -549,6 +750,147 @@ def _status(response: bytes) -> str | None:
             break
         rest = rest[head_end + 4:]
     return status
+
+
+# --- responses read and sent ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Response:
+    """A server's response head: its status, reason and header lines, and the headers parsed (lowercase names)."""
+
+    status: int
+    reason: str
+    header_lines: list[str]
+    headers: dict[str, str]
+
+
+# A body framed by chunked transfer coding, not by its length.
+CHUNKED = "chunked"
+
+
+async def _read_response(reader: asyncio.StreamReader) -> _Response:
+    """The head of a server's final response: interim ones (100 Continue) are skipped."""
+    while True:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEADER_TIMEOUT)
+        except (asyncio.LimitOverrunError, asyncio.IncompleteReadError, TimeoutError, ConnectionError, ssl.SSLError):
+            raise Refused(502, "Bad Gateway: no response from the server", "failed") from None
+        status_line, *header_lines = head.decode("latin-1").split("\r\n")[:-2]
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not parts[1].isdigit() or len(parts[1]) != 3:
+            raise Refused(502, "Bad Gateway: the server's response isn't HTTP", "failed")
+        status = int(parts[1])
+        if 100 <= status < 200 and status != 101:
+            continue
+        return _Response(status, parts[2] if len(parts) > 2 else "", header_lines, _parsed(header_lines))
+
+
+def _body_length(method: str, response: _Response) -> int | str | None:
+    """How the response's body ends: its length (0 for none), CHUNKED, or None, when the server closes."""
+    if method == "HEAD" or response.status in (101, 204, 304):
+        return 0
+    if "chunked" in _tokens(response.headers.get("transfer-encoding", "")):
+        return CHUNKED
+    length = response.headers.get("content-length")
+    if length is None:
+        return None
+    if not length.isdigit():
+        raise Refused(502, "Bad Gateway: the server's response has no length bottled can read", "failed")
+    return int(length)
+
+
+def _storable(response: _Response, length: int | str | None) -> bool:
+    """Whether the response to a GET can be kept: a 200 of a file as it is, which is known to be all of it.
+
+    Not when the server says not to keep it, or to check with it before using
+    it again (no-cache, max-age=0): a kept file is never checked again.
+    """
+    directives = _tokens(response.headers.get("cache-control", "")).union(
+        {"no-cache"} if "no-cache" in _tokens(response.headers.get("pragma", "")) else set())
+    return (
+        response.status == 200 and length is not None
+        and response.headers.get("content-encoding", "identity").lower() == "identity"
+        and not directives & {"no-store", "no-cache", "private", "max-age=0", "s-maxage=0"}
+    )
+
+
+async def _body(reader: asyncio.StreamReader, length: int | str | None) -> AsyncIterator[bytes]:
+    """A response's body, as it arrives, without its framing; refused if it ends early."""
+    try:
+        if length == CHUNKED:
+            while True:
+                size = int((await reader.readuntil(b"\n")).split(b";")[0].strip(), 16)
+                if size == 0:
+                    while (await reader.readuntil(b"\n")).strip():  # trailers, until the empty line
+                        pass
+                    return
+                async for data in _exactly(reader, size):
+                    yield data
+                if (await reader.readuntil(b"\n")).strip():
+                    raise ValueError("a chunk longer than it said")
+        elif length is None:
+            while data := await reader.read(64 * 1024):
+                yield data
+        else:
+            async for data in _exactly(reader, length):
+                yield data
+    except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ssl.SSLError):
+        raise Refused(None, "the server's response ended early", "failed") from None
+
+
+async def _exactly(reader: asyncio.StreamReader, n: int) -> AsyncIterator[bytes]:
+    while n:
+        data = await reader.read(min(n, 64 * 1024))
+        if not data:
+            raise asyncio.IncompleteReadError(b"", n)
+        n -= len(data)
+        yield data
+
+
+async def _chunks_of(file: BinaryIO) -> AsyncIterator[bytes]:
+    while data := file.read(64 * 1024):
+        yield data
+
+
+async def _teed(body: AsyncIterator[bytes], partial: cache.Partial) -> AsyncIterator[bytes]:
+    """`body`, written to `partial` too."""
+    async for data in body:
+        partial.write(data)
+        yield data
+
+
+async def _send(
+    writer, status: int, reason: str, header_lines: list[str], body: AsyncIterator[bytes] | None,
+    length: int | None, keep: bool, down: list[int],
+) -> bool:
+    """Send the bottle a response, framed here: whether the connection can take another request.
+
+    A body of unknown length is chunked when the connection is kept, and
+    ends with it when it isn't. Refused, with nothing to answer, if the
+    bottle goes away.
+    """
+    lines = [f"HTTP/1.1 {status} {reason}".rstrip(), *header_lines]
+    chunked = body is not None and length is None and keep
+    if body is not None and length is not None:
+        lines.append(f"Content-Length: {length}")
+    elif chunked:
+        lines.append("Transfer-Encoding: chunked")
+    keep = keep and (body is None or length is not None or chunked)
+    lines.append("Connection: keep-alive" if keep else "Connection: close")
+    try:
+        writer.write("\r\n".join([*lines, "", ""]).encode("latin-1"))
+        if body is not None:
+            async for data in body:
+                writer.write(b"%x\r\n%s\r\n" % (len(data), data) if chunked else data)
+                await writer.drain()
+                down[0] += len(data)
+            if chunked:
+                writer.write(b"0\r\n\r\n")
+        await writer.drain()
+    except (ConnectionError, OSError):
+        raise Refused(None, "the bottle went away", "closed") from None
+    return keep
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, reason: str) -> None:
@@ -698,6 +1040,10 @@ class _Reader:
         data = bytes(self._buffer[:n])
         del self._buffer[:n]
         return data
+
+    async def at_eof(self) -> bool:
+        """Whether there's nothing more to read: waits for more, or for the end."""
+        return not self._buffer and not await self._more()
 
     async def readuntil(self, separator: bytes = b"\n") -> bytes:
         while (at := self._buffer.find(separator)) < 0:

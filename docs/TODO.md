@@ -113,10 +113,26 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   - One request per terminated tunnel: the upstream is told
     `Connection: close`, so a client opens a new tunnel (and handshake) per
     request, and an `Upgrade` (WebSockets) through a terminated tunnel doesn't
-    work. Reading responses' framing would allow keep-alive.
-  - A bottle picks up a re-login only when it next starts.
+    work. A cached host's tunnel is kept alive (its responses' framing is
+    read, egress.py's `_send`); a credential's could be the same way.
+  - A bottle picks up a re-login only when it next starts, and hosts its
+    features name for a credential or the cache since it started are reached
+    directly until then: its egress CA covers the hosts it was made for.
   - An injected host is allowed even when private, which is wider than the
     `--allow` list it bypasses.
+
+- **The HTTP cache: what's left.** (bottle/cache.py)
+  - Files unused for a week are removed, but nothing caps its size, or says
+    how big it is. A size cap with the least recently used going first, or
+    `bottle cache clear`, if a week's downloads turn out to be too many.
+  - A kept file is never revalidated: right for released artifacts, wrong
+    for anything a host changes in place that a feature didn't exclude.
+  - Each miss is a new connection, and TLS handshake, to the host; a pool
+    per host would save them for a cold build.
+  - Two bottles missing the same file both download it; the second rename
+    wins. Joining a download already under way would save the second.
+  - Files are written and read on bottled's event loop, a 64 KiB block at a
+    time: fine on a local disk.
 
 ## Host commands for the genie
 

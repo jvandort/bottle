@@ -291,7 +291,13 @@ def _run_machine(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
 
 
 def _start_machine(bottle: Bottle) -> None:
-    """Start the bottle's machine, its flows decided by bottled under a token new for this run."""
+    """Start the bottle's machine, its flows decided by bottled under a token new for this run.
+
+    Its egress CA is made first, for the hosts its features name now: bottled
+    terminates TLS for the hosts that CA covers (see daemon.py), and
+    trust_egress_ca installs it once the machine is up.
+    """
+    ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
     decider, token = daemon.bind_decider(bottle.name, git_dir(bottle), bottle.features, bottle.remotes)
     smolvm.start(bottle.machine, decider, token)
 

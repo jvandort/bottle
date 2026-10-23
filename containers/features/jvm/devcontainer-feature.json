@@ -2,7 +2,7 @@
   "id": "jvm",
   "version": "1.0.0",
   "name": "JVM",
-  "description": "Eclipse Temurin JDKs (default 25; more with additionalVersions), from Adoptium's signed apt repository.",
+  "description": "Eclipse Temurin JDKs (default 25; more with additionalVersions), from Adoptium's signed apt repository. Downloads from Maven Central, Google's Maven repository and Gradle's hosts are cached on the host, for every bottle, but for what changes in place: maven-metadata.xml, snapshots, and the list of Gradle versions.",
   "options": {
     "version": {
       "type": "string",
@@ -32,6 +32,23 @@
   },
   "customizations": {
     "bottle": {
+      "cache": {
+        "hosts": [
+          "repo.maven.apache.org",
+          "repo1.maven.org",
+          "plugins.gradle.org",
+          "plugins-artifacts.gradle.org",
+          "services.gradle.org",
+          "downloads.gradle.org",
+          "repo.gradle.org",
+          "dl.google.com"
+        ],
+        "exclude": [
+          "*/maven-metadata.xml*",
+          "*-SNAPSHOT/*",
+          "/versions/*"
+        ]
+      },
       "context": "Temurin JDK ${version} is the default `java`, at `$JAVA_HOME`. Every JDK installed is at `/usr/lib/jvm/jdk-<version>`."
     }
   }

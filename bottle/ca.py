@@ -6,7 +6,8 @@ and Claude Code for everything but inference). So for those hosts the decider
 redirects the bottle's flow to bottled, which completes the bottle's TLS
 handshake itself with a certificate for the host, signed by the bottle's CA,
 reads the request, attaches the credential, and makes its own verified TLS
-connection to the real server (see egress.py).
+connection to the real server (see egress.py). The hosts whose downloads are
+cached (see cache.py) are read the same way, and are a CA's hosts too.
 
 Each bottle has a CA of its own, and that CA can only vouch for the hosts the
 bottle's credentials name: its certificate carries a critical name
@@ -131,6 +132,24 @@ def certificate(bottle: str, hosts: Iterable[str]) -> str | None:
             if other != keep and not other.name.startswith("."):
                 shutil.rmtree(other, ignore_errors=True)
     return (keep / "ca.crt").read_text() if keep else None
+
+
+def hosts(bottle: str) -> list[str]:
+    """The host patterns `bottle`'s CA vouches for, as it was made when the bottle last started; [] for none.
+
+    What its trust store holds, so what bottled can terminate: hosts a
+    feature names since then are reached directly until the bottle starts again.
+    """
+    try:
+        directories = [d for d in hosts_dir(bottle).iterdir() if not d.name.startswith(".")]
+    except FileNotFoundError:
+        return []
+    for directory in directories:
+        try:
+            return (directory / "hosts").read_text().split()
+        except FileNotFoundError:
+            continue
+    return []
 
 
 def forget(bottle: str) -> None:

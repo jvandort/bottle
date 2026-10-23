@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from bottle import auth, ca, decider as decider_, egress
+from bottle import auth, ca, cache, decider as decider_, egress
 from bottle.host import HostServices, Remote
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log
@@ -28,6 +28,8 @@ log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
 
 START_TIMEOUT = 5
+# How often the HTTP cache's unused files are removed, after once at start.
+CACHE_EXPIRY_INTERVAL = 6 * 60 * 60
 
 
 # macOS caps Unix socket paths at 104 bytes.
@@ -147,6 +149,8 @@ class Daemon:
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
+        # Every bottle's cached downloads, in one place: what one fetched, the next is answered with.
+        self.store = cache.Store()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = await reader.readline()
@@ -183,14 +187,14 @@ class Daemon:
 
     def _gateway(
         self, bottle: str, git_dir: Path | None, remotes: tuple[Remote, ...], injections: tuple[egress.Injection, ...],
-        intercepted: tuple[str, ...],
+        intercepted: tuple[str, ...], caches: tuple[cache.Cached, ...] = (),
     ) -> egress.Gateway:
         """What decides and serves `bottle`'s flows."""
         # The bottle's own CA, which bottle made when it started the bottle.
         certificates = functools.partial(ca.server_context, bottle, intercepted)
         return egress.Gateway(
             bottle, self.policy, services=HostServices(git_dir, remotes=remotes), injections=injections,
-            certificates=certificates,
+            certificates=certificates, caches=caches, store=self.store,
         )
 
     async def bind(
@@ -201,9 +205,12 @@ class Daemon:
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             # Credentials are read here, each time a bottle is bound, so logging
             # in or out reaches a bottle when it next starts.
-            injections = tuple(await asyncio.to_thread(auth.injections_for, features))
-            intercepted = tuple(await asyncio.to_thread(auth.intercepted_hosts, features))
-            gateway = self._gateway(bottle, git_dir, remotes, injections, intercepted)
+            # Only the hosts the bottle's CA covers, which it was made for when the bottle started:
+            # those its features name since then can't be terminated, and go direct until it starts again.
+            intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
+            injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features) if i.host.lower() in intercepted)
+            caches = tuple(c for c in await asyncio.to_thread(cache.cached_for, features) if c.host in intercepted)
+            gateway = self._gateway(bottle, git_dir, remotes, injections, intercepted, caches)
             return self.decider.bind(bottle, gateway, token)
 
     async def release(self, bottle: str) -> None:
@@ -236,6 +243,16 @@ def bound_bottles() -> list[tuple[str, Path | None, tuple[str, ...], tuple[Remot
             if b.status == "ready" and b.name in tokens]
 
 
+async def _expire_cache(store: cache.Store) -> None:
+    """Remove the cache's unused files now, and every CACHE_EXPIRY_INTERVAL after."""
+    while True:
+        try:
+            await asyncio.to_thread(store.expire)
+        except Exception:
+            log.exception("couldn't expire the HTTP cache")
+        await asyncio.sleep(CACHE_EXPIRY_INTERVAL)
+
+
 async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     path = path or socket_path()
     daemon = daemon or Daemon()
@@ -260,6 +277,7 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     # Before answering anyone: whoever started bottled may be about to use a bottle whose machine
     # still holds its token, and its flows must find it bound.
     await daemon.restore(await asyncio.to_thread(bound_bottles))
+    expiring = asyncio.create_task(_expire_cache(daemon.store))
     server = await asyncio.start_unix_server(daemon.handle, str(path))
     os.chmod(path, 0o600)
     log.info("bottled %d listening on %s", os.getpid(), path)
@@ -267,6 +285,7 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
         async with server:
             await daemon.stopping.wait()
     finally:
+        expiring.cancel()
         # Closed, not released: the decider's tokens outlive bottled, as their machines do.
         decider.close()
         path.unlink(missing_ok=True)

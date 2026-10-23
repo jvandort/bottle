@@ -15,7 +15,8 @@ error, so a feature never silently loses behavior it asked for:
   installsAfter (local feature ids); customizations.bottle (below).
 
 customizations.bottle declares what a feature needs from bottle itself:
-credentials, options a user has to set, and what to tell the agent.
+credentials, downloads to cache, options a user has to set, and what to tell
+the agent.
 
 A credential is a secret bottle keeps on the host and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
@@ -66,6 +67,15 @@ is a regular expression with one group, matched across lines against the
 command's output with terminal escape codes removed; whitespace is removed from
 the captured value, since a narrow terminal may wrap it.
 
+cache names hosts whose downloads bottled keeps on the machine, so the next
+bottle gets them from there (see bottle/cache.py): as with a credential's
+host, the bottle's TLS to them is terminated with its egress CA. exclude is
+fnmatch patterns over a request's path, for files a host changes after
+they're published, which are never kept.
+
+  "customizations": {"bottle": {"cache": {
+      "hosts": ["files.example.com"], "exclude": ["*/index.json"]}}}
+
 requiredOptions names options a user has to set, for the ones with no sensible
 default (the teamcity feature's server). The format has no way to say this --
 an option must declare a default, of its own type, so there is no null to mean
@@ -94,7 +104,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from bottle import images
+from bottle import cache as cache_module, images
 from bottle.errors import BottleError
 
 FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
@@ -106,7 +116,8 @@ REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
-BOTTLE_KEYS = {"credentials", "requiredOptions", "context"}
+BOTTLE_KEYS = {"credentials", "cache", "requiredOptions", "context"}
+CACHE_KEYS = {"hosts", "exclude"}
 CREDENTIAL_KEYS = {"description", "login", "inject"}
 LOGIN_KEYS = {"command", "capture"}
 INJECT_KEYS = {"hosts", "header", "value", "standin"}
@@ -155,6 +166,14 @@ class Credential:
 
 
 @dataclass(frozen=True)
+class Cache:
+    """Hosts whose downloads bottled keeps, but for paths matching `exclude`."""
+
+    hosts: tuple[str, ...]
+    exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Feature:
     id: str
     version: str
@@ -164,6 +183,7 @@ class Feature:
     depends_on: tuple[str, ...]
     installs_after: tuple[str, ...]
     credentials: tuple[Credential, ...] = ()
+    cache: Cache | None = None
     required_options: tuple[str, ...] = ()
     # What to tell the agent about it, with ${option} where an option's value goes.
     context: str = ""
@@ -330,7 +350,7 @@ def _options(options, fail) -> dict[str, Option]:
 
 
 def _customizations(customizations, options, fail) -> dict:
-    """What the feature asks of bottle: its credentials, the options a user has to set, and its context."""
+    """What the feature asks of bottle: its credentials, its cache, the options a user has to set, and its context."""
     if not isinstance(customizations, dict):
         raise fail("customizations must be an object")
     unsupported = sorted(set(customizations) - {"bottle"})
@@ -361,6 +381,7 @@ def _customizations(customizations, options, fail) -> dict:
             raise fail(f"customizations.bottle.context: ${{{name}}} names no option of this feature (options: {known})")
     return {
         "credentials": tuple(_credential(name, spec, options, fail) for name, spec in credentials.items()),
+        "cache": _cache(bottle["cache"], fail) if "cache" in bottle else None,
         "required_options": tuple(required),
         "context": context,
     }
@@ -427,6 +448,25 @@ def _inject(inject, options, where, fail) -> Inject:
     if standin is not None and (not isinstance(standin, str) or not ENV_NAME.fullmatch(standin)):
         raise fail(f"{where}: inject.standin must be an environment variable name")
     return Inject(tuple(hosts), value, header, standin)
+
+
+def _cache(cache, fail) -> Cache:
+    if not isinstance(cache, dict):
+        raise fail("customizations.bottle.cache must be an object")
+    unsupported = sorted(set(cache) - CACHE_KEYS)
+    if unsupported:
+        raise fail(f"customizations.bottle.cache: unsupported: {', '.join(unsupported)}")
+    hosts = cache.get("hosts")
+    if not isinstance(hosts, list) or not hosts or not all(isinstance(h, str) for h in hosts):
+        raise fail("customizations.bottle.cache.hosts must be a non-empty list of hosts")
+    for host in hosts:
+        # Always https, on its own port: a host is only ever a name.
+        if not cache_module.HOST.fullmatch(host):
+            raise fail(f"customizations.bottle.cache.hosts: {host!r} must be a lowercase host name, or *. and one")
+    exclude = cache.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(p, str) and p.startswith(("/", "*")) for p in exclude):
+        raise fail("customizations.bottle.cache.exclude must be a list of path patterns, each starting with / or *")
+    return Cache(tuple(hosts), tuple(exclude))
 
 
 def _container_env(env, fail) -> dict[str, str]:
