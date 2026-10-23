@@ -9,6 +9,7 @@ One module per seam, and the dependencies run one way:
     hooks     the three hooks, installing them and handling them
     carry     copying a review onto a rebased branch, and finding its base
     start     beginning one: the base, and naming the clean line
+    transfer  copying the review you are in onto the branch that replaced it
     fixup     folding into an existing clean commit, and its conflicts
     gitverb   `curate git <command>`: borrow write mode for one command
     commands  status, list, drop

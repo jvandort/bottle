@@ -70,6 +70,8 @@ curate status                report on curate's state, and anything wrong
 curate fixup <commit>        fold what you approved into an existing clean
                              commit.  --continue / --abort when it conflicts
 curate resolve               open the current fixup conflict in git's merge tool
+curate transfer [<branch>]   copy this review onto the branch that replaced
+                             its working line: fetch, choose, copy, come back
 curate list                  every review in this repository
 curate drop [<branch>]       forget a review started by `start`; the one
                              you are in unless you name a branch
@@ -210,6 +212,19 @@ not be able to rewrite what they have pushed -- a protected remote, a policy,
 a sandboxed agent -- and push the rebase as a new branch instead: `feature-2`
 where you were reviewing `feature-1`. The review belongs on the new one, so
 copy it there:
+
+```sh
+curate transfer
+```
+
+That fetches the remote the working line tracks (every remote, if it tracks
+none), and lists that remote's branches, newest first -- the one that was just
+pushed is usually at the top. `<show local>`, at the bottom, lists your own
+branches instead. Then it switches to the branch you choose, copies the review
+onto it, and leaves you in whichever mode you were in. Nothing changes until
+every question is answered, so `q` at any point leaves everything as it was.
+
+By hand, it is:
 
 ```sh
 git switch feature-2

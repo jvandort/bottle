@@ -60,7 +60,10 @@ def encode(name: str) -> str:
 
 
 def short(ref: str) -> str:
-    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    for prefix in ("refs/heads/", "refs/remotes/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
 
 
 def named(ref: str | None) -> str:

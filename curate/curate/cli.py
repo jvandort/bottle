@@ -10,6 +10,7 @@ from .gitverb import cmd_git
 from .hooks import cmd_hook, install as install_hooks
 from .modes import NoReview, switch_mode
 from .start import cmd_start
+from .transfer import cmd_transfer
 from .state import STATE_VERSION, VERSION, Repo
 from .ui import interactive
 
@@ -32,6 +33,11 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                clean commit, instead of appending a fix to it.
                                --continue / --abort when it conflicts.
   curate resolve               open the current fixup conflict in git's merge tool.
+  curate transfer [<branch>]   copy this review onto the branch that replaced
+                               its working line, as a rebase pushed under a new
+                               name does. Fetches, then asks which branch, and
+                               its base if that moved. The old review is
+                               untouched.
   curate list                  every review in this repository.
   curate drop [<branch>]       forget a review started by `start`: the one
                                you are in, or the one <branch> names.
@@ -52,6 +58,7 @@ COMMANDS: dict[str, Callable[[Repo, list[str]], int]] = {
     "resolve": cmd_resolve,
     "list": cmd_list,
     "drop": cmd_drop,
+    "transfer": cmd_transfer,
 }
 MODE_VERBS = ("write", "review", "switch")
 INTERNAL = {"hook": cmd_hook}
