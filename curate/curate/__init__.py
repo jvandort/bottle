@@ -7,6 +7,7 @@ One module per seam, and the dependencies run one way:
     state     what a review is: Session, Repo, the invariant, the versions
     modes     the mode switch -- two renames and a symbolic-ref
     hooks     the three hooks, installing them and handling them
+    carry     copying a review onto a rebased branch, and finding its base
     start     beginning one: the base, and naming the clean line
     fixup     folding into an existing clean commit, and its conflicts
     gitverb   `curate git <command>`: borrow write mode for one command

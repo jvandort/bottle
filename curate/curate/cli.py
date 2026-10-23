@@ -15,8 +15,11 @@ from .ui import interactive
 
 HELP = """  curate start --from <base>   begin. The clean line starts at <base>; the
                                branch you are on is the working line.
+                               --copy <branch> copies that branch's review.
   curate review                read your files against the clean line. Stage a
                                hunk to approve it, commit to ship it.
+                               --copy <branch> begins this branch's review as
+                               a copy of that one's, for a rebased branch.
   curate write                 back to an ordinary repository, to write code.
   curate git <command>         run a git command as if you were in write mode,
                                whatever mode you are in, then come back. So
@@ -99,8 +102,20 @@ def main(argv: list[str]) -> int:
 
     try:
         if verb in MODE_VERBS:
+            if rest and verb != "review":
+                raise Refused(f"unexpected argument: {rest[0]}")
             to = verb if verb != "switch" else (
                 "write" if repo.mode == "review" else "review")
+            if rest:
+                # `review --copy <branch>` says how to begin a review, so it
+                # only makes sense where there is none to switch into.
+                repo.recover()
+                if repo.session() is not None:
+                    raise Refused(f"{rest[0]} begins a review, and this "
+                                  f"branch already has one")
+                if cmd_start(repo, rest) != 0:
+                    return 1
+                return switch_mode(repo, to)
             try:
                 return switch_mode(repo, to)
             except NoReview:

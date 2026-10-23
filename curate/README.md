@@ -58,8 +58,10 @@ A summary; `curate --help` is the real thing.
 
 ```
 curate                       status here, or the command list if no review
-curate start --from <base>   begin. --clean <branch> to name the clean line
-curate review                switch to review mode
+curate start --from <base>   begin. --clean <branch> to name the clean line,
+                             --copy <branch> to copy that branch's review
+curate review                switch to review mode; --copy <branch> begins
+                             this branch's review as a copy of that one's
 curate write                 switch back
 curate switch                toggle between the two
 curate git <command>         run a git command in write mode, whatever mode
@@ -200,6 +202,39 @@ If the command checks something else out -- `curate git switch elsewhere` --
 there is no review to come back to, because the working line is no longer where
 you are standing. curate says so and leaves you there; `git switch <working>
 && curate review` returns.
+
+## When the branch is replaced rather than updated
+
+Not every rebase arrives as a force-push. Whoever writes the working line may
+not be able to rewrite what they have pushed -- a protected remote, a policy,
+a sandboxed agent -- and push the rebase as a new branch instead: `feature-2`
+where you were reviewing `feature-1`. The review belongs on the new one, so
+copy it there:
+
+```sh
+git switch feature-2
+curate review --copy feature-1
+```
+
+The clean line and your approvals come across, and since approval is content,
+what the rebase changed is exactly what shows up as unreviewed. It is a copy:
+the review of `feature-1` is left exactly as it was, so if the copy is wrong,
+`curate drop` it and nothing else is touched. Once you are happy with the new
+one, drop the old.
+
+**If the rebase moved onto a newer base**, the clean line is replayed onto it
+and your approvals merged across, so what upstream did never lands on your
+list. The copy never stops on a conflict. A clean commit that conflicts ends
+the replay there: it and the commits after it come across as approved but not
+committed, for you to commit again. An approval that conflicts is simply
+unreviewed again. Both are still approved in the old review if you want to
+look.
+
+When the new branch looks to be on a different base than the old review --
+judged by where it left the old base's branch, that branch's upstream, and the
+usual mainlines -- curate asks rather than assumes, with the old base and the
+branches on it named above the list. Off a terminal it refuses, and `--from`
+says.
 
 ## Starting from the wrong base
 

@@ -1,9 +1,10 @@
 """Beginning a review: choosing the base, and naming the clean line."""
 
+from .carry import Carried, carry, choose_base, find, report
 from .errors import Refused
 from .gitcmd import git, rev, run
 from .hooks import install
-from .state import CLEAN_PREFIX, Repo, Session, encode, short, write
+from .state import CLEAN_PREFIX, Repo, Session, encode, named, short, write
 from .ui import ask_for_base, interactive
 
 
@@ -26,7 +27,7 @@ def branch_conflict(name: str) -> str | None:
 
 
 def cmd_start(repo: Repo, argv: list[str]) -> int:
-    base_arg = clean_arg = None
+    base_arg = clean_arg = copy_arg = None
     rest = []
     i = 0
     while i < len(argv):
@@ -36,6 +37,11 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
         elif argv[i] == "--clean":
             i += 1
             clean_arg = argv[i] if i < len(argv) else None
+        elif argv[i] == "--copy":
+            i += 1
+            copy_arg = argv[i] if i < len(argv) else None
+            if copy_arg is None:
+                raise Refused("--copy needs the review to copy: its branch")
         else:
             rest.append(argv[i])
         i += 1
@@ -74,10 +80,16 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     if rev(f"refs/heads/{clean_name}") is not None:
         raise Refused(f"branch {clean_name} already exists")
 
+    source = find(repo, copy_arg) if copy_arg else None
+    if source and source.working == head:
+        raise Refused(f"that is the review of {named(head)}, the branch you are on")
+
     if base_arg:
         base = rev(base_arg)
         if base is None:
             raise Refused(f"cannot resolve {base_arg}")
+    elif source:
+        base = choose_base(source, head)
     elif interactive():
         # Asking beats guessing: --from is the one argument that decides what
         # the review contains, so a person present gets to see and confirm it.
@@ -88,7 +100,11 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
             raise Refused("no upstream to infer a base from; pass --from <base>")
         base = git("merge-base", head, upstream)
 
-    git("branch", clean_name, base)
+    # Copying writes objects and no refs, so a copy that is refused part way
+    # leaves nothing behind, exactly like a start that is.
+    carried = (carry(repo, source, base) if source else
+               Carried(base, git("rev-parse", f"{base}^{{tree}}")))
+    git("branch", clean_name, carried.tip)
     repo.stamp()                       # before any other state exists
     write(session.dir / "clean", f"refs/heads/{clean_name}")
     write(session.dir / "working", head)
@@ -97,15 +113,22 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
 
     idx = session.index("review")
     idx.unlink(missing_ok=True)
-    git("read-tree", base, index=idx)
+    git("read-tree", carried.approved, index=idx)
     run(["update-index", "--refresh"], index=idx)   # non-zero means work to review
     repo.set_state("write", session)
     session.record("write")
     install(repo)
 
-    print(f"curate: clean line '{clean_name}' at {base[:8]}, "
+    if source:
+        report(source, carried)
+    print(f"curate: clean line '{clean_name}' at {carried.tip[:8]}, "
           f"working line '{working_name}'.")
     print(f"        `curate review` to start reading; `curate write` to go back.")
-    print(f"        Wrong base? `curate drop {working_name}` undoes all of this, "
-          f"while nothing is approved.")
+    if source:
+        print(f"        Wrong base? `curate drop {working_name}` undoes the copy.")
+        print(f"        The review of {named(source.working)} is untouched; `curate "
+              f"drop {short(source.working)}` once you are happy with this one.")
+    else:
+        print(f"        Wrong base? `curate drop {working_name}` undoes all of this, "
+              f"while nothing is approved.")
     return 0

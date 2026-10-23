@@ -90,15 +90,19 @@ def history(tip: str, guess: str | None) -> list[tuple[str, str, str]]:
 
 
 def pick_base(head: str, guess: str | None, via: str | None,
-              tip: str | None, header: list[str] | None = None) -> str:
+              tip: str | None, header: list[str] | None = None,
+              marks: dict[str, str] | None = None) -> str:
+    """The base from a list. `marks` labels commits besides the guess."""
+    marks = marks or {}
     rows: list[Row] = []
     cursor = 0
     for oid, subject, refs in history(head, guess):
         if oid == guess:
             cursor = len(rows)
         named_here = f"({refs}) {subject}" if refs else subject
-        rows.append(Row([oid[:8], named_here], value=oid,
-                        tag="best guess" if oid == guess else ""))
+        tags = (["best guess"] if oid == guess else []) + (
+            [marks[oid]] if oid in marks else [])
+        rows.append(Row([oid[:8], named_here], value=oid, tag=", ".join(tags)))
     lines = list(header or [])
     if guess and via and tip:
         lines.append(suggestion(head, guess, via, tip))
