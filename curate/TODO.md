@@ -15,6 +15,18 @@ tools that duplicate them.
   intercept this, but `curate status` could notice the clean line has no
   upstream and say so.
 
+- **`curate adopt`: take ownership of the working line.** A branch someone
+  else wrote is authored by them, and maybe unsigned. Adopting it rewrites
+  every commit since the review's base -- not onto anything newer --
+  re-authored and signed as you:
+
+  ```sh
+  git rebase <review base> --exec 'git commit --amend --reset-author -S --no-edit'
+  ```
+
+  Not to be confused with `transfer`, which carries a review over to a branch
+  that replaced its working line and leaves the commits as they are.
+
 ## Packaging
 
 - **`git curate`.** Git turns any `git-<name>` on `PATH` into a subcommand, and
