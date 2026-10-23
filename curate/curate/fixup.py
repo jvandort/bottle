@@ -192,7 +192,7 @@ def replay(repo: Repo, session: Session, new: str,
                             later_range=None)
             return None, 2
         env, message = metadata(y)
-        new = commit_tree(tree, [new], message, env=env)
+        new = commit_tree(tree, [new], message, env=env, sign=True)
         todo = todo[1:]
     return new, 0
 
@@ -262,7 +262,7 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
     env, message = metadata(target)
 
     if target == clean_tip:               # amend: no replay needed
-        new = commit_tree(approved, parents_of(target), message, env=env)
+        new = commit_tree(approved, parents_of(target), message, env=env, sign=True)
         return finish(repo, session, new)
 
     todo = git("rev-list", "--reverse", f"{target}..{clean_tip}").splitlines()
@@ -275,7 +275,7 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
                         into=message.splitlines()[0] if message else target[:8],
                         later_range=f"{target}..{clean_tip}")
         return 2
-    new = commit_tree(tree, parents_of(target), message, env=env)
+    new = commit_tree(tree, parents_of(target), message, env=env, sign=True)
     rebuilt, code = replay(repo, session, new, todo)
     if code or rebuilt is None:
         return code
@@ -313,11 +313,11 @@ def continue_fixup(repo: Repo, session: Session) -> int:
 
     if state.stage == "fold":
         env, message = metadata(state.target)
-        new = commit_tree(tree, parents_of(state.target), message, env=env)
+        new = commit_tree(tree, parents_of(state.target), message, env=env, sign=True)
         todo = state.todo
     else:
         env, message = metadata(state.current)
-        new = commit_tree(tree, [state.done], message, env=env)
+        new = commit_tree(tree, [state.done], message, env=env, sign=True)
         todo = state.todo[1:]
 
     shutil.rmtree(session.fixup_dir, ignore_errors=True)

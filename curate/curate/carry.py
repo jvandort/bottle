@@ -1,8 +1,9 @@
 """Copying a review onto another working line: the clean line and the approvals.
 
 Whoever writes the working line may push a rebase as a new branch rather than
-force-push it, and the review belongs with the new one. It is copied, never moved: the review it came from
-is left exactly as it was, so a copy that goes wrong costs a `drop`.
+force-push it, and the review belongs with the new one. It is copied, never
+moved: the review it came from is left exactly as it was, so a copy that goes
+wrong costs a `drop`.
 
 On the same base that is two refs: the clean line's tip and the approved tree
 are taken as they are, and whatever the rebase changed shows up as unreviewed.
@@ -181,7 +182,7 @@ def carry(repo: Repo, source: Session, base: str) -> Carried:
             result.upstream.append(subject(c))
         else:
             env, message = metadata(c)
-            result.tip = commit_tree(tree, [result.tip], message, env=env)
+            result.tip = commit_tree(tree, [result.tip], message, env=env, sign=True)
             result.replayed.append(subject(c))
         done = c
 

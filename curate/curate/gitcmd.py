@@ -106,11 +106,27 @@ def metadata(commit: str) -> tuple[dict[str, str], str]:
              "GIT_AUTHOR_DATE": date}, message)
 
 
+def signing() -> bool:
+    """Whether commits should be signed: `commit.gpgSign`, which `git commit`
+    reads and `git commit-tree` does not."""
+    return git("config", "--type=bool", "--get", "commit.gpgsign",
+               check=False) == "true"
+
+
 def commit_tree(tree: str, parents: list[str], message: str,
-                env: dict[str, str] | None = None) -> str:
+                env: dict[str, str] | None = None, sign: bool = False) -> str:
+    """A commit, and nothing else moved.
+
+    `sign` is for commits people read -- a rebuilt clean commit, an adopted
+    one -- which are signed when `commit.gpgSign` says so, as `git commit`
+    would have. Never for curate's own bookkeeping: the approved set is
+    recorded on every `git add`, and a passphrase prompt there would be absurd.
+    """
     args = ["commit-tree", tree]
     for p in parents:
         args += ["-p", p]
+    if sign and signing():
+        args.append("-S")
     return git(*args, "-m", message, env=env)
 
 
