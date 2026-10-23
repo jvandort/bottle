@@ -15,6 +15,7 @@ from .errors import Refused
 from .gitcmd import (Conflicts, blob, commit_tree, git, git_ok, merge_tree,
                      metadata, parents_of, rev, run, tree_of)
 from .state import Repo, Session, named, read, short, write
+from .timing import timed
 
 
 @dataclass(frozen=True)
@@ -342,7 +343,8 @@ def cmd_resolve(repo: Repo, argv: list[str]) -> int:
             continue                       # already dealt with; leave it alone
         env = {label: f"{scratch}.{label}" for label in SIDES.values()}
         env["MERGED"] = str(scratch)
-        subprocess.run(["sh", "-c", cmd], env={**os.environ, **env})
+        with timed(["sh", "-c", cmd]):
+            subprocess.run(["sh", "-c", cmd], env={**os.environ, **env})
 
     resolved, outstanding = scan(session, conflicts)
     if not cmd:

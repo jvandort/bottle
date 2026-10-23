@@ -352,8 +352,14 @@ You can only *look* at one at a time, because there is one working tree.
 .git/curate/mode, active          which mode, which review
 .git/curate/sessions/<clean>/     one per review: the two index files, fixup state,
                                   and the review it was copied from, if it was
+.git/curate/log                   every command: when, how long, how much was git
 refs/curate/<clean branch>        the approved set, as a real commit, with a reflog
 ```
+
+When a command feels slow, look at the end of `.git/curate/log`. Each command
+is one line there. One that took longer than `CURATE_SLOW` seconds (1 by
+default) also lists every git it ran, with when each started and how long it
+took. `CURATE_SLOW=0` lists them for everything.
 
 The index files are a cache. Delete them and the next command rebuilds them
 from the ref; all you lose is a re-stat. curate installs three hooks

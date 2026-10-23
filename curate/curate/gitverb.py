@@ -20,6 +20,7 @@ from .errors import Refused
 from .gitcmd import HOOK_GUARD, environment
 from .modes import switch_mode
 from .state import Repo, Session, named, short
+from .timing import timed
 
 
 def run_git(argv: list[str]) -> int:
@@ -37,7 +38,8 @@ def run_git(argv: list[str]) -> int:
     env.pop(HOOK_GUARD, None)
     sys.stdout.flush()
     sys.stderr.flush()
-    code = subprocess.run(["git", *argv], env=env).returncode
+    with timed(["git", *argv]):
+        code = subprocess.run(["git", *argv], env=env).returncode
     # A signal comes back negative; shells report those as 128 + n, and so do we.
     return 128 - code if code < 0 else code
 

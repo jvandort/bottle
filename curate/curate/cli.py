@@ -1,12 +1,16 @@
 """What you can type, and what happens when you do."""
 
+import os
 import sys
 from typing import Callable
+
+from . import timing
 
 from .base import cmd_update_base
 from .commands import cmd_drop, cmd_list, cmd_status
 from .errors import Refused
 from .fixup import cmd_fixup, cmd_resolve
+from .gitcmd import HOOK_GUARD
 from .gitverb import cmd_git
 from .integrate import cmd_integrate
 from .hooks import cmd_hook, install as install_hooks
@@ -80,6 +84,22 @@ INTERNAL = {"hook": cmd_hook}
 
 
 def main(argv: list[str]) -> int:
+    """Run one command, and log how long it took: see timing."""
+    code: int | str = "?"
+    try:
+        code = run(argv)
+        return code
+    except KeyboardInterrupt:
+        code = "interrupted"
+        raise
+    finally:
+        # A hook git fires under curate's own git returns before doing
+        # anything, and the call that fired it already carries its cost.
+        if not (argv[:1] == ["hook"] and os.environ.get(HOOK_GUARD) == "1"):
+            timing.flush(argv, code)
+
+
+def run(argv: list[str]) -> int:
     if argv and argv[0] in ("-h", "--help", "help"):
         print(HELP)
         return 0
@@ -95,6 +115,7 @@ def main(argv: list[str]) -> int:
             return 0
         print(f"curate: {e}", file=sys.stderr)
         return 1
+    timing.log_into(repo.state)
 
     verb_now = argv[0] if argv else ""
     try:

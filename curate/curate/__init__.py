@@ -3,6 +3,7 @@
 One module per seam, and the dependencies run one way:
 
     errors    Refused, the one exception raised on purpose
+    timing    how long each command took, in .git/curate/log
     gitcmd    every call made to git, and reading merge-tree's output
     state     what a review is: Session, Repo, the invariant, the versions
     modes     the mode switch -- two renames and a symbolic-ref

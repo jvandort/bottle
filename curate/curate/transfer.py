@@ -17,6 +17,7 @@ from .modes import switch_mode
 from .pick import Row, choose
 from .start import begin, prepare
 from .state import Repo, Session, named, short
+from .timing import timed
 from .ui import interactive, uninterrupted
 
 
@@ -52,7 +53,8 @@ def remotes() -> list[str]:
 def fetch(which: list[str] | None) -> None:
     args = ["fetch", "--all"] if which is None else ["fetch", "--multiple", *which]
     sys.stdout.flush()
-    code = subprocess.run(["git", *args], env=environment()).returncode
+    with timed(["git", *args]):
+        code = subprocess.run(["git", *args], env=environment()).returncode
     if code != 0:
         # Offline is no reason not to use what is already here.
         print(f"curate: `git {' '.join(args)}` failed; carrying on with what "

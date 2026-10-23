@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .errors import Refused
+from .timing import timed
 
 HOOK_GUARD = "CURATE_IN_HOOK"
 
@@ -37,8 +38,9 @@ def run(args: list[str], index: str | Path | None = None,
         env: dict[str, str] | None = None,
         stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     """Run git and decode its output as text."""
-    return subprocess.run(["git", *args], capture_output=True, text=True,
-                          env=environment(index, env), input=stdin)
+    with timed(["git", *args]):
+        return subprocess.run(["git", *args], capture_output=True, text=True,
+                              env=environment(index, env), input=stdin)
 
 
 def git(*args: str, index: str | Path | None = None,
@@ -61,8 +63,9 @@ def blob(spec: str) -> bytes | None:
     first line and drops trailing blank lines. File content is bytes and is
     handled as bytes the whole way -- see `fixup.materialise`.
     """
-    p = subprocess.run(["git", "cat-file", "blob", spec], capture_output=True,
-                       env=environment())
+    with timed(["git", "cat-file", "blob", spec]):
+        p = subprocess.run(["git", "cat-file", "blob", spec],
+                           capture_output=True, env=environment())
     return p.stdout if p.returncode == 0 else None
 
 
