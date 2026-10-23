@@ -13,7 +13,7 @@ from bottle import smolvm
 from bottle.errors import BottleError
 
 # The smolvm tests/test_smolvm_contract.py last passed with; others may work, unchecked.
-SMOLVM_TESTED = "1.31.2"
+SMOLVM_TESTED = "1.31.4"
 
 
 @functools.cache
