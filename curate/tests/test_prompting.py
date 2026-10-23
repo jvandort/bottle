@@ -155,3 +155,46 @@ class PickerKeys(unittest.TestCase):
         p = Picker(self.rows(2))
         p.key("/")
         self.assertIsNone(p.typing)
+
+    def test_a_row_with_a_prompt_asks_for_text_when_chosen(self) -> None:
+        new = Row(["<new branch>"], prompt="new branch: ")
+        p = Picker([new, *self.rows(2)], typed=lambda t: (f"new:{t}", ""))
+        p.key("\n")
+        self.assertEqual(p.footer(), "new branch: ")
+        for k in "x\n":
+            p.key(k)
+        self.assertEqual(p.chosen, "new:x")
+
+
+class Checkboxes(unittest.TestCase):
+    """Every row has to be passed before the list can be confirmed."""
+
+    def picker(self) -> Picker:
+        return Picker([Row([a], value=a) for a in "abc"], checkboxes=True)
+
+    def test_space_toggles_the_row_under_the_cursor(self) -> None:
+        p = self.picker()
+        for k in " j  j":                # a on; b on, then off again
+            p.key(k)
+        self.assertEqual(p.checked, ["a"])
+
+    def test_enter_before_the_last_row_says_why_and_does_nothing(self) -> None:
+        p = self.picker()
+        p.key("j")
+        p.key("\n")
+        self.assertFalse(p.done)
+        self.assertIn("every row", p.footer())
+
+    def test_enter_on_the_last_row_confirms_what_is_checked(self) -> None:
+        p = self.picker()
+        for k in "j jj \n":
+            p.key(k)
+        self.assertTrue(p.done)
+        self.assertEqual(p.checked, ["b", "c"])
+
+    def test_nothing_checked_is_an_answer_too(self) -> None:
+        p = self.picker()
+        for k in "jj\n":
+            p.key(k)
+        self.assertTrue(p.done)
+        self.assertEqual(p.checked, [])

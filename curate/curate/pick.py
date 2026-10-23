@@ -1,8 +1,8 @@
-"""Choosing one thing from a list, on a terminal.
+"""Choosing from a list, on a terminal: one row, or a checkbox on each.
 
 Two halves. `Picker` is what the list is and what a key does to it, and knows
-nothing about terminals, so tests drive it directly. `choose` draws it with
-curses and feeds it keys.
+nothing about terminals, so tests drive it directly. `choose` and
+`choose_many` draw it with curses and feed it keys.
 """
 
 import curses
@@ -22,6 +22,8 @@ class Row:
     value: str | None = None         # what choosing it returns
     tag: str = ""                    # a label: "best guess"
     expand: Callable[[], list["Row"]] | None = None   # chosen, it becomes these
+    prompt: str = ""                 # chosen, it asks for text after this
+    checked: bool = False            # in a checkbox list
 
 
 @dataclass
@@ -30,11 +32,15 @@ class Picker:
     cursor: int = 0
     top: int = 0                     # the first row on screen
     height: int = 10                 # rows on screen
-    typing: str | None = None        # the text after `/`, while typing
+    typing: str | None = None        # the text typed so far, while typing
+    prompt: str = "/"                # what it is typed after
     message: str = ""                # one line under the list
     chosen: str | None = None
     cancelled: bool = False
     typed: Typed | None = None
+    # A checkbox on each row, and enter only from the last: getting there
+    # means having passed every row, so every one is a decision made.
+    checkboxes: bool = False
 
     def __post_init__(self) -> None:
         self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
@@ -56,9 +62,20 @@ class Picker:
         self.message = ""
         self.scroll()
 
+    @property
+    def checked(self) -> list[str]:
+        return [r.value for r in self.rows if r.checked and r.value is not None]
+
     def enter(self) -> None:
         row = self.rows[self.cursor]
-        if row.expand is not None:
+        if self.checkboxes:
+            if self.cursor == len(self.rows) - 1:
+                self.chosen = ""
+            else:
+                self.message = "go through every row first: j to the last, then enter"
+        elif row.prompt and self.typed is not None:
+            self.typing, self.prompt, self.message = "", row.prompt, ""
+        elif row.expand is not None:
             self.rows[self.cursor:self.cursor + 1] = row.expand()
             self.cursor = min(self.cursor, len(self.rows) - 1)
             self.scroll()
@@ -73,6 +90,9 @@ class Picker:
             self.move(1)
         elif k in ("k", "KEY_UP"):
             self.move(-1)
+        elif k == " " and self.checkboxes:
+            row = self.rows[self.cursor]
+            row.checked = not row.checked
         elif k in ("KEY_NPAGE", " "):
             self.move(self.height)
         elif k == "KEY_PPAGE":
@@ -86,7 +106,7 @@ class Picker:
         elif k in ("q", "\x1b", "\x03", "\x04"):
             self.cancelled = True
         elif k == "/" and self.typed is not None:
-            self.typing, self.message = "", ""
+            self.typing, self.prompt, self.message = "", "/", ""
 
     def type_key(self, k: str) -> None:
         assert self.typing is not None and self.typed is not None
@@ -125,22 +145,43 @@ class Picker:
         for i in range(self.top, min(self.top + self.height, len(self.rows))):
             text = "  ".join(c.ljust(widths[n]) for n, c in enumerate(table[i]))
             mark = "> " if i == self.cursor else "  "
+            if self.checkboxes:
+                mark += "[x] " if self.rows[i].checked else "[ ] "
             out.append(((mark + text.rstrip())[:width - 1], i == self.cursor))
         return out
 
     def footer(self) -> str:
         if self.typing is not None:
-            return f"/{self.typing}"
+            return f"{self.prompt}{self.typing}"
         if self.message:
             return self.message
+        if self.checkboxes:
+            return "j/k move   space toggles   enter on the last row confirms   q/esc cancel"
         typing = "   / type one" if self.typed is not None else ""
-        return f"j/k move   enter choose{typing}   q cancel"
+        return f"j/k move   enter choose{typing}   q/esc cancel"
 
 
 def choose(header: list[str], rows: list[Row], cursor: int = 0,
-           typed: Typed | None = None) -> str:
+           typed: Typed | None = None,
+           cancelled: str = "cancelled; nothing was created") -> str:
     """Draw the list, and return what was chosen. Refused when cancelled."""
-    picker = Picker(rows, cursor=cursor, typed=typed)
+    picker = show(Picker(rows, cursor=cursor, typed=typed), header)
+    if picker.chosen is None:
+        raise Refused(cancelled)
+    return picker.chosen
+
+
+def choose_many(header: list[str], rows: list[Row],
+                cancelled: str = "cancelled; nothing was changed") -> list[str]:
+    """Checkboxes, confirmed from the last row. The values left checked."""
+    picker = show(Picker(rows, checkboxes=True), header)
+    if picker.chosen is None:
+        raise Refused(cancelled)
+    return picker.checked
+
+
+def show(picker: Picker, header: list[str]) -> Picker:
+    """Draw the list and feed it keys until it is done."""
     os.environ.setdefault("ESCDELAY", "25")     # Esc should not wait a second
 
     def draw(screen: "curses.window") -> None:
@@ -168,6 +209,4 @@ def choose(header: list[str], rows: list[Row], cursor: int = 0,
             picker.key(curses.keyname(k).decode() if isinstance(k, int) else k)
 
     curses.wrapper(draw)
-    if picker.chosen is None:
-        raise Refused("cancelled; nothing was created")
-    return picker.chosen
+    return picker
