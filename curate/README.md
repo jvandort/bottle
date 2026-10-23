@@ -35,7 +35,7 @@ itself through the symlink.
 ## Quick start
 
 ```sh
-curate start          # asks where the clean line should begin
+curate start          # asks where the clean line should begin, from a list
 curate review         # now you are reading
 ```
 

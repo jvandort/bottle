@@ -5,9 +5,13 @@ conventions here.
 """
 
 import os
+import pty
 import re
+import select
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -166,3 +170,47 @@ class CurateTestCase(unittest.TestCase):
     def start(self, base: str) -> None:
         result = self.repo.curate("start", "--from", base)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def on_a_terminal(self, args: list[str], keys: list[str],
+                      term: str = "xterm-256color", timeout: float = 20) -> str:
+        """Run the tool on a real pty, type `keys`, return everything it printed.
+
+        A pipe is not enough: the whole behaviour under test is gated on
+        isatty, so the test has to provide an actual terminal.
+        """
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(self.repo.path)
+                os.environ["TERM"] = term
+                os.execv(CURATE, [CURATE, *args])
+            except BaseException:
+                pass
+            os._exit(127)
+        output, deadline = b"", time.time() + timeout
+        try:
+            for key in keys:
+                time.sleep(0.3)
+                os.write(fd, key.encode())
+            while time.time() < deadline:
+                ready, _, _ = select.select([fd], [], [], 0.3)
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:      # EIO: the child closed the terminal
+                    break
+                if not chunk:
+                    break
+                output += chunk
+        finally:
+            os.close(fd)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        return output.decode(errors="replace")

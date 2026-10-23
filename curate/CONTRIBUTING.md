@@ -25,7 +25,9 @@ docstring for why those exist.
 One file per area, sharing `tests/support.py`: the throwaway-repository harness,
 `CurateTestCase`, and how the tool under test is found.
 
-The pty tests need a terminal, because what they test is gated on `isatty`.
+The pty tests need a terminal, because what they test is gated on `isatty`
+(and on a `TERM` curses can drive: anywhere else, curate takes flags instead
+of asking).
 They fork one, kill the child in a `finally`, and cap at twenty seconds, so a
 hang fails rather than wedging the suite.
 

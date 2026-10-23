@@ -1,16 +1,18 @@
 """Asking, when there is a terminal to ask at."""
 
-import os
-import pty
-import select
-import signal
-import time
+import sys
+import unittest
+from pathlib import Path
 
-from .support import CurateTestCase, CURATE
+from .support import CurateTestCase
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from curate.pick import Picker, Row
 
 
 class Prompting(CurateTestCase):
-    """On a terminal the tool asks for the base; off one, nothing changes."""
+    """On a terminal the tool asks for the base; anywhere else it takes a flag."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -18,52 +20,9 @@ class Prompting(CurateTestCase):
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
 
-    def on_a_terminal(self, args: list[str], keys: list[str],
-                      timeout: float = 20) -> str:
-        """Run the tool on a real pty, type `keys`, return everything it printed.
-
-        A pipe is not enough: the whole behaviour under test is gated on
-        isatty, so the test has to provide an actual terminal.
-        """
-        pid, fd = pty.fork()
-        if pid == 0:
-            try:
-                os.chdir(self.repo.path)
-                os.execv(CURATE, [CURATE, *args])
-            except BaseException:
-                pass
-            os._exit(127)
-        output, deadline = b"", time.time() + timeout
-        try:
-            for key in keys:
-                time.sleep(0.3)
-                os.write(fd, key.encode())
-            while time.time() < deadline:
-                ready, _, _ = select.select([fd], [], [], 0.3)
-                if not ready:
-                    continue
-                try:
-                    chunk = os.read(fd, 4096)
-                except OSError:      # EIO: the child closed the terminal
-                    break
-                if not chunk:
-                    break
-                output += chunk
-        finally:
-            os.close(fd)
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
-        return output.decode(errors="replace")
-
     def test_switching_to_review_mode_with_no_review_asks_and_starts_one(self) -> None:
-        out = self.on_a_terminal(["review"], [f"{self.base}\n"])
-        self.assertIn("Clean line starts at", out)
+        out = self.on_a_terminal(["review"], ["/", self.base, "\r"])
+        self.assertIn("Clean line for 'wip' starts at", out)
         fields = self.repo.status_fields()
         self.assertEqual(fields["mode"], "review")
         self.assertEqual(self.repo.git("rev-parse", fields["clean"]), self.base)
@@ -71,7 +30,7 @@ class Prompting(CurateTestCase):
     def test_a_suggestion_names_the_branch_not_the_commit_message(self) -> None:
         """What you want to recognise is "main", not what was last done to it."""
         self.repo.git("branch", "main", self.base)     # something to fork from
-        out = self.on_a_terminal(["start"], ["\n"])
+        out = self.on_a_terminal(["start"], ["\r"])
         self.assertIn("Suggested: 'main'", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
@@ -81,13 +40,14 @@ class Prompting(CurateTestCase):
         moved = self.repo.git("commit-tree", self.repo.tree_of(self.base),
                               "-p", self.base, "-m", "someone else")
         self.repo.git("update-ref", "refs/heads/main", moved)
-        out = self.on_a_terminal(["start"], ["\n"])
+        out = self.on_a_terminal(["start"], ["\r"])
         self.assertIn("where 'wip' left 'main'", out)
         self.assertIn("1 commit since", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
-    def test_an_answer_git_cannot_resolve_asks_again(self) -> None:
-        out = self.on_a_terminal(["start"], ["nonsense\n", f"{self.base}\n"])
+    def test_an_answer_git_cannot_resolve_says_so_and_keeps_asking(self) -> None:
+        out = self.on_a_terminal(["start"], ["/", "nonsense", "\r",
+                                             "/", self.base, "\r"])
         self.assertIn("cannot resolve nonsense", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
@@ -103,3 +63,95 @@ class Prompting(CurateTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("curate start", result.stderr)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
+
+    def test_a_terminal_curses_cannot_drive_is_no_terminal_at_all(self) -> None:
+        """One way of asking, not a second one kept alive for dumb terminals."""
+        out = self.on_a_terminal(["review"], [], term="dumb")
+        self.assertIn("curate start --from", out)
+        self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
+
+
+class Picking(CurateTestCase):
+    """The base as a list to move through, on a terminal curses can drive."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.make_base()
+        self.repo.git("branch", "main", self.base)
+        self.repo.write("f.txt", "ONE\ntwo\nthree\n")
+        self.first = self.repo.commit_all("their work")
+        self.repo.write("f.txt", "ONE\nTWO\nthree\n")
+        self.repo.commit_all("more of it")
+
+    def test_enter_takes_the_best_guess(self) -> None:
+        out = self.on_a_terminal(["start"], ["\r"])
+        self.assertIn("best guess", out)
+        self.assertIn(f"Clean line starts at {self.base[:8]} base", out)
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
+
+    def test_the_list_names_the_branches_on_each_commit(self) -> None:
+        out = self.on_a_terminal(["start"], ["q"])
+        self.assertIn("main", out)
+        self.assertNotIn("curate/", out)
+
+    def test_k_moves_up_the_line(self) -> None:
+        self.on_a_terminal(["start"], ["k", "\r"])
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
+
+    def test_arrow_keys_move_too(self) -> None:
+        self.on_a_terminal(["start"], ["\x1bOA", "\r"])     # up, as xterm sends it in keypad mode
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
+
+    def test_slash_takes_any_revision(self) -> None:
+        self.on_a_terminal(["start"], ["/", "wip~1", "\r"])
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
+
+    def test_q_cancels_and_creates_nothing(self) -> None:
+        out = self.on_a_terminal(["review"], ["q"])
+        self.assertIn("cancelled", out)
+        self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
+        self.assertFalse((self.repo.path / ".git" / "curate" / "sessions").exists())
+
+
+class PickerKeys(unittest.TestCase):
+    """What a key does to the list, without a terminal in the way."""
+
+    def rows(self, n: int) -> list[Row]:
+        return [Row([str(i)], value=str(i)) for i in range(n)]
+
+    def test_moving_stops_at_the_ends(self) -> None:
+        p = Picker(self.rows(3), cursor=0)
+        p.key("k")
+        self.assertEqual(p.cursor, 0)
+        for _ in range(5):
+            p.key("j")
+        self.assertEqual(p.cursor, 2)
+
+    def test_the_list_scrolls_to_keep_the_cursor_on_screen(self) -> None:
+        p = Picker(self.rows(20), cursor=15, height=5)
+        self.assertEqual(p.top, 11)
+        p.key("g")
+        self.assertEqual((p.cursor, p.top), (0, 0))
+
+    def test_enter_on_an_expanding_row_puts_its_rows_in_its_place(self) -> None:
+        more = Row(["<show local>"], expand=lambda: self.rows(2))
+        p = Picker([Row(["a"], value="a"), more], cursor=1)
+        p.key("\n")
+        self.assertIsNone(p.chosen)
+        self.assertEqual([r.value for r in p.rows], ["a", "0", "1"])
+        p.key("\n")
+        self.assertEqual(p.chosen, "0")
+
+    def test_typing_something_unknown_says_why_and_keeps_the_list(self) -> None:
+        p = Picker(self.rows(2), typed=lambda t: (None, f"cannot resolve {t}"))
+        for k in "/xy\x7f":
+            p.key(k)
+        self.assertEqual(p.footer(), "/x")
+        p.key("\n")
+        self.assertFalse(p.done)
+        self.assertEqual(p.footer(), "cannot resolve x")
+
+    def test_a_list_with_nothing_to_type_ignores_slash(self) -> None:
+        p = Picker(self.rows(2))
+        p.key("/")
+        self.assertIsNone(p.typing)

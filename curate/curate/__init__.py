@@ -11,6 +11,7 @@ One module per seam, and the dependencies run one way:
     fixup     folding into an existing clean commit, and its conflicts
     gitverb   `curate git <command>`: borrow write mode for one command
     commands  status, list, drop
+    pick      choosing from a list: the keys, apart from curses drawing it
     ui        asking, when there is a terminal to ask at
     cli       the verbs, and HELP
 

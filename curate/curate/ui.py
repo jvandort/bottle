@@ -1,18 +1,24 @@
 """Asking the person things, when there is a person to ask."""
 
+import os
 import sys
 
-from .errors import Refused
 from .gitcmd import git, rev, run
-from .state import named, short
+from .pick import Row, choose
+from .state import CLEAN_PREFIX, named, short
+
+PAST_THE_GUESS = 10        # how far the base list goes below the best guess
+LONGEST_LIST = 500         # and how far it goes at most
 
 
 def interactive() -> bool:
-    """Whether there is a person here to answer a question."""
+    """Whether there is a person here to answer a question, on a terminal
+    curses can draw the question on. Anywhere else the answer is a flag."""
     try:
-        return sys.stdin.isatty() and sys.stdout.isatty()
+        tty = sys.stdin.isatty() and sys.stdout.isatty()
     except (AttributeError, ValueError):
         return False
+    return tty and os.environ.get("TERM", "") not in ("", "dumb")
 
 
 def default_base(head: str) -> tuple[str, str, str] | tuple[None, None, None]:
@@ -35,33 +41,74 @@ def default_base(head: str) -> tuple[str, str, str] | tuple[None, None, None]:
     return None, None, None
 
 
+def suggestion(head: str, base: str, via: str, tip: str) -> str:
+    """The best guess in words."""
+    if base == tip:
+        # The branch itself, so name it: that is what you want to recognise.
+        return f"Suggested: {named(via)} ({base[:8]})"
+    behind = git("rev-list", "--count", f"{base}..{tip}", check=False)
+    plural = "" if behind == "1" else "s"
+    return (f"Suggested: {base[:8]}, where {named(head)} left {named(via)} "
+            f"({named(via)} has {behind} commit{plural} since)")
+
+
 def ask_for_base(head: str) -> str:
-    base, via, tip = default_base(head)
-    if base:
-        if base == tip:
-            # The branch itself, so name it: that is what you want to recognise.
-            print(f"Suggested: {named(via)} ({base[:8]})")
-            label = via
-        else:
-            behind = git("rev-list", "--count", f"{base}..{tip}", check=False)
-            plural = "" if behind == "1" else "s"
-            print(f"Suggested: {base[:8]}, where {named(head)} left {named(via)} "
-                  f"({named(via)} has {behind} commit{plural} since)")
-            label = base[:8]
-        prompt = f"Clean line starts at [{label}]: "
-    else:
-        prompt = "Clean line starts at: "
-    while True:
-        try:
-            answer = input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            raise Refused("cancelled; nothing was created")
-        if not answer:
-            if base:
-                return base
-            continue
-        resolved = rev(answer)
-        if resolved is not None:
-            return resolved
-        print(f"  cannot resolve {answer}")
+    return pick_base(head, *default_base(head))
+
+
+def decorations(refs: str) -> str:
+    """%D without curate's own refs and without HEAD: what a person names."""
+    names = []
+    for name in refs.split(", "):
+        name = name.removeprefix("HEAD -> ")
+        if name and name != "HEAD" and not name.startswith(f"{CLEAN_PREFIX}/"):
+            names.append(name)
+    return ", ".join(names)
+
+
+def history(tip: str, guess: str | None) -> list[tuple[str, str, str]]:
+    """(oid, subject, refs) down the first-parent line from `tip`, as far as
+    a little past the guess."""
+    out = git("log", "--first-parent", f"-n{LONGEST_LIST}",
+              "--format=%H%x1f%s%x1f%D", tip)
+    found, past = [], None
+    for line in out.splitlines():
+        oid, subject, refs = (line.split("\x1f") + ["", ""])[:3]
+        found.append((oid, subject, decorations(refs)))
+        if oid == guess:
+            past = 0
+        elif past is not None:
+            past += 1
+            if past >= PAST_THE_GUESS:
+                break
+    if guess and past is None:
+        # Reached through a merge rather than down the first parent: still
+        # the best guess, so it goes in the list, at the end.
+        subject = git("log", "-1", "--format=%s", guess)
+        found.append((guess, subject, ""))
+    return found
+
+
+def pick_base(head: str, guess: str | None, via: str | None,
+              tip: str | None, header: list[str] | None = None) -> str:
+    rows: list[Row] = []
+    cursor = 0
+    for oid, subject, refs in history(head, guess):
+        if oid == guess:
+            cursor = len(rows)
+        named_here = f"({refs}) {subject}" if refs else subject
+        rows.append(Row([oid[:8], named_here], value=oid,
+                        tag="best guess" if oid == guess else ""))
+    lines = list(header or [])
+    if guess and via and tip:
+        lines.append(suggestion(head, guess, via, tip))
+    lines += [f"Clean line for {named(head)} starts at:", ""]
+
+    def typed(text: str) -> tuple[str | None, str]:
+        found = rev(text)
+        return (found, "") if found else (None, f"cannot resolve {text}")
+
+    base = choose(lines, rows, cursor=cursor, typed=typed)
+    print(f"Clean line starts at {base[:8]} "
+          f"{git('log', '-1', '--format=%s', base)}")
+    return base
