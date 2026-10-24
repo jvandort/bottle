@@ -217,13 +217,15 @@ def destination(session: Session, tip: str, into: str | None) -> str:
                       "fast-forwards")
     guesses = {n.split("~")[0] for n in names_for(session.base, session, session.working)}
     rows = [Row(["<new branch…>"], prompt="new branch: ")]
-    out = run(["for-each-ref", "--sort=-committerdate",
+    # --merged: the branches `tip` fast-forwards, all in one call. Asking
+    # merge-base about each in turn costs a git per branch you have ever made.
+    out = run(["for-each-ref", "--sort=-committerdate", f"--merged={tip}",
                "--format=%(refname)%1f%(committerdate:relative)%1f%(subject)",
                "refs/heads/"]).stdout
     for line in out.splitlines():
         ref, when, subject = line.split("\x1f")
         name = short(ref)
-        if ref in taken or not can_take(ref, tip):
+        if ref in taken:
             continue
         rows.append(Row([name, when, subject], value=ref,
                         tag="best guess" if name in guesses else ""))

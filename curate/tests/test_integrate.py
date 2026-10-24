@@ -110,6 +110,14 @@ class Adopting(Integrating):
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "mine"), "Test")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/mine")
 
+    def test_on_a_terminal_only_branches_it_fast_forwards_are_offered(self) -> None:
+        self.repo.git("branch", "behind", self.base)
+        self.repo.git("branch", "diverged", self.repo.git(
+            "commit-tree", self.repo.tree_of(self.base), "-p", self.base, "-m", "moved"))
+        out = self.on_a_terminal(["integrate"], ["\r", "q"])
+        self.assertIn("behind", out)
+        self.assertNotIn("diverged", out)
+
     def test_on_a_terminal_main_is_the_best_guess(self) -> None:
         out = self.on_a_terminal(["integrate"], ["\r", "j", "\r"])
         self.assertIn("best guess", out)
