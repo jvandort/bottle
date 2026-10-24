@@ -38,12 +38,15 @@ def fetch(which: list[str] | None) -> None:
               f"was already fetched.", file=sys.stderr)
 
 
-def branch_name(ref: str) -> str:
-    """A ref as the branch it is, without refs/heads/ or the remote's name."""
+def branch_name(ref: str, known: list[str] | None = None) -> str:
+    """A ref as the branch it is, without refs/heads/ or the remote's name.
+    `known` is `remotes()`, for a caller naming many refs: a git apiece adds
+    up to half a minute across every branch fetched from a busy remote."""
     if ref.startswith("refs/heads/"):
         return ref[len("refs/heads/"):]
     rest = ref[len("refs/remotes/"):]
-    remote = next((r for r in remotes() if rest.startswith(f"{r}/")), None)
+    remote = next((r for r in (remotes() if known is None else known)
+                   if rest.startswith(f"{r}/")), None)
     return rest[len(remote) + 1:] if remote else rest
 
 
@@ -73,17 +76,18 @@ def to_review(repo: Repo) -> list[Row]:
     """
     skip = repo.clean_lines()
     rows = branches("refs/heads/", "refs/remotes/", skip=skip)
+    known = remotes()
     local = {branch_name(r.value) for r in rows
              if r.value and r.value.startswith("refs/heads/")}
     # A clean line pushed somewhere is still a clean line.
-    clean = {branch_name(c) for c in skip}
+    taken = local | {branch_name(c, known) for c in skip}
     reviewed = {s.working for s in repo.sessions()}
     head = repo.head
     kept = []
     for row in rows:
         assert row.value is not None
         if row.value.startswith("refs/remotes/"):
-            if branch_name(row.value) in local | clean:
+            if branch_name(row.value, known) in taken:
                 continue
         if row.value == head:
             row.tag = "current"
@@ -102,9 +106,10 @@ def local_for(ref: str, again: str | None = None) -> tuple[str, str]:
     """
     if ref.startswith("refs/heads/"):
         return ref, ref
-    if not any(ref.startswith(f"refs/remotes/{r}/") for r in remotes()):
+    known = remotes()
+    if not any(ref.startswith(f"refs/remotes/{r}/") for r in known):
         raise Refused(f"{ref} is not on any remote")
-    local = f"refs/heads/{branch_name(ref)}"
+    local = f"refs/heads/{branch_name(ref, known)}"
     mine = rev(local)
     if mine is None or git_ok("merge-base", "--is-ancestor", local, ref):
         return local, ref                         # created, or fast-forwarded

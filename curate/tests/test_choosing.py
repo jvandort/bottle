@@ -110,6 +110,16 @@ class Choosing(CurateTestCase):
         self.assertEqual(self.repo.git("rev-parse", "--symbolic-full-name", "feature@{upstream}"),
                          "refs/remotes/up/x/feature")
 
+    def test_listing_asks_for_the_remotes_once_not_once_a_branch(self) -> None:
+        """1,600 remote branches once cost 1,600 `git remote`s: half a minute
+        before the list appeared."""
+        for i in range(30):
+            self.repo.git("update-ref", f"refs/remotes/up/b{i}", self.base)
+        self.on_a_terminal(["start"], ["\r", "\r"], env={"CURATE_SLOW": "0"})
+        log = (self.repo.path / ".git" / "curate" / "log").read_text()
+        asked = [line for line in log.splitlines() if line.endswith(" git remote")]
+        self.assertLessEqual(len(asked), 2, log)
+
     def test_each_tag_is_on_its_own_row(self) -> None:
         self.newer_branch("other", "elsewhere")
         self.repo.git("switch", "-q", "other")

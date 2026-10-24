@@ -185,7 +185,8 @@ class CurateTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def on_a_terminal(self, args: list[str], keys: list[str],
-                      term: str = "xterm-256color", timeout: float = 20) -> str:
+                      term: str = "xterm-256color", timeout: float = 20,
+                      env: dict[str, str] | None = None) -> str:
         """Run the tool on a real pty, type `keys`, return everything it printed.
 
         A pipe is not enough: the whole behaviour under test is gated on
@@ -196,6 +197,7 @@ class CurateTestCase(unittest.TestCase):
             try:
                 os.chdir(self.repo.path)
                 os.environ["TERM"] = term
+                os.environ.update(env or {})       # the child's own, after the fork
                 os.execv(CURATE, [CURATE, *args])
             except BaseException:
                 pass
