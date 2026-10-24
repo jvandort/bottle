@@ -136,6 +136,23 @@ class Transfer(CurateTestCase):
         self.assertEqual((fields["mode"], fields["working"]),
                          ("review", "refs/heads/feature-1"))
 
+    def test_a_local_branch_behind_the_remote_is_fast_forwarded(self) -> None:
+        pushed = self.agent_pushes("feature-2", self.base,
+                                   {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        self.repo.git("branch", "feature-2", self.base)
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.git("rev-parse", "feature-2"), pushed)
+
+    def test_and_put_back_where_it_was_if_the_switch_fails(self) -> None:
+        self.agent_pushes("feature-2", self.base,
+                          {"a.txt": "A1\na2\na3\n", "b.txt": "B\n", "c.txt": "C\n"})
+        self.repo.git("branch", "feature-2", self.base)
+        self.repo.write("c.txt", "in the way\n")
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.repo.git("rev-parse", "feature-2"), self.base)
+
     def test_a_local_branch_that_diverged_is_refused(self) -> None:
         self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
         self.repo.git("branch", "feature-2", self.base)
@@ -144,6 +161,36 @@ class Transfer(CurateTestCase):
         result = self.repo.curate("transfer", "agent/feature-2")
         self.assertEqual(result.returncode, 1)
         self.assertIn("diverged", result.stderr)
+
+    def test_a_local_branch_ahead_of_the_remote_is_kept_as_it_is(self) -> None:
+        pushed = self.agent_pushes("feature-2", self.base,
+                                   {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        self.repo.git("fetch", "-q", "agent")
+        ahead = self.repo.git("commit-tree", self.repo.tree_of(pushed), "-p", pushed,
+                              "-m", "mine, on top")
+        self.repo.git("branch", "feature-2", ahead)
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.git("rev-parse", "feature-2"), ahead)
+        self.assertEqual(self.repo.status_fields()["working"], "refs/heads/feature-2")
+
+    def test_only_the_remote_the_working_line_tracks_is_fetched(self) -> None:
+        """Not every remote: one unrelated and unreachable is none of its business."""
+        self.repo.git("remote", "add", "elsewhere", str(self.repo.path.parent / "gone.git"))
+        self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        result = self.repo.curate("transfer", "agent/feature-2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("failed", result.stderr)
+
+    def test_a_branch_that_does_not_exist_is_refused(self) -> None:
+        result = self.repo.curate("transfer", "no-such-branch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no branch no-such-branch", result.stderr)
+
+    def test_the_branch_already_under_review_is_refused(self) -> None:
+        result = self.repo.curate("transfer", "feature-1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the branch under review already", result.stderr)
 
     def test_with_no_review_there_is_nothing_to_transfer(self) -> None:
         self.repo.curate("write")

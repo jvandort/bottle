@@ -66,6 +66,24 @@ class Timing(CurateTestCase):
         were the base list waiting for someone to choose."""
         self.on_a_terminal(["start"], ["\r", "\r"])
         line = self.log.read_text().splitlines()[-1]
-        self.assertRegex(line, r"\(waited for you \d+\.\d{3}s; subprocesses")
+        found = re.search(r"\(waited for you (\d+\.\d{3})s; subprocesses \S+ in (\d+)\)", line)
+        assert found, line
+        self.assertGreaterEqual(float(found[1]), 0.25, "the pause before the key")
+        self.assertGreater(int(found[2]), 5, "the git it ran, not the two waits")
         self.assertEqual(len(self.log.read_text().splitlines()), 1,
                          "the wait alone does not make it slow")
+
+    def test_a_full_log_is_kept_as_log_1_and_started_again(self) -> None:
+        self.start(self.base)
+        self.log.write_text("x" * (1 << 20) + "\n")
+        self.curate("status")
+        self.assertEqual((self.log.parent / "log.1").stat().st_size, (1 << 20) + 1)
+        self.assertEqual([cmd for _, cmd in self.entries()], ["status"])
+
+    def test_a_curate_slow_that_is_not_a_number_is_the_default(self) -> None:
+        self.start(self.base)
+        result = subprocess.run([CURATE, "status"], cwd=self.repo.path,
+                                capture_output=True, text=True,
+                                env={**os.environ, "CURATE_SLOW": "soon"}, timeout=TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([cmd for _, cmd in self.entries()][-1], "status")

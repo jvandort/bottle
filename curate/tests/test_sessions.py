@@ -35,6 +35,15 @@ class Sessions(CurateTestCase):
         self.assertEqual(self.repo.curate("drop", "wip").returncode, 0)
         self.assertNotIn("wip", self.repo.curate("list").stdout)
 
+    def test_list_marks_the_review_you_are_in(self) -> None:
+        self.start(self.base)
+        self.repo.git("switch", "-q", "-c", "other", self.base)
+        self.repo.write("g.txt", "g\n")
+        self.repo.commit_all("other work")
+        self.start(self.base)
+        self.assertEqual(self.repo.curate("list").stdout.splitlines(),
+                         ["* other -> curate/other", "  wip -> curate/wip"])
+
     def test_a_branch_name_with_slashes_works(self) -> None:
         """A slash must survive into the session name and the review ref.
 

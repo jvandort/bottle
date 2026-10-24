@@ -1,6 +1,7 @@
 """Copying a review onto a branch an agent rebased into."""
 
 from .support import CurateTestCase
+from .test_signing import fake_gpg, signed
 
 
 class Copying(CurateTestCase):
@@ -63,6 +64,13 @@ class SameBase(Copying):
                          self.repo.git("rev-parse", "curate/feature-1"))
         self.assertEqual(self.reviewing(), ["A  b.txt", "?? c.txt"])
 
+    def test_the_approvals_it_carried_are_recorded_not_only_cached(self) -> None:
+        """The index files are a cache; a copy's approvals must survive losing them."""
+        self.copy()
+        for cache in (self.repo.path / ".git" / "curate").rglob("index.*"):
+            cache.unlink()
+        self.assertEqual(self.reviewing(), ["A  b.txt", "?? c.txt"])
+
     def test_the_old_review_is_untouched(self) -> None:
         self.copy()
         self.reviewing()
@@ -103,6 +111,12 @@ class SameBase(Copying):
         self.assertIn("no review of nonsense", result.stderr)
         self.assertEqual(self.repo.git("branch", "--list", "curate/feature-2"), "")
 
+    def test_a_review_whose_clean_line_is_gone_is_refused(self) -> None:
+        self.repo.git("branch", "-D", "curate/feature-1")
+        result = self.repo.curate("start", "--copy", "feature-1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("'curate/feature-1' does not exist", result.stderr)
+
     def test_a_paused_fixup_is_finished_first(self) -> None:
         """Half a fixup is not a review anyone meant to copy."""
         session = self.repo.path / ".git" / "curate" / "sessions" / "curate%2Ffeature-1"
@@ -131,6 +145,14 @@ class NewBase(Copying):
         self.assertEqual(self.old_refs(), "\n".join(
             line for line in self.old.splitlines() if "feature-1" in line))
 
+    def test_a_replayed_clean_commit_is_signed_when_commits_are(self) -> None:
+        fake_gpg(self.repo)
+        self.repo.git("config", "commit.gpgsign", "true")
+        new = self.upstream({"g.txt": "G\n"})
+        self.branch("feature-2", new, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        self.copy("--from", "main")
+        self.assertTrue(signed(self.repo, "curate/feature-2"))
+
     def test_a_clean_commit_upstream_already_made_is_dropped(self) -> None:
         new = self.upstream({"a.txt": "A1\na2\na3\n"})
         self.branch("feature-2", new, {"b.txt": "B\n"})
@@ -156,6 +178,36 @@ class NewBase(Copying):
         out = self.copy("--from", "main")
         self.assertIn("now unreviewed again", out)
         self.assertEqual(self.reviewing(), [" M b.txt"])
+
+    def test_an_approval_of_a_file_upstream_deleted_is_unreviewed_again(self) -> None:
+        """Nothing on the new clean line to fall back on: the file is simply
+        not approved, rather than approved as merge-tree left it."""
+        self.repo.git("switch", "-q", "feature-1")
+        self.repo.write("g.txt", "g, changed\n")
+        self.repo.commit_all("change g")
+        self.repo.curate("review")
+        self.repo.git("add", "g.txt")
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "main")
+        self.repo.git("rm", "-q", "g.txt")
+        self.repo.git("commit", "-q", "-m", "drop g")
+        self.branch("feature-2", "main",
+                    {"a.txt": "A1\na2\na3\n", "b.txt": "B\n", "g.txt": "g, changed\n"})
+        out = self.copy("--from", "main")
+        self.assertIn("now unreviewed again", out)
+        self.assertIn("?? g.txt", self.reviewing())
+
+    def test_a_clean_line_with_a_merge_on_it_is_not_replayed(self) -> None:
+        tip = self.repo.git("rev-parse", "curate/feature-1")
+        merge = self.repo.git("commit-tree", self.repo.tree_of(tip), "-p", tip,
+                              "-p", self.base, "-m", "a merge")
+        self.repo.git("update-ref", "refs/heads/curate/feature-1", merge)
+        self.upstream({"g.txt": "G\n"})
+        self.branch("feature-2", "main", {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
+        result = self.repo.curate("start", "--copy", "feature-1", "--from", "main")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("has a merge on it", result.stderr)
+        self.assertEqual(self.repo.git("branch", "--list", "curate/feature-2"), "")
 
     def test_the_guess_follows_the_old_bases_branch_to_its_upstream(self) -> None:
         """Your main has not moved; the agent rebased onto origin/main."""

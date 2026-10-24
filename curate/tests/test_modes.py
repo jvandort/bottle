@@ -95,6 +95,25 @@ class SwitchFailure(CurateTestCase):
         self.repo.commit_all("their work")
         self.start(self.base)
 
+    def test_a_held_index_lock_is_waited_out_rather_than_raced(self) -> None:
+        """An editor's git holding the index is the one thing a switch must
+        not move under."""
+        lock = self.repo.path / ".git" / "index.lock"
+        lock.write_text("")
+        result = self.repo.curate("review")
+        lock.unlink()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("holds .git/index.lock", result.stderr)
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
+        self.assertEqual(self.repo.curate("review").returncode, 0)
+
+    def test_a_line_deleted_by_hand_is_not_switched_to(self) -> None:
+        self.repo.git("branch", "-D", "curate/wip")
+        result = self.repo.curate("review")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("'curate/wip' does not exist", result.stderr)
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
+
     def test_a_failed_switch_leaves_the_indexes_where_they_were(self) -> None:
         self.repo.curate("review")
         self.repo.git("add", "f.txt")

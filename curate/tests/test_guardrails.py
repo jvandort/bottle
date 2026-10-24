@@ -1,8 +1,9 @@
 """What happens when HEAD moves out from under a review."""
 
+import os
 import subprocess
 
-from .support import CurateTestCase, TIMEOUT
+from .support import CURATE, CurateTestCase, TIMEOUT
 
 
 class Guardrails(CurateTestCase):
@@ -97,6 +98,21 @@ class Guardrails(CurateTestCase):
         slug = clean.replace("%", "%25").replace("/", "%2F")
         recorded = self.repo.git("rev-parse", f"refs/curate/{slug}^{{tree}}", check=False)
         self.assertEqual(recorded, approved)
+
+    def test_recording_what_is_already_recorded_moves_nothing(self) -> None:
+        """Every command records the approved set; only a change may move the
+        ref, or its reflog says something happened when nothing did.
+
+        Later, by the clock: a commit made again in the same second is the
+        same commit, and would hide a ref being rewritten."""
+        self.repo.git("add", "-A")
+        ref = self.repo.git("for-each-ref", "--format=%(refname)", "refs/curate")
+        before = self.repo.git("rev-parse", ref)
+        later = subprocess.run([CURATE, "review"], cwd=self.repo.path,
+                               capture_output=True, text=True,
+                               env={**os.environ, "GIT_COMMITTER_DATE": "@4000000000 +0000"}, timeout=TIMEOUT)
+        self.assertEqual(later.returncode, 0, later.stderr)
+        self.assertEqual(self.repo.git("rev-parse", ref), before)
 
     def test_recovery_restores_the_last_recorded_approvals(self) -> None:
         self.repo.git("add", "f.txt")

@@ -25,7 +25,9 @@ class Start(CurateTestCase):
     def test_refuses_on_a_detached_head(self) -> None:
         base = self.make_base()
         self.repo.git("checkout", "-q", "--detach")
-        self.assertEqual(self.repo.curate("start", "--from", base).returncode, 1)
+        result = self.repo.curate("start", "--from", base)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("HEAD is detached", result.stderr)
 
     def test_refuses_when_a_branch_named_curate_exists(self) -> None:
         """Refs are paths: that branch rules out every curate/* clean line."""
@@ -47,6 +49,62 @@ class Start(CurateTestCase):
         base = self.make_base()
         self.start(base)
         self.assertEqual(self.repo.curate("start", "--from", base).returncode, 1)
+
+    def test_off_a_terminal_the_base_is_where_the_branch_left_its_upstream(self) -> None:
+        base = self.make_base()
+        self.repo.git("branch", "main")
+        self.repo.git("branch", "--set-upstream-to", "main")
+        self.repo.write("f.txt", "ONE\ntwo\nthree\n")
+        self.repo.commit_all("their work")
+        self.repo.git("update-ref", "refs/heads/main", self.repo.git(
+            "commit-tree", self.repo.tree_of(base), "-p", base, "-m", "upstream moved on"))
+        result = self.repo.curate("start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), base)
+
+    def test_and_with_no_upstream_it_asks_for_from(self) -> None:
+        self.make_base()
+        result = self.repo.curate("start")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pass --from <base>", result.stderr)
+        self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
+
+    def test_a_base_that_does_not_resolve_is_refused(self) -> None:
+        self.make_base()
+        result = self.repo.curate("start", "--from", "no-such-base")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot resolve no-such-base", result.stderr)
+
+    def test_starts_in_the_middle_of_a_conflicted_merge(self) -> None:
+        """An unmerged live index cannot seed the review's; it is built
+        without the stat cache instead."""
+        base = self.make_base()
+        self.repo.git("switch", "-q", "-c", "other")
+        self.repo.write("f.txt", "OTHER\ntwo\nthree\n")
+        self.repo.commit_all("other")
+        self.repo.git("switch", "-q", "wip")
+        self.repo.write("f.txt", "WIP\ntwo\nthree\n")
+        self.repo.commit_all("wip")
+        self.repo.git("merge", "-q", "other", check=False)
+        self.assertIn("UU f.txt", self.repo.short_status())
+        self.start(base)
+        index = self.repo.path / ".git" / "curate" / "sessions" / "curate%2Fwip" / "index.review"
+        self.assertEqual(self.repo.index_tree(str(index)), self.repo.tree_of(base))
+
+    def test_refuses_from_review_mode(self) -> None:
+        base = self.make_base()
+        self.start(base)
+        self.repo.curate("review")
+        result = self.repo.curate("start", "--from", base, "--clean", "another")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("finish the current review first", result.stderr)
+
+    def test_a_clean_line_named_after_an_existing_branch_is_refused(self) -> None:
+        base = self.make_base()
+        self.repo.git("branch", "taken", base)
+        result = self.repo.curate("start", "--from", base, "--clean", "taken")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("branch taken already exists", result.stderr)
 
 
 class WrongBase(CurateTestCase):

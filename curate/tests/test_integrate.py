@@ -1,6 +1,7 @@
 """`curate integrate`: a finished review onto a branch, and the review gone."""
 
 from .support import CurateTestCase
+from .test_signing import fake_gpg, signed
 
 GENIE = {"GIT_AUTHOR_NAME": "genie", "GIT_AUTHOR_EMAIL": "genie@bottle.host",
          "GIT_AUTHOR_DATE": "2026-01-02T03:04:05+00:00"}
@@ -67,6 +68,13 @@ class Adopting(Integrating):
         self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
         self.assertEqual(self.repo.git("branch", "--list", "feature", "curate/*"), "")
         self.assertIn(f"'feature' (was {self.tip[:8]})", out)
+
+    def test_adopted_commits_are_signed_when_commits_are(self) -> None:
+        fake_gpg(self.repo)
+        self.repo.git("config", "commit.gpgsign", "true")
+        self.integrate("--into", "main", "--adopt", "genie")
+        self.assertTrue(signed(self.repo, "main"))
+        self.assertTrue(signed(self.repo, "main~1"))
 
     def test_not_adopting_keeps_the_commits_as_they_are(self) -> None:
         self.integrate("--into", "main", "--no-adopt", "genie")
@@ -204,6 +212,52 @@ class Curated(Integrating):
     def test_a_clean_line_with_only_some_of_it_is_refused(self) -> None:
         self.repo.git("add", "c.txt")                  # approved, not committed
         self.assertIn("not all of what you approved", self.refused("--into", "main"))
+
+
+class Refusals(Integrating):
+    def test_a_working_line_still_at_the_base_has_nothing_to_integrate(self) -> None:
+        self.review_all()
+        self.assertIn("nothing to integrate", self.refused("--into", "main"))
+
+    def test_a_flag_with_no_value_is_refused(self) -> None:
+        self.review_all()
+        self.assertIn("--into needs a value", self.refused("--into"))
+
+    def test_a_branch_checked_out_in_another_worktree_is_refused(self) -> None:
+        """Moving it would leave that worktree's index and files behind."""
+        self.commit("Add b", {"b.txt": "B\n"})
+        self.review_all()
+        self.repo.git("worktree", "add", "-q", str(self.repo.path.parent / "other"), "main")
+        self.assertIn("checked out in another worktree", self.refused("--into", "main"))
+
+    def test_with_no_review_there_is_nothing_to_integrate(self) -> None:
+        self.assertIn("no review here to integrate", self.refused())
+
+    def test_an_author_cannot_be_both_adopted_and_kept(self) -> None:
+        self.commit("Add b", {"b.txt": "B\n"}, by=GENIE)
+        self.review_all()
+        self.assertIn("cannot be both adopted and not",
+                      self.refused("--into", "main", "--adopt", "genie", "--no-adopt", "genie"))
+
+    def test_a_name_two_authors_share_has_to_be_an_email(self) -> None:
+        self.commit("Add b", {"b.txt": "B\n"}, by=GENIE)
+        self.commit("Add c", {"c.txt": "C\n"}, by={**GENIE, "GIT_AUTHOR_EMAIL": "other@x"})
+        self.review_all()
+        said = self.refused("--into", "main", "--adopt", "genie")
+        self.assertIn("could be any of", said)
+        self.assertIn("use the email", said)
+
+
+class Missing(Integrating):
+    def setUp(self) -> None:
+        super().setUp()
+        self.commit("Add b", {"b.txt": "B\n"})
+        self.review_all()
+        self.repo.curate("write")
+
+    def test_a_clean_line_deleted_by_hand_is_refused(self) -> None:
+        self.repo.git("branch", "-D", "curate/feature")
+        self.assertIn("a line of this review is missing", self.refused("--into", "main"))
 
 
 class Copied(Integrating):

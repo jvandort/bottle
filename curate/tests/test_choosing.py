@@ -95,3 +95,14 @@ class Choosing(CurateTestCase):
         out = self.on_a_terminal(["start", "--from", self.base], [])
         self.assertNotIn("Review which branch?", out)
         self.assertEqual(self.repo.status_fields()["working"], "refs/heads/wip")
+
+    def test_each_tag_is_on_its_own_row(self) -> None:
+        self.newer_branch("other", "elsewhere")
+        self.repo.git("switch", "-q", "other")
+        self.start(self.base)
+        self.repo.curate("write")
+        self.repo.git("switch", "-q", "wip")
+        out = self.on_a_terminal(["start"], ["q"])
+        self.assertRegex(out, r"other +has a review")
+        self.assertRegex(out, r"wip +current")
+        self.assertNotRegex(out, r"main +(current|has a review)")

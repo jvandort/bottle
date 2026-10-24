@@ -43,6 +43,13 @@ class UpdateBase(CurateTestCase):
         self.assertEqual(self.repo.log("curate/feature"), ["Change a", "upstream", "base"])
         self.assertEqual(self.repo.status_fields()["base"], self.main)
 
+    def test_the_approvals_it_carried_are_recorded_not_only_cached(self) -> None:
+        self.update_base("main")
+        for cache in (self.repo.path / ".git" / "curate").rglob("index.*"):
+            cache.unlink()
+        self.repo.curate("review")
+        self.assertEqual(self.repo.short_status(), ["A  b.txt"])
+
     def test_it_comes_back_in_the_mode_it_left(self) -> None:
         self.update_base("main")
         self.assertEqual(self.repo.status_fields()["mode"], "write")

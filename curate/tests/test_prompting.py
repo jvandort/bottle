@@ -45,6 +45,18 @@ class Prompting(CurateTestCase):
         self.assertIn("1 commit since", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
+    def test_a_guess_reached_only_through_a_merge_is_listed_as_itself(self) -> None:
+        """Not on the first-parent line, so it goes at the end of the list --
+        with its own subject, not the last one the list happened to read."""
+        self.repo.git("branch", "main", self.base)
+        side = self.repo.git("commit-tree", self.repo.tree_of("wip"), "-m", "side")
+        merge = self.repo.git("commit-tree", self.repo.tree_of("wip"),
+                              "-p", side, "-p", self.base, "-m", "merge main")
+        self.repo.git("update-ref", "refs/heads/wip", merge)
+        out = self.on_a_terminal(["start"], ["\r", "\r"])
+        self.assertIn("best guess  base", out)
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
+
     def test_an_answer_git_cannot_resolve_says_so_and_keeps_asking(self) -> None:
         out = self.on_a_terminal(["start"], ["\r", "/", "nonsense", "\r",
                                              "/", self.base, "\r"])
@@ -88,6 +100,21 @@ class Picking(CurateTestCase):
         self.assertIn("best guess", out)
         self.assertIn(f"Clean line starts at {self.base[:8]} base", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
+
+    def test_the_list_stops_ten_commits_past_the_guess(self) -> None:
+        """Anything older is `/` and a revision; a list of everything is no help."""
+        tip = self.repo.git("rev-parse", "wip")
+        older = self.repo.git("commit-tree", self.repo.tree_of(self.base), "-m", "old 13")
+        for n in range(12, 0, -1):
+            older = self.repo.git("commit-tree", self.repo.tree_of(self.base),
+                                  "-p", older, "-m", f"old {n}")
+        self.repo.git("update-ref", "refs/heads/main", self.repo.git(
+            "commit-tree", self.repo.tree_of(self.base), "-p", older, "-m", "base again"))
+        self.repo.git("update-ref", "refs/heads/wip", self.repo.git(
+            "commit-tree", self.repo.tree_of(tip), "-p", "main", "-m", "their work"))
+        out = self.on_a_terminal(["start"], ["\r", "G", "q"])
+        self.assertIn("old 10", out)
+        self.assertNotIn("old 11", out)
 
     def test_the_list_names_the_branches_on_each_commit(self) -> None:
         out = self.on_a_terminal(["start"], ["q"])
@@ -136,6 +163,39 @@ class PickerKeys(unittest.TestCase):
     def rows(self, n: int) -> list[Row]:
         return [Row([str(i)], value=str(i)) for i in range(n)]
 
+    def test_a_cursor_past_the_end_starts_on_the_last_row(self) -> None:
+        self.assertEqual(Picker(self.rows(3), cursor=10).cursor, 2)
+
+    def test_moving_clears_a_message(self) -> None:
+        p = Picker(self.rows(2), typed=lambda t: (None, "no"))
+        for k in "/x\n":
+            p.key(k)
+        self.assertEqual(p.footer(), "no")
+        p.key("j")
+        self.assertNotEqual(p.footer(), "no")
+
+    def test_a_row_that_expands_to_nothing_leaves_the_cursor_on_the_list(self) -> None:
+        p = Picker([Row(["a"], value="a"), Row(["more"], expand=lambda: [])], cursor=1)
+        p.key("\n")
+        self.assertEqual(p.cursor, 0)
+        p.key("\n")
+        self.assertEqual(p.chosen, "a")
+
+    def test_typing_ignores_keys_that_are_not_characters(self) -> None:
+        p = Picker(self.rows(2), typed=lambda t: (t, ""))
+        for k in ["/", "a", "KEY_LEFT", "\t", "b"]:
+            p.key(k)
+        self.assertEqual(p.footer(), "/ab")
+
+    def test_columns_line_up_and_the_cursor_row_is_marked(self) -> None:
+        p = Picker([Row(["a", "x"], value="a"), Row(["bbb", "y"], value="b")], cursor=1)
+        self.assertEqual(p.lines(80), [("  a    x", False), ("> bbb  y", True)])
+
+    def test_a_checkbox_shows_whether_it_is_ticked(self) -> None:
+        p = Picker([Row(["a"], value="a", checked=True), Row(["b"], value="b")],
+                   checkboxes=True)
+        self.assertEqual([t for t, _ in p.lines(80)], ["> [x] a", "  [ ] b"])
+
     def test_moving_stops_at_the_ends(self) -> None:
         p = Picker(self.rows(3), cursor=0)
         p.key("k")
@@ -143,6 +203,15 @@ class PickerKeys(unittest.TestCase):
         for _ in range(5):
             p.key("j")
         self.assertEqual(p.cursor, 2)
+
+    def test_a_page_at_a_time_and_straight_to_the_end(self) -> None:
+        p = Picker(self.rows(20), cursor=0, height=5)
+        p.key("KEY_NPAGE")
+        self.assertEqual(p.cursor, 5)
+        p.key("KEY_PPAGE")
+        self.assertEqual(p.cursor, 0)
+        p.key("G")
+        self.assertEqual((p.cursor, p.top), (19, 15))
 
     def test_the_list_scrolls_to_keep_the_cursor_on_screen(self) -> None:
         p = Picker(self.rows(20), cursor=15, height=5)
@@ -167,6 +236,20 @@ class PickerKeys(unittest.TestCase):
         p.key("\n")
         self.assertFalse(p.done)
         self.assertEqual(p.footer(), "cannot resolve x")
+
+    def test_enter_with_nothing_typed_goes_back_to_the_list(self) -> None:
+        asked: list[str] = []
+
+        def typed(text: str) -> tuple[str | None, str]:
+            asked.append(text)
+            return None, "no"
+
+        p = Picker(self.rows(2), typed=typed)
+        p.key("/")
+        p.key("\n")
+        self.assertIsNone(p.typing)
+        self.assertEqual((asked, p.footer()), ([], "j/k move   enter choose   / type one   q/esc cancel"))
+        self.assertFalse(p.done)
 
     def test_a_list_with_nothing_to_type_ignores_slash(self) -> None:
         p = Picker(self.rows(2))
@@ -194,6 +277,9 @@ class Checkboxes(unittest.TestCase):
         for k in " j  j":                # a on; b on, then off again
             p.key(k)
         self.assertEqual(p.checked, ["a"])
+
+    def test_the_footer_says_how_to_confirm(self) -> None:
+        self.assertIn("enter on the last row confirms", self.picker().footer())
 
     def test_enter_before_the_last_row_says_why_and_does_nothing(self) -> None:
         p = self.picker()

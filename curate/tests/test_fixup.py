@@ -1,6 +1,9 @@
 """Folding approved changes into an existing clean commit."""
 
-from .support import CurateTestCase
+import os
+import subprocess
+
+from .support import CURATE, CurateTestCase, TIMEOUT
 
 
 class Fixup(CurateTestCase):
@@ -24,6 +27,17 @@ class Fixup(CurateTestCase):
         self.repo.git("add", "a.txt")
         self.assertEqual(self.repo.curate("fixup", self.target).returncode, 0)
         self.assertEqual(self.repo.log(self.clean), ["Add feature B", "Add feature A", "base"])
+        self.assertEqual(self.repo.file_at(f"{self.clean}~1", "a.txt"), "A\nA more\n")
+
+    def test_an_inherited_index_file_is_not_what_it_folds_in(self) -> None:
+        """Git hands its hooks GIT_INDEX_FILE, and a script may set it: the
+        approved set is still the live index, never that one."""
+        self.repo.git("add", "a.txt")
+        stranger = str(self.repo.path.parent / "someone-elses-index")
+        result = subprocess.run([CURATE, "fixup", self.target], cwd=self.repo.path,
+                                capture_output=True, text=True,
+                                env={**os.environ, "GIT_INDEX_FILE": stranger}, timeout=TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.file_at(f"{self.clean}~1", "a.txt"), "A\nA more\n")
 
     def test_never_touches_the_working_tree(self) -> None:
@@ -50,6 +64,26 @@ class Fixup(CurateTestCase):
         self.repo.git("add", "a.txt")
         stranger = self.repo.git("rev-parse", self.repo.status_fields()["working"])
         self.assertEqual(self.repo.curate("fixup", stranger).returncode, 1)
+
+    def test_refuses_a_target_that_does_not_resolve(self) -> None:
+        self.repo.git("add", "a.txt")
+        before = self.repo.git("for-each-ref")
+        result = self.repo.curate("fixup", "no-such-commit")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot resolve no-such-commit", result.stderr)
+        self.assertEqual(self.repo.git("for-each-ref"), before)
+
+    def test_continue_and_abort_with_nothing_paused_are_refused(self) -> None:
+        for flag in ("--continue", "--abort"):
+            with self.subTest(flag=flag):
+                result = self.repo.curate("fixup", flag)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("no fixup in progress", result.stderr)
+
+    def test_resolve_with_nothing_paused_is_refused(self) -> None:
+        result = self.repo.curate("resolve")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no conflict to resolve", result.stderr)
 
     def test_refuses_when_nothing_is_approved_to_fix_up(self) -> None:
         result = self.repo.curate("fixup", self.target)
@@ -117,6 +151,12 @@ class FixupConflicts(CurateTestCase):
         names = {p.name for p in scratch.rglob("f.txt.*")}
         self.assertEqual(names, {"f.txt.BASE", "f.txt.LOCAL", "f.txt.REMOTE"})
 
+    def test_resolve_says_what_to_run_next(self) -> None:
+        self.repo.curate("fixup", self.target)
+        out = self.repo.curate("resolve").stdout
+        self.assertIn("resolve: 1 of 1 resolved\n", out)
+        self.assertIn("then:    curate fixup --continue", out)
+
     def test_abort_leaves_every_ref_exactly_where_it_was(self) -> None:
         before = self.repo.git("for-each-ref")
         self.repo.curate("fixup", self.target)
@@ -181,6 +221,68 @@ class FixupConflicts(CurateTestCase):
         self.repo.stage_file("f.txt").write_text("by hand\n")   # again, on replay
         self.assertEqual(self.repo.curate("fixup", "--continue").returncode, 0)
         self.assertEqual(self.repo.file_at(f"{self.clean}~1", "f.txt"), "by hand\n")
+
+    def test_deleting_the_stage_file_resolves_by_deleting_the_file(self) -> None:
+        """Deleting the marked-up file is a resolution: the file goes."""
+        self.repo.git("config", "--unset", "merge.tool")
+        self.repo.curate("fixup", self.target)
+        for code in (2, 0):                     # the fold, then the replay
+            self.repo.curate("resolve")
+            self.repo.stage_file("f.txt").unlink()
+            self.assertEqual(self.repo.curate("fixup", "--continue").returncode, code)
+        self.assertEqual(self.repo.log(self.clean), ["B", "A", "base"])
+        self.assertEqual(self.repo.git("ls-tree", "--name-only", f"{self.clean}~1"), "")
+
+    def test_a_paused_fixup_holds_off_whatever_would_move_the_clean_line(self) -> None:
+        """Another fixup, a new base, a transfer, an integrate: each would
+        leave the paused one folding into commits that are no longer there."""
+        self.repo.curate("fixup", self.target)
+        before = self.repo.git("for-each-ref")
+        for args, says in ((["fixup", self.target], "already paused"),
+                           (["update-base", self.base], "paused on a conflict"),
+                           (["transfer", "wip"], "paused on a conflict"),
+                           (["integrate", "--into", "main"], "paused on a conflict")):
+            with self.subTest(command=args[0]):
+                result = self.repo.curate(*args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(says, result.stderr)
+        self.assertEqual(self.repo.git("for-each-ref"), before)
+
+    def test_status_says_how_to_go_on(self) -> None:
+        self.repo.curate("fixup", self.target)
+        self.assertIn("paused on a conflict -- `curate resolve`",
+                      self.repo.curate("status").stdout)
+
+    def test_a_resolution_may_quote_one_kind_of_marker(self) -> None:
+        """Only a file with both ends of a conflict in it is still conflicted."""
+        self.repo.git("config", "--unset", "merge.tool")
+        self.repo.curate("fixup", self.target)
+        for code in (2, 0):
+            self.repo.curate("resolve")
+            self.repo.stage_file("f.txt").write_text(">>>>>>> quoted\n")
+            self.assertEqual(self.repo.curate("fixup", "--continue").returncode, code)
+
+    def test_after_a_resolution_the_index_and_the_record_are_the_clean_tip(self) -> None:
+        """The resolution is a tree nobody staged, so both have to catch up."""
+        self.repo.git("config", "--unset", "merge.tool")
+        self.repo.curate("fixup", self.target)
+        for _ in range(2):
+            self.repo.curate("resolve")
+            self.repo.stage_file("f.txt").write_text("by hand\n")
+            self.repo.curate("fixup", "--continue")
+        tip = self.repo.tree_of(self.clean)
+        # The record first: write-tree updates the index's cache, which fires
+        # the hook that records it, and would hide a fixup that did not.
+        ref = self.repo.git("for-each-ref", "--format=%(refname)", "refs/curate")
+        self.assertEqual(self.repo.tree_of(ref), tip)
+        self.assertEqual(self.repo.index_tree(), tip)
+
+    def test_resolve_with_no_merge_tool_says_where_to_edit(self) -> None:
+        self.repo.git("config", "--unset", "merge.tool")
+        self.repo.curate("fixup", self.target)
+        result = self.repo.curate("resolve")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no merge tool configured", result.stdout)
 
     def test_resolve_does_not_clobber_a_hand_edit(self) -> None:
         """The stage files are where a resolution lives; there is nowhere else."""
