@@ -32,7 +32,6 @@ def ask(repo: Repo, session: Session) -> str:
 def cmd_update_base(repo: Repo, argv: list[str]) -> int:
     if len(argv) > 1:
         raise Refused("usage: curate update-base [<base>]")
-    repo.require_consistent()
     session = repo.session()
     if session is None:
         raise Refused("no review here. `curate list` shows them.")

@@ -200,7 +200,6 @@ def replay(repo: Repo, session: Session, new: str,
 
 def finish(repo: Repo, session: Session, new: str) -> int:
     git("update-ref", session.clean, new)
-    shutil.rmtree(session.fixup_dir, ignore_errors=True)
     # Only matters when a conflict was resolved, since then the rebuilt tip's
     # tree is no longer the approved tree. Cheap, and always correct.
     git("reset", "--mixed", "-q", session.clean)
@@ -210,7 +209,6 @@ def finish(repo: Repo, session: Session, new: str) -> int:
 
 
 def cmd_fixup(repo: Repo, argv: list[str]) -> int:
-    repo.require_consistent()
     session = repo.session()
     if session is None:
         raise Refused("no review here.")

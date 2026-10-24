@@ -56,7 +56,6 @@ def choose_line(source: Session, fetched: list[str] | None) -> str:
 def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     if len(argv) > 1:
         raise Refused("usage: curate transfer [<branch>]")
-    repo.require_consistent()
     source = repo.session()
     if source is None:
         raise Refused("no review here to transfer. `curate list` shows them.")

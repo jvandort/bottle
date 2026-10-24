@@ -313,7 +313,6 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
             raise Refused(f"unexpected argument: {flag}")
         i += 2
 
-    repo.require_consistent()
     session = repo.session()
     if session is None:
         raise Refused("no review here to integrate. `curate list` shows them.")

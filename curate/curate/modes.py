@@ -12,6 +12,9 @@ class NoReview(Refused):
 
 
 def switch_mode(repo: Repo, to: str) -> int:
+    # The one place this is checked. Every command starts consistent, since
+    # cli re-anchors on HEAD first; this is for the switches commands make
+    # part way through, after git has run, right before the indexes move.
     repo.require_consistent()
     session = repo.session()
     if session is None:
