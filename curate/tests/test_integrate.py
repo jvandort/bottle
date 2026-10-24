@@ -147,7 +147,9 @@ class SeveralAuthors(Integrating):
         self.assertIn("Not yet: Jane <jane@example.com>", err)
 
     def test_below_the_first_adopted_nothing_changes_and_above_it_authors_stay(self) -> None:
-        self.integrate("--into", "main", "--adopt", "genie", "--no-adopt", "Jane")
+        out = self.integrate("--into", "main", "--adopt", "genie", "--no-adopt", "Jane")
+        self.assertIn("integrated 3 commit(s)", out)
+        self.assertIn("adopted 1 of them as yours", out)
         self.assertEqual(self.repo.git("rev-parse", "main~2"), self.jane1)
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "main~1"), "Test")
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "main"), "Jane")

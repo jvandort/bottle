@@ -20,11 +20,31 @@ from dataclasses import dataclass
 
 from .carry import names_for
 from .errors import Refused
-from .gitcmd import commit_tree, git, metadata, parents_of, rev, run, tree_of
+from .gitcmd import commit_tree, git, metadata, rev, run, tree_of
 from .modes import switch_mode
 from .pick import Row, choose, choose_many
 from .state import Repo, Session, named, short
 from .ui import interactive, uninterrupted
+
+
+@dataclass
+class Commit:
+    oid: str
+    tree: str
+    parents: list[str]
+    email: str                       # the author's
+
+
+def commits_in(*revs: str) -> list[Commit]:
+    """The commits `revs` name, oldest first: what `rewrite` needs of each,
+    in one git rather than three a commit."""
+    out = git("log", "--no-show-signature", "--reverse", "--topo-order",
+              "--format=%H%x1f%T%x1f%P%x1f%ae", *revs)
+    commits = []
+    for line in out.splitlines():
+        oid, tree, parents, email = line.split("\x1f")
+        commits.append(Commit(oid, tree, parents.split(), email))
+    return commits
 
 
 @dataclass
@@ -98,11 +118,13 @@ def line_to_ship(repo: Repo, session: Session) -> str:
 
 # -- whose commits ---------------------------------------------------------
 
-def others(commits: list[str]) -> list[Author]:
+def others(*revs: str) -> list[Author]:
+    """Who wrote the commits `revs` name, besides you, newest first."""
     mine = me()[1]
     found: dict[str, Author] = {}
-    for c in commits:
-        name, email, subject = git("log", "-1", "--format=%an%n%ae%n%s", c).split("\n")
+    out = git("log", "--no-show-signature", "--format=%H%x1f%an%x1f%ae%x1f%s", *revs)
+    for line in out.splitlines():
+        c, name, email, subject = line.split("\x1f", 3)
         if email == mine:
             continue
         if email not in found:
@@ -239,23 +261,21 @@ def destination(session: Session, tip: str, into: str | None) -> str:
 
 # -- doing it --------------------------------------------------------------
 
-def rewrite(commits: list[str], adopt: set[str]) -> dict[str, str]:
+def rewrite(commits: list[Commit], adopt: set[str]) -> dict[str, str]:
     """Adopted commits as yours, author date kept; anything above one rebuilt
     on its new parent. Below the first, nothing changes."""
     name, email = me()
     new: dict[str, str] = {}
     for c in commits:
-        parents = parents_of(c)
-        mapped = [new.get(p, p) for p in parents]
-        env, message = metadata(c)
-        adopted = env["GIT_AUTHOR_EMAIL"] in adopt
-        if not adopted and mapped == parents:
-            new[c] = c
+        mapped = [new.get(p, p) for p in c.parents]
+        adopted = c.email in adopt
+        if not adopted and mapped == c.parents:
+            new[c.oid] = c.oid
             continue
+        env, message = metadata(c.oid)
         if adopted:
             env |= {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email}
-        new[c] = commit_tree(git("rev-parse", f"{c}^{{tree}}"), mapped, message,
-                             env=env, sign=True)
+        new[c.oid] = commit_tree(c.tree, mapped, message, env=env, sign=True)
     return new
 
 
@@ -320,12 +340,11 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         raise Refused("a fixup is paused on a conflict. Finish it or abort it first.")
 
     tip = line_to_ship(repo, session)
-    shipping = git("rev-list", tip, f"^{session.base}").split()
-    adopted = to_adopt(others(shipping), adopt, keep)
+    adopted = to_adopt(others(tip, f"^{session.base}"), adopt, keep)
     target = destination(session, tip, into)
     # What a branch being fast-forwarded already has stays exactly as it is.
-    commits = git("rev-list", "--reverse", "--topo-order", tip, f"^{session.base}",
-                  *([f"^{target}"] if rev(target) else [])).split()
+    commits = commits_in(tip, f"^{session.base}",
+                         *([f"^{target}"] if rev(target) else []))
 
     # Every question is answered. From here on, things change, and stopping
     # half way would leave a destination moved and a review that refuses to
@@ -353,8 +372,7 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
            else "a new branch")
     print(f"curate: integrated {len(commits)} commit(s) into {named(target)}, {how}.")
     if adopted:
-        count = sum(1 for c in commits
-                    if git("log", "-1", "--format=%ae", c) in adopted)
+        count = sum(1 for c in commits if c.email in adopted)
         print(f"        adopted {count} of them as yours.")
     if gone:
         print(f"        the review is over; deleted {', and '.join(gone)}.")
