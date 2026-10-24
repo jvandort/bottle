@@ -11,7 +11,7 @@ import subprocess
 from .support import CURATE, CurateTestCase
 
 ENTRY = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}\S* pid \d+ "
-                   r"\d+\.\d{3}s \(subprocesses \d+\.\d{3}s in \d+\) "
+                   r"\d+\.\d{3}s \((?:waited for you \d+\.\d{3}s; )?subprocesses \d+\.\d{3}s in \d+\) "
                    r"exit (\S+): curate (.*)$")
 
 
@@ -60,3 +60,12 @@ class Timing(CurateTestCase):
         here, so the log must never be what creates it."""
         self.curate("status")
         self.assertFalse(self.log.parent.exists())
+
+    def test_waiting_for_an_answer_is_not_counted_as_slow(self) -> None:
+        """The case that prompted it: 19s for a `curate review`, of which 14
+        were the base list waiting for someone to choose."""
+        self.on_a_terminal(["start"], ["\r"])
+        line = self.log.read_text().splitlines()[-1]
+        self.assertRegex(line, r"\(waited for you \d+\.\d{3}s; subprocesses")
+        self.assertEqual(len(self.log.read_text().splitlines()), 1,
+                         "the wait alone does not make it slow")

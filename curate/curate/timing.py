@@ -3,7 +3,8 @@
 Every command appends one line to `.git/curate/log`: when it ran, what it was,
 how long it took, and how much of that was git. A command slower than
 CURATE_SLOW seconds (default 1) also lists every subprocess it ran, in order,
-with when each started and how long it took. So when one feels slow, the log
+with when each started and how long it took. Time spent waiting for you to
+answer a question is listed too, but apart: it is not curate being slow. So when one feels slow, the log
 already says why, without having to reproduce it.
 
 Always on, because the slow ones are the ones you did not expect. It costs a
@@ -39,6 +40,18 @@ def log_into(state: Path) -> None:
     _state = state
 
 
+WAITING = ["(waiting for you)"]     # what `waiting` logs in place of a command
+
+
+@contextmanager
+def waiting() -> Iterator[None]:
+    """Time a question, which is the person and not curate: logged in the
+    list like a subprocess, kept out of the subprocess total, and not counted
+    towards whether the command was slow."""
+    with timed(WAITING):
+        yield
+
+
 @contextmanager
 def timed(argv: list[str]) -> Iterator[None]:
     """Time one subprocess, for the log."""
@@ -58,13 +71,16 @@ def slow() -> float:
 
 def entry(argv: list[str], code: int | str) -> str:
     total = time.perf_counter() - _began
-    git = sum(d for _, d, _ in _calls)
+    waited = sum(d for _, d, a in _calls if a is WAITING)
+    run = [d for _, d, a in _calls if a is not WAITING]
     when = _when.isoformat(timespec="milliseconds")
+    asked = f"waited for you {waited:.3f}s; " if waited else ""
     lines = [f"{when} pid {os.getpid()} {total:.3f}s "
-             f"(subprocesses {git:.3f}s in {len(_calls)}) exit {code}: "
+             f"({asked}subprocesses {sum(run):.3f}s in {len(run)}) exit {code}: "
              f"curate {shlex.join(argv)}"]
-    if total >= slow():
-        lines += [f"    +{start:.3f}s {d:.3f}s {shlex.join(a)}"
+    if total - waited >= slow():
+        lines += [f"    +{start:.3f}s {d:.3f}s "
+                  f"{a[0] if a is WAITING else shlex.join(a)}"
                   for start, d, a in _calls]
     return "\n".join(lines) + "\n"
 

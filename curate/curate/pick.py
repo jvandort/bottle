@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .errors import Refused
+from .timing import waiting
 
 # What `typed` answers: the value, or why not.
 Typed = Callable[[str], tuple[str | None, str]]
@@ -208,5 +209,6 @@ def show(picker: Picker, header: list[str]) -> Picker:
                 k = "\x03"
             picker.key(curses.keyname(k).decode() if isinstance(k, int) else k)
 
-    curses.wrapper(draw)
+    with waiting():
+        curses.wrapper(draw)
     return picker
