@@ -96,6 +96,20 @@ class Choosing(CurateTestCase):
         self.assertNotIn("Review which branch?", out)
         self.assertEqual(self.repo.status_fields()["working"], "refs/heads/wip")
 
+    def test_a_remote_named_inside_another_is_told_apart(self) -> None:
+        """`up` and `up/x` both remotes, as `bottle` and `bottle/rebase` are:
+        up/x/feature is up/x's feature, and git will not say so by itself."""
+        nested = self.repo.path.parent / "x.git"
+        self.repo.git("init", "-q", "--bare", str(nested))
+        self.repo.git("remote", "add", "up/x", str(nested))
+        self.newer_branch("feature", "theirs")
+        self.repo.git("push", "-q", "up/x", "feature")
+        self.repo.git("branch", "-D", "feature")
+        self.on_a_terminal(["start"], ["g", "\r", "\r"])
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/feature")
+        self.assertEqual(self.repo.git("rev-parse", "--symbolic-full-name", "feature@{upstream}"),
+                         "refs/remotes/up/x/feature")
+
     def test_each_tag_is_on_its_own_row(self) -> None:
         self.newer_branch("other", "elsewhere")
         self.repo.git("switch", "-q", "other")

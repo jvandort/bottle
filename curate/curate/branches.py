@@ -119,6 +119,25 @@ def git_ok(*args: str) -> bool:
     return run(list(args)).returncode == 0
 
 
+def track(local: str, chosen: str) -> None:
+    """Make `chosen`, a remote branch, the upstream of `local`.
+
+    By hand rather than `git branch --track`, which refuses outright when one
+    remote's name is inside another's -- `bottle` and `bottle/rebase` both map
+    refs/remotes/bottle/rebase/* -- calling it ambiguous. Which remote it is
+    gets decided the way `branch_name` decides it: the longest that matches.
+    """
+    if not chosen.startswith("refs/remotes/"):
+        return
+    rest = chosen[len("refs/remotes/"):]
+    remote = next((r for r in remotes() if rest.startswith(f"{r}/")), None)
+    if remote is None:
+        return
+    name = short(local)
+    git("config", f"branch.{name}.remote", remote)
+    git("config", f"branch.{name}.merge", f"refs/heads/{rest[len(remote) + 1:]}")
+
+
 def switch_to(local: str, chosen: str, tip: str) -> None:
     """Make `local` what `local_for` said, and check it out.
 
@@ -127,7 +146,8 @@ def switch_to(local: str, chosen: str, tip: str) -> None:
     """
     before = rev(local)
     if before is None:
-        git("branch", "--track", short(local), chosen)
+        git("branch", "--no-track", short(local), chosen)
+        track(local, chosen)
     elif tip != local:
         git("update-ref", local, tip)             # fast-forward, checked by local_for
     switched = run(["switch", short(local)])
