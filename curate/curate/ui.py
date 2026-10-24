@@ -49,10 +49,11 @@ def default_base(head: str) -> tuple[str, str, str] | tuple[None, None, None]:
     Only ever a suggestion, offered as the default answer and never taken
     silently: where the clean line starts decides what there is to review.
     """
+    mine = rev(head)
     for candidate in (f"{short(head)}@{{upstream}}", "origin/HEAD", "origin/main",
                       "origin/master", "main", "master"):
         other = rev(candidate)
-        if other is None or other == rev(head):
+        if other is None or other == mine:
             continue
         found = run(["merge-base", head, candidate])
         if found.returncode != 0:
