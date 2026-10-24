@@ -22,8 +22,13 @@ def script(name: str, me: str) -> str:
     leave it pointing at nothing. The guard is what keeps that quiet: without
     it, git prints an interpreter error on every commit until someone works
     out where it is coming from.
+
+    It also answers the git curate runs itself without starting Python, which
+    is most of the times it fires: `cmd_hook` would only return, and an
+    interpreter that starts just to do that is tens of milliseconds a time.
     """
     return (f"#!/bin/sh\n{MARKER}\n"
+            f'[ "${HOOK_GUARD}" = 1 ] && exit 0  # curate\'s own git\n'
             f'CURATE="{me}"\n'
             f'[ -f "$CURATE" ] || exit 0        # curate moved or went away\n'
             f'"{sys.executable}" "$CURATE" hook {name} "$@" || true\n'
