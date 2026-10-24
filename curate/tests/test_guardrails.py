@@ -2,7 +2,7 @@
 
 import subprocess
 
-from .support import CurateTestCase
+from .support import CurateTestCase, TIMEOUT
 
 
 class Guardrails(CurateTestCase):
@@ -25,20 +25,20 @@ class Guardrails(CurateTestCase):
     def test_an_unfinished_review_blocks_a_checkout_by_itself(self) -> None:
         """Git's own protection, which exists only while something is unreviewed."""
         result = subprocess.run(["git", "-C", str(self.repo.path), "switch", "elsewhere"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=TIMEOUT)
         self.assertNotEqual(result.returncode, 0)
 
     def test_a_finished_review_does_not_and_that_is_the_hazard(self) -> None:
         self.approve_everything()
         result = subprocess.run(["git", "-C", str(self.repo.path), "switch", "elsewhere"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=TIMEOUT)
         self.assertEqual(result.returncode, 0, "git no longer protects us here")
 
     def test_being_moved_out_of_review_mode_says_nothing(self) -> None:
         """Switching away is what you meant, so there is nothing to tell you."""
         self.approve_everything()
         result = subprocess.run(["git", "-C", str(self.repo.path), "switch", "elsewhere"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=TIMEOUT)
         self.assertNotIn("curate", result.stderr)
 
     def test_and_stands_down_like_leaving_in_write_mode(self) -> None:

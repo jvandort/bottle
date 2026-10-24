@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 
-from .support import CURATE, CurateTestCase
+from .support import CURATE, CurateTestCase, TIMEOUT
 
 ENTRY = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}\S* pid \d+ "
                    r"\d+\.\d{3}s \((?:waited for you \d+\.\d{3}s; )?subprocesses \d+\.\d{3}s in \d+\) "
@@ -29,7 +29,7 @@ class Timing(CurateTestCase):
 
     def curate(self, *args: str, slow: str = "1") -> None:
         subprocess.run([CURATE, *args], cwd=self.repo.path, capture_output=True,
-                       env={**os.environ, "CURATE_SLOW": slow})
+                       env={**os.environ, "CURATE_SLOW": slow}, timeout=TIMEOUT)
 
     def test_every_command_is_logged_with_when_and_how_long(self) -> None:
         self.start(self.base)

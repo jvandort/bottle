@@ -26,6 +26,17 @@ CURATE = os.path.abspath(
     or Path(__file__).resolve().parent.parent.parent / "bin" / "curate")
 HAVE_CURATE = os.path.isfile(CURATE)
 
+# How long any one git or curate a test runs may take. Without it a curate
+# that loops never returns: the suite hangs, and a loop that writes objects
+# goes on filling the disk long after anyone stopped watching.
+TIMEOUT = 60
+
+# For git run only to look: curate's hooks stand aside, as they do for the git
+# curate itself runs. `write-tree` and `status` write the index's caches back,
+# which fires post-index-change, which records the approved set -- so a test
+# that looked before it asserted would make the recording it meant to check.
+LOOKING = {"CURATE_IN_HOOK": "1"}
+
 
 class Repo:
     """A throwaway git repository, driven with plumbing rather than checkouts.
@@ -43,20 +54,22 @@ class Repo:
     def git(self, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
         result = subprocess.run(
             ["git", "-C", str(self.path), *args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=TIMEOUT,
             env={**os.environ, **(env or {})},
         )
         if check and result.returncode != 0:
             raise AssertionError(f"git {' '.join(args)} failed:\n{result.stderr}")
         return result.stdout.strip()
 
-    def git_raw(self, *args: str) -> str:
+    def git_raw(self, *args: str, env: dict[str, str] | None = None) -> str:
         """git output verbatim -- patches and other things a strip() would corrupt."""
         return subprocess.run(["git", "-C", str(self.path), *args],
-                              capture_output=True, text=True, check=True).stdout
+                              capture_output=True, text=True, check=True,
+                              timeout=TIMEOUT, env={**os.environ, **(env or {})}).stdout
 
     def curate(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([CURATE, *args], cwd=self.path, capture_output=True, text=True)
+        return subprocess.run([CURATE, *args], cwd=self.path, capture_output=True,
+                              text=True, timeout=TIMEOUT)
 
     def state_version(self) -> str:
         """The layout version this tool writes, from the tool rather than from
@@ -82,7 +95,7 @@ class Repo:
     def blob(self, text: str) -> str:
         return subprocess.run(
             ["git", "-C", str(self.path), "hash-object", "-w", "--stdin"],
-            input=text, capture_output=True, text=True,
+            input=text, capture_output=True, text=True, timeout=TIMEOUT,
         ).stdout.strip()
 
     def commit_all(self, message: str) -> str:
@@ -115,7 +128,7 @@ class Repo:
             line.split("=", 1)
             for line in subprocess.run([CURATE, "status", "--porcelain"],
                                        cwd=self.path, capture_output=True,
-                                       text=True).stdout.splitlines()
+                                       text=True, timeout=TIMEOUT).stdout.splitlines()
             if "=" in line)["clean"]
         slug = clean[len("refs/heads/"):].replace("%", "%25").replace("/", "%2F")
         return self.path / ".git" / "curate" / "sessions" / slug / "fixup" / "stages" / path
@@ -126,7 +139,7 @@ class Repo:
         return self.git("rev-parse", f"{rev}^{{tree}}")
 
     def index_tree(self, index: str | None = None) -> str:
-        env = {"GIT_INDEX_FILE": index} if index else {}
+        env = {**LOOKING, "GIT_INDEX_FILE": index} if index else LOOKING
         return self.git("write-tree", env=env)
 
     def log(self, rev: str) -> list[str]:
@@ -136,7 +149,7 @@ class Repo:
     def short_status(self) -> list[str]:
         # git_raw, not git: the first column is a space when something is
         # unstaged, and strip() eats it off the first line.
-        out = self.git_raw("status", "--short")
+        out = self.git_raw("status", "--short", env=LOOKING)
         return out.splitlines() if out else []
 
     def file_at(self, rev: str, path: str) -> str:

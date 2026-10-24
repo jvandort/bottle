@@ -7,7 +7,7 @@ something that is not curate, on every commit, until someone traces it.
 
 import subprocess
 
-from .support import CurateTestCase
+from .support import CurateTestCase, TIMEOUT
 
 
 class Hooks(CurateTestCase):
@@ -30,7 +30,7 @@ class Hooks(CurateTestCase):
         self.repo.write("g.txt", "more\n")
         self.repo.git("add", "-A")
         return subprocess.run(["git", "-C", str(self.repo.path), "commit", "-m", "x"],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, timeout=TIMEOUT)
 
     def test_a_hook_naming_a_curate_that_is_gone_says_nothing(self) -> None:
         self.point_hooks_at(str(self.repo.path / "not-here"))

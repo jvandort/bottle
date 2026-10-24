@@ -6,7 +6,7 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from .support import Repo
+from .support import Repo, TIMEOUT
 
 
 class GitAssumptions(unittest.TestCase):
@@ -50,7 +50,7 @@ class GitAssumptions(unittest.TestCase):
         self.r.git("read-tree", "HEAD", env={"GIT_INDEX_FILE": other})
         subprocess.run(["git", "-C", str(self.r.path), "add", "-p"],
                        input="y\nn\n", capture_output=True, text=True,
-                       env={**os.environ, "GIT_INDEX_FILE": other})
+                       env={**os.environ, "GIT_INDEX_FILE": other}, timeout=TIMEOUT)
         staged = self.r.git("diff", "--cached", "HEAD", env={"GIT_INDEX_FILE": other})
         self.assertIn("+FIRST", staged)
         self.assertNotIn("+LAST", staged, "both hunks were approved; splitting failed")
@@ -82,8 +82,7 @@ class GitAssumptions(unittest.TestCase):
         result = subprocess.run(
             ["git", "-C", str(self.r.path), "merge-tree", "--write-tree",
              f"--merge-base={base}", ours, theirs],
-            capture_output=True, text=True,
-        )
+            capture_output=True, text=True, timeout=TIMEOUT)
         self.assertEqual(result.returncode, 1)
         lines = result.stdout.splitlines()
         tree, stages = lines[0], [l for l in lines[1:] if "\t" in l]
@@ -117,8 +116,7 @@ class GitAssumptions(unittest.TestCase):
         result = subprocess.run(
             ["git", "-C", str(self.r.path), "update-ref", "refs/curate/agent",
              self.r.git("commit-tree", tree, "-m", "b")],
-            capture_output=True, text=True,
-        )
+            capture_output=True, text=True, timeout=TIMEOUT)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot", result.stderr.lower())
 
@@ -155,6 +153,6 @@ class GitAssumptions(unittest.TestCase):
         self.r.commit_all("c2")
         self.r.write("g.txt", "uncommitted\n")
         result = subprocess.run(["git", "-C", str(self.r.path), "rebase", "wip"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=TIMEOUT)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("commit or stash", (result.stderr + result.stdout).lower())

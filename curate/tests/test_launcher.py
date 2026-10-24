@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .support import CURATE, CurateTestCase
+from .support import CURATE, CurateTestCase, TIMEOUT
 
 
 class Launcher(CurateTestCase):
@@ -23,12 +23,11 @@ class Launcher(CurateTestCase):
         root = Path(CURATE).resolve().parent.parent
         result = subprocess.run(
             [CURATE, "--version"], cwd=str(root), capture_output=True, text=True,
-            env={**os.environ, "PYTHONPATH": str(root)},
-        )
+            env={**os.environ, "PYTHONPATH": str(root)}, timeout=TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("curate", result.stdout)
 
     def test_runs_from_an_unrelated_directory(self) -> None:
         result = subprocess.run([CURATE, "--version"], cwd=str(self.repo.path),
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
