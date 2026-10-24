@@ -183,8 +183,8 @@ def replay(repo: Repo, session: Session, new: str,
     """Replay the rest of the clean line onto a rebuilt commit."""
     while todo:
         y = todo[0]
-        tree, conflicts = merge_tree(base=f"{y}^" if parents_of(y) else y,
-                                     ours=y, theirs=new)
+        # Everything in `todo` is above the target, so it has a parent.
+        tree, conflicts = merge_tree(base=f"{y}^", ours=y, theirs=new)
         if conflicts:
             save_conflict(session, "replay", read(session.fixup_dir / "target"),
                           y, new, todo, tree, conflicts)

@@ -19,8 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .errors import Refused
-from .gitcmd import (commit_tree, git, merge_tree, metadata, parents_of, rev,
-                     run, tree_of)
+from .gitcmd import commit_tree, git, merge_tree, metadata, rev, run, tree_of
 from .state import Repo, Session, named, short
 from .ui import default_base, interactive, pick_base
 
@@ -72,9 +71,12 @@ def names_for(commit: str, source: Session, head: str) -> list[str]:
     """What a person would call this commit: the branches on it, and where it
     is on a mainline. Failing both, whatever name-rev finds."""
     skip = excluded(source, head)
-    on = git("for-each-ref", "--points-at", commit, "--format=%(refname)",
-             "refs/heads", "refs/remotes", "refs/tags").split()
-    names = [git("rev-parse", "--abbrev-ref", r) for r in on
+    # %(refname:short) is what `rev-parse --abbrev-ref` says, without a git
+    # a ref: with a remote a bottle, a mainline commit has dozens on it.
+    on = git("for-each-ref", "--points-at", commit,
+             "--format=%(refname)%1f%(refname:short)",
+             "refs/heads", "refs/remotes", "refs/tags").splitlines()
+    names = [name for r, _, name in (line.partition("\x1f") for line in on)
              if not any(_glob(p, r) for p in skip) and not r.endswith("/HEAD")]
     for line in MAINLINES:
         tip = rev(line)
@@ -166,25 +168,30 @@ def carry(repo: Repo, source: Session, base: str) -> Carried:
     if base == source.base:
         return Carried(tip=old_tip, approved=approved)
 
-    commits = git("rev-list", "--reverse", "--first-parent",
-                  f"{source.base}..{old_tip}").split()
-    if any(len(parents_of(c)) > 1 for c in commits):
+    span = f"{source.base}..{old_tip}"
+    if git("rev-list", "--first-parent", "--min-parents=2", span):
         raise Refused(f"{named(source.clean)} has a merge on it, and a merge "
                       f"cannot be replayed onto a new base")
+    # (oid, subject), oldest first: one git for the lot, not one a commit.
+    out = git("log", "--no-show-signature", "--reverse", "--first-parent",
+              "--format=%H%x1f%s", span)
+    commits = [(oid, said) for oid, _, said in
+               (line.partition("\x1f") for line in out.splitlines())]
     result = Carried(tip=base, approved="")
     done = source.base                   # the old commit the new tip stands for
-    for i, c in enumerate(commits):
-        tree, conflicts = merge_tree(base=parents_of(c)[0], ours=result.tip,
-                                     theirs=c)
+    tip_tree = tree_of(base)
+    for i, (c, said) in enumerate(commits):
+        tree, conflicts = merge_tree(base=f"{c}^", ours=result.tip, theirs=c)
         if conflicts:
-            result.uncommitted = [subject(x) for x in commits[i:]]
+            result.uncommitted = [s for _, s in commits[i:]]
             break
-        if tree == tree_of(result.tip):
-            result.upstream.append(subject(c))
+        if tree == tip_tree:
+            result.upstream.append(said)
         else:
             env, message = metadata(c)
             result.tip = commit_tree(tree, [result.tip], message, env=env, sign=True)
-            result.replayed.append(subject(c))
+            tip_tree = tree
+            result.replayed.append(said)
         done = c
 
     # Everything approved since `done`, committed or not, onto the new tip.
