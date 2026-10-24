@@ -66,7 +66,7 @@ def cmd_update_base(repo: Repo, argv: list[str]) -> int:
         write(session.dir / "base", base)
         idx = session.index("review")
         tmp = idx.with_suffix(".rebasing")
-        git("read-tree", carried.approved, index=tmp)
+        repo.index_of(carried.approved, tmp)
         run(["update-index", "--refresh", "-q"], index=tmp)   # non-zero is normal
         tmp.replace(idx)
         session.record("write")

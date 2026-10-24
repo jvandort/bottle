@@ -151,8 +151,7 @@ class Session:
         source = (self.ref if mode == "review" and rev(self.ref) else
                   self.clean if mode == "review" else self.working)
         tmp = path.with_suffix(".rebuilding")
-        tmp.unlink(missing_ok=True)
-        git("read-tree", source, index=tmp)
+        self.repo.index_of(source, tmp)
         run(["update-index", "--refresh", "-q"], index=tmp)   # non-zero is normal
         tmp.replace(path)
 
@@ -166,6 +165,27 @@ class Repo:
             raise Refused("not a git repository")
         self.gitdir = Path(found.stdout.strip())
         self.state = self.gitdir / "curate"
+
+    def index_of(self, tree: str, path: Path | str) -> None:
+        """An index file at `path` holding `tree`, with the stat cache filled
+        in wherever it can be.
+
+        `read-tree` alone leaves every entry without stat data, so whatever
+        reads the working tree next -- a refresh, an `add -A` -- hashes every
+        file in it: seconds, in a big repository. Starting from a copy of the
+        live index and reading with -m keeps the stat data of every entry whose
+        content `tree` agrees with, so only the files that differ are read.
+        """
+        path = Path(path)
+        path.unlink(missing_ok=True)
+        try:
+            shutil.copyfile(self.gitdir / "index", path)
+        except OSError:
+            pass                                 # no live index: nothing to keep
+        if run(["read-tree", "-m", tree], index=path).returncode != 0:
+            # An unmerged live index cannot be read over. Lose the cache, then.
+            path.unlink(missing_ok=True)
+            git("read-tree", tree, index=path)
 
     def stamp(self) -> None:
         write(self.state / "version", str(STATE_VERSION))

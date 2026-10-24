@@ -47,7 +47,7 @@ def files_tree(session: Session) -> str:
     """Your files as a tree, untracked ones included, whatever the mode."""
     with tempfile.TemporaryDirectory() as d:
         idx = f"{d}/index"
-        git("read-tree", session.working, index=idx)
+        session.repo.index_of(session.working, idx)
         top = git("rev-parse", "--show-toplevel")
         git("-C", top, "add", "-A", index=idx)
         return git("write-tree", index=idx)

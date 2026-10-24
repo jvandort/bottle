@@ -149,8 +149,7 @@ def begin(repo: Repo, b: Beginning) -> None:
             write(session.dir / "copied-from", source.id)
 
         idx = session.index("review")
-        idx.unlink(missing_ok=True)
-        git("read-tree", carried.approved, index=idx)
+        repo.index_of(carried.approved, idx)
         run(["update-index", "--refresh"], index=idx)   # non-zero means work to review
         repo.set_state("write", session)
         session.record("write")
