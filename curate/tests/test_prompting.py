@@ -21,7 +21,7 @@ class Prompting(CurateTestCase):
         self.repo.commit_all("their work")
 
     def test_switching_to_review_mode_with_no_review_asks_and_starts_one(self) -> None:
-        out = self.on_a_terminal(["review"], ["/", self.base, "\r"])
+        out = self.on_a_terminal(["review"], ["\r", "/", self.base, "\r"])
         self.assertIn("Clean line for 'wip' starts at", out)
         fields = self.repo.status_fields()
         self.assertEqual(fields["mode"], "review")
@@ -30,7 +30,7 @@ class Prompting(CurateTestCase):
     def test_a_suggestion_names_the_branch_not_the_commit_message(self) -> None:
         """What you want to recognise is "main", not what was last done to it."""
         self.repo.git("branch", "main", self.base)     # something to fork from
-        out = self.on_a_terminal(["start"], ["\r"])
+        out = self.on_a_terminal(["start"], ["\r", "\r"])
         self.assertIn("Suggested: 'main'", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
@@ -40,13 +40,13 @@ class Prompting(CurateTestCase):
         moved = self.repo.git("commit-tree", self.repo.tree_of(self.base),
                               "-p", self.base, "-m", "someone else")
         self.repo.git("update-ref", "refs/heads/main", moved)
-        out = self.on_a_terminal(["start"], ["\r"])
+        out = self.on_a_terminal(["start"], ["\r", "\r"])
         self.assertIn("where 'wip' left 'main'", out)
         self.assertIn("1 commit since", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
     def test_an_answer_git_cannot_resolve_says_so_and_keeps_asking(self) -> None:
-        out = self.on_a_terminal(["start"], ["/", "nonsense", "\r",
+        out = self.on_a_terminal(["start"], ["\r", "/", "nonsense", "\r",
                                              "/", self.base, "\r"])
         self.assertIn("cannot resolve nonsense", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
@@ -84,7 +84,7 @@ class Picking(CurateTestCase):
         self.repo.commit_all("more of it")
 
     def test_enter_takes_the_best_guess(self) -> None:
-        out = self.on_a_terminal(["start"], ["\r"])
+        out = self.on_a_terminal(["start"], ["\r", "\r"])
         self.assertIn("best guess", out)
         self.assertIn(f"Clean line starts at {self.base[:8]} base", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
@@ -95,15 +95,15 @@ class Picking(CurateTestCase):
         self.assertNotIn("curate/", out)
 
     def test_k_moves_up_the_line(self) -> None:
-        self.on_a_terminal(["start"], ["k", "\r"])
+        self.on_a_terminal(["start"], ["\r", "k", "\r"])
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
 
     def test_arrow_keys_move_too(self) -> None:
-        self.on_a_terminal(["start"], ["\x1bOA", "\r"])     # up, as xterm sends it in keypad mode
+        self.on_a_terminal(["start"], ["\r", "\x1bOA", "\r"])     # up, as xterm sends it in keypad mode
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
 
     def test_slash_takes_any_revision(self) -> None:
-        self.on_a_terminal(["start"], ["/", "wip~1", "\r"])
+        self.on_a_terminal(["start"], ["\r", "/", "wip~1", "\r"])
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
 
     def test_q_cancels_and_creates_nothing(self) -> None:

@@ -3,10 +3,12 @@
 import uuid
 from dataclasses import dataclass
 
+from .branches import fetch, local_for, switch_to, to_review
 from .carry import Carried, carry, choose_base, find, report
 from .errors import Refused
 from .gitcmd import git, rev, run
 from .hooks import install
+from .pick import choose
 from .state import CLEAN_PREFIX, Repo, Session, encode, named, short, write
 from .ui import ask_for_base, interactive, uninterrupted
 
@@ -30,6 +32,12 @@ def branch_conflict(name: str) -> str | None:
 
 
 def cmd_start(repo: Repo, argv: list[str]) -> int:
+    current = repo.session()
+    if current and repo.mode == "review" and repo.consistent():
+        raise Refused("finish the current review first: `curate write`")
+    if not argv and interactive():
+        return start_chosen(repo)
+
     base_arg = clean_arg = copy_arg = None
     rest = []
     i = 0
@@ -54,12 +62,44 @@ def cmd_start(repo: Repo, argv: list[str]) -> int:
     head = repo.head
     if not head:
         raise Refused("HEAD is detached. The working line has to be a branch.")
-    current = repo.session()
-    if current and repo.mode == "review" and repo.consistent():
-        raise Refused("finish the current review first: `curate write`")
     source = find(repo, copy_arg) if copy_arg else None
     begin(repo, prepare(repo, head, base_arg=base_arg, clean_arg=clean_arg,
                         source=source))
+    return 0
+
+
+def start_chosen(repo: Repo) -> int:
+    """Ask which branch to review, out of everything there is, then begin.
+
+    The branch you are on is the one offered, but it is not taken silently:
+    `curate review` on a branch that merely happens to be checked out is as
+    likely to be a mistake as a decision. Fetching first, because the branch
+    worth reviewing is often the one somebody just pushed.
+    """
+    fetch(None)
+    rows = to_review(repo)
+    if not rows:
+        raise Refused("no branches to review")
+    head = repo.head
+    cursor = next((i for i, r in enumerate(rows) if r.value == head), 0)
+    chosen = choose(["Review which branch?", ""], rows, cursor=cursor)
+    local, tip = local_for(chosen)
+
+    if local != head and any(s.working == local for s in repo.sessions()):
+        # Nothing to start, but somewhere to go: this is how you get back to it.
+        switch_to(local, chosen, tip)
+        repo.recover()
+        print(f"curate: {named(local)} has a review already; switched to it.")
+        return 0
+
+    # Every question before anything moves, so cancelling the base leaves you
+    # where you were, and so does anything prepare refuses.
+    base = ask_for_base(tip, repo.clean_lines())
+    beginning = prepare(repo, local, base_arg=base)
+    with uninterrupted():
+        if local != head:
+            switch_to(local, chosen, tip)
+        begin(repo, beginning)
     return 0
 
 

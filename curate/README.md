@@ -35,9 +35,15 @@ itself through the symlink.
 ## Quick start
 
 ```sh
-curate start          # asks where the clean line should begin, from a list
+curate start          # fetches, asks which branch, then where its clean line begins
 curate review         # now you are reading
 ```
+
+Which branch is a list of every branch, local and fetched, newest first, with
+the one you are on as the default. One that only exists on a remote becomes a
+local branch tracking it; one that already has a review is switched back to
+rather than started again. Give `start` any argument and it asks nothing about
+the branch: the one you are on is the working line.
 
 In review mode your editor is the tool. Stage a hunk to approve it; commit to
 put it on the clean line. Unstaged means unreviewed, so `git status` **is** your
@@ -61,7 +67,9 @@ curate                       status here, or the command list if no review
 curate start --from <base>   begin. --clean <branch> to name the clean line,
                              --copy <branch> to copy that branch's review
 curate review                switch to review mode; --copy <branch> begins
-                             this branch's review as a copy of that one's
+                             this branch's review as a copy of that one's.
+                             With no review here, asks which branch to start,
+                             as a bare `curate start` does
 curate write                 switch back
 curate switch                toggle between the two
 curate git <command>         run a git command in write mode, whatever mode

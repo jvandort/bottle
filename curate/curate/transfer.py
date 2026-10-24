@@ -7,24 +7,16 @@ and only then switch to it and copy the review, coming back in the mode you
 left. Cancelling either list leaves everything as it was.
 """
 
-import subprocess
-import sys
-
+from .branches import (branches, fetch, local_for, remote_of, remotes,
+                       switch_to)
 from .carry import choose_base, names_for
 from .errors import Refused
-from .gitcmd import environment, git, rev, run
+from .gitcmd import git, rev, run
 from .modes import switch_mode
 from .pick import Row, choose
 from .start import begin, prepare
 from .state import Repo, Session, named, short
-from .timing import timed
 from .ui import interactive, uninterrupted
-
-
-def remote_of(branch: str) -> str | None:
-    """The remote a local branch tracks, or None. "." is a local upstream."""
-    found = git("config", f"branch.{short(branch)}.remote", check=False)
-    return found if found and found != "." else None
 
 
 def remotes_to_fetch(source: Session, head: str) -> list[str] | None:
@@ -45,85 +37,20 @@ def remotes_to_fetch(source: Session, head: str) -> list[str] | None:
     return wanted
 
 
-def remotes() -> list[str]:
-    # Longest first, so `bottle/rebase` is found before a remote called `bottle`.
-    return sorted(git("remote").split(), key=len, reverse=True)
-
-
-def fetch(which: list[str] | None) -> None:
-    args = ["fetch", "--all"] if which is None else ["fetch", "--multiple", *which]
-    sys.stdout.flush()
-    with timed(["git", *args]):
-        code = subprocess.run(["git", *args], env=environment()).returncode
-    if code != 0:
-        # Offline is no reason not to use what is already here.
-        print(f"curate: `git {' '.join(args)}` failed; carrying on with what "
-              f"was already fetched.", file=sys.stderr)
-
-
-def branch_name(ref: str) -> str:
-    """A ref as the branch it is, without refs/heads/ or the remote's name."""
-    if ref.startswith("refs/heads/"):
-        return ref[len("refs/heads/"):]
-    rest = ref[len("refs/remotes/"):]
-    remote = next((r for r in remotes() if rest.startswith(f"{r}/")), None)
-    return rest[len(remote) + 1:] if remote else rest
-
-
-def branches(prefix: str, skip: set[str]) -> list[Row]:
-    """The branches under `prefix`, newest first, as rows to choose from."""
-    # Unstripped: str.strip() counts \x1f as whitespace, and would eat an
-    # empty field at either end of the output.
-    out = run(["for-each-ref", "--sort=-committerdate",
-               "--format=%(symref)%1f%(refname)%1f%(refname:short)%1f"
-               "%(committerdate:relative)%1f%(subject)", prefix]).stdout
-    rows = []
-    for line in out.splitlines():
-        symref, ref, name, when, subject = line.split("\x1f")
-        if symref or ref in skip:
-            continue
-        rows.append(Row([name, when, subject], value=ref))
-    return rows
-
-
 def choose_line(source: Session, fetched: list[str] | None) -> str:
     up = git("rev-parse", "--symbolic-full-name",
              f"{short(source.working)}@{{upstream}}", check=False)
     skip = {source.working, up} | source.repo.clean_lines()
     if fetched is None:
-        rows = branches("refs/remotes/", skip)
+        rows = branches("refs/remotes/", skip=skip)
     else:
         rows = [r for remote in fetched[:1]
-                for r in branches(f"refs/remotes/{remote}/", skip)]
+                for r in branches(f"refs/remotes/{remote}/", skip=skip)]
     rows.append(Row(["<show local>"],
-                    expand=lambda: branches("refs/heads/", skip) or
+                    expand=lambda: branches("refs/heads/", skip=skip) or
                     [Row(["(no other local branches)"])]))
     header = [f"Transfer the review of {named(source.working)} to:", ""]
     return choose(header, rows, cursor=0)
-
-
-def local_for(ref: str) -> tuple[str, str]:
-    """The local branch for a chosen ref, and the commit it should be at.
-
-    Makes nothing: what it says is only done once every question is answered.
-    """
-    if ref.startswith("refs/heads/"):
-        return ref, ref
-    if not any(ref.startswith(f"refs/remotes/{r}/") for r in remotes()):
-        raise Refused(f"{ref} is not on any remote")
-    local = f"refs/heads/{branch_name(ref)}"
-    mine = rev(local)
-    if mine is None or git_ok("merge-base", "--is-ancestor", local, ref):
-        return local, ref                         # created, or fast-forwarded
-    if git_ok("merge-base", "--is-ancestor", ref, local):
-        return local, local                       # yours is ahead: keep it
-    raise Refused(f"{named(local)} and {named(ref)} "
-                  f"have diverged. Sort that out first, then `curate transfer "
-                  f"{short(local)}`.")
-
-
-def git_ok(*args: str) -> bool:
-    return run(list(args)).returncode == 0
 
 
 def cmd_transfer(repo: Repo, argv: list[str]) -> int:
@@ -149,7 +76,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     else:
         raise Refused("which branch? `curate transfer <branch>`")
 
-    local, tip = local_for(chosen)
+    local, tip = local_for(chosen, "curate transfer")
     if local == source.working:
         raise Refused(f"that is {named(local)}, the branch under review already")
     if local in repo.clean_lines():
@@ -169,22 +96,13 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         mode = repo.mode
         if mode == "review":
             switch_mode(repo, "write")
-        before = rev(local)
-        if before is None:
-            git("branch", "--track", short(local), chosen)
-        elif tip != local:
-            git("update-ref", local, tip)             # fast-forward, checked above
-        switched = run(["switch", short(local)])
-        if switched.returncode != 0:
-            # Put the branch back as it was, and the review with it.
-            if before is None:
-                git("branch", "-D", short(local))
-            elif tip != local:
-                git("update-ref", local, before)
+        try:
+            switch_to(local, chosen, tip)
+        except Refused:
+            # The branch is back as it was; put the review back with it.
             if mode == "review":
                 switch_mode(repo, "review")
-            raise Refused(f"git switch {short(local)} failed: "
-                          f"{switched.stderr.strip()}")
+            raise
         begin(repo, beginning)
         if mode == "review":
             switch_mode(repo, "review")

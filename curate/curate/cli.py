@@ -17,14 +17,17 @@ from .hooks import cmd_hook, install as install_hooks
 from .modes import NoReview, switch_mode
 from .start import cmd_start
 from .transfer import cmd_transfer
-from .state import STATE_VERSION, VERSION, Repo
+from .state import STATE_VERSION, VERSION, Repo, named
 from .ui import interactive
 
 HELP = """  curate start --from <base>   begin. The clean line starts at <base>; the
                                branch you are on is the working line.
                                --copy <branch> copies that branch's review.
+                               With no arguments, on a terminal, it fetches
+                               and asks which branch, then where it starts.
   curate review                read your files against the clean line. Stage a
-                               hunk to approve it, commit to ship it.
+                               hunk to approve it, commit to ship it. With no
+                               review here, it asks which branch, as `start`.
                                --copy <branch> begins this branch's review as
                                a copy of that one's, for a rebased branch.
   curate write                 back to an ordinary repository, to write code.
@@ -175,7 +178,7 @@ def run(argv: list[str]) -> int:
                 # Nothing to switch into, but something to offer.
                 if not interactive():
                     raise
-                print("No review in this repository yet; starting one.")
+                print(f"No review on {named(repo.head)}; choose a branch to start one.")
                 cmd_start(repo, [])
                 return switch_mode(repo, to)
         if verb not in COMMANDS and verb not in INTERNAL:

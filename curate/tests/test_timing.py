@@ -64,7 +64,7 @@ class Timing(CurateTestCase):
     def test_waiting_for_an_answer_is_not_counted_as_slow(self) -> None:
         """The case that prompted it: 19s for a `curate review`, of which 14
         were the base list waiting for someone to choose."""
-        self.on_a_terminal(["start"], ["\r"])
+        self.on_a_terminal(["start"], ["\r", "\r"])
         line = self.log.read_text().splitlines()[-1]
         self.assertRegex(line, r"\(waited for you \d+\.\d{3}s; subprocesses")
         self.assertEqual(len(self.log.read_text().splitlines()), 1,
