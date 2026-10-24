@@ -98,6 +98,23 @@ class Picking(CurateTestCase):
         self.on_a_terminal(["start"], ["\r", "k", "\r"])
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
 
+    def test_the_branch_tip_is_not_offered(self) -> None:
+        """Starting there would leave nothing to review; the top of the list
+        is the commit below it."""
+        tip = self.repo.git("rev-parse", "wip")
+        out = self.on_a_terminal(["start"], ["\r", "g", "\r"])
+        self.assertIn(self.first[:8], out)
+        self.assertNotIn(tip[:8], out)
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
+
+    def test_unless_the_branch_has_nothing_of_its_own_yet(self) -> None:
+        """Its upstream is where it is, so there is no guess, and the tip is
+        where a review that has nothing to read yet starts."""
+        self.repo.git("update-ref", "refs/heads/main", "wip")
+        self.on_a_terminal(["start"], ["\r", "\r"])
+        self.assertEqual(self.repo.git("rev-parse", "curate/wip"),
+                         self.repo.git("rev-parse", "wip"))
+
     def test_arrow_keys_move_too(self) -> None:
         self.on_a_terminal(["start"], ["\r", "\x1bOA", "\r"])     # up, as xterm sends it in keypad mode
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)

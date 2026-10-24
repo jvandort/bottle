@@ -118,11 +118,19 @@ def pick_base(head: str, guess: str | None, via: str | None,
               marks: dict[str, str] | None = None,
               hide: set[str] | None = None) -> str:
     """The base from a list. `marks` labels commits besides the guess; `hide`
-    is refs it names none of them by -- the clean lines."""
+    is refs it names none of them by -- the clean lines.
+
+    Not the branch's own tip, which would leave nothing to review, when there
+    is a better guess. With none -- a branch with nothing of its own yet, whose
+    upstream is where it is -- the tip is as good a place as any to start.
+    `/` still takes it, as it takes anything."""
     marks = marks or {}
     rows: list[Row] = []
     cursor = 0
-    for oid, subject, refs in history(head, guess, hide or set()):
+    found = history(head, guess, hide or set())
+    if guess and found[0][0] != guess:
+        found = found[1:]
+    for oid, subject, refs in found:
         if oid == guess:
             cursor = len(rows)
         named_here = f"({refs}) {subject}" if refs else subject
