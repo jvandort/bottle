@@ -50,23 +50,16 @@ class Start(CurateTestCase):
         self.start(base)
         self.assertEqual(self.repo.curate("start", "--from", base).returncode, 1)
 
-    def test_off_a_terminal_the_base_is_where_the_branch_left_its_upstream(self) -> None:
-        base = self.make_base()
+    def test_off_a_terminal_it_takes_from_rather_than_guessing(self) -> None:
+        """Not even from an upstream: what the review contains is not a guess."""
+        self.make_base()
         self.repo.git("branch", "main")
         self.repo.git("branch", "--set-upstream-to", "main")
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
-        self.repo.git("update-ref", "refs/heads/main", self.repo.git(
-            "commit-tree", self.repo.tree_of(base), "-p", base, "-m", "upstream moved on"))
-        result = self.repo.curate("start")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.repo.git("rev-parse", "curate/wip"), base)
-
-    def test_and_with_no_upstream_it_asks_for_from(self) -> None:
-        self.make_base()
         result = self.repo.curate("start")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("pass --from <base>", result.stderr)
+        self.assertIn("curate start --from <base>", result.stderr)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
 
     def test_a_base_that_does_not_resolve_is_refused(self) -> None:

@@ -161,10 +161,9 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
         # the review contains, so a person present gets to see and confirm it.
         base = ask_for_base(working, repo.clean_lines())
     else:
-        upstream = rev(f"{working_name}@{{upstream}}")
-        if upstream is None:
-            raise Refused("no upstream to infer a base from; pass --from <base>")
-        base = git("merge-base", working, upstream)
+        # And with nobody to ask, the flag, as every command takes one: a
+        # guess nobody saw is a review of the wrong commits.
+        raise Refused("where does the clean line start? `curate start --from <base>`")
 
     # Copying writes objects and no refs, so a copy that is refused part way
     # leaves nothing behind, exactly like a start that is.
