@@ -6,7 +6,15 @@
 python3 -m unittest discover -s tests -t . -v            # all of them
 python3 -m unittest tests.test_git_assumptions -v        # the git ones alone
 python3 -m unittest tests.test_fixup -v                  # one file's worth
+python3 -m tests.parallel                                # all of them, one process a core
+python3 -m tests.parallel -j 4 tests.test_fixup          # some of them, on four
 ```
+
+`tests.parallel` is several times faster, because a test spends nearly all its
+time waiting on the git and curate processes it starts. It is safe because each
+test touches only the throwaway repository it makes; keep it that way. A test
+that wants a shared file, a class- or module-level fixture, or a change to its
+own process's environment would break the parallel runner.
 
 That runs the `curate` sitting beside the tests. 
 
