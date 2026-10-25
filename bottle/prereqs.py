@@ -12,9 +12,6 @@ import sys
 from bottle import smolvm
 from bottle.errors import BottleError
 
-# The smolvm tests/test_smolvm_contract.py last passed with; others may work, unchecked.
-SMOLVM_TESTED = "1.31.4"
-
 
 @functools.cache
 def ensure_smolvm() -> None:
@@ -28,11 +25,6 @@ def ensure_smolvm() -> None:
         if shutil.which("brew") is None:
             raise BottleError("bottle installs smolvm with Homebrew; install it from https://brew.sh")
         _install("smolvm", ["brew", "install", "smol-machines/tap/smolvm"])
-    version = subprocess.run([binary, "--version"], capture_output=True, text=True).stdout.split()
-    if version[1:2] != [SMOLVM_TESTED]:
-        found = version[1] if len(version) > 1 else "an unknown version"
-        print(f"bottle: smolvm is {found}; bottle was checked with {SMOLVM_TESTED} "
-              "(tests/test_smolvm_contract.py checks another)", file=sys.stderr)
 
 
 def _install(what: str, cmd: list[str]) -> None:

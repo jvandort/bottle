@@ -9,11 +9,10 @@ from bottle.errors import BottleError
 
 
 class FakeHost:
-    """A Mac whose installed tools, and smolvm's version, are configurable."""
+    """A Mac whose installed tools are configurable."""
 
-    def __init__(self, tools=("brew", "smolvm"), version=prereqs.SMOLVM_TESTED, machine="arm64", tty=True, answer="y"):
+    def __init__(self, tools=("brew", "smolvm"), machine="arm64", tty=True, answer="y"):
         self.tools = set(tools)
-        self.version = version
         self.machine = machine
         self.tty = tty
         self.answer = answer
@@ -21,8 +20,6 @@ class FakeHost:
         self.prompts: list[str] = []
 
     def run(self, cmd, capture_output=False, text=False):
-        if cmd == ["smolvm", "--version"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=f"smolvm {self.version}\n", stderr="")
         self.commands.append(cmd)
         if cmd == ["brew", "install", "smol-machines/tap/smolvm"]:
             self.tools.add("smolvm")
@@ -77,11 +74,6 @@ class EnsureSmolvmTest(unittest.TestCase):
     def test_requires_homebrew(self) -> None:
         with FakeHost(tools=()).active(), self.assertRaisesRegex(BottleError, "Homebrew"):
             prereqs.ensure_smolvm()
-
-    def test_another_version_is_said_but_used(self) -> None:
-        with FakeHost(version="9.9.9").active() as host:
-            prereqs.ensure_smolvm()
-        self.assertIn(f"smolvm is 9.9.9; bottle was checked with {prereqs.SMOLVM_TESTED}", host.stderr.getvalue())
 
     def test_checks_once_per_process(self) -> None:
         with FakeHost().active():

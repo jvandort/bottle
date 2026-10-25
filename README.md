@@ -419,7 +419,7 @@ suites that run real machines, and take minutes the first time, while they
 pull and build images:
 
 - `tests/test_smolvm_contract.py`: what bottle relies on smolvm for. Run it
-  for a smolvm version bottle hasn't been checked with.
+  after upgrading smolvm.
 - `tests/test_end_to_end.py`: a real bottle through `bin/bottle`, in its own
   `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
 

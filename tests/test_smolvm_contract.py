@@ -4,8 +4,7 @@ Runs only where smolvm is: a Mac with it on PATH, or $BOTTLE_SMOLVM naming
 one. Checks smolvm through bottle's own smolvm module, with a stand-in for
 bottled's decider, on one alpine machine made for the module and deleted
 after. The first run pulls alpine and buildah's image, which takes a while.
-Run it for a smolvm version bottle hasn't been checked with
-(prereqs.SMOLVM_TESTED).
+Run it after upgrading smolvm.
 """
 
 import fcntl
