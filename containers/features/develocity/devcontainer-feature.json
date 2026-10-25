@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "name": "Develocity",
   "description": "Develocity, authenticated by the host: the bottle talks to the server, and Claude Code (with the claude feature) to its MCP server, without ever holding the access key.",
-  "documentationURL": "https://docs.develocity.ai/2026.1/integrations/mcp-servers/ai-clients/",
+  "documentationURL": "https://docs.develocity.ai/2026.3/integrations/agentic-ai/mcp-servers/ai-agents/",
   "installsAfter": [
     "claude"
   ],

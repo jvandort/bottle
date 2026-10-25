@@ -225,7 +225,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
   bottle exec reponame -- teamcity run list
   ```
-- `develocity`: [Develocity's MCP server](https://docs.develocity.ai/2026.1/integrations/mcp-servers/ai-clients/)
+- `develocity`: [Develocity's MCP server](https://docs.develocity.ai/2026.3/integrations/agentic-ai/mcp-servers/ai-agents/)
   for Claude Code, with its access key held by the egress proxy rather than
   the bottle. The key is read on the machine from Gradle's
   `~/.gradle/develocity/keys.properties` (`server=key` lines, as
