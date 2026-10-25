@@ -1,0 +1,43 @@
+{
+  "id": "develocity",
+  "version": "1.0.0",
+  "name": "Develocity",
+  "description": "Develocity, authenticated by the host: the bottle talks to the server, and Claude Code (with the claude feature) to its MCP server, without ever holding the access key.",
+  "documentationURL": "https://docs.develocity.ai/2026.1/integrations/mcp-servers/ai-clients/",
+  "installsAfter": [
+    "claude"
+  ],
+  "options": {
+    "server": {
+      "type": "string",
+      "default": "",
+      "description": "The Develocity servers, separated by commas, e.g. https://develocity.example.com,https://ge.example.com. Required: each is a host its access key is attached to, and one whose MCP server (/mcp) Claude Code gets."
+    },
+    "keyFile": {
+      "type": "string",
+      "default": "~/.gradle/develocity/keys.properties",
+      "description": "Where on the machine Gradle keeps Develocity access keys, as server=key lines (./gradlew provisionDevelocityAccessKey writes them). bottled reads each server's key from it each time the bottle starts; for a server it has no line for, `bottle auth login develocity` is used instead."
+    }
+  },
+  "customizations": {
+    "bottle": {
+      "requiredOptions": [
+        "server"
+      ],
+      "credentials": {
+        "develocity": {
+          "description": "Develocity access key, from your user menu (My settings, Access keys); its user needs the 'Access build data via the API' permission. Read from the keyFile option's file first",
+          "properties": "${keyFile}",
+          "inject": {
+            "hosts": [
+              "${server}"
+            ],
+            "header": "Authorization",
+            "value": "Bearer ${credential}"
+          }
+        }
+      },
+      "context": "Develocity (${server}) is authenticated by the host: send `Authorization: Bearer the-egress-proxy-holds-the-real-one` to a server and the host puts its real access key in its place. If Claude Code is installed, it has each server's MCP server (<server>/mcp), named develocity-<host> with dots as dashes (develocity-ge-example-com), set up that way."
+    }
+  }
+}

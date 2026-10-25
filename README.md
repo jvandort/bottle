@@ -18,7 +18,7 @@ permissions inside. Take back only the commits you want.
   network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   `bottled` attaches it there. The bottle never holds the token.
-- **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, in the
+- **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, `develocity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
   file. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -90,14 +90,15 @@ missing, and asks first.
 Logs in once, for every bottle. Features declare the credentials they need (the
 `claude` feature needs `claude`, a Claude subscription token; the `github`
 feature needs `github`, a personal access token; the `teamcity` feature needs
-`teamcity`, an access token). `login` runs the feature's own login
+`teamcity`, an access token; the `develocity` feature needs `develocity`, an
+access key, which it reads from Gradle's own key file when that has one). `login` runs the feature's own login
 command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
 captures the credential it prints and stores it in the macOS Keychain; a
 credential with no such command is asked for instead.
 
 A credential never enters a bottle. bottled keeps it, and attaches it as a header to the bottle's requests to the hosts the
 feature named — `claude` names `api.anthropic.com`, `github` names `github.com`
-and its API, `teamcity` names its `server`. The agent can spend the credential
+and its API, `teamcity` and `develocity` name their `server`. The agent can spend the credential
 against those hosts and can't read it, so an agent that sends everything it
 holds to a stranger sends no token.
 
@@ -206,6 +207,26 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   echo '{"features": ["tools", "teamcity:server=https://teamcity.example.com"]}' > spec.json
   bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
   bottle exec reponame -- teamcity run list
+  ```
+- `develocity`: [Develocity's MCP server](https://docs.develocity.ai/2026.1/integrations/mcp-servers/ai-clients/)
+  for Claude Code, with its access key held by the egress proxy rather than
+  the bottle. The key is read on the machine from Gradle's
+  `~/.gradle/develocity/keys.properties` (`server=key` lines, as
+  `./gradlew provisionDevelocityAccessKey` writes them) each time the bottle
+  starts, so there's nothing to log in to; a server the file has no line for
+  uses `bottle auth login develocity` instead. Develocity serves MCP itself, so
+  nothing is installed: the server goes in Claude Code's user config, which
+  the feature writes whether or not `claude` is in the spec (it installs after
+  it when it is). The server's API is authenticated the same way. Options:
+  `server` (required), the Develocity servers, separated by commas, e.g.
+  `https://develocity.example.com`, each with its own key and its own MCP
+  server in Claude Code, `develocity-<host>` (`develocity-develocity-example-com`); `keyFile`, where the keys are (default
+  `~/.gradle/develocity/keys.properties`). The key's user needs the "Access build
+  data via the API" permission. A server on a private address, as one behind a
+  VPN often is, is reachable because the credential names it.
+
+  ```sh
+  echo '{"features": ["claude", "develocity:server=https://develocity.example.com,https://ge.example.com"]}' > spec.json
   ```
 
 A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.

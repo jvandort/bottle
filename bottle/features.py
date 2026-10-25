@@ -32,7 +32,9 @@ those hosts (see bottle/egress.py).
              reached over https -- a credential is never put on a request the
              proxy sends in the clear. `${option}` is the value of one of this
              feature's options, so the server a user configures is the server
-             the credential is attached to; and a host may be a pattern
+             the credential is attached to; a host that is only `${option}`
+             is each of the option's comma-separated values, for a user with
+             several servers; and a host may be a pattern
              (`*.example.com`). A request matching several patterns gets one
              header, from the first credential that claims it, and two
              credentials claiming the same host is an error.
@@ -61,6 +63,14 @@ those hosts (see bottle/egress.py).
   every bottle with the feature. Bottles only: the throwaway bottle that runs
   a login command gets no stand-ins, so a login flow starts from nothing
   rather than from a token that isn't one.
+
+properties is optional: a file on the machine where a tool already keeps its
+credentials, as Java properties of `host=credential` lines (Gradle's
+Develocity keys.properties is one), with `${option}` for an option's value and
+`~` for the home directory. bottled reads it each time a bottle starts, and
+attaches to each of inject.hosts the credential on that host's line; a host
+the file has no line for gets the one stored by `bottle auth login`, if any.
+Only the line for a host the feature names ever leaves the file.
 
 login is optional: without it, `bottle auth login` asks for the value. capture
 is a regular expression with one group, matched across lines against the
@@ -118,7 +128,7 @@ METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywo
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
 BOTTLE_KEYS = {"credentials", "cache", "requiredOptions", "context"}
 CACHE_KEYS = {"hosts", "exclude"}
-CREDENTIAL_KEYS = {"description", "login", "inject"}
+CREDENTIAL_KEYS = {"description", "login", "inject", "properties"}
 LOGIN_KEYS = {"command", "capture"}
 INJECT_KEYS = {"hosts", "header", "value", "standin"}
 # What a stand-in variable holds: enough for a tool to believe it's configured,
@@ -163,6 +173,8 @@ class Credential:
     # Where it goes: onto the bottle's requests, by bottled.
     inject: Inject
     login: Login | None = None
+    # A properties file on the machine, of host=credential lines, read before the Keychain.
+    properties: str | None = None
 
 
 @dataclass(frozen=True)
@@ -223,7 +235,7 @@ class Feature:
                 raise BottleError(f"feature {self.id}: its {name} option can't be empty")
 
     def resolved_credentials(self) -> tuple[Credential, ...]:
-        """This feature's credentials, with ${option} in inject.hosts replaced by what the options are set to.
+        """This feature's credentials, with ${option} in inject.hosts and properties replaced by what the options are set to.
 
         A feature says which hosts its credential belongs to; when that is an
         option (the server a user configured), the value has to be there, or
@@ -231,11 +243,22 @@ class Feature:
         """
         resolved = []
         for credential in self.credentials:
-            hosts = tuple(self._substitute(host, credential) for host in credential.inject.hosts)
-            resolved.append(replace(credential, inject=replace(credential.inject, hosts=hosts)))
+            hosts = tuple(h for host in credential.inject.hosts for h in self._expand(host, credential))
+            properties = credential.properties
+            if properties is not None:
+                properties = OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), properties) or None
+            resolved.append(replace(credential, inject=replace(credential.inject, hosts=hosts), properties=properties))
         return tuple(resolved)
 
-    def _substitute(self, host: str, credential: Credential) -> str:
+    def _expand(self, host: str, credential: Credential) -> tuple[str, ...]:
+        """One of inject.hosts as the hosts it stands for: those in its option, when it is only `${option}`."""
+        whole = OPTION_REFERENCE.fullmatch(host)
+        if not whole:
+            return (self._substitute(host, credential),)
+        values = [v.strip() for v in _option_value(self.values[whole.group(1)]).split(",")]
+        return tuple(self._substitute(host, credential, v) for v in values if v) or (self._substitute(host, credential, ""),)
+
+    def _substitute(self, host: str, credential: Credential, value: str | None = None) -> str:
         """One of inject.hosts with its ${option} filled in, as a bare host or host:port.
 
         An option holding a server is the URL a user has at hand, so https://
@@ -243,7 +266,7 @@ class Feature:
         ever attaches a credential to a request it makes over TLS.
         """
         option = next(iter(OPTION_REFERENCE.findall(host)), None)
-        filled = OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), host)
+        filled = value if value is not None else OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), host)
         where = f"{self.id}: credential {credential.name!r}"
         if option and not OPTION_REFERENCE.sub("", filled):
             raise BottleError(
@@ -251,7 +274,7 @@ class Feature:
                 f"use --feature {self.id}:{option}=..."
             )
         filled = filled.removeprefix("https://").rstrip("/")
-        if "//" in filled or "/" in filled:
+        if "//" in filled or "/" in filled or "," in filled or any(c.isspace() for c in filled):
             raise BottleError(f"{where}: {filled!r} must be a host, reached over https, with no path")
         return filled
 
@@ -415,7 +438,14 @@ def _credential(name, spec, options, fail) -> Credential:
         if groups != 1:
             raise fail(f"{where}: login capture must be a regular expression with exactly one group")
         login = Login(tuple(command), raw["capture"])
-    return Credential(name, spec["description"], _inject(spec["inject"], options, where, fail), login)
+    properties = spec.get("properties")
+    if properties is not None:
+        if not isinstance(properties, str) or not properties:
+            raise fail(f"{where}: properties must be the path of a properties file")
+        for option in OPTION_REFERENCE.findall(properties):
+            if option not in options or options[option].type != "string":
+                raise fail(f"{where}: properties: {properties!r} names no string option of this feature")
+    return Credential(name, spec["description"], _inject(spec["inject"], options, where, fail), login, properties)
 
 
 def _inject(inject, options, where, fail) -> Inject:

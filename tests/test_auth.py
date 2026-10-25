@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -101,7 +102,7 @@ class DeclaredTest(unittest.TestCase):
         self.assertEqual((d.feature, d.credential.inject.hosts), ("claude", ("api.anthropic.com",)))
 
     def test_unknown(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, github, teamcity\\)"):
+        with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, develocity, github, teamcity\\)"):
             auth.get_declared("nope")
 
     def test_only_the_bottles_features_are_injected(self) -> None:
@@ -164,6 +165,70 @@ class InjectedCredentialTest(unittest.TestCase):
                     auth.credentials_for(self.specs)[0], claimed]), \
                 self.assertRaisesRegex(BottleError, "both claim ci.corp.example.com"):
             auth.injections_for(self.specs)
+
+
+class PropertiesTest(unittest.TestCase):
+    """Credentials read from a file a tool on the machine keeps them in, as Gradle does for Develocity."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.keys = Path(tmp.name) / "keys.properties"
+        self.keys.write_text(
+            "# written by provisionDevelocityAccessKey\n"
+            "ge.example.com=ge-key\n"
+            "https://dv.corp.example.com/ = dv-key\n"
+            "other.example.com\\:8443:port-key\n"
+            "\n! another comment\nempty.example.com=\n"
+        )
+        self.specs = [f"develocity:server=https://dv.corp.example.com,keyFile={self.keys}"]
+
+    def test_reads_lines_by_key(self) -> None:
+        self.assertEqual(auth.read_properties(self.keys), {
+            "ge.example.com": "ge-key", "https://dv.corp.example.com/": "dv-key",
+            "other.example.com:8443": "port-key", "empty.example.com": "",
+        })
+
+    def test_no_file_is_no_lines(self) -> None:
+        self.assertEqual(auth.read_properties(self.keys.with_name("nope")), {})
+
+    def test_the_servers_line_is_attached_without_the_keychain(self) -> None:
+        with mock.patch.object(auth, "get", side_effect=AssertionError("the file has it")):
+            [injection] = auth.injections_for(self.specs)
+        self.assertEqual((injection.host, injection.value), ("dv.corp.example.com", "Bearer dv-key"))
+
+    def test_each_server_gets_its_own_line(self) -> None:
+        specs = [f"develocity:server=https://ge.example.com,https://dv.corp.example.com,keyFile={self.keys}"]
+        with mock.patch.object(auth, "get", return_value=None):
+            injections = auth.injections_for(specs)
+        self.assertEqual([(i.host, i.value) for i in injections],
+                         [("ge.example.com", "Bearer ge-key"), ("dv.corp.example.com", "Bearer dv-key")])
+        self.assertEqual(auth.intercepted_hosts(specs), ["dv.corp.example.com", "ge.example.com"])
+
+    def test_a_host_with_no_line_falls_back_to_the_keychain(self) -> None:
+        specs = [f"develocity:server=https://new.example.com,keyFile={self.keys}"]
+        with mock.patch.object(auth, "get", return_value="stored-key"):
+            [injection] = auth.injections_for(specs)
+        self.assertEqual(injection.value, "Bearer stored-key")
+        with mock.patch.object(auth, "get", return_value=None):
+            self.assertEqual(auth.injections_for(specs), [])
+
+    def test_an_empty_line_is_no_credential(self) -> None:
+        [credential] = auth.credentials_for([f"develocity:server=empty.example.com,keyFile={self.keys}"])
+        self.assertIsNone(auth.from_properties(credential, "empty.example.com"))
+
+    def test_a_host_with_a_port_matches_its_own_line(self) -> None:
+        [credential] = auth.credentials_for([f"develocity:server=other.example.com:8443,keyFile={self.keys}"])
+        self.assertEqual(auth.from_properties(credential, "other.example.com:8443"), "port-key")
+
+    def test_the_default_file_is_gradles(self) -> None:
+        [credential] = auth.credentials_for(["develocity:server=dv.corp.example.com"])
+        self.assertEqual(credential.properties, "~/.gradle/develocity/keys.properties")
+
+    def test_no_login_needed_when_the_file_has_it(self) -> None:
+        with mock.patch.object(auth, "get", return_value=None), \
+                mock.patch.object(auth, "login", side_effect=AssertionError("the file has it")):
+            auth.ensure_logged_in(self.specs)
 
 
 class DestinationTest(unittest.TestCase):

@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["claude", "github", "jvm", "python", "teamcity", "tools"])
+        self.assertEqual(features.available(), ["claude", "develocity", "github", "jvm", "python", "teamcity", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
@@ -18,7 +18,7 @@ class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_tells_the_agent_about_itself(self) -> None:
         for feature_id in features.available():
             with self.subTest(feature_id):
-                [feature] = [f for f in features.resolve([f"{feature_id}:server=x" if feature_id == "teamcity" else feature_id])
+                [feature] = [f for f in features.resolve([f"{feature_id}:server=x" if feature_id in ("develocity", "teamcity") else feature_id])
                              if f.id == feature_id]
                 self.assertTrue(feature.agent_context())
                 self.assertNotIn("${", feature.agent_context())
@@ -210,6 +210,40 @@ class LoadTest(FeatureTestCase):
         [configured] = features.resolve(["a:server=other.example.com"])
         self.assertEqual(configured.resolved_credentials()[0].inject.hosts[0], "other.example.com")
 
+    def test_credential_read_from_a_properties_file_an_option_names(self) -> None:
+        self.feature(
+            "a",
+            options={"keys": {"type": "string", "default": "~/.tool/keys.properties"}},
+            customizations=self.credential(properties="${keys}"),
+        )
+        [c] = features.load("a").resolved_credentials()
+        self.assertEqual(c.properties, "~/.tool/keys.properties")
+        [configured] = features.resolve(["a:keys=/elsewhere/keys.properties"])
+        self.assertEqual(configured.resolved_credentials()[0].properties, "/elsewhere/keys.properties")
+
+    def test_a_host_that_is_only_an_option_is_each_server_it_lists(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        [several] = features.resolve(["a:server=https://one.example.com, two.example.com/,"])
+        self.assertEqual(several.resolved_credentials()[0].inject.hosts, ("one.example.com", "two.example.com"))
+        for spec in ("a:server=,", "a:server=one.example.com,x y"):
+            [bad] = features.resolve([spec])
+            with self.subTest(spec), self.assertRaises(BottleError):
+                bad.resolved_credentials()
+
+    def test_a_list_only_stands_for_a_whole_host(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}:8443"], "value": "Bearer ${credential}"}),
+        )
+        [bad] = features.resolve(["a:server=one.example.com,two.example.com"])
+        with self.assertRaisesRegex(BottleError, "must be a host"):
+            bad.resolved_credentials()
+
     def test_an_option_holding_a_server_may_be_written_as_a_url(self) -> None:
         self.feature(
             "a",
@@ -337,6 +371,8 @@ class LoadTest(FeatureTestCase):
             ({"login": {"command": [], "capture": "(x)"}}, "non-empty list of strings"),
             ({"login": {"command": ["x"], "capture": "no group"}}, "exactly one group"),
             ({"login": {"command": ["x"], "capture": "(unclosed"}}, "isn't a valid regular expression"),
+            ({"properties": ""}, "properties must be the path of a properties file"),
+            ({"properties": "${nope}"}, "names no string option"),
         ):
             with self.subTest(message):
                 self.feature("a", customizations=self.credential(**spec))

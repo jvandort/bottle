@@ -194,11 +194,23 @@ def _auth_list(args: argparse.Namespace) -> int:
     # where it's spent: the hosts it's attached to, as the feature declares
     # them (${option} is filled in from a bottle's own options).
     rows = [("CREDENTIAL", "FEATURE", "STATUS", "ATTACHED TO", "DESCRIPTION")]
-    rows += [(d.credential.name, d.feature, "set" if is_set else "not set",
+    rows += [(d.credential.name, d.feature, _credential_status(d, is_set),
               ", ".join(d.credential.inject.hosts), d.credential.description)
              for d, is_set in auth.status()]
     _table(rows)
     return 0
+
+
+def _credential_status(declared, is_set: bool) -> str:
+    """Whether the Keychain has it, and the file read before the Keychain, if the credential has one."""
+    from bottle import features
+
+    status = "set" if is_set else "not set"
+    if declared.credential.properties:
+        values = features.load(declared.feature).values
+        path = features.OPTION_REFERENCE.sub(lambda m: str(values[m.group(1)]), declared.credential.properties)
+        status = f"{path}, else {status}"
+    return status
 
 
 def _auth_login(args: argparse.Namespace) -> int:

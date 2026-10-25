@@ -21,7 +21,12 @@ presents the stand-in is one that asks for the credential; the rest reach the
 host as they would from the machine. The throwaway bottle a login command
 runs in gets none, so logging in starts from nothing.
 
-A bottle picks up a login or a logout when it next starts.
+A credential can also come from a file a tool on the machine already keeps
+its credentials in (the credential's properties, see features.py), such as
+Gradle's ~/.gradle/develocity/keys.properties: bottled reads the line for each
+host, and the Keychain is for the hosts the file doesn't name.
+
+A bottle picks up a login or a logout, or a change to such a file, when it next starts.
 """
 
 import getpass
@@ -117,7 +122,69 @@ def delete(name: str) -> bool:
 
 
 def status() -> list[tuple[Declared, bool]]:
+    """Every declared credential, and whether the Keychain has it."""
     return [(d, get(name) is not None) for name, d in sorted(declared().items())]
+
+
+# --- properties files --------------------------------------------------------------
+
+
+def read_properties(path: Path) -> dict[str, str]:
+    """A Java properties file's `key=value` (or `key:value`) lines, by key; {} when there's no file.
+
+    Enough of the format for a file of credentials: comments (# and !) and
+    blank lines are skipped, and a backslash escapes the character after it.
+    A key ends at the first `=`, and only at a `:` on a line with no `=`, so a
+    URL is a key as written (Java would end it at `https`). Continuation lines
+    and \\u escapes aren't supported, and no credential needs them.
+    """
+    try:
+        text = path.expanduser().read_text()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise BottleError(f"can't read {path}: {e.strerror or e}") from None
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#!":
+            continue
+        separators = "=" if "=" in line else ":"
+        key, value, escaped = "", None, False
+        for i, c in enumerate(line):
+            if escaped:
+                key, escaped = key + c, False
+            elif c == "\\":
+                escaped = True
+            elif c in separators:
+                value = line[i + 1:].strip()
+                break
+            else:
+                key += c
+        if value is not None:
+            result[key.strip()] = value
+    return result
+
+
+def from_properties(credential: features.Credential, host: str) -> str | None:
+    """The credential for `host`, one of its inject.hosts, from its properties file; None when the file has no line for it.
+
+    A line's key may be the host or a URL of it; a host with a port matches its
+    host:port line, else its bare host's.
+    """
+    if not credential.properties:
+        return None
+    keys = {}
+    for key, value in read_properties(Path(credential.properties)).items():
+        if value:
+            keys[key.lower().removeprefix("https://").rstrip("/")] = value
+    pattern, port = destination(host)
+    return keys.get(host.lower()) or keys.get(pattern.lower())
+
+
+def value_for(credential: features.Credential, host: str) -> str | None:
+    """What's attached to `host` for `credential`: its properties file's line for the host, else the Keychain's."""
+    return from_properties(credential, host) or get(credential.name)
 
 
 def login(name: str) -> None:
@@ -192,7 +259,7 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
     Interactive only: without a terminal, say how to log in and carry on.
     """
     for credential in credentials_for(specs):
-        if get(credential.name) is not None:
+        if all(from_properties(credential, host) for host in credential.inject.hosts) or get(credential.name) is not None:
             continue
         if not sys.stdin.isatty():
             print(f"bottle: {credential.name} isn't logged in; run `bottle auth login {credential.name}`", file=sys.stderr)
@@ -204,8 +271,8 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
 def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
     """What bottled attaches for a bottle with these features: one per injected credential.
 
-    Read from the Keychain here, in bottled, so the value goes no further than
-    the gateway. A credential that isn't logged in is left out; the bottle then
+    Read from its properties file or the Keychain here, in bottled, so the
+    value goes no further than the gateway. A credential that isn't logged in is left out; the bottle then
     reaches the host unauthenticated, and the server says so.
 
     A request to a host that several patterns match is served by the first
@@ -219,10 +286,10 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
             owner = claimed.setdefault(host.lower(), credential.name)
             if owner != credential.name:
                 raise BottleError(f"credentials {owner!r} and {credential.name!r} both claim {host}")
-        value = get(credential.name)
-        if value is None:
-            continue
         for host in credential.inject.hosts:
+            value = value_for(credential, host)
+            if value is None:
+                continue
             pattern, port = destination(host)
             injections.append(egress.Injection(
                 host=pattern,
