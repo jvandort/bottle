@@ -33,7 +33,9 @@ never clashes. The repo key is the repo's name and a hash of its path.
   if they've stopped. Closing the terminal only detaches it, and whatever is
   running carries on. shpool passes output straight through, so your terminal's
   own scrollback, mouse wheel and selection work; a reattach replays the
-  session's last 10000 lines into that scrollback. Detach with Ctrl+Space
+  session's last 10000 lines into that scrollback. A session shpool can no
+  longer show (an attach that fails at once) is started again, and Claude
+  carries on with its conversation. Detach with Ctrl+Space
   Ctrl+Q, or by closing the terminal. tmux is there too, to start in one.
 - **Its lane** is two git namespaces in your repo: one the agent pushes into
   and you read, one you push into and it reads. Neither side's push is ever

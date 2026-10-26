@@ -53,11 +53,28 @@ SESSIONS = {
 # What a session's programs are told their terminal is. Not the one attached,
 # whose TERM the bottle may have no terminfo for, and which a session outlives.
 TERM = "xterm-256color"
-# Attaches to the session named by $1. shpool loses a session's screen if a
-# terminal attaches before it has a size, which an exec's can lack at first.
-ATTACH = """\
-for i in $(seq 20); do [ "$(stty size)" = "0 0" ] || exec shpool attach -f "$1"; sleep 0.1; done
-echo "folio: the terminal has no size, so it wasn't attached" >&2; exit 1
+# Attaches to the session named by $1, whose command is $2 (as shpool's --cmd
+# takes it). shpool loses a session's screen if a terminal attaches before it
+# has a size, which an exec's can lack at first.
+#
+# An attach that fails at once is a session shpool can no longer show: its
+# program may be running, but the thread that passes its output on has died
+# (as shpool-vterm 0.2.2 made it, on a zero-width character), and every attach
+# fails the same way until the session is killed. So it's started again, once:
+# Claude carries on with its conversation, which it keeps as it goes.
+ATTACH = f"""\
+attach() {{
+  for i in $(seq 20); do [ "$(stty size)" = "0 0" ] || {{ shpool attach -f "$1"; return; }}; sleep 0.1; done
+  echo "folio: the terminal has no size, so it wasn't attached" >&2; exit 1
+}}
+started=$(date +%s)
+attach "$1" && exit 0
+status=$?
+[ $(($(date +%s) - started)) -le 1 ] || exit $status
+echo "folio: shpool couldn't show the $1 session any more, so it's been started again" >&2
+shpool kill "$1"
+env TERM={TERM} shpool attach --background --dir {WORKSPACE} --cmd "$2" "$1" || exit $status
+attach "$1"
 """
 SNAPSHOT = (snapshots.WORKSPACE_ARCHIVE, snapshots.CLAUDE_ARCHIVE, snapshots.WORK)
 
@@ -185,7 +202,7 @@ def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
     _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}), dict.fromkeys(SNAPSHOT))
     # -f detaches anything else on it: closing a terminal doesn't hang up its
     # attach inside the VM.
-    engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session])
+    engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session, session_command(session)])
 
 
 def _ensure_running(repo: Repo, thread: Thread) -> None:
@@ -278,7 +295,12 @@ def _ensure_session(thread: Thread, session: str) -> None:
         # would start a plain shell in its place.
         engine.run(thread.bottle, ["shpool", "kill", session], check=False)
     engine.run(thread.bottle, ["env", f"TERM={TERM}", "shpool", "attach", "--background", "--dir", WORKSPACE,
-                               "--cmd", shlex.join(["sh", "-c", SESSIONS[session]]), session])
+                               "--cmd", session_command(session), session])
+
+
+def session_command(session: str) -> str:
+    """What a session runs, as shpool's --cmd takes it."""
+    return shlex.join(["sh", "-c", SESSIONS[session]])
 
 
 def losses(repo: Repo, thread: Thread) -> list[str]:

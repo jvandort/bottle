@@ -1,5 +1,6 @@
 import io
 import json
+import shlex
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -83,15 +84,22 @@ class AttachTest(FolioTestCase):
     def test_claude_starts_the_session_once_and_attaches(self) -> None:
         self.ok("claude", "fix-it")
         self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"], {"claude": threads.SESSIONS["claude"]})
-        self.assertEqual(self.calls("exec")[-1], ["exec", self.bottle, "--", "sh", "-c", threads.ATTACH, "attach", "claude"])
+        self.assertEqual(self.calls("exec")[-1], ["exec", self.bottle, "--", "sh", "-c", threads.ATTACH, "attach", "claude", threads.session_command("claude")])
         self.ok("claude", "fix-it")
         sessions = [c for c in self.calls("exec") if c[6:8] == ["attach", "--background"]]
         self.assertEqual(len(sessions), 1)  # reattached, not started again
 
+    def test_the_attach_can_start_its_session_again(self) -> None:
+        # With the command the session was started with, for a session shpool can no longer show.
+        self.ok("claude", "fix-it")
+        self.assertEqual(self.calls("exec")[-1][-1], shlex.join(["sh", "-c", threads.SESSIONS["claude"]]))
+        started = next(c for c in self.calls("exec") if c[6:8] == ["attach", "--background"])
+        self.assertEqual(started[-3:], ["--cmd", self.calls("exec")[-1][-1], "claude"])
+
     def test_a_shell_is_a_session_of_its_own(self) -> None:
         self.ok("shell", "fix-it")
         self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"]["shell"], "exec bash -l")
-        self.assertEqual(self.calls("exec")[-1][-1], "shell")
+        self.assertEqual(self.calls("exec")[-1][-2], "shell")
 
     def test_a_session_whose_program_exited_is_started_again(self) -> None:
         # shpool still lists it, and attaching would get a plain shell instead.
@@ -123,7 +131,7 @@ class AttachTest(FolioTestCase):
                 name = f"new-{session}"
                 self.assertIn(f"Started thread {name}", self.ok(session, name))
                 bottle = f"{repos.current(self.repo).key}-{name}"
-                self.assertEqual(self.calls("exec")[-1], ["exec", bottle, "--", "sh", "-c", threads.ATTACH, "attach", session])
+                self.assertEqual(self.calls("exec")[-1], ["exec", bottle, "--", "sh", "-c", threads.ATTACH, "attach", session, threads.session_command(session)])
         self.assertIn("new-claude", git("-C", str(self.repo), "remote"))
 
     def test_an_unknown_thread_with_a_bad_name_starts_nothing(self) -> None:
