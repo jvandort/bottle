@@ -12,20 +12,14 @@
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.
 
-# Pinned by digest so rebuilds are reproducible and the weekly upstream rebuild
-# never changes the image underneath us. Bump the digest deliberately.
-FROM debian:stable-slim@sha256:5bc3287b25407c965a30f38e32603dc253a3869e1b12a21ac09bfc27fd8b13ce
+# Debian 13 by name, not by digest: a build takes trixie's latest point release
+# and security fixes, but a new Debian release is a change to this line. Its apt
+# sources name trixie too, so later installs stay on the same release.
+FROM debian:trixie-slim
 
 # Builds have no terminal; stop debconf trying (and warning about) interactive prompts.
 # ARG, not ENV, so it doesn't leak into bottles.
 ARG DEBIAN_FRONTEND=noninteractive
-
-# The stable-slim image points apt at the "stable" suite, which silently becomes
-# the next Debian release when it ships. Rewrite the suites to this image's own
-# codename (e.g. trixie) so any later apt install stays on the same release.
-RUN . /etc/os-release \
- && sed -i -E "s/\bstable(-updates|-security)?\b/${VERSION_CODENAME}\1/g" \
-      /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
