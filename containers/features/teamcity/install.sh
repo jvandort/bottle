@@ -3,29 +3,35 @@ set -eu
 
 # JetBrains publishes the CLI as a Debian package per release, and no apt
 # repository, so the package is fetched from its GitHub release and checked
-# against a checksum before it is installed. The default version's checksums
-# are in this feature (teamcity-<version>-checksums.txt), so a build doesn't
-# trust a file fetched at build time; asking for another version fetches that
-# release's checksums over TLS, which is weaker, and deliberate.
+# against the release's checksums, which JetBrains signs. The signing key is
+# vendored (jetbrains.gpg: JetBrains' download key, fingerprint B46D C71E 03FE
+# EB7F 89D1 F249 1F7A 8F87 B9D8 F501, from https://download-cdn.jetbrains.com/KEYS,
+# dearmored) so a build trusts JetBrains, not whatever GitHub serves. gpgv, not
+# Debian's sqv: sqv refuses the encoding of JetBrains' signatures.
 [ -n "$SERVER" ] || {
   echo "teamcity: which server? use --feature teamcity:server=https://teamcity.example.com" >&2
   exit 1
 }
 
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl
+apt-get install -y --no-install-recommends ca-certificates curl gpgv
 
 arch=$(dpkg --print-architecture)  # arm64 or amd64, as the release names them
 package="teamcity_linux_${arch}.deb"
-checksums="teamcity-${VERSION}-checksums.txt"
-release="https://github.com/JetBrains/teamcity-cli/releases/download/v${VERSION}"
+case "$VERSION" in
+  latest) release="https://github.com/JetBrains/teamcity-cli/releases/latest/download" ;;
+  *) release="https://github.com/JetBrains/teamcity-cli/releases/download/v${VERSION}" ;;
+esac
 
+install -m 0644 jetbrains.gpg /tmp/jetbrains.gpg
 cd /tmp
 curl -fsSL -o "$package" "$release/$package"
-[ -f "$OLDPWD/$checksums" ] && cp "$OLDPWD/$checksums" . || curl -fsSL -o "$checksums" "$release/checksums.txt"
-grep " ${package}\$" "$checksums" | sha256sum -c -
+curl -fsSL -o checksums.txt "$release/checksums.txt"
+curl -fsSL -o checksums.txt.asc "$release/checksums.txt.asc"
+gpgv --keyring /tmp/jetbrains.gpg checksums.txt.asc checksums.txt
+grep " ${package}\$" checksums.txt | sha256sum -c -
 dpkg -i "$package"
-rm -f "$package" "$checksums"
+rm -f "$package" checksums.txt checksums.txt.asc jetbrains.gpg
 cd "$OLDPWD"
 
 apt-get clean

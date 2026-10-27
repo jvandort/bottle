@@ -212,10 +212,10 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   bottle exec reponame -- gh pr list
   ```
 - `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
-  pinned and checksum-verified from its GitHub release, with its access token
+  verified against JetBrains' signature from its GitHub release, with its access token
   held by the egress proxy rather than the bottle (see `bottle auth login`).
   Options: `server` (required), the TeamCity server, e.g.
-  `https://teamcity.example.com`; `version`, the CLI release; and `readOnly`
+  `https://teamcity.example.com`; `version`, the CLI release (default `latest`); and `readOnly`
   (default `true`), which blocks everything but GET, so a bottle can read
   builds but not start or change anything; pass `readOnly=false` to let it
   start them. A token with read-only permissions is the real boundary.

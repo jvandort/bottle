@@ -15,8 +15,8 @@
     },
     "version": {
       "type": "string",
-      "default": "1.5.0",
-      "description": "The CLI release to install. This feature holds the checksums for the default; another version's are fetched from its own release."
+      "default": "latest",
+      "description": "The CLI release to install, e.g. 1.6.0, or latest. Either way, its checksums are checked against JetBrains' signature."
     },
     "readOnly": {
       "type": "boolean",
