@@ -123,8 +123,8 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
       to use (bottled's log, 2026-10-27): Claude Code started with
       `CLAUDE_CODE_OAUTH_TOKEN`, gh's reads, git clones. Not seen, so
       refused: `/usage` (`/api/oauth/usage`), artifacts (`/api/frame/**`),
-      `/v1/messages/count_tokens`, remote sessions, Git LFS. Add each when a
-      refusal shows it's needed.
+      remote sessions, Git LFS. Add each when a refusal shows it's needed,
+      as `/v1/messages/count_tokens` was (2026-10-27).
     - `POST /graphql` is allowed for gh's reads, and takes mutations as
       well: refusing those means reading the body's operation.
     - Unverified for Develocity: `/distribution-broker/files/**` (the 4.6.1

@@ -71,6 +71,7 @@
             ],
             "allow": [
               "POST /v1/messages",
+              "POST /v1/messages/count_tokens",
               "POST /api/event_logging/**",
               "POST /api/eval/*",
               "GET /api/claude_cli/bootstrap",
