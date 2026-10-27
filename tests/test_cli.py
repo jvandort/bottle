@@ -58,6 +58,14 @@ class LogTest(CliTestCase):
         logging.getLogger("asyncio").warning("Task was destroyed but it is pending!")
         self.assertRegex(self.log(), r"\n\d{4}-\d\d-\d\d [\d:,]+ \d+ asyncio Task was destroyed")
 
+    def test_a_log_deleted_while_its_open_is_made_again(self) -> None:
+        self.run_cli("status")
+        log = self.bottle_home / "logs" / "bottle.log"
+        log.unlink()
+        logging.getLogger("bottle.test").warning("after the log was deleted")
+        self.assertIn("bottle.test after the log was deleted\n", log.read_text())
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
     def test_only_the_owner_can_read_the_log_or_list_bottle_home(self) -> None:
         self.bottle_home.mkdir(mode=0o755)
         (self.bottle_home / "logs").mkdir(mode=0o755)

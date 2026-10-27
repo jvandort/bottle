@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 from pathlib import Path
 
@@ -42,14 +43,28 @@ def log_to_file(name: str = "bottle") -> None:
         root.removeHandler(handler)
         handler.close()
     try:
-        os.close(open_log(name))  # creates it private; the handler then opens the file itself
-        handler = logging.FileHandler(log_path(name))
+        handler = _Log(name)
     except OSError:
         return
     handler.bottle_log = True
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+
+
+class _Log(logging.handlers.WatchedFileHandler):
+    """A log, opened again when it's deleted or replaced (by a rotation, say), and private each time (open_log).
+
+    bottled runs for days: a plain FileHandler would go on writing to a log
+    deleted under it, where no one can read it.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.log_name = name
+        super().__init__(log_path(name))
+
+    def _open(self):
+        return os.fdopen(open_log(self.log_name), "a", encoding=self.encoding, errors=self.errors)
 
 
 def namespace() -> str:
