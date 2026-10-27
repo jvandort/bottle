@@ -14,7 +14,7 @@
     "bottle": {
       "credentials": {
         "github": {
-          "description": "GitHub fine-grained personal access token, limited to the repositories and permissions a bottle should have (https://github.com/settings/personal-access-tokens)",
+          "description": "GitHub fine-grained personal access token, limited to the repositories and permissions a bottle should have, with no Workflows or Administration permission (https://github.com/settings/personal-access-tokens)",
           "inject": {
             "hosts": [
               "github.com",
@@ -23,11 +23,54 @@
             ],
             "header": "Authorization",
             "value": "Bearer ${credential}",
-            "standin": "GH_TOKEN"
+            "standin": "GH_TOKEN",
+            "forbid": [
+              "POST /user/{keys,ssh_signing_keys,gpg_keys}",
+              "POST /repos/*/*/keys",
+              "POST /{repos/*/*,orgs/*,enterprises/*}/actions/runners/{registration-token,remove-token,generate-jitconfig}",
+              "POST /user/codespaces",
+              "POST /repos/*/*/codespaces",
+              "POST /repos/*/*/pulls/*/codespaces",
+              "POST /user/codespaces/*/{start,publish,exports}",
+              "* /copilot_internal/v2/token",
+              "* /login/device/code",
+              "* /login/oauth/access_token",
+              "POST /repos/*/*/dispatches",
+              "POST /repos/*/*/actions/workflows/*/dispatches",
+              "PUT /repos/*/*/collaborators/*",
+              "PATCH /repos/*/*/invitations/*",
+              "POST /orgs/*/invitations",
+              "PUT /orgs/*/memberships/*",
+              "PUT /orgs/*/outside_collaborators/*",
+              "PUT /orgs/*/teams/*/memberships/*",
+              "PUT /teams/*/memberships/*",
+              "PATCH /user/memberships/orgs/*",
+              "POST /orgs/*/{personal-access-token-requests,personal-access-tokens}/**",
+              "PUT|DELETE /{repos/*/*,orgs/*,user}/{actions,codespaces,dependabot,agents}/secrets/**",
+              "PUT|DELETE /repos/*/*/environments/*/secrets/**",
+              "POST|PATCH|DELETE /{repos/*/*,orgs/*}/actions/variables/**",
+              "POST|PATCH|DELETE /repos/*/*/environments/*/variables/**",
+              "PUT /{repos/*/*,orgs/*}/actions/oidc/customization/sub",
+              "POST /orgs/*/actions/oidc/customization/properties/repo",
+              "POST|PATCH|DELETE /{repos/*/*,orgs/*}/hooks/**",
+              "POST|PATCH|DELETE /applications/*/token/**",
+              "DELETE /applications/*/grant",
+              "POST /app/installations/*/access_tokens"
+            ],
+            "allow": [
+              "GET|HEAD /",
+              "GET|HEAD /user",
+              "GET|HEAD /rate_limit",
+              "GET|HEAD /search/**",
+              "GET|HEAD /repos/**",
+              "POST /graphql",
+              "GET /*/*/info/refs",
+              "POST /*/*/git-upload-pack"
+            ]
           }
         }
       },
-      "context": "`gh` is installed. It and git are already authenticated to github.com by the host. SSH URLs for github.com are fetched over https."
+      "context": "`gh` is installed. It and git are already authenticated to github.com by the host, for reading: gh's queries, and cloning and fetching. Pushes and GitHub's REST writes are refused. SSH URLs for github.com are fetched over https."
     }
   }
 }

@@ -26,18 +26,47 @@
       ],
       "credentials": {
         "develocity": {
-          "description": "Develocity access key, from your user menu (My settings, Access keys); its user needs the 'Access build data via the API' permission. Read from the keyFile option's file first",
+          "description": "Develocity access key, from your user menu (My settings, Access keys); its user needs the 'Access build data via the API' permission, and no administrative ones: what the key's user may do, a bottle may too, but for the few routes bottle refuses. Read from the keyFile option's file first",
           "properties": "${keyFile}",
           "inject": {
             "hosts": [
               "${server}"
             ],
             "header": "Authorization",
-            "value": "Bearer ${credential}"
+            "value": "Bearer ${credential}",
+            "forbid": [
+              "* /api/auth/**",
+              "* /provision-access-key/**",
+              "* /api/test-distribution/agent-pools/*/registration-keys/**",
+              "POST|PUT|PATCH|DELETE /api/test-distribution/agent-pools/**",
+              "* /api/build-cache/nodes/*/secret",
+              "POST|PUT|PATCH|DELETE /api/build-cache/**",
+              "POST|PUT|PATCH|DELETE /api/{projects,project-groups}/**"
+            ],
+            "allow": [
+              "GET|HEAD /api/{version,builds/**,tests/**,console-logs/**}",
+              "* /mcp/**",
+              "GET|HEAD|PUT /cache/**",
+              "GET /usage/users/check",
+              "GET /build-agent/checkin/**",
+              "POST /predictive-test-selection/**",
+              "* /distribution-broker/**"
+            ],
+            "rewrite": [
+              {
+                "route": "POST /scans/publish/*/*/token",
+                "json": "accessKey"
+              },
+              {
+                "route": "GET /distribution-broker/**",
+                "header": "X-User-Access-Key",
+                "encoding": "base64"
+              }
+            ]
           }
         }
       },
-      "context": "Develocity (${server}) is authenticated by the host: send `Authorization: Bearer the-egress-proxy-holds-the-real-one` to a server and the host puts its real access key in its place. If Claude Code is installed, it has each server's MCP server (<server>/mcp), named develocity-<host> with dots as dashes (develocity-ge-example-com), set up that way."
+      "context": "Develocity (${server}) is set up for Gradle and, as develocity-<host> MCP servers, for Claude Code. Access keys are in ~/.gradle/develocity/keys.properties, by server."
     }
   }
 }

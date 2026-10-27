@@ -1,10 +1,12 @@
 import asyncio
 import base64
+import dataclasses
 import functools
 import ipaddress
 import shutil
 import ssl
 import subprocess
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,9 +84,15 @@ class Upstream:
         await server.wait_closed()
 
     async def upstream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Echoes raw bytes, or answers an HTTP request after recording its head."""
+        """Echoes raw bytes, or answers an HTTP request after recording its head, and its body if it has a length."""
         first = await reader.read(64 * 1024)
         if first.startswith((b"GET ", b"POST ")):
+            head, _, body = first.partition(b"\r\n\r\n")
+            length = next((int(line.split(b":")[1]) for line in head.split(b"\r\n")
+                           if line.lower().startswith(b"content-length:")), 0)
+            while len(body) < length and (more := await reader.read(64 * 1024)):
+                body += more
+                first += more
             await self.received.put(first)
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
         else:
@@ -277,14 +285,17 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_log_says_a_credential_was_attached_and_what_the_server_answered(self) -> None:
         with self.assertLogs("bottle.egress") as logs:
-            await self.head_of(b"GET /v1/models HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+            await self.head_of(b"GET /v1/models?key=signed HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
             await asyncio.sleep(0.05)
             await self.head_of(b"GET /v1/public HTTP/1.1\r\nHost: upstream.test\r\n\r\n")
             await asyncio.sleep(0.05)
         port = self.upstream_port
-        self.assertRegex(logs.output[-2], rf"test {CONNECTED_TO}:{port} \(upstream.test\) \+credential -> 127.0.0.1 ok 200 ")
+        self.assertRegex(logs.output[-4], r"test GET https://upstream.test/v1/models credential 200$")
+        self.assertRegex(logs.output[-3], rf"test {CONNECTED_TO}:{port} \(upstream.test\) \+credential -> 127.0.0.1 ok 200 ")
+        self.assertRegex(logs.output[-2], r"test GET https://upstream.test/v1/public passed 200$")
         self.assertRegex(logs.output[-1], rf"test {CONNECTED_TO}:{port} \(upstream.test\) -> 127.0.0.1 ok 200 ")
         self.assertNotIn("real-token", "\n".join(logs.output))
+        self.assertNotIn("signed", "\n".join(logs.output))
 
     async def test_with_the_credential_nothing_else_the_bottle_sent_under_that_name_leaves(self) -> None:
         head = await self.head_of(
@@ -358,6 +369,213 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
             Flow("127.0.0.1", self.upstream_port, b"GET / HTTP/1.1\r\nHost: upstream.test\r\n\r\n"))
         self.assertEqual(decision, Direct(("127.0.0.1",)))
         self.assertTrue(all(private is False for _, private in self.asked))
+
+
+    def with_routes(self, **routes) -> None:
+        """The gateway's credential, with `forbid`, `allow` or `rewrites` routes, given as text."""
+        parsed = {}
+        for name, value in routes.items():
+            if name == "rewrites":
+                parsed[name] = tuple(egress.Rewrite(egress.Route.parse(route), **where) for route, where in value)
+            else:
+                parsed[name] = tuple(egress.Route.parse(r) for r in value)
+        self.gateway.injections = (dataclasses.replace(self.gateway.injections[0], **parsed),)
+
+    async def test_a_forbidden_route_never_leaves_with_the_credential_or_without(self) -> None:
+        self.with_routes(forbid=["POST /api/auth/token"])
+        for target in (b"/api/auth/token?expiresInHours=4", b"/API/Auth/Token", b"/api//auth/token/", b"/api/auth/%74oken",
+                       b"/api/auth/%2574oken", b"/api/x/../auth/token", b"/api/auth/token;jsessionid=1", b"/api/auth/token.json",
+                       b"/api%2Fauth%2Ftoken", b"/api\\auth/token"):
+            for auth in self.asking:
+                with self.subTest(target=target, auth=auth):
+                    response = await self.send(b"POST " + target + b" HTTP/1.1\r\nHost: upstream.test\r\n" + auth +
+                                               b"Content-Length: 0\r\n\r\n")
+                    self.assertTrue(response.startswith(b"HTTP/1.1 403 "), response)
+        self.assertTrue(self.received.empty())
+
+    async def test_a_forbidden_routes_other_methods_and_neighbours_go(self) -> None:
+        self.with_routes(forbid=["POST /api/auth/token"])
+        for request in (b"GET /api/auth/token", b"POST /api/auth/tokens", b"POST /api/auth"):
+            with self.subTest(request):
+                head = await self.head_of(request + b" HTTP/1.1\r\nAuthorization: Bearer stand-in\r\nContent-Length: 0\r\n\r\n")
+                self.assertIn("Authorization: Bearer real-token", head)
+
+    async def test_a_path_no_server_should_be_asked_for_is_refused(self) -> None:
+        self.with_routes(forbid=["POST /api/auth/token"])
+        for target in (b"/api/%00", b"/%25252525252574"):
+            with self.subTest(target):
+                response = await self.send(b"GET " + target + b" HTTP/1.1\r\n\r\n")
+                self.assertTrue(response.startswith(b"HTTP/1.1 400 "), response)
+
+    async def test_a_refusal_tells_whoever_reads_it_to_ask_the_user_not_work_around_it(self) -> None:
+        self.with_routes(forbid=["POST /api/auth/token"], allow=["GET /api/**"])
+        self.gateway.injections = (dataclasses.replace(self.gateway.injections[0], feature="develocity"),)
+        response = await self.send(b"POST /api/auth/token HTTP/1.1\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        self.assertTrue(response.startswith(b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n"), response)
+        self.assertIn(b"the develocity credential's feature forbids this route", response)
+        self.assertIn(b"don't retry the request", response)
+        # As JSON to an API client, where it shows an error's message: gh's `message`, Anthropic's `error.message`.
+        response = await self.send(
+            b"POST /api/builds HTTP/1.1\r\nAccept: application/vnd.github+json\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertIn(b"Content-Type: application/json", head)
+        error = json.loads(body)
+        self.assertEqual(error["message"], error["error"]["message"])
+        self.assertIn("the develocity credential goes only on the routes its feature allows", error["message"])
+        self.assertIn("tell the user", error["message"])
+
+    async def test_the_log_says_what_was_forbidden_and_nothing_of_the_credential(self) -> None:
+        self.with_routes(forbid=["POST /api/auth/token"])
+        with self.assertLogs("bottle.egress") as logs:
+            await self.send(b"POST /api/auth/token HTTP/1.1\r\nAuthorization: Bearer stand-in\r\n\r\n")
+            await asyncio.sleep(0.05)
+        self.assertIn("POST https://upstream.test/api/auth/token forbidden 403", "\n".join(logs.output))
+        self.assertRegex(logs.output[-1], r"\(upstream.test\) -> - forbidden ")
+        self.assertNotIn("real-token", "\n".join(logs.output))
+
+    async def test_with_allowed_routes_the_credential_goes_only_on_those(self) -> None:
+        self.with_routes(allow=["GET /api/**"])
+        head = await self.head_of(b"GET /api/builds HTTP/1.1\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        self.assertIn("Authorization: Bearer real-token", head)
+        # Asked for elsewhere, it's refused, so the tool says why.
+        response = await self.send(b"POST /api/builds HTTP/1.1\r\nAuthorization: Bearer stand-in\r\nContent-Length: 0\r\n\r\n")
+        self.assertTrue(response.startswith(b"HTTP/1.1 403 "), response)
+        self.assertIn(b"bottle refused POST /api/builds on upstream.test: the credential goes only on the routes", response)
+        self.assertIn(b"tell the user", response)
+        self.assertTrue(self.received.empty())
+        # Not asked for, the request goes as it would from the machine.
+        head = await self.head_of(b"GET /releases/x.zip HTTP/1.1\r\n\r\n")
+        self.assertNotIn("authorization", head.lower())
+
+    scan_token = [("POST /scans/publish/*/*/token", {"json": "accessKey"})]
+
+    async def test_the_stand_in_in_a_json_field_is_replaced_there(self) -> None:
+        self.with_routes(rewrites=self.scan_token, allow=["GET /api/**"])
+        body = b'{"accessKey": "stand-in", "buildToolVersion": "9.1", "note": "stand-in"}'
+        received = await self.head_of(
+            b"POST /scans/publish/gradle/4.6.1/token HTTP/1.1\r\nContent-Type: application/vnd.gradle.scan-token-request+json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        head, _, sent = received.partition("\r\n\r\n")
+        self.assertEqual(json.loads(sent), {"accessKey": "real-token", "buildToolVersion": "9.1", "note": "stand-in"})
+        self.assertIn(f"Content-Length: {len(sent)}", head)
+        self.assertEqual(head.lower().count("content-length:"), 1)
+
+    async def test_a_chunked_body_the_bottle_waits_to_send_is_read_and_sent_whole(self) -> None:
+        self.with_routes(rewrites=self.scan_token)
+        reader, writer = await self.tunnel()
+        writer.write(b"POST /scans/publish/maven/1.0/token HTTP/1.1\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n")
+        self.assertEqual(await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5), b"HTTP/1.1 100 Continue\r\n\r\n")
+        writer.write(b'10\r\n{"accessKey": "s\r\n9\r\ntand-in"}\r\n0\r\n\r\n')
+        received = (await asyncio.wait_for(self.received.get(), 5)).decode()
+        head, _, sent = received.partition("\r\n\r\n")
+        self.assertEqual(json.loads(sent), {"accessKey": "real-token"})
+        self.assertNotIn("chunked", head.lower())
+        self.assertNotIn("expect", head.lower())
+
+    async def test_a_json_field_that_isnt_exactly_the_stand_in_is_left(self) -> None:
+        self.with_routes(rewrites=self.scan_token)
+        for body in (b'{"accessKey": "stand-in-and-more"}', b'{"other": {"accessKey": "stand-in"}}', b'["stand-in"]',
+                     b'{"accessKey": "stand-in"', b'\xff'):
+            with self.subTest(body):
+                await self.send(b"POST /scans/publish/gradle/4.6.1/token HTTP/1.1\r\nContent-Length: " +
+                                str(len(body)).encode() + b"\r\n\r\n" + body)
+                received = await asyncio.wait_for(self.received.get(), 5)
+                self.assertTrue(received.endswith(b"\r\n\r\n" + body))
+                self.assertNotIn(b"real-token", received)
+
+    async def test_another_routes_body_isnt_read_for_the_stand_in(self) -> None:
+        self.with_routes(rewrites=self.scan_token)
+        body = b'{"accessKey": "stand-in"}'
+        received = await self.head_of(b"POST /scans/publish/gradle/4.6.1/upload HTTP/1.1\r\nContent-Length: " +
+                                      str(len(body)).encode() + b"\r\n\r\n" + body)
+        self.assertTrue(received.endswith('{"accessKey": "stand-in"}'))
+
+    async def test_a_body_too_big_to_read_is_refused(self) -> None:
+        self.with_routes(rewrites=self.scan_token)
+        response = await self.send(b"POST /scans/publish/gradle/4.6.1/token HTTP/1.1\r\nContent-Length: " +
+                                   str(egress.MAX_BODY_BYTES + 1).encode() + b"\r\n\r\n")
+        self.assertTrue(response.startswith(b"HTTP/1.1 413 "), response)
+
+    async def test_the_stand_in_base64_in_a_header_of_the_tools_own_is_replaced_in_kind(self) -> None:
+        self.with_routes(rewrites=[("GET /distribution-broker/**", {"header": "X-User-Access-Key", "encoding": "base64"})])
+        for presented in (base64.b64encode(b"stand-in").rstrip(b"="), base64.b64encode(b"stand-in")):
+            with self.subTest(presented):
+                head = await self.head_of(b"GET /distribution-broker/build/v2/?buildInvocationId=1 HTTP/1.1\r\n"
+                                          b"X-User-Access-Key: " + presented + b"\r\n\r\n")
+                self.assertIn("X-User-Access-Key: " + base64.b64encode(b"real-token").decode().rstrip("="), head)
+                self.assertEqual(head.lower().count("x-user-access-key:"), 1)
+        other = base64.b64encode(b"made-in-the-bottle").decode()
+        head = await self.head_of(b"GET /distribution-broker/build/v2/ HTTP/1.1\r\nX-User-Access-Key: " + other.encode() + b"\r\n\r\n")
+        self.assertIn("X-User-Access-Key: " + other, head)
+
+    async def test_a_websocket_upgrade_keeps_its_connection(self) -> None:
+        head = await self.head_of(b"GET /distribution-broker/build/v2/ HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                                  b"Sec-WebSocket-Version: 13\r\n\r\n")
+        self.assertIn("\r\nConnection: Upgrade\r\n", head)
+        self.assertIn("\r\nUpgrade: websocket\r\n", head)
+        self.assertNotIn("close", head)
+        head = await self.head_of(b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n")
+        self.assertIn("\r\nConnection: close\r\n", head)
+
+
+class RouteTest(unittest.TestCase):
+    """Which requests a route names: by method, and by the path as the server would route it."""
+
+    def matches(self, route: str, method: str, path: str) -> bool:
+        return egress.Route.parse(route).matches(method, egress._canonical(path))
+
+    def test_overlapping_a_forbidden_route(self) -> None:
+        for allowed, forbidden, overlaps in (
+            ("GET|HEAD /api/**", "* /api/auth/**", True),
+            ("GET /api/builds/**", "* /api/auth/**", False),
+            ("GET /api/**", "POST /api/auth/token", False),  # by method
+            ("GET /*/*/info/refs", "* /copilot_internal/**", True),
+            ("GET /*/*/info/refs", "* /copilot_internal/v2/token", False),
+            ("GET /a/**", "* /a", True),  # ** takes no segments too
+            ("GET /a/*", "* /a/b/c", False),
+            ("GET /a*/b", "* /*z/b", True),  # /az/b
+            ("GET /{x,b/c}/d", "* /b/c/**", True),
+            ("GET /API/Token", "* /api/token", True),
+            ("GET /api/token.json", "* /api/token", True),  # forbid also takes it without its extension
+            ("GET /api/token*", "* /api/token", True),
+            ("GET /api/tokens", "* /api/token", False),
+        ):
+            with self.subTest(f"{allowed} / {forbidden}"):
+                self.assertEqual(egress.Route.parse(allowed).overlaps_forbidden(egress.Route.parse(forbidden)), overlaps)
+
+    def test_methods(self) -> None:
+        self.assertTrue(self.matches("POST /x", "post", "/x"))
+        self.assertFalse(self.matches("POST /x", "GET", "/x"))
+        self.assertTrue(self.matches("GET|PUT /x", "PUT", "/x"))
+        self.assertTrue(self.matches("* /x", "PROPFIND", "/x"))
+
+    def test_one_segment_and_any_number(self) -> None:
+        self.assertTrue(self.matches("GET /repos/*/*/keys", "GET", "/repos/o/r/keys"))
+        self.assertFalse(self.matches("GET /repos/*/*/keys", "GET", "/repos/o/keys"))
+        self.assertFalse(self.matches("GET /repos/*/*/keys", "GET", "/repos/o/r/x/keys"))
+        self.assertTrue(self.matches("GET /a-*", "GET", "/a-b"))
+        for path in ("/hooks", "/hooks/1", "/hooks/1/pings"):
+            with self.subTest(path):
+                self.assertTrue(self.matches("GET /hooks/**", "GET", path))
+        self.assertFalse(self.matches("GET /hooks/**", "GET", "/hooksx"))
+
+    def test_alternatives_may_hold_slashes(self) -> None:
+        route = "PUT /{repos/*/*,orgs/*,user}/{actions,dependabot}/secrets/**"
+        for path in ("/repos/o/r/actions/secrets/K", "/orgs/o/dependabot/secrets/K", "/user/actions/secrets"):
+            with self.subTest(path):
+                self.assertTrue(self.matches(route, "PUT", path))
+        self.assertFalse(self.matches(route, "PUT", "/orgs/o/r/actions/secrets/K"))
+
+    def test_the_path_as_a_server_routes_it(self) -> None:
+        for path in ("/API/auth/token", "/api//auth/token/", "/api/auth/%74oken", "/api/auth/%2574oken", "/./api/x/../auth/token",
+                     "/../api/auth/token", "/api/auth/token;x=1", "/api;x/auth/token", "/api%2fauth%2ftoken", "/api\\auth\\token"):
+            with self.subTest(path):
+                self.assertTrue(self.matches("POST /api/auth/token", "POST", path))
+
+    def test_not_a_route(self) -> None:
+        for text in ("", "POST", "/x", "POST x", "POST /x y", "GET,PUT /x", "GET /{x", "GET /x}"):
+            with self.subTest(text), self.assertRaises(ValueError):
+                egress.Route.parse(text)
 
 
 class InjectionMatchTest(unittest.TestCase):

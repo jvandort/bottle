@@ -298,6 +298,10 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
                 value=credential.inject.value.replace(features.CREDENTIAL_PLACEHOLDER, value),
                 standin=features.STANDIN,
                 credential=value,
+                rewrites=credential.inject.rewrites,
+                forbid=credential.inject.forbid,
+                allow=credential.inject.allow,
+                feature=credential.name,
             ))
     return injections
 

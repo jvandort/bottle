@@ -42,6 +42,28 @@ those hosts (see bottle/egress.py).
     value    The whole header value, with ${credential} where the real one goes.
     standin  An environment variable a bottle gets a fake token in, for a tool
              that won't work until it thinks it's logged in (see below).
+    forbid   Routes never sent to the hosts, with the credential or without:
+             `METHOD[|METHOD] /path`, `*` for any method, and in the path `*`
+             for part of a segment, `**` for any number of them, `{a,b}` for
+             either (see egress.Route). For the requests whose answer is a
+             credential (a token minted from this one, a key provisioned, a
+             runner registered), or that let something outside the bottle
+             act with it later: the proxy would otherwise spend the
+             credential on them like any other.
+    allow    Routes the credential is attached to, when there are any; a
+             request on another that presents the stand-in is refused. None
+             may reach a forbidden route: forbid is what allow must never
+             grow to cover, checked when the feature loads.
+    rewrite  Where else a tool presents the stand-in, by route: a header whose
+             whole value is the stand-in, or a top-level field of a JSON body,
+             either raw or base64 (`"encoding": "base64"`, unpadded):
+
+               {"route": "POST /scans/publish/*/*/token", "json": "accessKey"}
+               {"route": "GET /distribution-broker/**", "header": "X-User-Access-Key",
+                "encoding": "base64"}
+
+             The credential goes in that place, in the same encoding, when
+             what's there is exactly the stand-in, and nowhere else.
 
   A tool in the bottle talks to the host over https as it always would: the
   proxy terminates the tunnel with a certificate from the bottle's egress CA,
@@ -114,7 +136,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from bottle import cache as cache_module, images
+from bottle import cache as cache_module, egress, images
 from bottle.errors import BottleError
 
 FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
@@ -130,7 +152,8 @@ BOTTLE_KEYS = {"credentials", "cache", "requiredOptions", "context"}
 CACHE_KEYS = {"hosts", "exclude"}
 CREDENTIAL_KEYS = {"description", "login", "inject", "properties"}
 LOGIN_KEYS = {"command", "capture"}
-INJECT_KEYS = {"hosts", "header", "value", "standin"}
+INJECT_KEYS = {"hosts", "header", "value", "standin", "forbid", "allow", "rewrite"}
+REWRITE_KEYS = {"route", "header", "json", "encoding"}
 # What a stand-in variable holds: enough for a tool to believe it's configured,
 # and obvious in a `env | grep TOKEN` that the real one is elsewhere.
 STANDIN = "the-egress-proxy-holds-the-real-one"
@@ -164,6 +187,10 @@ class Inject:
     # A variable holding a fake token in the bottle, for a tool that won't
     # work until it thinks it's logged in. Never set in a login throwaway.
     standin: str | None = None
+    # Routes never sent; the only ones the credential goes on, if any; where else it's presented.
+    forbid: tuple[egress.Route, ...] = ()
+    allow: tuple[egress.Route, ...] = ()
+    rewrites: tuple[egress.Rewrite, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -477,7 +504,47 @@ def _inject(inject, options, where, fail) -> Inject:
     standin = inject.get("standin")
     if standin is not None and (not isinstance(standin, str) or not ENV_NAME.fullmatch(standin)):
         raise fail(f"{where}: inject.standin must be an environment variable name")
-    return Inject(tuple(hosts), value, header, standin)
+    forbid = _routes(inject.get("forbid", []), f"{where}: inject.forbid", fail)
+    allow = _routes(inject.get("allow", []), f"{where}: inject.allow", fail)
+    rewrites = inject.get("rewrite", [])
+    if not isinstance(rewrites, list):
+        raise fail(f"{where}: inject.rewrite must be a list")
+    rewrites = tuple(_rewrite(r, f"{where}: inject.rewrite", fail) for r in rewrites)
+    # forbid asserts what allow must never reach: a route allowed (a rewrite's
+    # is) that a forbidden one could also match is allowed too widely.
+    for route in (*allow, *(r.route for r in rewrites)):
+        for forbidden in forbid:
+            if route.overlaps_forbidden(forbidden):
+                raise fail(f"{where}: {route.text!r} is allowed, but reaches {forbidden.text!r}, which is forbidden: "
+                           "narrow it")
+    return Inject(tuple(hosts), value, header, standin, forbid, allow, rewrites)
+
+
+def _routes(routes, where, fail) -> tuple[egress.Route, ...]:
+    if not isinstance(routes, list) or not all(isinstance(r, str) for r in routes):
+        raise fail(f"{where} must be a list of routes, e.g. \"POST /api/auth/token\"")
+    try:
+        return tuple(egress.Route.parse(r) for r in routes)
+    except ValueError as e:
+        raise fail(f"{where}: {e}") from None
+
+
+def _rewrite(rewrite, where, fail) -> egress.Rewrite:
+    if not isinstance(rewrite, dict):
+        raise fail(f"{where}: each is an object")
+    unsupported = sorted(set(rewrite) - REWRITE_KEYS)
+    if unsupported:
+        raise fail(f"{where}: unsupported: {', '.join(unsupported)}")
+    route = _routes([rewrite.get("route")], where, fail)[0]
+    header, field = rewrite.get("header", ""), rewrite.get("json", "")
+    if not isinstance(header, str) or not isinstance(field, str) or bool(header) == bool(field):
+        raise fail(f"{where}: {route.text}: needs a header or a json field, not both")
+    if header and not HEADER_NAME.fullmatch(header):
+        raise fail(f"{where}: {route.text}: {header!r} isn't a header name")
+    encoding = rewrite.get("encoding", egress.RAW)
+    if encoding not in (egress.RAW, egress.BASE64):
+        raise fail(f"{where}: {route.text}: encoding is {egress.RAW} or {egress.BASE64}")
+    return egress.Rewrite(route, header, field, encoding)
 
 
 def _cache(cache, fail) -> Cache:

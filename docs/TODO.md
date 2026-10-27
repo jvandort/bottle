@@ -111,10 +111,34 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   hosts a credential names (the egress CA, bottle/ca.py), so tools use https as
   usual. What's left:
   - One request per terminated tunnel: the upstream is told
-    `Connection: close`, so a client opens a new tunnel (and handshake) per
-    request, and an `Upgrade` (WebSockets) through a terminated tunnel doesn't
-    work. A cached host's tunnel is kept alive (its responses' framing is
-    read, egress.py's `_send`); a credential's could be the same way.
+    `Connection: close` (or keeps `Upgrade`, for a WebSocket), so a client
+    opens a new tunnel (and handshake) per request. A cached host's tunnel is
+    kept alive (its responses' framing is read, egress.py's `_send`); a
+    credential's could be the same way. Until then, whatever the bottle sends
+    after the first request's head is relayed unread: a pipelined second
+    request gets no credential, but isn't checked against `forbid` either,
+    and reaches the server if it ignores `Connection: close`.
+  - Routes (`forbid`, `allow`, `rewrite`; findings of 2026-10-25). Not done yet:
+    - The `claude` and `github` allow lists are what one session was seen
+      to use (bottled's log, 2026-10-27): Claude Code started with
+      `CLAUDE_CODE_OAUTH_TOKEN`, gh's reads, git clones. Not seen, so
+      refused: `/usage` (`/api/oauth/usage`), artifacts (`/api/frame/**`),
+      `/v1/messages/count_tokens`, remote sessions, Git LFS. Add each when a
+      refusal shows it's needed.
+    - `POST /graphql` is allowed for gh's reads, and takes mutations as
+      well: refusing those means reading the body's operation.
+    - Unverified for Develocity: `/distribution-broker/files/**` (the 4.6.1
+      plugin sends an `Authorization` header there, of what isn't known),
+      whether the broker session presents the key again after its handshake,
+      and the Maven extension's and other build tools' requests (assumed to
+      be `/scans/publish/<tool>/<version>/token` with `accessKey`, like
+      Gradle's).
+    - A push adding or changing `.github/workflows/**` can run code with
+      the repository's secrets, and no route says so: only a token without
+      the Workflows permission prevents it.
+    - Hosts no credential names aren't terminated, so their routes can't be
+      refused: `ghcr.io/token`, `platform.claude.com/v1/oauth/token`. The
+      stand-in is no credential there, so nothing is minted from it.
   - A bottle picks up a re-login only when it next starts, and hosts its
     features name for a credential or the cache since it started are reached
     directly until then: its egress CA covers the hosts it was made for.

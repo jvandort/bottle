@@ -102,6 +102,23 @@ and its API, `teamcity` and `develocity` name their `server`. The agent can spen
 against those hosts and can't read it, so an agent that sends everything it
 holds to a stranger sends no token.
 
+Spending it is not a free-for-all, though. Some requests would turn the
+credential into one the bottle could hold: a token minted from it, an access
+key provisioned, an SSH key or a deploy key added, a runner registered, a
+codespace started. Each feature lists those routes (`forbid`), and bottled
+refuses them outright, with the credential or without. Beyond those, each
+attaches its credential only to the routes its tools were seen to use
+(`allow`): `github` to reads (gh's REST reads and GraphQL, clones and
+fetches), so no push and no REST write; `claude` to Claude Code's own
+requests. A refused request comes back 403, saying why and that only the user
+can allow it, as JSON to a client that asked for JSON, so gh and Claude Code
+show it. A feature's `forbid` is also an assertion over its `allow`: an
+allowed route that could reach a forbidden one fails the feature's loading,
+as allowed too widely. GraphQL is one route, `POST /graphql`, so a mutation through it isn't
+refused, so still give each credential no more than a bottle should have: a
+fine-grained GitHub token without Workflows or Administration (or read-only),
+a Develocity user without administrative permissions.
+
 Tools in the bottle talk to those hosts over HTTPS as usual. TLS is opaque, so
 for those hosts only, bottled takes the connection itself: it completes the
 bottle's TLS handshake with a certificate from the bottle's **egress CA**,
@@ -222,7 +239,12 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `https://develocity.example.com`, each with its own key and its own MCP
   server in Claude Code, `develocity-<host>` (`develocity-develocity-example-com`); `keyFile`, where the keys are (default
   `~/.gradle/develocity/keys.properties`). The key's user needs the "Access build
-  data via the API" permission. A server on a private address, as one behind a
+  data via the API" permission, and should have no administrative ones. The
+  bottle's own `~/.gradle/develocity/keys.properties` has a line for each
+  server with the placeholder in place of its key, so Gradle needs nothing set:
+  bottled puts the key where the Develocity plugin presents it, for Build Scans,
+  the build cache, test distribution and predictive test selection, and refuses
+  to mint tokens (`/api/auth/token`) or provision access keys. A server on a private address, as one behind a
   VPN often is, is reachable because the credential names it.
 
   ```sh
@@ -237,7 +259,8 @@ bottle runs features itself (no Dev Container tooling or Node) and supports a
 subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `containerEnv`, `dependsOn` / `installsAfter` naming local features, and
 `customizations.bottle` (the credentials a feature needs, the hosts each one is
-attached to and the stand-in it wants, `cache`, the hosts whose downloads are
+attached to, the stand-in it wants and the routes it's refused, allowed or
+rewritten on, `cache`, the hosts whose downloads are
 kept, `requiredOptions`, the options a user
 has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).

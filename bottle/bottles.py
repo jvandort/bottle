@@ -399,8 +399,12 @@ def context(bottle: Bottle) -> str:
         lines.append(f"- `{WORKSPACE}` is empty: this bottle has no repo.")
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
+    resolved = features_.resolve(list(bottle.features))
+    if any(f.credentials for f in resolved):
+        lines.append("- A credential the host attaches goes only where its feature allows: a request it refuses\n"
+                     "  comes back 403, saying why. That's policy, not a fault: if you need it, tell the user.")
     # Each feature's own word on what it gives the agent (customizations.bottle.context).
-    told = [(f.id, f.agent_context()) for f in features_.resolve(list(bottle.features))]
+    told = [(f.id, f.agent_context()) for f in resolved]
     told = [(feature_id, text) for feature_id, text in told if text]
     if told:
         lines.append("\n## Features")

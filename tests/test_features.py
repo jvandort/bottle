@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import features
+from bottle import egress, features
 from bottle.errors import BottleError
 
 
@@ -63,6 +63,119 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", github.container_env)
         # Asked for, not captured from a login flow: gh's would mint a token for every repo.
         self.assertIsNone(credential.login)
+
+    def injection(self, feature_id: str) -> egress.Injection:
+        """The feature's credential as bottled attaches it, but for the host and the value."""
+        [credential] = features.load(feature_id).credentials
+        inject = credential.inject
+        return egress.Injection(host="x", header=inject.header, value="v", standin=features.STANDIN, credential="v",
+                                rewrites=inject.rewrites, forbid=inject.forbid, allow=inject.allow)
+
+    def test_routes_that_mint_export_or_grant_credentials_are_forbidden(self) -> None:
+        # The report's critical and high rows (2026-10-25), on each feature's hosts.
+        for feature_id, method, path in (
+            ("develocity", "POST", "/api/auth/token"),
+            ("develocity", "POST", "/api/auth/revoke-signing-keys"),
+            ("develocity", "POST", "/provision-access-key/init/gradle/4.6.1/host"),
+            ("develocity", "GET", "/provision-access-key/poll/abc"),
+            ("develocity", "GET", "/api/test-distribution/agent-pools/p/registration-keys"),
+            ("develocity", "POST", "/api/test-distribution/agent-pools/p/registration-keys"),
+            ("develocity", "PUT", "/api/test-distribution/agent-pools/p"),
+            ("develocity", "POST", "/api/build-cache/nodes/n/secret"),
+            ("develocity", "POST", "/api/build-cache/nodes/n/purge"),
+            ("develocity", "PUT", "/api/projects/p"),
+            ("github", "POST", "/user/keys"),
+            ("github", "POST", "/user/ssh_signing_keys"),
+            ("github", "POST", "/repos/o/r/keys"),
+            ("github", "POST", "/repos/o/r/actions/runners/registration-token"),
+            ("github", "POST", "/orgs/o/actions/runners/generate-jitconfig"),
+            ("github", "POST", "/user/codespaces"),
+            ("github", "POST", "/repos/o/r/pulls/1/codespaces"),
+            ("github", "POST", "/user/codespaces/c/exports"),
+            ("github", "GET", "/copilot_internal/v2/token"),
+            ("github", "POST", "/login/device/code"),
+            ("github", "POST", "/login/oauth/access_token"),
+            ("github", "POST", "/repos/o/r/dispatches"),
+            ("github", "POST", "/repos/o/r/actions/workflows/ci.yml/dispatches"),
+            ("github", "PUT", "/repos/o/r/collaborators/someone"),
+            ("github", "POST", "/orgs/o/personal-access-token-requests"),
+            ("github", "PUT", "/repos/o/r/actions/secrets/KEY"),
+            ("github", "PUT", "/user/codespaces/secrets/KEY"),
+            ("github", "PATCH", "/repos/o/r/environments/prod/variables/X"),
+            ("github", "PUT", "/orgs/o/actions/oidc/customization/sub"),
+            ("github", "POST", "/repos/o/r/hooks"),
+            ("github", "POST", "/app/installations/1/access_tokens"),
+            ("claude", "POST", "/api/oauth/claude_cli/create_api_key"),
+            ("claude", "POST", "/v1/oauth/token"),
+            ("claude", "POST", "/api/oauth/cri/token"),
+            ("claude", "POST", "/api/oauth/local_pairing/attest"),
+            ("claude", "POST", "/api/oauth/organizations/o/sync/github/auth"),
+            ("claude", "POST", "/api/oauth/organizations/o/prepaid/bundles"),
+            ("claude", "PATCH", "/api/oauth/account/settings"),
+            ("claude", "GET", "/v1/organizations/api_keys"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                self.assertTrue(self.injection(feature_id).forbids(method, egress._canonical(path)))
+
+    def test_what_the_tools_need_is_not_forbidden(self) -> None:
+        for feature_id, method, path in (
+            ("develocity", "POST", "/mcp"),
+            ("develocity", "GET", "/api/builds"),
+            ("develocity", "POST", "/scans/publish/gradle/4.6.1/token"),
+            ("develocity", "PUT", "/cache/0123abcd"),
+            # What gh, git and Claude Code were seen asking for with it (bottled's log, 2026-10-27).
+            ("github", "GET", "/"),
+            ("github", "GET", "/user"),
+            ("github", "GET", "/rate_limit"),
+            ("github", "GET", "/search/repositories"),
+            ("github", "GET", "/repos/o/r/pulls/1"),
+            ("github", "GET", "/repos/o/r/actions/runs/1/jobs"),
+            ("github", "GET", "/repos/o/r/contents/README.md"),
+            ("github", "POST", "/graphql"),
+            ("github", "GET", "/o/r.git/info/refs"),
+            ("github", "POST", "/o/r/git-upload-pack"),
+            ("claude", "POST", "/v1/messages"),
+            ("claude", "POST", "/api/event_logging/v2/batch"),
+            ("claude", "POST", "/api/eval/sdk-abc"),
+            ("claude", "GET", "/api/claude_cli/bootstrap"),
+            ("claude", "GET", "/api/claude_code/settings"),
+            ("claude", "GET", "/api/claude_code/policy_limits"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                injection = self.injection(feature_id)
+                route = egress._canonical(path)
+                self.assertFalse(injection.forbids(method, route))
+                self.assertTrue(injection.allows(method, route))
+
+    def test_the_rest_doesnt_get_the_credential(self) -> None:
+        for feature_id, method, path in (
+            ("github", "POST", "/repos/o/r/pulls"),
+            ("github", "POST", "/repos/o/r/issues/1/comments"),
+            ("github", "PUT", "/repos/o/r/pulls/1/merge"),
+            ("github", "DELETE", "/repos/o/r"),
+            ("github", "POST", "/o/r.git/git-receive-pack"),
+            ("github", "POST", "/o/r.git/info/lfs/objects/batch"),
+            ("github", "GET", "/user/installations"),
+            ("github", "POST", "/repos/o/r/releases/1/assets"),
+            ("claude", "GET", "/api/oauth/usage"),
+            ("claude", "GET", "/api/oauth/organizations/o/sync/github/auth"),
+            ("claude", "POST", "/v1/code/github/import-token"),
+            ("claude", "GET", "/v1/vaults/v/credentials"),
+            ("claude", "POST", "/api/frame/upload"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                self.assertFalse(self.injection(feature_id).allows(method, egress._canonical(path)))
+
+    def test_develocity_attaches_its_key_only_where_its_tools_use_it(self) -> None:
+        injection = self.injection("develocity")
+        for method, path in (("POST", "/api/builds"), ("GET", "/admin"), ("GET", "/scans/publish/gradle/4.6.1/token")):
+            with self.subTest(f"{method} {path}"):
+                self.assertFalse(injection.allows(method, egress._canonical(path)))
+        # Where Gradle's Develocity plugin presents it other than as a header's token.
+        self.assertEqual(
+            {(r.route.text, r.header, r.json, r.encoding) for r in injection.rewrites},
+            {("POST /scans/publish/*/*/token", "", "accessKey", "raw"),
+             ("GET /distribution-broker/**", "X-User-Access-Key", "", "base64")})
 
     def test_github_installs_after_tools_which_owns_etc_gitconfig(self) -> None:
         order = [f.id for f in features.resolve(["github", "tools"])]
@@ -332,6 +445,26 @@ class LoadTest(FeatureTestCase):
             ({"hosts": ["x"], "value": "Bearer ${credential}", "header": "bad header"}, "must be a header name"),
             ({"hosts": ["https://x"], "value": "Bearer ${credential}"}, "always reached over https"),
             ({"hosts": ["x"], "value": "Bearer ${credential}", "scheme": "http"}, "inject: unsupported: scheme"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": "POST /x"}, "inject.forbid must be a list of routes"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["/x"]}, r"inject.forbid: '/x' isn't METHOD"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "allow": ["GET x"]}, "inject.allow: 'GET x' isn't METHOD"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "allow": ["GET,PUT /x"]}, "methods are names separated by"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["GET /{x"]}, "a brace without its pair"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["* /api/auth/**"], "allow": ["GET /api/**"]},
+             r"'GET /api/\*\*' is allowed, but reaches '\* /api/auth/\*\*', which is forbidden: narrow it"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["POST /api/auth/token"],
+              "rewrite": [{"route": "POST /api/*/*", "json": "key"}]}, "'POST /api/\\*/\\*' is allowed, but reaches"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "rewrite": {}}, "inject.rewrite must be a list"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "rewrite": [{"route": "GET /x"}]},
+             "needs a header or a json field, not both"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "header": "X-Key", "json": "key"}]}, "needs a header or a json field, not both"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "header": "X Key"}]}, "isn't a header name"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "json": "key", "encoding": "hex"}]}, "encoding is raw or base64"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "json": "key", "where": "body"}]}, "unsupported: where"),
         ):
             with self.subTest(message):
                 self.feature("a", options={"flag": {"type": "boolean", "default": False}},

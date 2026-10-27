@@ -223,6 +223,11 @@ class CreateTest(BottleTestCase):
         self.assertIn("\n### Feature 'tools'\n\n", context)
         self.assertNotIn("## Features", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
 
+    def test_context_says_a_refused_credential_route_is_for_the_user(self) -> None:
+        said = "comes back 403, saying why. That's policy, not a fault: if you need it, tell the user."
+        self.assertIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("github",))))
+        self.assertNotIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("tools",))))
+
     def test_workspace_script_quotes_values(self) -> None:
         run("git", "-C", self.repo_path, "branch", "we$rd;branch")
         fake = self.fake()
@@ -280,8 +285,8 @@ class CreateTest(BottleTestCase):
 
     def test_records_feature_dependencies(self) -> None:
         self.fake()
-        resolved = [SimpleNamespace(id="tools", spec="tools", agent_context=str),
-                    SimpleNamespace(id="jvm", spec="jvm", agent_context=str)]
+        resolved = [SimpleNamespace(id="tools", spec="tools", agent_context=str, credentials=()),
+                    SimpleNamespace(id="jvm", spec="jvm", agent_context=str, credentials=())]
         with mock.patch.object(bottles.features_, "resolve", return_value=resolved), \
                 mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-jvm.tools"):
             bottle = self.create(features=["jvm"])

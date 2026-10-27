@@ -58,7 +58,24 @@
             ],
             "header": "Authorization",
             "value": "Bearer ${credential}",
-            "standin": "CLAUDE_CODE_OAUTH_TOKEN"
+            "standin": "CLAUDE_CODE_OAUTH_TOKEN",
+            "forbid": [
+              "* /api/oauth/claude_cli/create_api_key",
+              "* /v1/oauth/token",
+              "POST|PUT|PATCH|DELETE /api/oauth/cri/**",
+              "* /api/oauth/local_pairing/**",
+              "POST|PUT|PATCH|DELETE /api/oauth/organizations/*/sync/github/auth",
+              "POST|PUT|PATCH|DELETE /api/oauth/organizations/*/{setup_overage_billing,overage_spend_limit,overage_credit_grant,payment_method,prepaid/**,contracts/**}",
+              "POST|PUT|PATCH|DELETE /api/oauth/account/settings",
+              "* /v1/organizations/**"
+            ],
+            "allow": [
+              "POST /v1/messages",
+              "POST /api/event_logging/**",
+              "POST /api/eval/*",
+              "GET /api/claude_cli/bootstrap",
+              "GET /api/claude_code/{settings,policy_limits}"
+            ]
           }
         }
       },

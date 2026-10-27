@@ -62,3 +62,17 @@ for host in $hosts; do
   mv "$config.new" "$config"
 done
 chown "$_REMOTE_USER:$_REMOTE_USER" "$config"
+
+# Gradle's Develocity plugin, the same way: a keys.properties line for each
+# server, with the placeholder for its key, where the plugin looks for one on
+# the machine too, so a build authenticates as it would there, with nothing to
+# set. By bare host, as the plugin looks a server up (and a `:` in a key would
+# end it). A server it already has a line for keeps it.
+keys="$_REMOTE_USER_HOME/.gradle/develocity/keys.properties"
+mkdir -p "$(dirname "$keys")"
+touch "$keys"
+for host in $hosts; do
+  host=${host%%:*}
+  cut -d= -f1 "$keys" | grep -qxF "$host" || echo "$host=the-egress-proxy-holds-the-real-one" >> "$keys"
+done
+chown -R "$_REMOTE_USER:$_REMOTE_USER" "$_REMOTE_USER_HOME/.gradle"
