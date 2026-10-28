@@ -396,7 +396,7 @@ def context(bottle: Bottle) -> str:
         lines.append(f"- `{WORKSPACE}` is a checkout of `{Path(bottle.git_repo).name}`, {at}.")
         if bottle.remotes:
             lines.append("  Its remotes are served by the host:")
-            lines += [f"  - `{r.name}`: {_describe_remote(r)}" for r in bottle.remotes]
+            lines += [f"  - `{r.name}`: {_describe_remote(r, bottle.remotes)}" for r in bottle.remotes]
         else:
             lines.append("  It has no remotes.")
     else:
@@ -422,11 +422,13 @@ def context(bottle: Bottle) -> str:
     return text + (f"\n{bottle.context}" if bottle.context else "")
 
 
-def _describe_remote(remote: host.Remote) -> str:
+def _describe_remote(remote: host.Remote, remotes: tuple[host.Remote, ...] = ()) -> str:
     if remote.fetch == host.UPSTREAM:
         what = "the repo's upstream, up to date whenever you fetch."
     elif remote.fetch == host.HEADS:
         what = "the user's own branches, as they stand in their repo."
+        # A branch another remote advances is the bottle's own work, come back.
+        what += "".join(f" Its `{r.advance}` follows what you push to `{r.name}`." for r in remotes if r.advance)
     else:
         what = "refs the host keeps for this bottle."
     if remote.push is None:
@@ -434,7 +436,9 @@ def _describe_remote(remote: host.Remote) -> str:
     # Fetching reads other refs than pushing writes (a two-lane exchange, say), so say so,
     # or an agent fetching to check its push finds nothing and pushes again.
     echo = "" if remote.push == remote.fetch else " Fetching it doesn't show your own pushes."
-    return f"{what} You can push to it: pushes can't rewrite or delete what's already there.{echo}"
+    advance = (f" A push of `{remote.advance}` also moves the user's own `{remote.advance}` and its working tree,"
+               " when nothing of theirs is in the way." if remote.advance else "")
+    return f"{what} You can push to it: pushes can't rewrite or delete what's already there.{echo}{advance}"
 
 
 def _init_workspace(bottle: Bottle) -> None:

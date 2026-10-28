@@ -36,6 +36,17 @@ directly in its own repo. bottled never serves that direction.
 
 Nothing is mirrored or watched: every request sees the repo as it is right now.
 
+After a push, the host's checked-out branches follow it (hooks/follow.py):
+one whose upstream is a remote reading the push's namespace (folio's
+bottle/<thread>) is fast-forwarded to the bottle's branch of the same name,
+files and all, in whichever worktree has it, unless the repo says
+`git config bottle.follow false`. A remote's advance=BRANCH makes the host's
+BRANCH follow, tracking or not (folio's broker's notes). Only ever a
+fast-forward, and only when it can't lose anything: a branch with commits of
+the host's own, a change in the way, or a worktree mid-merge, -rebase and the
+like is left alone. The push succeeds either way, and its output tells the
+bottle what moved and what didn't; bottled logs it too.
+
 A bottle can also send a message to another bottle: a POST to
 http://bottle.host/messages of {"to": ..., "text": ...}, where to is an address
 it was given (see messages.py) or, with the message-any permission, a running
@@ -58,6 +69,8 @@ import logging
 import os
 import re
 import subprocess
+import sys
+import tempfile
 import time
 import zlib
 from collections.abc import Awaitable, Callable
@@ -89,6 +102,8 @@ UPSTREAM, HEADS, NS = "upstream", "heads", "ns/"
 # and a namespace is flat. Namespaces nest rather than concatenate, so `a/b`
 # would mean refs/namespaces/a/refs/namespaces/b/, not what anyone expects.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# A branch advance can name: path segments like NAME, so nothing git would read otherwise.
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,7 @@ class Remote:
     name: str
     fetch: str  # UPSTREAM, HEADS, or NS + a namespace
     push: str | None = None  # NS + the namespace pushes go into; None: read-only
+    advance: str | None = None  # the host branch a push of this name in the lane fast-forwards; None: none
 
     @property
     def fetch_namespace(self) -> str | None:
@@ -109,28 +125,35 @@ class Remote:
 
     @property
     def spec(self) -> str:
-        """As `--git-remote` takes it: work:fetch=ns/x-in,push=ns/x-out."""
-        return f"{self.name}:fetch={self.fetch}" + (f",push={self.push}" if self.push else "")
+        """As `--git-remote` takes it: work:fetch=ns/x-in,push=ns/x-out[,advance=main]."""
+        return (f"{self.name}:fetch={self.fetch}" + (f",push={self.push}" if self.push else "")
+                + (f",advance={self.advance}" if self.advance else ""))
 
     @classmethod
     def parse(cls, spec: str) -> "Remote":
-        """A remote from its spec: NAME:fetch=VIEW[,push=ns/NAMESPACE]."""
-        usage = f"invalid remote {spec!r}: use NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being {UPSTREAM}, {HEADS} or ns/NAMESPACE"
+        """A remote from its spec: NAME:fetch=VIEW[,push=ns/NAMESPACE[,advance=BRANCH]]."""
+        usage = (f"invalid remote {spec!r}: use NAME:fetch=VIEW[,push=ns/NAMESPACE[,advance=BRANCH]], "
+                 f"VIEW being {UPSTREAM}, {HEADS} or ns/NAMESPACE")
         name, colon, rest = spec.partition(":")
         if not colon or not NAME.fullmatch(name):
             raise BottleError(usage)
         settings: dict[str, str] = {}
         for item in rest.split(","):
             key, equals, value = item.partition("=")
-            if not equals or key not in ("fetch", "push") or key in settings:
+            if not equals or key not in ("fetch", "push", "advance") or key in settings:
                 raise BottleError(usage)
             settings[key] = value
-        fetch, push = settings.get("fetch"), settings.get("push")
+        fetch, push, advance = settings.get("fetch"), settings.get("push"), settings.get("advance")
         if fetch is None or not (fetch in (UPSTREAM, HEADS) or _namespace_view(fetch)):
             raise BottleError(usage)
         if push is not None and not _namespace_view(push):
             raise BottleError(f"invalid remote {spec!r}: push takes ns/NAMESPACE, the namespace pushes go into")
-        return cls(name, fetch, push)
+        if advance is not None:
+            if push is None:
+                raise BottleError(f"invalid remote {spec!r}: advance needs push: it's what a push advances")
+            if not BRANCH.fullmatch(advance) or ".." in advance or advance.endswith((".lock", "/", ".")):
+                raise BottleError(f"invalid remote {spec!r}: advance takes a branch name, e.g. main")
+        return cls(name, fetch, push, advance)
 
 
 def _namespace_view(view: str) -> bool:
@@ -250,6 +273,10 @@ class HostServices:
                     # checked-out branch and would refuse it.
                     "receive.denyCurrentBranch": "ignore",
                 }
+        # What hooks/post-receive needs to make the host's branches follow a push, and where it says what it did.
+        hook_log = None
+        if push and request.method == "POST":
+            hook_log = Path(tempfile.mkstemp(prefix="bottle-follow-", suffix=".log")[1])
         body = request.body
         if request.headers.get("content-encoding") == "gzip":
             body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
@@ -271,6 +298,8 @@ class HostServices:
             **({"GIT_NAMESPACE": namespace} if namespace else {}),
             **({"GIT_PROTOCOL": request.headers["git-protocol"]} if "git-protocol" in request.headers else {}),
             **_config_env(config),
+            **({"BOTTLE_PYTHON": sys.executable, "BOTTLE_HOOK_LOG": str(hook_log),
+                "BOTTLE_ADVANCE": remote.advance or ""} if hook_log is not None else {}),
         }
         process = await asyncio.create_subprocess_exec(
             "git", "http-backend", env=env,
@@ -281,6 +310,10 @@ class HostServices:
             log.warning("git http-backend failed: %s", err.decode(errors="replace").strip())
             await _respond(writer, 500, "Internal Server Error", b"git http-backend failed\n")
             return "failed"
+        if hook_log is not None:
+            for line in hook_log.read_text().splitlines() if hook_log.exists() else ():
+                log.info("%s: %s", self.git_dir, line)
+            hook_log.unlink(missing_ok=True)
         await _relay_cgi(out, writer)
         return "pushed" if push else "ok"
 

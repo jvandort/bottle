@@ -231,6 +231,12 @@ class CreateTest(BottleTestCase):
         self.assertNotIn(bottles.specs.PERMISSIONS["list-bottles"], context)
         self.assertNotIn("## Permissions", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
 
+    def test_context_says_which_branch_a_push_advances(self) -> None:
+        remotes = tuple(host.Remote.parse(r) for r in ("host:fetch=heads", "agent:fetch=ns/x,push=ns/x,advance=main"))
+        context = bottles.context(bottles.Bottle("b", "id", "base", "main", "c" * 40, 0.0, git_repo="/r", remotes=remotes))
+        self.assertIn("`host`: the user's own branches, as they stand in their repo. Its `main` follows what you push to `agent`.", context)
+        self.assertIn("A push of `main` also moves the user's own `main` and its working tree", context)
+
     def test_context_says_a_refused_credential_route_is_for_the_user(self) -> None:
         said = "comes back 403, saying why. That's policy, not a fault: if you need it, tell the user."
         self.assertIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("github",))))

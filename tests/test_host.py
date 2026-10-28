@@ -6,6 +6,7 @@ import zlib
 import unittest
 
 from bottle import egress, host
+from bottle.errors import BottleError
 from tests.support import GitTestCase, run
 
 
@@ -247,6 +248,159 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
                 response = await self.request(b"GET " + path + b" HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
                 self.assertTrue(response.startswith(b"HTTP/1.1 404"), response[:40])
 
+
+
+class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
+    """The host's checked-out branches follow a bottle's push, when it's safe, and the push says what happened.
+
+    The host repo is set up as folio sets one up: a remote, bottle/t, reading the
+    bottle's lane, and a branch genie/x tracking the lane's genie/x, checked out.
+    """
+
+    OUT = "refs/namespaces/t-out"
+
+    async def asyncSetUp(self) -> None:
+        self.repo = self.make_repo("app")
+        remotes = (host.Remote.parse("agent:fetch=ns/t-out,push=ns/t-out"),
+                   host.Remote.parse("notes:fetch=ns/n-out,push=ns/n-out,advance=main"))
+        server, self.env = await serve_bottle_host(host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes))
+        self.addAsyncCleanup(RemotesTest._close, server)
+        for key, value in (("url", str(self.repo)), ("fetch", "+refs/heads/*:refs/remotes/bottle/t/*"),
+                           ("uploadpack", "git --namespace=t-out upload-pack")):
+            run("git", "-C", self.repo, "config", f"remote.bottle/t.{key}", value)
+        self.workspace = self.tmp / "workspace"
+        run("git", "clone", "-q", self.repo, self.workspace)
+        for name in ("agent", "notes"):
+            run("git", "-C", self.workspace, "remote", "add", name, f"http://bottle.host/git/{name}")
+        run("git", "-C", self.workspace, "checkout", "-q", "-b", "genie/x")
+        self.write("a.txt", "first\n")
+        await self.push()
+        # As `git fetch bottle/t && git switch genie/x` does: the user's copy, tracking the bottle's.
+        run("git", "-C", self.repo, "fetch", "-q", "bottle/t")
+        run("git", "-C", self.repo, "switch", "-q", "genie/x")
+        self.assertEqual("refs/remotes/bottle/t/genie/x", run("git", "-C", self.repo, "rev-parse", "--symbolic-full-name", "genie/x@{upstream}"))
+
+    async def push(self, refspec: str = "genie/x", remote: str = "agent") -> str:
+        """Push from the bottle; what the push's output said about following."""
+        result = await asyncio.to_thread(subprocess.run, ["git", "push", remote, refspec], cwd=self.workspace,
+                                         env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return "\n".join(line.removeprefix("remote: ").strip() for line in result.stderr.splitlines()
+                         if line.startswith("remote: bottle:"))
+
+    def write(self, path: str, text: str) -> str:
+        (self.workspace / path).write_text(text)
+        run("git", "-C", self.workspace, "add", path)
+        run("git", "-C", self.workspace, "commit", "-q", "-m", f"write {path}")
+        return run("git", "-C", self.workspace, "rev-parse", "HEAD")
+
+    def users(self, branch: str = "genie/x") -> str:
+        return run("git", "-C", self.repo, "rev-parse", branch)
+
+    async def test_a_tracking_branch_follows_files_and_all_and_the_bottle_is_told(self) -> None:
+        pushed = self.write("a.txt", "second\n")
+        with self.assertLogs("bottle.egress", "INFO") as logs:
+            said = await self.push()
+        self.assertEqual(pushed, self.users())
+        self.assertEqual("second\n", (self.repo / "a.txt").read_text())
+        self.assertEqual(pushed, self.users("bottle/t/genie/x"))  # as if the user had fetched
+        self.assertEqual(f"bottle: moved the user's genie/x to {pushed[:12]}, files and all", said)
+        self.assertIn("moved the user's genie/x", "\n".join(logs.output))
+
+    async def test_uncommitted_changes_elsewhere_come_along(self) -> None:
+        (self.repo / "mine.txt").write_text("not committed\n")
+        pushed = self.write("a.txt", "second\n")
+        await self.push()
+        self.assertEqual(pushed, self.users())
+        self.assertEqual("not committed\n", (self.repo / "mine.txt").read_text())
+
+    async def test_not_over_a_change_in_the_way(self) -> None:
+        (self.repo / "a.txt").write_text("the user's edit\n")
+        before = self.users()
+        self.write("a.txt", "second\n")
+        said = await self.push()
+        self.assertEqual(before, self.users())
+        self.assertEqual("the user's edit\n", (self.repo / "a.txt").read_text())
+        self.assertEqual("bottle: didn't move the user's genie/x: Your local changes to the following files would be "
+                         "overwritten by merge: a.txt", said)
+
+    async def test_not_over_commits_of_the_users(self) -> None:
+        mine = self.commit(self.repo, "the user's own")
+        self.write("a.txt", "second\n")
+        said = await self.push()
+        self.assertEqual(mine, self.users())
+        self.assertEqual("bottle: didn't move the user's genie/x: it has commits yours doesn't", said)
+
+    async def test_not_in_the_middle_of_a_git_operation(self) -> None:
+        before = self.users()
+        (self.repo / ".git" / "MERGE_HEAD").write_text(before + "\n")
+        self.write("a.txt", "second\n")
+        said = await self.push()
+        self.assertEqual(before, self.users())
+        self.assertEqual("bottle: didn't move the user's genie/x: it's in the middle of a merge", said)
+
+    async def test_not_when_the_branch_isnt_checked_out(self) -> None:
+        # Under a curate review, HEAD is curate/genie/x: the branch isn't checked out, so nothing moves.
+        run("git", "-C", self.repo, "switch", "-q", "-c", "curate/genie/x")
+        before = self.users()
+        pushed = self.write("a.txt", "second\n")
+        self.assertEqual("", await self.push())
+        self.assertEqual(before, self.users())
+        self.assertEqual("first\n", (self.repo / "a.txt").read_text())
+        self.assertEqual(pushed, self.users("bottle/t/genie/x"))  # fetched all the same
+
+    async def test_in_whichever_worktree_has_it(self) -> None:
+        run("git", "-C", self.repo, "switch", "-q", "main")
+        elsewhere = self.tmp / "review"
+        run("git", "-C", self.repo, "worktree", "add", "-q", elsewhere, "genie/x")
+        pushed = self.write("a.txt", "second\n")
+        said = await self.push()
+        self.assertEqual(pushed, self.users())
+        self.assertEqual("second\n", (elsewhere / "a.txt").read_text())
+        self.assertEqual(f"bottle: moved the user's genie/x (in worktree review) to {pushed[:12]}, files and all", said)
+        self.assertNotIn(str(self.tmp), said)  # no host paths for the bottle
+
+    async def test_branches_tracking_anything_else_stay_put(self) -> None:
+        run("git", "-C", self.repo, "branch", "--unset-upstream", "genie/x")
+        before = self.users()
+        self.write("a.txt", "second\n")
+        self.assertEqual("", await self.push())
+        self.assertEqual(before, self.users())
+
+    async def test_the_repo_can_say_no(self) -> None:
+        run("git", "-C", self.repo, "config", "bottle.follow", "false")
+        before = self.users()
+        self.write("a.txt", "second\n")
+        self.assertEqual("", await self.push())
+        self.assertEqual(before, self.users())
+
+    async def test_advance_moves_its_branch_tracking_or_not(self) -> None:
+        run("git", "-C", self.repo, "config", "bottle.follow", "false")  # advance is its own
+        run("git", "-C", self.repo, "switch", "-q", "main")
+        run("git", "-C", self.workspace, "switch", "-q", "main")
+        pushed = self.write("Now.md", "in flight: nothing\n")
+        said = await self.push("main", remote="notes")
+        self.assertEqual(pushed, self.users("main"))
+        self.assertEqual("in flight: nothing\n", (self.repo / "Now.md").read_text())
+        self.assertEqual(f"bottle: moved the user's main to {pushed[:12]}, files and all", said)
+
+    async def test_ignored_files_dont_stop_it(self) -> None:
+        self.write(".gitignore", ".obsidian/\n")
+        await self.push()
+        (self.repo / ".obsidian").mkdir()
+        (self.repo / ".obsidian" / "workspace.json").write_text("{}")
+        pushed = self.write("Now.md", "x\n")
+        await self.push()
+        self.assertEqual(pushed, self.users())
+
+    def test_advance_needs_push_and_a_branch(self) -> None:
+        self.assertEqual("main", host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main").advance)
+        self.assertEqual("a:fetch=ns/x,push=ns/x,advance=notes/main",
+                         host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=notes/main").spec)
+        for spec in ("a:fetch=ns/x,advance=main", "a:fetch=ns/x,push=ns/x,advance=../main",
+                     "a:fetch=ns/x,push=ns/x,advance=-x", "a:fetch=ns/x,push=ns/x,advance=main.lock"):
+            with self.subTest(spec), self.assertRaises(BottleError):
+                host.Remote.parse(spec)
 
 
 class MessagesTest(unittest.IsolatedAsyncioTestCase):

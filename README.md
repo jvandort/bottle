@@ -315,7 +315,19 @@ live, at `http://bottle.host/`, which bottled answers. What a fetch sees is one 
 - `ns/NAMESPACE`: the refs in one [git namespace](https://git-scm.com/docs/gitnamespaces)
   of your repo, and nothing else.
 
-With `push`, pushes go into that namespace. A namespace is what confines the
+With `push`, pushes go into that namespace. **Your checked-out branches follow
+a push**: a branch of yours whose upstream is a remote reading that namespace
+(folio's `bottle/<thread>`, so any branch you got with `git switch` after
+fetching it) is fast-forwarded to what the bottle pushed, files and all, in
+whichever worktree has it checked out, and the remote's tracking refs are
+fetched. Only when nothing would be lost: a branch with commits of yours, a
+change in the way, or a worktree in the middle of a merge, rebase,
+cherry-pick, revert or bisect is left alone; so is a branch checked out
+nowhere, as under a curate review. The push succeeds either way, and its
+output tells the bottle what moved and what didn't (`remote: bottle: ...`);
+bottled logs it too. `git config bottle.follow false` in your repo turns it
+off. A remote can also `advance=BRANCH`: your BRANCH follows its pushes the
+same way, tracking or not (folio's broker's notes). A namespace is what confines the
 bottle: every ref its `receive-pack` resolves is inside it, and your own refs
 aren't advertised to it at all. Pushes are append-only, refusing force-pushes
 and deletes, so nothing you've already read changes underneath you; no other
