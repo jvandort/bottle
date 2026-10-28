@@ -43,7 +43,7 @@ class NewTest(FolioTestCase):
     def test_the_repos_spec_is_checked_and_saved_first(self) -> None:
         self.ok("new", "fix-it")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
-        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G"})
+        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G", "thread": "fix-it"})
 
     def test_refuses_a_bad_name_or_a_taken_one(self) -> None:
         for name in ("Fix", "fix_it", "fix-", "fix--it", "fix/it"):
@@ -274,11 +274,22 @@ class ConfigureTest(FolioTestCase):
     def test_update_needs_something_to_change(self) -> None:
         self.assertEqual(self.folio("configure", "update").returncode, 2)
 
-    def test_a_new_thread_gets_the_spec(self) -> None:
+    def test_a_new_thread_gets_the_spec_and_its_name(self) -> None:
         self.ok("configure", "set", "--feature", "tools", "--feature", "claude")
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
-        self.assertEqual(bottle["spec"]["features"], ["claude", "tools"])
+        self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "thread": "fix-it"})
+        self.assertNotIn("thread", repos.current(self.repo).spec())
+
+    def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
+        for key, value in (("permissions", ["message-any"]), ("thread", "other")):
+            with self.subTest(key):
+                repos.current(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
+                for args in (("new", f"t-{key}"), ("configure", "update", "--memory", "4G")):
+                    result = self.folio(*args)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"can't give {key}", result.stderr)
+        self.assertEqual(self.fake()["bottles"], {})
 
 
 class RepoListTest(FolioTestCase):

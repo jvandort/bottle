@@ -56,7 +56,8 @@ def main(argv: list[str]) -> int:
             for feature in spec.get("features", []):
                 if feature.split(":")[0] not in ("tools", "claude", "jvm", "python"):
                     fail(f"no feature named {feature.split(':')[0]!r}")
-            print(json.dumps({"features": sorted(spec.get("features", [])), "memory": spec["memory"]}))
+            canonical = {"features": sorted(spec.get("features", [])), "memory": spec["memory"]}
+            print(json.dumps(canonical | {key: spec[key] for key in ("permissions", "thread") if key in spec}))
         case ["new", *rest]:
             name = option(rest, "--name")
             if name in bottles:

@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from . import engine, lanes, picker, repos, threads
+from . import broker, engine, lanes, obsidian, picker, repos, threads
 from .errors import FolioError
 
 
@@ -73,6 +73,17 @@ def main(argv: list[str] | None = None) -> int:
         command.set_defaults(run=_configure, replace=name == "set", parser=command)
     show = configure_commands.add_parser("show", help="the repo's spec")
     show.set_defaults(run=_configure_show)
+
+    broker_ = commands.add_parser(
+        "broker", help="the broker: the thread that talks to the others, and keeps the notes",
+        description="The broker: one thread outside your repos, whose agent talks to the others' and keeps "
+        "a long-term memory of it all, as notes in its vault, an Obsidian vault folio owns. "
+        "`claude` (the default) and `shell` attach to it, starting it if need be; `pause` pauses it, as "
+        "`folio pause` does a thread; `notes` opens its vault in Obsidian.",
+    )
+    broker_.add_argument("command", nargs="?", default="claude", choices=("claude", "shell", "pause", "notes"),
+                         help="what to do (default: claude)")
+    broker_.set_defaults(run=_broker)
 
     repo = commands.add_parser("repo", help="the repos folio knows")
     repo_commands = repo.add_subparsers(required=True)
@@ -151,6 +162,35 @@ def _pause(args: argparse.Namespace) -> int:
     return 0
 
 
+def _broker(args: argparse.Namespace) -> int:
+    vault = broker.vault()
+    if args.command == "notes":
+        return _open_notes(vault.path)
+    if threads.exists(vault, broker.NAME):
+        thread = threads.load(vault, broker.NAME)
+    elif args.command == "pause":
+        raise FolioError("there's no broker to pause; `folio broker` starts it")
+    else:
+        print("Starting the broker...", file=sys.stderr)
+        thread = threads.create(vault, broker.NAME, broker_=True)
+        print(f"Started the broker. Its notes: {vault.path}", flush=True)
+    if args.command == "pause":
+        print("Pausing the broker...", file=sys.stderr)
+        threads.pause(vault, thread)
+        print("Paused the broker. Resume it with: folio broker")
+        return 0
+    threads.attach(vault, thread, threads.CLAUDE if args.command == "claude" else threads.SHELL)
+
+
+def _open_notes(path) -> int:
+    """Open the vault in Obsidian, if it's installed; else say where it is."""
+    if obsidian.installed():
+        print(obsidian.open_vault(path))
+    else:
+        print(f"The broker's notes are in {path}: open that folder as a vault in Obsidian.")
+    return 0
+
+
 def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
@@ -205,7 +245,7 @@ def _configure(args: argparse.Namespace) -> int:
         spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
         if args.memory is not None:
             spec["memory"] = args.memory
-    spec = engine.validate_spec(spec)
+    spec = repos.check_repo_spec(engine.validate_spec(spec))
     repo.save_spec(spec)
     print(f"Set {repo.name}'s spec: {_spec(spec)}")
     return 0

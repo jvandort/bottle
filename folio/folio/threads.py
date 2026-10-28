@@ -34,20 +34,27 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from . import engine, lanes, snapshots, store
+from . import broker, engine, lanes, snapshots, store
 from .advice import advice
 from .errors import FolioError
-from .repos import DEFAULT_SPEC, Repo
+from .repos import DEFAULT_SPEC, Repo, check_repo_spec
 
 NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 RECORD = "thread.json"
 WORKSPACE = "/workspace"
 CLAUDE, SHELL = "claude", "shell"
 # What each session runs. Claude carries on with the thread's conversation if
-# it has one; checked in the bottle, at the moment the session starts.
+# it has one, and runs the claude feature's channel, bottle-event, if the bottle
+# has it, so events and other bottles' messages reach its session; both checked
+# in the bottle, at the moment the session starts. The channel isn't on Claude
+# Code's allowlist, so it's loaded as a development channel, which Claude Code
+# asks to confirm each time it starts.
 SESSIONS = {
-    CLAUDE: 'if ls "$HOME"/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; '
-            'then exec claude --continue; else exec claude; fi',
+    CLAUDE: 'set --; '
+            'if ls "$HOME"/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then set -- --continue; fi; '
+            'if command -v bottle-event >/dev/null; '
+            'then set -- "$@" --dangerously-load-development-channels server:events; fi; '
+            'exec claude "$@"',
     SHELL: "exec bash -l",
 }
 # What a session's programs are told their terminal is. Not the one attached,
@@ -98,6 +105,7 @@ class Thread:
     created: float
     last_active: float
     base: str | None = None  # the branch it started from, if one was asked for; None: the repo's default
+    broker: bool = False  # the broker (see broker.py), whose bottle is made folio's way, not the repo's
 
 
 def directory(repo: Repo, name: str) -> Path:
@@ -143,14 +151,14 @@ def _snapshot(repo: Repo, thread: Thread) -> Path | None:
     return slot if slot is not None and (slot / snapshots.WORKSPACE_ARCHIVE).exists() else None
 
 
-def create(repo: Repo, name: str, base: str | None = None) -> Thread:
+def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False) -> Thread:
     """A new thread: its bottle and its lane. Nothing runs in it until something attaches."""
     if not NAME.fullmatch(name):
         raise FolioError(f"invalid thread name {name!r}: use lowercase letters and digits, in words joined by '-'")
     if store.current_slot(directory(repo, name)) is not None:
         raise FolioError(f"thread {name} already exists; attach with `folio claude {name}`")
     now = time.time()
-    thread = Thread(name, f"{repo.key}-{name}", now, now, base)
+    thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", now, now, base, broker_)
     _make_bottle(repo, thread)
     try:
         lanes.register(repo.path, name)
@@ -163,12 +171,18 @@ def create(repo: Repo, name: str, base: str | None = None) -> Thread:
 
 def _make_bottle(repo: Repo, thread: Thread) -> None:
     """Create the thread's bottle from the repo's spec as it is now, served the thread's lane."""
+    if thread.broker:
+        repo.remember()
+        engine.new(thread.bottle, engine.validate_spec(broker.SPEC), repo.path, broker.remotes(thread.name),
+                   thread.base, broker.CONTEXT)
+        return
     # Checked again each time: a feature can have changed since the spec was saved.
-    spec = engine.validate_spec(repo.spec() or DEFAULT_SPEC)
+    spec = check_repo_spec(engine.validate_spec(repo.spec() or DEFAULT_SPEC))
     repo.remember()
     if repo.spec() != spec:
         repo.save_spec(spec)
-    engine.new(thread.bottle, spec, repo.path, lanes.bottle_remotes(thread.name), thread.base,
+    # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
+    engine.new(thread.bottle, spec | {"thread": thread.name}, repo.path, lanes.bottle_remotes(thread.name), thread.base,
                advice(thread.name, repo.name))
 
 

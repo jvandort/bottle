@@ -22,6 +22,20 @@ from .git import git
 # has shpool, which every thread runs in; and memory, which every spec gives.
 DEFAULT_MEMORY = "2G"
 DEFAULT_SPEC = {"features": ["tools"], "memory": DEFAULT_MEMORY}
+# Under folio's home, the repos folio owns (owned_path).
+OWNED = "repos"
+# What a repo's spec can't say: a thread's bottle never has permissions, and
+# folio names its thread itself.
+NOT_IN_A_REPOS_SPEC = ("permissions", "thread")
+
+
+def check_repo_spec(spec: dict) -> dict:
+    """`spec`, if it's one a repo's threads can be made from."""
+    given = [key for key in NOT_IN_A_REPOS_SPEC if key in spec]
+    if given:
+        raise FolioError(f"a repo's spec can't give {' or '.join(given)}: its threads' bottles never have permissions, "
+                         "and each one's thread is its own")
+    return spec
 
 
 @dataclass(frozen=True)
@@ -66,12 +80,24 @@ def path_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode()).hexdigest()[:8]
 
 
+def owned_path(name: str) -> Path:
+    """Where folio keeps a repo it owns, rather than one of yours: the broker's vault."""
+    return store.folio_home() / OWNED / name
+
+
+def owned(toplevel: Path) -> bool:
+    root = store.folio_home() / OWNED
+    return toplevel.parent in (root, root.resolve())
+
+
 def current(cwd: Path | None = None) -> Repo:
     """The repo the working directory is in."""
     try:
         toplevel = Path(git("rev-parse", "--show-toplevel", repo=cwd))
     except FolioError:
         raise FolioError("not in a git repo; folio works on the repo you're in") from None
+    if owned(toplevel):
+        raise FolioError(f"{toplevel} is folio's own; `folio {toplevel.name}` works in it")
     return Repo(_name(toplevel), toplevel)
 
 

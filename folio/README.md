@@ -35,14 +35,18 @@ never clashes. The repo key is the repo's name and a hash of its path.
   own scrollback, mouse wheel and selection work; a reattach replays the
   session's last 10000 lines into that scrollback. A session shpool can no
   longer show (an attach that fails at once) is started again, and Claude
-  carries on with its conversation. Detach with Ctrl+Space
+  carries on with its conversation. Claude starts with the `claude` feature's
+  channel, so events and other bottles' messages reach its session; Claude Code
+  asks you to confirm loading it each time it starts. Detach with Ctrl+Space
   Ctrl+Q, or by closing the terminal. tmux is there too, to start in one.
 - **Its lane** is two git namespaces in your repo: one the agent pushes into
   and you read, one you push into and it reads. Neither side's push is ever
   refused for what the other did, so conflicts are always the agent's to
   merge. Your repo sees the lane as one remote, `bottle/<thread>`: fetching
   reads the agent's branches, and pushing hands yours over. It works whether
-  or not the thread has a bottle right now. In the bottle, the agent's lane is
+  or not the thread has a bottle right now. A branch you've switched to from it
+  follows the agent's pushes, files and all, when nothing of yours is in the
+  way (see bottle's README). In the bottle, the agent's lane is
   its remote `agent` and yours is `user`, read-only. The agent can't rewrite
   or delete anything it has pushed.
 - **Its agent** is told how to work: every branch it pushes is
@@ -64,6 +68,38 @@ like build output) and Claude's conversation and memory. `folio claude` or
 `folio shell` resumes it, in a new bottle made from the repo's spec as it is
 then, so a resume is also how a thread gets features added since.
 
+## The broker
+
+`folio broker` attaches to the broker: one thread outside your repos, whose
+agent talks to your threads' agents for you -- gives them work, follows it up,
+relays what comes back -- and keeps a long-term memory of it all, as notes.
+
+```sh
+folio broker            # Claude, in the broker (starting it the first time)
+folio broker shell      # a shell beside it
+folio broker pause      # as folio pause
+folio broker notes      # its notes, in Obsidian
+```
+
+`folio broker notes` adds the vault to Obsidian's list of vaults the first time
+(asking to restart Obsidian if it's running, since Obsidian only reads the list
+when it starts), and opens it. Obsidian has no documented way to add a vault,
+so this is the undocumented one: its `obsidian.json`.
+
+It's a thread like any other, in a repo folio owns rather than one of yours:
+its vault, `~/.folio/repos/broker`, an Obsidian vault of the broker's own
+notes, which it organizes as it sees fit. It commits them on `main` and pushes
+as it goes, and each push fast-forwards the vault's own `main` and working
+tree (bottle's `advance`), so the vault Obsidian opens is always its latest.
+Hand it a branch the way you would any thread: push it to `bottle/broker` from
+the vault.
+
+Its bottle, `broker`, is made folio's way, not from a repo's spec: `claude` and
+`tools`, 2G, and two permissions no thread has: `list-bottles`, to see the
+running threads, and `message-any`, to send them messages. Threads can only
+answer it. It can't start, stop or pause anything: a paused thread is out of
+its reach until you resume it.
+
 ## Commands
 
 | Command | |
@@ -75,6 +111,7 @@ then, so a resume is also how a thread gets features added since.
 | `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec: its threads' features and memory |
+| `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` | Every repo folio has state for |
 
 Leave the thread out, on a terminal, and you choose it from a list: the
@@ -94,7 +131,9 @@ terminal it needs `--yes`.
 **`folio configure`** edits the repo's spec, which every new bottle of its
 threads is made from: `set` replaces it, `update` adds features (a feature
 given again replaces its options) or changes the memory. Bottle checks the
-spec before folio saves it. A repo with no spec gets `tools`, which has the
+spec before folio saves it. A repo's spec can't give `permissions`
+or a `thread`: folio names each thread's bottle's thread itself, and never
+gives it permissions. A repo with no spec gets `tools`, which has the
 shpool every thread runs in, and 2G of memory; add `claude` for Claude.
 
 ```sh
