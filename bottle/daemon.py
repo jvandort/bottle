@@ -19,8 +19,8 @@ import sys
 import time
 from pathlib import Path
 
-from bottle import auth, ca, cache, decider as decider_, egress
-from bottle.host import HostServices, Remote
+from bottle import auth, ca, cache, decider as decider_, egress, messages
+from bottle.host import HostServices, Remote, ServiceError
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log
 
@@ -30,6 +30,15 @@ log.addHandler(logging.NullHandler())
 START_TIMEOUT = 5
 # How often the HTTP cache's unused files are removed, after once at start.
 CACHE_EXPIRY_INTERVAL = 6 * 60 * 60
+# How long a message between bottles waits for its bottle's session to take it,
+# and how much longer bottled gives the exec that waits, which starts a process
+# in the bottle, before giving up on it.
+DELIVERY_TIMEOUT = 10
+DELIVERY_GRACE = 15
+# The claude feature's channel, which takes an event into a bottle's session;
+# it exits 75 (EX_TEMPFAIL) when no session took the event in time.
+BOTTLE_EVENT = "/usr/local/bin/bottle-event"
+NOT_TAKEN = 75
 
 
 # macOS caps Unix socket paths at 104 bytes.
@@ -193,7 +202,7 @@ class Daemon:
         # The bottle's own CA, which bottle made when it started the bottle.
         certificates = functools.partial(ca.server_context, bottle, intercepted)
         return egress.Gateway(
-            bottle, self.policy, services=HostServices(git_dir, remotes=remotes), injections=injections,
+            bottle, self.policy, services=HostServices(git_dir, remotes=remotes, bottle=bottle, deliver=self.deliver, peers=self.peers), injections=injections,
             certificates=certificates, caches=caches, store=self.store,
         )
 
@@ -212,6 +221,57 @@ class Daemon:
             caches = tuple(c for c in await asyncio.to_thread(cache.cached_for, features) if c.host in intercepted)
             gateway = self._gateway(bottle, git_dir, remotes, injections, intercepted, caches)
             return self.decider.bind(bottle, gateway, token)
+
+    async def deliver(self, sender: str, to: str, text: str) -> None:
+        """Hand `text` to the bottle `to` reaches from `sender`, as an event from `sender`; raises ServiceError.
+
+        `to` is an address issued to `sender` (see messages.py), or a bottle's
+        name if `sender` may message any. The event's from is `sender`'s address,
+        issued to the recipient, so it can answer. bottle-event send, run in the
+        recipient, queues the event and waits until the session takes it, so
+        this returns once it has.
+        """
+        from bottle import bottles, smolvm  # bottles imports this module
+
+        registry = await asyncio.to_thread(bottles.load)
+        if messages.is_address(to):
+            target = await asyncio.to_thread(messages.target, to, sender)
+        else:
+            target = to if "message-any" in _permissions(registry.get(sender)) else None
+        if target == sender:
+            raise ServiceError(400, "Bad Request", "a bottle can't send a message to itself")
+        bottle = registry.get(target) if target else None
+        if bottle is None or not self.decider.bound(target):
+            # The same whether there's no such bottle or the sender may not reach it: a refusal gives nothing away.
+            raise ServiceError(404, "Not Found", f"no running bottle you can reach as {to}")
+        reply_to = await asyncio.to_thread(messages.address, sender, target)
+        command = smolvm.exec_command(
+            bottle.machine, [BOTTLE_EVENT, "send", "-t", str(DELIVERY_TIMEOUT), "-f", reply_to], user=bottles.USER)
+        process = await asyncio.create_subprocess_exec(
+            *command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            _, err = await asyncio.wait_for(process.communicate(text.encode()), DELIVERY_TIMEOUT + DELIVERY_GRACE)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ServiceError(504, "Gateway Timeout", f"couldn't reach {to} to deliver the message") from None
+        if process.returncode == NOT_TAKEN:
+            raise ServiceError(504, "Gateway Timeout", f"{to} has no session that took the message within {DELIVERY_TIMEOUT}s")
+        if process.returncode != 0:
+            why = err.decode(errors="replace").strip() or f"exit {process.returncode}"
+            raise ServiceError(502, "Bad Gateway", f"couldn't deliver to {to}: {why}")
+        log.info("%s: delivered a message from %s", target, sender)
+
+    async def peers(self, asker: str) -> list[dict]:
+        """The running bottles but `asker`, for a bottle with list-bottles: each one's name, repo and thread."""
+        from bottle import bottles  # bottles imports this module
+
+        registry = await asyncio.to_thread(bottles.load)
+        if "list-bottles" not in _permissions(registry.get(asker)):
+            raise ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
+        return [{"name": name, "repo": Path(bottle.git_repo).name if bottle.git_repo else None,
+                 "thread": bottle.spec.get("thread")}
+                for name, bottle in sorted(registry.items()) if name != asker and self.decider.bound(name)]
 
     async def release(self, bottle: str) -> None:
         """Stop answering `bottle`'s flows, and forget its token: its machine has stopped."""
@@ -232,6 +292,11 @@ class Daemon:
                 await self.bind(bottle, git_dir, features, remotes, token)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore its decisions: %s", bottle, e)
+
+
+def _permissions(bottle) -> list[str]:
+    """What a bottle's spec permits it, by bottle's own record of it: never what the bottle says."""
+    return bottle.spec.get("permissions", []) if bottle is not None else []
 
 
 def bound_bottles() -> list[tuple[str, Path | None, tuple[str, ...], tuple[Remote, ...]]]:

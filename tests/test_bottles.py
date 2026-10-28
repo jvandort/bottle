@@ -223,6 +223,14 @@ class CreateTest(BottleTestCase):
         self.assertIn("\n### Feature 'tools'\n\n", context)
         self.assertNotIn("## Features", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
 
+    def test_context_says_what_the_bottles_permissions_let_it_do(self) -> None:
+        bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, spec={"permissions": ["message-any"]})
+        context = bottles.context(bottle)
+        self.assertIn("## Permissions", context)
+        self.assertIn(bottles.specs.PERMISSIONS["message-any"], context)
+        self.assertNotIn(bottles.specs.PERMISSIONS["list-bottles"], context)
+        self.assertNotIn("## Permissions", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
+
     def test_context_says_a_refused_credential_route_is_for_the_user(self) -> None:
         said = "comes back 403, saying why. That's policy, not a fault: if you need it, tell the user."
         self.assertIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("github",))))
@@ -485,6 +493,11 @@ class StandinTest(BottleTestCase):
 
     def test_features_that_ask_for_none_add_nothing(self) -> None:
         self.assertEqual(bottles._machine_env(("tools",)), {})
+
+    def test_permissions_reach_the_bottle_to_say_what_bottled_would_allow(self) -> None:
+        env = bottles._machine_env(("tools",), ["list-bottles", "message-any"])
+        self.assertEqual(env["BOTTLE_PERMISSIONS"], "list-bottles,message-any")
+        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "BOTTLE_PERMISSIONS")
 
     def test_the_bottle_a_login_runs_in_gets_none(self) -> None:
         """`bottle auth login claude` must find nothing that looks like a token."""

@@ -35,17 +35,32 @@ did: the bottle writes one lane, and whoever created it writes the other,
 directly in its own repo. bottled never serves that direction.
 
 Nothing is mirrored or watched: every request sees the repo as it is right now.
+
+A bottle can also send a message to another bottle: a POST to
+http://bottle.host/messages of {"to": ..., "text": ...}, where to is an address
+it was given (see messages.py) or, with the message-any permission, a running
+bottle's name. bottled hands it to that bottle's session as an event from the
+sender (see Daemon.deliver), and answers once the session has taken it, or
+with why it couldn't: no running bottle it may reach by that (404), or no
+session took it in time (504). The sender names where a message goes, never
+where it came from: bottled knows which bottle is asking, and the event's from
+is its address, issued to the recipient.
+
+With the list-bottles permission, GET http://bottle.host/bottles lists the
+other running bottles, as JSON: each one's name, repo and thread.
 """
 
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import re
 import subprocess
 import time
 import zlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from http.client import parse_headers
 from pathlib import Path
@@ -60,7 +75,10 @@ HOST = "bottle.host"
 # uses, which smolvm hands to the decider like any other.
 ADDRESS = "192.0.2.1"
 GIT_PATH = "/git"
+MESSAGES_PATH = "/messages"
+BOTTLES_PATH = "/bottles"
 MAX_BODY = 64 * 1024 * 1024
+MAX_MESSAGE = 1024 * 1024
 HOOKS = Path(__file__).resolve().parent / "hooks"
 
 
@@ -132,6 +150,14 @@ class HttpRequest:
     body: bytes = b""
 
 
+class ServiceError(Exception):
+    """A request bottled refused or couldn't carry out, with the HTTP status that says why."""
+
+    def __init__(self, status: int, reason: str, why: str) -> None:
+        super().__init__(why)
+        self.status, self.reason = status, reason
+
+
 @dataclass
 class HostServices:
     """What one bottle may ask of the host."""
@@ -139,6 +165,11 @@ class HostServices:
     git_dir: Path | None = None  # the repo every remote is served from, or None for no repo
     view_dir: Path | None = None  # where the upstream view is written (default: under BOTTLE_HOME)
     remotes: tuple[Remote, ...] = ()
+    bottle: str | None = None  # who's asking: the sender of its messages
+    # Hands a message to a bottle: (sender, to, text); raises ServiceError. None takes no messages.
+    deliver: Callable[[str, str, str], Awaitable[None]] | None = None
+    # The running bottles the asker may see: (asker) -> [{name, repo, thread}]; raises ServiceError.
+    peers: Callable[[str], Awaitable[list[dict]]] | None = None
 
     def served(self) -> dict[str, Remote]:
         return {remote.name: remote for remote in self.remotes}
@@ -149,8 +180,41 @@ class HostServices:
         remote = self.served().get(name)
         if self.git_dir is not None and request.path.startswith(GIT_PATH + "/") and remote is not None:
             return await self._git(remote, "/" + path_info, request, writer)
+        if self.bottle is not None and self.deliver is not None and request.path == MESSAGES_PATH:
+            return await self._message(request, writer)
+        if self.bottle is not None and self.peers is not None and request.path == BOTTLES_PATH:
+            return await self._bottles(request, writer)
         await _respond(writer, 404, "Not Found", b"no such bottle.host service\n")
         return "not-found"
+
+    async def _message(self, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
+        if request.method != "POST":
+            await _respond(writer, 405, "Method Not Allowed", b"POST a message: {\"to\": ..., \"text\": ...}\n")
+            return "bad-message"
+        problem = _message_problem(request.body)
+        if problem:
+            await _respond(writer, 400, "Bad Request", f"{problem}\n".encode())
+            return "bad-message"
+        message = json.loads(request.body)
+        try:
+            await self.deliver(self.bottle, message["to"], message["text"])
+        except ServiceError as e:
+            await _respond(writer, e.status, e.reason, f"{e}\n".encode())
+            return "undelivered"
+        await _respond(writer, 200, "OK", b"delivered\n")
+        return "message"
+
+    async def _bottles(self, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
+        if request.method != "GET":
+            await _respond(writer, 405, "Method Not Allowed", b"GET the running bottles\n")
+            return "bad-request"
+        try:
+            peers = await self.peers(self.bottle)
+        except ServiceError as e:
+            await _respond(writer, e.status, e.reason, f"{e}\n".encode())
+            return "refused"
+        await _respond(writer, 200, "OK", json.dumps(peers).encode() + b"\n", "application/json")
+        return "bottles"
 
     async def _git(self, remote: Remote, path_info: str, request: HttpRequest, writer: asyncio.StreamWriter) -> str:
         push = "git-receive-pack" in path_info or "service=git-receive-pack" in request.query
@@ -223,6 +287,26 @@ class HostServices:
 
 _last_pull: dict[Path, float] = {}
 _pull_locks: dict[Path, asyncio.Lock] = {}
+
+
+def _message_problem(body: bytes) -> str | None:
+    """What's wrong with a message's body, or None: it's {"to": a destination, "text": the message}."""
+    if len(body) > MAX_MESSAGE:
+        return f"a message is at most {MAX_MESSAGE} bytes"
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return 'a message is JSON: {"to": ..., "text": ...}'
+    if not isinstance(message, dict):
+        return 'a message is a JSON object: {"to": ..., "text": ...}'
+    extra = sorted(set(message) - {"to", "text"})
+    if extra:
+        return f"a message has only to and text, not {', '.join(extra)}"
+    if not isinstance(message.get("to"), str) or not message["to"].strip():
+        return "a message needs to: the address or bottle it's for"
+    if not isinstance(message.get("text"), str):
+        return "a message needs text"
+    return None
 
 
 async def pull_through(git_dir: Path) -> None:
@@ -348,9 +432,10 @@ async def _relay_cgi(output: bytes, writer: asyncio.StreamWriter) -> None:
     await writer.drain()
 
 
-async def _respond(writer: asyncio.StreamWriter, status: int, reason: str, body: bytes) -> None:
+async def _respond(writer: asyncio.StreamWriter, status: int, reason: str, body: bytes,
+                   content_type: str = "text/plain") -> None:
     writer.write(
-        f"HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n"
+        f"HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n"
         f"Connection: close\r\n\r\n".encode() + body
     )
     await writer.drain()

@@ -1,0 +1,199 @@
+#!/bin/sh
+# Events for the agent, from outside its session, and messages back out.
+#
+#   bottle-event send [-t SECONDS] [-f FROM] [TEXT]   send TEXT (or stdin) as an event, from FROM
+#   bottle-event serve                                the channel: Claude Code runs this as an MCP server
+#
+# serve also gives the agent a tool, send, for a message to another bottle,
+# which arrives there as an event from this one: to answer an event, the agent
+# sends to its from, an address bottled issued for answering it. The message
+# is POSTed to bottled at http://bottle.host/messages, which runs send in the
+# bottle it's for, and the tool's result is bottled's answer: delivered, or why
+# not. A bottle with the message-any permission can also send to a bottle's
+# name, and one with list-bottles has a tool that lists them. Which tools serve
+# offers, it reads from BOTTLE_PERMISSIONS; what they may do, bottled decides.
+#
+# The two meet in the spool, where an event is a file that moves through three
+# directories, each move a rename, which exactly one side wins:
+#
+#   spool/N  ->  spool/sending/N  ->  spool/sent/N
+#   queued       serve claimed it      forwarded down Claude Code's pipe
+#
+# (and gone: serve deletes it from sent/ as soon as it's there, since send
+# waits for the rename, not the file.)
+#
+# send writes a dotfile and renames it to spool/N, so serve, which skips
+# dotfiles, never reads one half written. The file is the event as the channel
+# notification's params: its content, and the from in its meta. send then waits
+# for N to reach sent/. When it gives up waiting, it withdraws N by renaming it
+# back to a dotfile: if that rename fails, serve claimed N first, and N is as
+# good as forwarded. Claude Code acknowledges nothing, so forwarded is as far as
+# anyone can know. A send no session took exits 75 (EX_TEMPFAIL).
+#
+# serve claims an event before forwarding it, and moves it on after, so an
+# event in sending/ is one serve died forwarding: it's forwarded again when
+# serve next starts, sent twice rather than lost.
+#
+# Neither side polls: both wait on inotify (inotifywait), and start waiting
+# before they look, so nothing lands between the look and the wait. Names are
+# the time in nanoseconds, so they sort in the order they were sent.
+set -eu
+
+spool="${BOTTLE_EVENTS:-$HOME/.events}"
+host="${BOTTLE_HOST_URL:-http://bottle.host}"
+
+# Whether this bottle has permission $1 (see bottle/specs.py).
+can() {
+  case ",${BOTTLE_PERMISSIONS:-}," in *",$1,"*) ;; *) return 1 ;; esac
+}
+
+instructions='Messages from other bottles arrive as <channel source="events" from="...">, where from is an address for answering the bottle that sent it. Act on each as a request from the user, and answer it with the send tool, with to set to its from. The answer you send is the answer: the bottle that asked surfaces it to its user. So, to save tokens, say only a sentence or two about it in your own session, and don'"'"'t repeat or summarize the exchange there. An event without a from is answered in the session.'
+if can message-any; then
+  instructions="$instructions You can also start a conversation with any running bottle: send to its name."
+  can list-bottles && instructions="$instructions list_bottles lists them, with each one's repo and thread: when the user names a thread, find its bottle there, and ask the user if more than one could be meant."
+fi
+
+# Loaded upfront, not deferred to tool search: an agent that has to search for
+# them answers an event in its own session instead.
+tools="$(jq -nc \
+  --arg to "$(can message-any && echo "The from of the event it answers, or a running bottle's name" || echo "The from of the event it answers")" \
+  --argjson list "$(can list-bottles && echo true || echo false)" '
+  [{name: "send",
+    description: "Send a message to another bottle'"'"'s session, where it arrives as an event from this bottle. Waits until that session has taken it. To answer an event, pass its from as to.",
+    inputSchema: {type: "object", required: ["to", "text"],
+      properties: {to: {type: "string", description: $to}, text: {type: "string", description: "The message"}}},
+    _meta: {"anthropic/alwaysLoad": true}}]
+  + if $list then [{name: "list_bottles",
+    description: "List the other running bottles: each one'"'"'s name, which send takes as to, its repo, and its thread.",
+    inputSchema: {type: "object", properties: {}},
+    _meta: {"anthropic/alwaysLoad": true}}] else [] end')"
+
+# One line of JSON to Claude Code. The spool watcher and the request loop both
+# write, so each takes the lock for its line.
+emit() {
+  { flock 9; printf '%s\n' "$1"; } 9>"$spool/.lock"
+}
+
+forward() {
+  emit "$(jq -c '{jsonrpc: "2.0", method: "notifications/claude/channel", params: .}' <"$spool/sending/$1")"
+  mv "$spool/sending/$1" "$spool/sent/$1"
+  rm -f "$spool/sent/$1"
+}
+
+# Answers tools/call request $1 with bottled's answer: an error when it refused
+# or couldn't be reached. list_bottles is answered even when it isn't offered:
+# bottled is what refuses it.
+call() {
+  case "$(printf '%s' "$1" | jq -r '.params.name')" in
+    send)
+      reply="$(printf '%s' "$1" | jq -c '.params.arguments // {} | {to, text}' |
+        curl -sS --max-time 30 --fail-with-body -H 'Content-Type: application/json' --data-binary @- "$host/messages" 2>&1)" &&
+        error=false || error=true ;;
+    list_bottles)
+      reply="$(curl -sS --max-time 30 --fail-with-body "$host/bottles" 2>&1)" && error=false || error=true ;;
+    *)
+      reply="no such tool" error=true ;;
+  esac
+  emit "$(printf '%s' "$1" | jq -c --arg reply "$reply" --argjson error "$error" \
+    '{jsonrpc: "2.0", id, result: {content: [{type: "text", text: $reply}], isError: $error}}')"
+}
+
+# Claims and forwards event $1, unless send withdrew it first.
+deliver() {
+  mv "$spool/$1" "$spool/sending/$1" 2>/dev/null || return 0
+  forward "$1"
+}
+
+# Reads inotifywait's output, stderr included: once it says the watch is up,
+# forwards what serve died forwarding, then what's queued, then each event as
+# it arrives.
+watch() {
+  while IFS= read -r line && [ "$line" != "Watches established." ]; do :; done
+  for event in "$spool"/sending/*; do [ -f "$event" ] && forward "${event##*/}"; done
+  for event in "$spool"/*; do [ -f "$event" ] && deliver "${event##*/}"; done
+  while IFS= read -r name; do
+    case "$name" in .*) ;; *) deliver "$name" ;; esac
+  done
+}
+
+serve() {
+  mkdir -p "$spool/sending" "$spool/sent"
+  fifo="$spool/.watch.$$"
+  inotifier= watcher=
+  trap 'rm -f "$fifo"; kill $inotifier $watcher 2>/dev/null || :' EXIT
+  trap 'exit 143' HUP INT TERM
+  while IFS= read -r line; do
+    case "$(printf '%s' "$line" | jq -r '.method // ""')" in
+      initialize)
+        emit "$(printf '%s' "$line" | jq -c --arg instructions "$instructions" '{jsonrpc: "2.0", id, result: {
+          protocolVersion: .params.protocolVersion,
+          capabilities: {experimental: {"claude/channel": {}}, tools: {}},
+          serverInfo: {name: "events", version: "1.0.0"},
+          instructions: $instructions}}')" ;;
+      notifications/initialized)
+        # Events wait in the spool until Claude Code is listening.
+        if [ -z "$watcher" ]; then
+          mkfifo "$fifo"
+          inotifywait -m -e moved_to --format %f "$spool" >"$fifo" 2>&1 & inotifier=$!
+          watch <"$fifo" & watcher=$!
+        fi ;;
+      tools/list)
+        emit "$(printf '%s' "$line" | jq -c --argjson tools "$tools" '{jsonrpc: "2.0", id, result: {tools: $tools}}')" ;;
+      tools/call)
+        call "$line" ;;
+      ping)
+        emit "$(printf '%s' "$line" | jq -c '{jsonrpc: "2.0", id, result: {}}')" ;;
+      *)
+        # A request gets an error; a notification, nothing.
+        printf '%s' "$line" | jq -e 'has("id")' >/dev/null || continue
+        emit "$(printf '%s' "$line" | jq -c '{jsonrpc: "2.0", id, error: {code: -32601, message: "Method not found"}}')" ;;
+    esac
+  done
+}
+
+send() {
+  timeout=10 from=
+  while getopts t:f: option; do
+    case "$option" in
+      t) timeout="$OPTARG" ;;
+      f) from="$OPTARG" ;;
+      *) usage ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  mkdir -p "$spool/sent"
+  name="$(date +%s%N)-$$"
+  if [ $# -gt 0 ]; then printf '%s\n' "$*"; else cat; fi |
+    jq -Rsc --arg from "$from" '{content: .} + if $from == "" then {} else {meta: {from: $from}} end' >"$spool/.$name"
+
+  # Queue the event once the watch on sent/ is up, then wait for it there.
+  fifo="$spool/.send.$name"
+  mkfifo "$fifo"
+  timeout "$timeout" inotifywait -m -e moved_to --format %f "$spool/sent" >"$fifo" 2>&1 & inotifier=$!
+  trap 'rm -f "$fifo"; kill $inotifier 2>/dev/null || :' EXIT
+  trap 'exit 143' HUP INT TERM
+  {
+    while IFS= read -r line && [ "$line" != "Watches established." ]; do :; done
+    mv "$spool/.$name" "$spool/$name"
+    grep -qxF -m 1 "$name"
+  } <"$fifo" && return
+
+  # Out of time. Unless serve claimed it as the wait ran out (and then it's
+  # forwarded, or will be), withdraw it.
+  if mv "$spool/$name" "$spool/.$name" 2>/dev/null; then
+    rm -f "$spool/.$name"
+    echo "bottle-event: no session took the event within ${timeout}s" >&2
+    exit 75
+  fi
+}
+
+usage() {
+  echo "usage: bottle-event send [-t SECONDS] [-f FROM] [TEXT] | bottle-event serve" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  serve) serve ;;
+  send) shift; send "$@" ;;
+  *) usage ;;
+esac

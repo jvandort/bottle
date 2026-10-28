@@ -280,7 +280,7 @@ def _run_machine(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
     smolvm.create(
         bottle.machine, str(archive),
         mounts=[smolvm.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)] if repo else [],
-        env=_machine_env(bottle.features), memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
+        env=_machine_env(bottle.features, bottle.spec.get("permissions", ())), memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
     )
     _start_machine(bottle)
     verify_contract(bottle)
@@ -364,16 +364,20 @@ def git_dir(bottle: Bottle) -> Path | None:
         return None
 
 
-def _machine_env(features: tuple[str, ...] | list[str]) -> dict[str, str]:
-    """What a bottle's machine is created with: the stand-ins its features asked for, never credentials.
+def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
+    """What a bottle's machine is created with: the stand-ins its features asked for, never credentials,
+    and its permissions, as BOTTLE_PERMISSIONS, so the tools that use them know to offer them.
+
+    BOTTLE_PERMISSIONS only says what bottled would allow: bottled checks the
+    bottle's spec, not this, so a bottle that sets it itself gains nothing.
 
     Every exec sees these. SSH sessions only see /etc/environment, so the base
     image's entrypoint mirrors there the ones BOTTLE_MIRROR_ENV names.
     """
-    standins = auth.standins_for(features)
-    if not standins:
+    env = auth.standins_for(features) | ({"BOTTLE_PERMISSIONS": ",".join(permissions)} if permissions else {})
+    if not env:
         return {}
-    return standins | {"BOTTLE_MIRROR_ENV": " ".join(sorted(standins))}
+    return env | {"BOTTLE_MIRROR_ENV": " ".join(sorted(env))}
 
 
 def context(bottle: Bottle) -> str:
@@ -403,6 +407,11 @@ def context(bottle: Bottle) -> str:
     if any(f.credentials for f in resolved):
         lines.append("- A credential the host attaches goes only where its feature allows: a request it refuses\n"
                      "  comes back 403, saying why. That's policy, not a fault: if you need it, tell the user.")
+    # What the spec permits it beyond every bottle, by specs.PERMISSIONS' own word on each.
+    permissions = bottle.spec.get("permissions", [])
+    if permissions:
+        lines.append("\n## Permissions\n\nThe host lets this bottle do more than most:\n")
+        lines += [f"- {specs.PERMISSIONS[p]}" for p in permissions if p in specs.PERMISSIONS]
     # Each feature's own word on what it gives the agent (customizations.bottle.context).
     told = [(f.id, f.agent_context()) for f in resolved]
     told = [(feature_id, text) for feature_id, text in told if text]

@@ -2,6 +2,12 @@
 
     {"features": ["claude", "jvm:version=25", "tools"], "memory": "8G"}
 
+A spec can also give the bottle permissions, what bottled lets it do beyond
+what every bottle may (see PERMISSIONS), and the thread it's for, which
+bottles with list-bottles see beside its name:
+
+    {"features": ["claude"], "memory": "4G", "permissions": ["message-any"], "thread": "fix-it"}
+
 Bottle keeps no specs. Whoever creates a bottle owns the file and passes it to
 `bottle new --spec`; `bottle spec validate` checks one the same way, and gives
 its canonical form: each feature's options sorted and every default left
@@ -18,7 +24,17 @@ from pathlib import Path
 
 from bottle.errors import BottleError
 
-KEYS = ("features", "memory")
+KEYS = ("features", "memory", "permissions", "thread")
+# What a bottle may be allowed beyond answering messages (see messages.py), and
+# what its agent is told it can do with each (bottles.context).
+PERMISSIONS = {
+    "list-bottles": "You can list the other running bottles: `GET http://bottle.host/bottles` "
+                    "gives each one's name, repo and thread.",
+    "message-any": "You can send a message to any running bottle by its name, not only answer one: "
+                   'its session gets it as an event from you. `POST http://bottle.host/messages` '
+                   'with `{"to": NAME, "text": ...}`.',
+}
+THREAD_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
 
 
@@ -46,7 +62,8 @@ def canonical(data: object) -> dict:
         raise BottleError('a spec is a JSON object, e.g. {"features": ["tools"]}')
     unknown = sorted(set(data) - set(KEYS))
     if unknown:
-        raise BottleError(f"unknown {'key' if len(unknown) == 1 else 'keys'} {', '.join(unknown)}; a spec has {' and '.join(KEYS)}")
+        raise BottleError(f"unknown {'key' if len(unknown) == 1 else 'keys'} {', '.join(unknown)}; "
+                          f"a spec has {', '.join(KEYS[:-1])} and {KEYS[-1]}")
     specs = data.get("features", [])
     if not isinstance(specs, list) or not all(isinstance(spec, str) for spec in specs):
         raise BottleError('features is a list of feature specs, e.g. ["tools", "jvm:version=25"]')
@@ -57,7 +74,22 @@ def canonical(data: object) -> dict:
         raise BottleError('a spec needs its memory, a size in M or G, e.g. {"memory": "8G"}')
     if not isinstance(memory, str):
         raise BottleError('memory is a string: a size in M or G, e.g. "8G"')
-    return {"features": canonical, "memory": canonical_memory(memory)}
+    spec = {"features": canonical, "memory": canonical_memory(memory)}
+    permissions = data.get("permissions", [])
+    if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+        raise BottleError(f'permissions is a list of permissions, e.g. ["message-any"]; there are {", ".join(PERMISSIONS)}')
+    unknown = sorted(set(permissions) - set(PERMISSIONS))
+    if unknown:
+        raise BottleError(f"unknown {'permission' if len(unknown) == 1 else 'permissions'} {', '.join(unknown)}; "
+                          f"there are {', '.join(PERMISSIONS)}")
+    if permissions:
+        spec["permissions"] = sorted(set(permissions))
+    thread = data.get("thread")
+    if thread is not None:
+        if not isinstance(thread, str) or not THREAD_PATTERN.fullmatch(thread):
+            raise BottleError(f"invalid thread {thread!r}: lowercase words joined by '-', e.g. fix-it")
+        spec["thread"] = thread
+    return spec
 
 
 def canonical_features(specs: list[str]) -> tuple[str, ...]:

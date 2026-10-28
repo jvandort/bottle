@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 import zlib
@@ -246,6 +247,102 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
                 response = await self.request(b"GET " + path + b" HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
                 self.assertTrue(response.startswith(b"HTTP/1.1 404"), response[:40])
 
+
+
+class MessagesTest(unittest.IsolatedAsyncioTestCase):
+    """A bottle's messages to other bottles, POSTed to http://bottle.host/messages, as the decider hands them on."""
+
+    async def asyncSetUp(self) -> None:
+        self.delivered: list[tuple[str, str, str]] = []
+        self.refusal: host.ServiceError | None = None
+
+        async def deliver(sender: str, to: str, text: str) -> None:
+            if self.refusal:
+                raise self.refusal
+            self.delivered.append((sender, to, text))
+
+        self.asked: list[str] = []
+
+        async def peers(asker: str) -> list[dict]:
+            if self.refusal:
+                raise self.refusal
+            self.asked.append(asker)
+            return [{"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}]
+
+        server, self.env = await serve_bottle_host(host.HostServices(bottle="b", deliver=deliver, peers=peers))
+        self.addAsyncCleanup(self._close, server)
+
+    async def _close(self, server: asyncio.Server) -> None:
+        server.close()
+        await server.wait_closed()
+
+    async def post(self, body: bytes, method: bytes = b"POST") -> bytes:
+        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["BOTTLE_HOST_PORT"]))
+        writer.write(method + b" /messages HTTP/1.1\r\nHost: bottle.host\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        response = await reader.read()
+        writer.close()
+        return response
+
+    async def test_a_message_is_delivered_as_from_the_bottle_that_sent_it(self) -> None:
+        response = await self.post(json.dumps({"to": "broker", "text": "done: genie/x-2"}).encode())
+        self.assertTrue(response.startswith(b"HTTP/1.1 200"), response[:40])
+        self.assertEqual([("b", "broker", "done: genie/x-2")], self.delivered)
+
+    async def test_an_undelivered_message_answers_with_why(self) -> None:
+        self.refusal = host.ServiceError(504, "Gateway Timeout", "broker has no session that took the message within 10s")
+        response = await self.post(json.dumps({"to": "broker", "text": "hi"}).encode())
+        self.assertTrue(response.startswith(b"HTTP/1.1 504"), response[:40])
+        self.assertIn(b"broker has no session", response)
+
+    async def test_a_bad_message_is_refused_saying_why(self) -> None:
+        for body, why in (
+            (b"not json", b"is JSON"),
+            (b"[]", b"JSON object"),
+            (json.dumps({"text": "hi"}).encode(), b"needs to"),
+            (json.dumps({"to": " ", "text": "hi"}).encode(), b"needs to"),
+            (json.dumps({"to": 1, "text": "hi"}).encode(), b"needs to"),
+            (json.dumps({"to": "broker"}).encode(), b"needs text"),
+            (json.dumps({"to": "broker", "text": "hi", "from": "other"}).encode(), b"not from"),
+            (json.dumps({"to": "broker", "text": "x" * host.MAX_MESSAGE}).encode(), b"at most"),
+        ):
+            with self.subTest(body[:40]):
+                response = await self.post(body)
+                self.assertTrue(response.startswith(b"HTTP/1.1 400"), response[:40])
+                self.assertIn(why, response)
+        self.assertEqual([], self.delivered)
+
+    async def test_only_post(self) -> None:
+        response = await self.post(b"", method=b"GET")
+        self.assertTrue(response.startswith(b"HTTP/1.1 405"), response[:40])
+
+    async def get_bottles(self) -> bytes:
+        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["BOTTLE_HOST_PORT"]))
+        writer.write(b"GET /bottles HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
+        response = await reader.read()
+        writer.close()
+        return response
+
+    async def test_the_running_bottles_are_listed_as_json(self) -> None:
+        response = await self.get_bottles()
+        self.assertTrue(response.startswith(b"HTTP/1.1 200"), response[:40])
+        self.assertIn(b"Content-Type: application/json", response)
+        self.assertEqual([{"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}],
+                         json.loads(response.partition(b"\r\n\r\n")[2]))
+        self.assertEqual(["b"], self.asked)
+
+    async def test_a_refused_listing_says_why(self) -> None:
+        self.refusal = host.ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
+        response = await self.get_bottles()
+        self.assertTrue(response.startswith(b"HTTP/1.1 403"), response[:40])
+        self.assertIn(b"needs the list-bottles permission", response)
+
+    async def test_services_that_deliver_nothing_take_no_messages(self) -> None:
+        server, env = await serve_bottle_host(host.HostServices(bottle="b"))
+        self.addAsyncCleanup(self._close, server)
+        self.env = env
+        response = await self.post(json.dumps({"to": "broker", "text": "hi"}).encode())
+        self.assertTrue(response.startswith(b"HTTP/1.1 404"), response[:40])
 
 
 class NoServicesTest(unittest.IsolatedAsyncioTestCase):

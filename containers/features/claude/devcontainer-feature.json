@@ -2,7 +2,7 @@
   "id": "claude",
   "version": "1.0.0",
   "name": "Claude Code",
-  "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle, with its subscription token held by the host rather than the bottle.",
+  "description": "Claude Code, from Anthropic's signed apt repository (stable channel), set up to start working straight away in a bottle, with its subscription token held by the host rather than the bottle, and a channel for messages between bottles' sessions.",
   "containerEnv": {
     "DISABLE_AUTOUPDATER": "1"
   },

@@ -192,7 +192,19 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   API through the egress proxy, which holds the `claude` credential
   (`bottle auth login claude`) so the agent can spend its own subscription
   token without ever being able to read it, and it reads
-  bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Options:
+  bottle's context for the agent (`~/BOTTLE.md`) as its instructions. It also
+  has a channel, `bottle-event`, an MCP server that brings events into a
+  running session (`bottle exec NAME -- bottle-event send -f FROM TEXT`, which
+  waits until the session takes it) and gives the agent a `send` tool for
+  messages to other bottles: bottled delivers each one as an event whose `from`
+  is an address for answering the sender, issued to the recipient and good
+  from no other bottle, and answers once that session has taken it (404 for no
+  running bottle the sender may reach that way, 504 for no session that took it
+  in time). Only a bottle with the `message-any` permission (see `bottle new`)
+  can start a conversation, by a bottle's name; any other can only answer.
+  Claude Code
+  runs the channel when started with `--dangerously-load-development-channels
+  server:events`, as folio starts it. Options:
   `permissionMode` (default `bypassPermissions`: the bottle is the sandbox),
   `theme` (default `dark`), and `tui` (default `default`: `fullscreen` would
   capture the mouse, and a bottle has no clipboard to copy to instead).
@@ -276,6 +288,14 @@ is built first if it isn't built yet.
 ```json
 {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
 ```
+
+A spec can also give the bottle `permissions`, what bottled lets it do beyond
+what every bottle may: `message-any`, to send messages to a running bottle by
+its name rather than only answer one; and `list-bottles`, to list the other
+running bottles, each one's name, repo and `thread` (which a spec can name).
+bottled checks the bottle's spec, never the bottle; the bottle sees its
+permissions as `BOTTLE_PERMISSIONS`, so its tools know what to offer. Folio
+never gives a thread's bottle permissions.
 
 `--git-repo PATH` is the repo whose objects are mounted read-only, so nothing
 is cloned and the bottle can't change your repo except by pushing to a remote

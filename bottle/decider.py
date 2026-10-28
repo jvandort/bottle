@@ -124,6 +124,10 @@ class Decider:
         if self.tokens.pop(bottle, None) is not None:
             self._save()
 
+    def bound(self, bottle: str) -> bool:
+        """Whether `bottle`'s flows are answered: its machine is running."""
+        return bottle in self.tokens and _digest(self.tokens[bottle]) in self.bindings
+
     def _unbind(self, bottle: str) -> None:
         if bottle in self.tokens:
             self.bindings.pop(_digest(self.tokens[bottle]), None)

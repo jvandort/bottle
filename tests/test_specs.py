@@ -52,9 +52,23 @@ class CanonicalTest(unittest.TestCase):
             ({"memory": 8}, "memory is a string"),
             ({"memory": "lots"}, "invalid memory"),
             ({"memory": "64G"}, "more than this machine has"),
+            ({"memory": "2G", "permissions": "message-any"}, "permissions is a list"),
+            ({"memory": "2G", "permissions": ["root"]}, "unknown permission root; there are list-bottles, message-any"),
+            ({"memory": "2G", "thread": "Fix It"}, "invalid thread"),
+            ({"memory": "2G", "thread": 1}, "invalid thread"),
         ):
             with self.subTest(data), self.assertRaisesRegex(BottleError, message):
                 specs.canonical(data)
+
+    def test_permissions_are_sorted_once_each_and_left_out_when_none(self) -> None:
+        spec = specs.canonical({"memory": "2G", "permissions": ["message-any", "list-bottles", "message-any"]})
+        self.assertEqual(spec["permissions"], ["list-bottles", "message-any"])
+        self.assertNotIn("permissions", specs.canonical({"memory": "2G", "permissions": []}))
+        self.assertEqual(specs.canonical(spec), spec)
+
+    def test_a_thread(self) -> None:
+        self.assertEqual(specs.canonical({"memory": "2G", "thread": "fix-it"})["thread"], "fix-it")
+        self.assertNotIn("thread", specs.canonical({"memory": "2G"}))
 
     def test_memory_limit(self) -> None:
         self.assertEqual(specs.memory_limit({"features": [], "memory": "8G"}), "8G")

@@ -4,9 +4,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from bottle import daemon
+from bottle import daemon, messages
 from bottle.daemon import Daemon
 from bottle.decider import Decider
 from bottle.errors import BottleError
@@ -130,6 +131,121 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
     async def _close(server: asyncio.Server) -> None:
         server.close()
         await server.wait_closed()
+
+
+class DeliverTest(unittest.IsolatedAsyncioTestCase):
+    """Daemon.deliver and Daemon.peers: messages between bottles, run in the recipient by way of a fake smolvm."""
+
+    async def asyncSetUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        # Records its arguments and stdin, and exits as $FAKE_EXIT says.
+        smolvm = self.tmp / "smolvm"
+        smolvm.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_DIR/argv"\ncat > "$FAKE_DIR/stdin"\n'
+                          'echo "$FAKE_ERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
+        smolvm.chmod(0o755)
+        env = {"BOTTLE_SMOLVM": str(smolvm), "FAKE_DIR": str(self.tmp), "FAKE_ERR": "", "BOTTLE_HOME": str(self.tmp)}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.object(daemon.ca, "hosts", return_value=[]),
+            mock.patch.object(daemon.auth, "injections_for", return_value=[]),
+            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.daemon = Daemon(decider=Decider(self.tmp / "tokens.json"))
+
+        def bottle(name: str, repo: str | None = None, **spec) -> mock.Mock:
+            return SimpleNamespace(machine=f"bottle-{name}", git_repo=repo, spec=spec)
+
+        registry = {
+            "broker": bottle("broker", "/Users/me/memories", permissions=["list-bottles", "message-any"]),
+            "app-1a2b3c4d-foo": bottle("app-1a2b3c4d-foo", "/Users/me/src/app", thread="foo"),
+            "app-1a2b3c4d-bar": bottle("app-1a2b3c4d-bar", "/Users/me/src/app", thread="bar"),
+            "stopped": bottle("stopped"),
+        }
+        loaded = mock.patch("bottle.bottles.load", return_value=registry)
+        loaded.start()
+        self.addCleanup(loaded.stop)
+        for name in ("broker", "app-1a2b3c4d-foo", "app-1a2b3c4d-bar"):
+            await self.daemon.bind(name)
+
+    def ran(self) -> tuple[list[str], str]:
+        """What the fake smolvm ran last, after `--`, and in which machine; and its stdin."""
+        argv = (self.tmp / "argv").read_text().splitlines()
+        return argv[argv.index("--name") + 1], argv[argv.index("--") + 1:], (self.tmp / "stdin").read_text()
+
+    async def refused(self, sender: str, to: str) -> daemon.ServiceError:
+        with self.assertRaises(daemon.ServiceError) as raised:
+            await self.daemon.deliver(sender, to, "hi")
+        return raised.exception
+
+    async def test_a_bottle_with_message_any_sends_by_name_from_an_address_issued_to_the_recipient(self) -> None:
+        await self.daemon.deliver("broker", "app-1a2b3c4d-foo", "status?\nall of it")
+        machine, argv, stdin = self.ran()
+        self.assertEqual("bottle-app-1a2b3c4d-foo", machine)
+        reply_to = messages.address("broker", holder="app-1a2b3c4d-foo")
+        self.assertEqual([daemon.BOTTLE_EVENT, "send", "-t", str(daemon.DELIVERY_TIMEOUT), "-f", reply_to], argv)
+        self.assertEqual("status?\nall of it", stdin)
+
+    async def test_the_recipient_answers_by_the_address_it_was_given(self) -> None:
+        await self.daemon.deliver("app-1a2b3c4d-foo", messages.address("broker", holder="app-1a2b3c4d-foo"), "done")
+        machine, argv, _ = self.ran()
+        self.assertEqual("bottle-broker", machine)
+        self.assertEqual(messages.address("app-1a2b3c4d-foo", holder="broker"), argv[-1])
+
+    async def test_a_bottle_without_message_any_cant_send_by_name(self) -> None:
+        self.assertEqual(404, (await self.refused("app-1a2b3c4d-foo", "broker")).status)
+        self.assertFalse((self.tmp / "argv").exists())
+
+    async def test_an_address_works_only_for_the_bottle_it_was_issued_to(self) -> None:
+        issued_to_foo = messages.address("broker", holder="app-1a2b3c4d-foo")
+        self.assertEqual(404, (await self.refused("app-1a2b3c4d-bar", issued_to_foo)).status)
+        self.assertFalse((self.tmp / "argv").exists())
+
+    async def test_a_forged_address_is_refused_like_a_missing_bottle(self) -> None:
+        forged = await self.refused("app-1a2b3c4d-foo", "broker~" + "a" * messages.SIGNATURE_CHARS)
+        missing = await self.refused("broker", "nobody")
+        self.assertEqual((404, "no running bottle you can reach as nobody"), (missing.status, str(missing)))
+        self.assertEqual(404, forged.status)
+
+    async def test_a_bottle_cant_message_itself(self) -> None:
+        self.assertEqual(400, (await self.refused("broker", "broker")).status)
+        self.assertEqual(400, (await self.refused(
+            "app-1a2b3c4d-foo", messages.address("app-1a2b3c4d-foo", holder="app-1a2b3c4d-foo"))).status)
+
+    async def test_a_bottle_that_isnt_running_is_not_found(self) -> None:
+        self.assertEqual(404, (await self.refused("broker", "stopped")).status)
+
+    async def test_no_session_taking_it_in_time_is_a_timeout(self) -> None:
+        os.environ["FAKE_EXIT"] = str(daemon.NOT_TAKEN)
+        refusal = await self.refused("broker", "app-1a2b3c4d-foo")
+        self.assertEqual(504, refusal.status)
+        self.assertIn("no session", str(refusal))
+
+    async def test_any_other_failure_says_what_went_wrong(self) -> None:
+        os.environ.update(FAKE_EXIT="127", FAKE_ERR="bottle-event: not found")
+        refusal = await self.refused("broker", "app-1a2b3c4d-foo")
+        self.assertEqual(502, refusal.status)
+        self.assertIn("bottle-event: not found", str(refusal))
+
+    async def test_an_exec_that_hangs_is_given_up_on(self) -> None:
+        (self.tmp / "smolvm").write_text("#!/bin/sh\nexec sleep 5\n")
+        with mock.patch.multiple(daemon, DELIVERY_TIMEOUT=0, DELIVERY_GRACE=0.2):
+            self.assertEqual(504, (await self.refused("broker", "app-1a2b3c4d-foo")).status)
+
+    async def test_list_bottles_shows_the_other_running_bottles_without_host_paths(self) -> None:
+        self.assertEqual([{"name": "app-1a2b3c4d-bar", "repo": "app", "thread": "bar"},
+                          {"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}],
+                         await self.daemon.peers("broker"))
+
+    async def test_listing_bottles_needs_list_bottles(self) -> None:
+        with self.assertRaises(daemon.ServiceError) as raised:
+            await self.daemon.peers("app-1a2b3c4d-foo")
+        self.assertEqual(403, raised.exception.status)
 
 
 class RestoreTest(unittest.IsolatedAsyncioTestCase):

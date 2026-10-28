@@ -13,8 +13,14 @@ echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude
   > /etc/apt/sources.list.d/claude-code.list
 
 apt-get update
-apt-get install -y --no-install-recommends claude-code
+apt-get install -y --no-install-recommends claude-code jq inotify-tools curl
 rm -rf /var/lib/apt/lists/*
+
+# The channel: bottle-event serve takes events into Claude's session, and gives
+# it a tool to send messages to other bottles; bottle-event send is how an event
+# gets in, run in the bottle by bottled, or by `bottle exec`. It needs jq,
+# inotify-tools and curl; flock is util-linux, already in the base image.
+install -m 0755 bottle-event /usr/local/bin/bottle-event
 
 # How this feature is authenticated, since JSON has no room for a comment:
 #
@@ -66,11 +72,16 @@ cat > "$home/.claude/settings.json" <<JSON
 JSON
 
 # Claude's own state file: first-run setup done, and /workspace trusted, so its
-# project settings apply without the trust dialog.
+# project settings apply without the trust dialog; and the channel, as a user
+# MCP server, so a session started with it named in
+# --dangerously-load-development-channels server:events runs it (folio does).
 cat > "$home/.claude.json" <<JSON
 {
   "hasCompletedOnboarding": true,
-  "projects": { "/workspace": { "hasTrustDialogAccepted": true } }
+  "projects": { "/workspace": { "hasTrustDialogAccepted": true } },
+  "mcpServers": {
+    "events": { "type": "stdio", "command": "/usr/local/bin/bottle-event", "args": ["serve"] }
+  }
 }
 JSON
 
