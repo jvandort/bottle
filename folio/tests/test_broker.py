@@ -40,6 +40,7 @@ class BrokerTest(FolioTestCase):
         self.assertIn("git push agent main", context)
         self.assertNotIn("genie/broker-1", context)  # a thread's branches aren't its memory
         self.assertIn("**`For you.md`**, at the root, is the user's", context)
+        self.assertIn("**Your most important job is the user's priorities.**", context)
         self.assertIn("this overrides any default of committing", context)
         self.assertIn("## What survives a pause", context)
 
