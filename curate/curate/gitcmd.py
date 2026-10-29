@@ -7,13 +7,47 @@ mode, `git commit`.
 
 import atexit
 import os
+import shutil
 import subprocess
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from .errors import Refused
 from .timing import looked_up, timed
 
 HOOK_GUARD = "CURATE_IN_HOOK"
+
+# Apple's /usr/bin/git is a shim: it runs xcrun, which finds the developer
+# tools and only then starts the real git -- about 9 ms a call on a Mac where
+# the real git's whole answer takes 6. So curate starts the real one itself,
+# found the way xcrun finds it but without a process: $DEVELOPER_DIR, else
+# the directory `xcode-select -s` chose (a symlink), else the Command Line
+# Tools. Anything that doesn't resolve leaves plain `git`, as before.
+APPLE_SHIM = "/usr/bin/git"
+XCODE_SELECT_LINK = "/var/db/xcode_select_link"
+COMMAND_LINE_TOOLS = "/Library/Developer/CommandLineTools"
+
+
+def which_git(path: str | None = None, environ: Mapping[str, str] | None = None,
+              platform: str = sys.platform, selected: str = XCODE_SELECT_LINK) -> str:
+    """The git to start: the one on PATH, or behind Apple's shim, the one it would start."""
+    if environ is None:
+        environ = os.environ
+    found = shutil.which("git", path=path if path is not None else environ.get("PATH"))
+    if platform != "darwin" or found is None or os.path.realpath(found) != APPLE_SHIM:
+        return found or "git"
+    developer = environ.get("DEVELOPER_DIR")
+    if not developer:
+        try:
+            developer = os.readlink(selected)
+        except OSError:
+            developer = COMMAND_LINE_TOOLS
+    real = os.path.join(developer, "usr", "bin", "git")
+    return real if os.access(real, os.X_OK) else found
+
+
+GIT = which_git()
 
 # What merge-tree hands back for a conflicted path: stage -> (mode, oid),
 # where stage 1 is the merge base, 2 is ours and 3 is theirs.
@@ -40,7 +74,7 @@ def run(args: list[str], index: str | Path | None = None,
         stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     """Run git and decode its output as text."""
     with timed(["git", *args]):
-        return subprocess.run(["git", *args], capture_output=True, text=True,
+        return subprocess.run([GIT, *args], capture_output=True, text=True,
                               env=environment(index, env), input=stdin)
 
 
@@ -136,7 +170,7 @@ class Objects:
         if self._process is None:
             with timed(["git", "cat-file", "--batch-command"]):
                 self._process = subprocess.Popen(
-                    ["git", "cat-file", "--batch-command"], stdin=subprocess.PIPE,
+                    [GIT, "cat-file", "--batch-command"], stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment())
             atexit.register(self.close)
         return self._process

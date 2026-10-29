@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from .errors import Refused
-from .gitcmd import Objects, Refs, environment, git, run
+from .gitcmd import GIT, Objects, Refs, environment, git, run
 from .pick import Row
 from .state import Repo, named, short
 from .timing import timed
@@ -37,7 +37,7 @@ def fetch(which: list[str] | None) -> None:
     args = ["fetch", "--all"] if which is None else ["fetch", "--multiple", *which]
     sys.stdout.flush()
     with timed(["git", *args]):
-        code = subprocess.run(["git", *args], env=environment()).returncode
+        code = subprocess.run([GIT, *args], env=environment()).returncode
     if code != 0:
         # Offline is no reason not to use what is already here.
         print(f"curate: `git {' '.join(args)}` failed; carrying on with what "
