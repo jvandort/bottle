@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from bottle.store import write_json
 from bottle import bottles, features as features_, host, repos
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
@@ -74,6 +75,9 @@ class FakeSmolvm:
             self._step("point_at_host")
             self.hosts = (user, argv[-1])
             return ""
+        if argv[-1].startswith("install -d"):
+            self.made = (user, argv[-1])            # each mount's path, as root
+            return ""
         self._step("init_workspace")
         self.workspace_script = argv[-1]
         return ""
@@ -82,11 +86,12 @@ class FakeSmolvm:
         self.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
         return ["smolvm-exec", name, *argv]
 
-    def bind_decider(self, bottle, git_dir=None, features=(), remotes=()):
+    def bind_decider(self, bottle, repos=(), features=()):
         self._step("bind")
-        self.egress_git_dir = git_dir
+        self.egress_repos = tuple(repos)
+        self.egress_git_dir = repos[0].git_dir if repos else None
         self.egress_features = tuple(features)
-        self.egress_remotes = remotes
+        self.egress_remotes = repos[0].remotes if repos else ()
         self.bound.add(bottle)
         self.tokens += 1
         return self.DECIDER, f"token-{self.tokens}"
@@ -140,7 +145,8 @@ class BottleTestCase(GitTestCase):
         taken = set(bottles.load())
         name = name or next(n for n in ("example", *(f"example-{i}" for i in range(2, 100))) if n not in taken)
         spec = {"features": list(features), "memory": memory}
-        return bottles.create(spec, name, self.repo_path, remotes, branch, context, image)
+        return bottles.create(spec, name, [bottles.MountRequest("/workspace", self.repo_path, branch, remotes)],
+                              context, image)
 
     def fake(self, **kwargs) -> FakeSmolvm:
         fake = FakeSmolvm(**kwargs)
@@ -154,7 +160,8 @@ class CreateTest(BottleTestCase):
 
         bottle = self.create()
 
-        self.assertEqual((bottle.name, bottle.branch, bottle.commit, bottle.status), ("example", "main", self.head, "ready"))
+        [mount] = bottle.mounts
+        self.assertEqual((bottle.name, mount.branch, mount.commit, bottle.status), ("example", "main", self.head, "ready"))
         self.assertEqual(bottles.get("example"), bottle)
         self.assertEqual(fake.machines, {bottle.machine: "running"})
         self.assertEqual(fake.bound, {"example"})
@@ -164,8 +171,8 @@ class CreateTest(BottleTestCase):
         self.create()
         self.assertEqual(fake.egress_git_dir, self.repo_path / ".git")
         self.assertEqual(fake.egress_remotes, (host.Remote("origin", host.UPSTREAM), host.Remote("host", host.HEADS)))
-        self.assertIn("remote add origin http://bottle.host/git/origin", fake.workspace_script)
-        self.assertIn("remote add host http://bottle.host/git/host", fake.workspace_script)
+        self.assertIn("remote add origin http://bottle.host/git/workspace/origin", fake.workspace_script)
+        self.assertIn("remote add host http://bottle.host/git/workspace/host", fake.workspace_script)
         self.assertIn("fetch -q --multiple origin host", fake.workspace_script)
 
     def test_order_bound_before_it_starts(self) -> None:
@@ -185,9 +192,10 @@ class CreateTest(BottleTestCase):
         self.assertEqual(fake.create_args["image"], "/images/base-latest.tar")
         self.assertEqual(bottle.archive, "base-latest.tar")  # kept while the bottle exists
         self.assertEqual(fake.create_args["memory_mib"], 3072)
-        self.assertEqual(fake.create_args["env"], {})  # no proxy, and no stand-ins without features asking
+        # No proxy, and no stand-ins without features asking: only where a login starts.
+        self.assertEqual(fake.create_args["env"], {"BOTTLE_WORKDIR": "/workspace", "BOTTLE_MIRROR_ENV": "BOTTLE_WORKDIR"})
         [mount] = fake.create_args["mounts"]
-        self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/repo/objects"))
+        self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/objects/workspace"))
 
     def test_started_with_its_token_at_the_decider(self) -> None:
         fake = self.fake()
@@ -213,34 +221,28 @@ class CreateTest(BottleTestCase):
         self.assertIn("The network works as usual", context)
 
     def test_context_for_a_detached_commit(self) -> None:
-        bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, git_repo="/src/r")
+        bottle = bottles.Bottle("b", "id", "base", 0.0, mounts=(bottles.Mount("/workspace", "/src/r", None, "c" * 40),))
         self.assertIn("checkout of `r`, at a detached commit.", bottles.context(bottle))
 
     def test_context_has_what_each_feature_says(self) -> None:
-        bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("jvm:version=21", "tools"))
+        bottle = bottles.Bottle("b", "id", "base", 0.0, features=("jvm:version=21", "tools"))
         context = bottles.context(bottle)
         self.assertIn("\n## Features\n\n### Feature 'jvm'\n\nTemurin JDK 21 is the default `java`", context)
         self.assertIn("\n### Feature 'tools'\n\n", context)
-        self.assertNotIn("## Features", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
+        self.assertNotIn("## Features", bottles.context(bottles.Bottle("b", "id", "base", 0.0)))
 
     def test_context_says_what_the_bottles_permissions_let_it_do(self) -> None:
-        bottle = bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, spec={"permissions": ["message-any"]})
+        bottle = bottles.Bottle("b", "id", "base", 0.0, spec={"permissions": ["message-any"]})
         context = bottles.context(bottle)
         self.assertIn("## Permissions", context)
         self.assertIn(bottles.specs.PERMISSIONS["message-any"], context)
         self.assertNotIn(bottles.specs.PERMISSIONS["list-bottles"], context)
-        self.assertNotIn("## Permissions", bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0)))
-
-    def test_context_says_which_branch_a_push_advances(self) -> None:
-        remotes = tuple(host.Remote.parse(r) for r in ("host:fetch=heads", "agent:fetch=ns/x,push=ns/x,advance=main"))
-        context = bottles.context(bottles.Bottle("b", "id", "base", "main", "c" * 40, 0.0, git_repo="/r", remotes=remotes))
-        self.assertIn("`host`: the user's own branches, as they stand in their repo. Its `main` follows what you push to `agent`.", context)
-        self.assertIn("A push of `main` also moves the user's own `main` and its working tree", context)
+        self.assertNotIn("## Permissions", bottles.context(bottles.Bottle("b", "id", "base", 0.0)))
 
     def test_context_says_a_refused_credential_route_is_for_the_user(self) -> None:
         said = "comes back 403, saying why. That's policy, not a fault: if you need it, tell the user."
-        self.assertIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("github",))))
-        self.assertNotIn(said, bottles.context(bottles.Bottle("b", "id", "base", None, "c" * 40, 0.0, features=("tools",))))
+        self.assertIn(said, bottles.context(bottles.Bottle("b", "id", "base", 0.0, features=("github",))))
+        self.assertNotIn(said, bottles.context(bottles.Bottle("b", "id", "base", 0.0, features=("tools",))))
 
     def test_workspace_script_quotes_values(self) -> None:
         run("git", "-C", self.repo_path, "branch", "we$rd;branch")
@@ -253,7 +255,8 @@ class CreateTest(BottleTestCase):
         run("git", "-C", self.repo_path, "checkout", "-q", "--detach", self.head)
         fake = self.fake()
         bottle = self.create()
-        self.assertEqual((bottle.branch, bottle.commit, bottle.checkout), (None, self.head, f"({self.head[:12]})"))
+        [mount] = bottle.mounts
+        self.assertEqual((mount.branch, mount.commit, mount.checkout), (None, self.head, f"({self.head[:12]})"))
         self.assertIn(f"update-ref --no-deref HEAD {self.head}", fake.workspace_script)
         self.assertEqual(bottles.get("example"), bottle)  # survives the JSON round trip
 
@@ -261,7 +264,7 @@ class CreateTest(BottleTestCase):
         run("git", "-C", self.repo_path, "branch", "feature")
         self.fake()
         bottle = self.create(branch="feature", name="mine")
-        self.assertEqual((bottle.name, bottle.branch), ("mine", "feature"))
+        self.assertEqual((bottle.name, bottle.mounts[0].branch), ("mine", "feature"))
 
     def test_duplicate_name(self) -> None:
         self.fake()
@@ -466,7 +469,7 @@ class ContractTest(BottleTestCase):
             script = argv
             return ""
 
-        bottle = bottles.Bottle("b", "id", "base", "main", "c" * 40, 0.0)
+        bottle = bottles.Bottle("b", "id", "base", 0.0)
         with mock.patch.object(bottles.smolvm, "exec_", side_effect=capture):
             bottles.verify_contract(bottle)
         return __import__("subprocess").run(script, capture_output=True, text=True)
@@ -495,15 +498,16 @@ class StandinTest(BottleTestCase):
         env = bottles._machine_env(("claude",))
         self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], features_.STANDIN)
         # The entrypoint mirrors it into /etc/environment, for SSH sessions.
-        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "BOTTLE_WORKDIR CLAUDE_CODE_OAUTH_TOKEN")
 
-    def test_features_that_ask_for_none_add_nothing(self) -> None:
-        self.assertEqual(bottles._machine_env(("tools",)), {})
+    def test_features_that_ask_for_none_add_only_where_a_login_starts(self) -> None:
+        self.assertEqual(bottles._machine_env(("tools",), workdir="/w"),
+                         {"BOTTLE_WORKDIR": "/w", "BOTTLE_MIRROR_ENV": "BOTTLE_WORKDIR"})
 
     def test_permissions_reach_the_bottle_to_say_what_bottled_would_allow(self) -> None:
         env = bottles._machine_env(("tools",), ["list-bottles", "message-any"])
         self.assertEqual(env["BOTTLE_PERMISSIONS"], "list-bottles,message-any")
-        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "BOTTLE_PERMISSIONS")
+        self.assertEqual(env["BOTTLE_MIRROR_ENV"], "BOTTLE_PERMISSIONS BOTTLE_WORKDIR")
 
     def test_the_bottle_a_login_runs_in_gets_none(self) -> None:
         """`bottle auth login claude` must find nothing that looks like a token."""
@@ -731,25 +735,27 @@ class SpecBottleTest(BottleTestCase):
 
     SPEC = {"features": [], "memory": "2G"}
 
-    def create(self, name: str = "t", **kwargs) -> bottles.Bottle:
-        return bottles.create(dict(self.SPEC), name, **kwargs)
+    def create(self, name: str = "t", git_repo=None, remotes=None, checkout=None, **kwargs) -> bottles.Bottle:
+        mounts = [bottles.MountRequest("/workspace", git_repo, checkout, remotes)] if git_repo else []
+        return bottles.create(dict(self.SPEC), name, mounts, **kwargs)
 
     def test_with_no_repo_there_is_nothing_to_mount_or_serve(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        self.assertEqual((bottle.name, bottle.git_repo, bottle.remotes, bottle.status), ("t", None, (), "ready"))
+        self.assertEqual((bottle.name, bottle.mounts, bottle.status), ("t", (), "ready"))
         self.assertEqual(fake.create_args["mounts"], [])
         self.assertIsNone(fake.egress_git_dir)
         self.assertNotIn("git init", fake.workspace_script)
         self.assertIn('> "$HOME/BOTTLE.md"', fake.workspace_script)
-        self.assertIn("`/workspace` is empty: this bottle has no repo.", bottles.context(bottle))
+        self.assertIn("- This bottle has no repo.", bottles.context(bottle))
 
     def test_a_repo_is_mounted_and_served_from_read_only_by_default(self) -> None:
         fake = self.fake()
         bottle = self.create(git_repo=self.repo_path)
-        self.assertEqual((bottle.git_repo, bottle.branch, bottle.commit), (str(self.repo_path), "main", self.head))
+        [mount] = bottle.mounts
+        self.assertEqual((mount.repo, mount.branch, mount.commit), (str(self.repo_path), "main", self.head))
         [mount] = fake.create_args["mounts"]
-        self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/repo/objects"))
+        self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/objects/workspace"))
         self.assertEqual(fake.egress_git_dir, self.repo_path / ".git")
         self.assertEqual(fake.egress_remotes, (host.Remote("origin", host.UPSTREAM), host.Remote("host", host.HEADS)))
         self.assertIn("fetch -q --multiple origin host", fake.workspace_script)
@@ -759,10 +765,10 @@ class SpecBottleTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create(git_repo=self.repo_path, remotes=["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"])
         self.assertEqual([r.spec for r in fake.egress_remotes], ["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"])
-        self.assertIn("remote add up http://bottle.host/git/up", fake.workspace_script)
+        self.assertIn("remote add up http://bottle.host/git/workspace/up", fake.workspace_script)
         self.assertIn("fetch -q --multiple up work", fake.workspace_script)
         self.assertNotIn("checkout.defaultRemote", fake.workspace_script)  # no origin to default to
-        self.assertEqual(bottles.get(bottle.name).remotes, bottle.remotes)  # survives the JSON round trip
+        self.assertEqual(bottles.get(bottle.name).mounts, bottle.mounts)  # survives the JSON round trip
 
     def test_registers_nothing_in_the_repo(self) -> None:
         self.fake()
@@ -772,8 +778,8 @@ class SpecBottleTest(BottleTestCase):
     def test_checks_out_a_branch_or_a_commit(self) -> None:
         self.fake()
         run("git", "-C", self.repo_path, "branch", "feature")
-        self.assertEqual(self.create("a", git_repo=self.repo_path, checkout="feature").branch, "feature")
-        detached = self.create("b", git_repo=self.repo_path, checkout=self.head[:10])
+        self.assertEqual(self.create("a", git_repo=self.repo_path, checkout="feature").mounts[0].branch, "feature")
+        [detached] = self.create("b", git_repo=self.repo_path, checkout=self.head[:10]).mounts
         self.assertEqual((detached.branch, detached.commit), (None, self.head))
         with self.assertRaisesRegex(BottleError, "no branch or commit 'nope'"):
             self.create(git_repo=self.repo_path, checkout="nope")
@@ -784,12 +790,6 @@ class SpecBottleTest(BottleTestCase):
             bottle = bottles.create({"features": ["tools"], "memory": "8G"}, "t")
         self.assertEqual((bottle.features, bottle.memory, fake.create_args["memory_mib"]), (("tools",), "8G", 8192))
         self.assertEqual(bottle.spec, {"features": ["tools"], "memory": "8G"})
-
-    def test_refuses_remotes_without_a_repo(self) -> None:
-        self.fake()
-        for kwargs in ({"remotes": ["origin:fetch=upstream"]}, {"checkout": "main"}):
-            with self.subTest(kwargs), self.assertRaisesRegex(BottleError, "need --git-repo"):
-                self.create(**kwargs)
 
     def test_refuses_a_subdirectory_for_the_repo(self) -> None:
         self.fake()
@@ -851,22 +851,86 @@ class SpecBottleTest(BottleTestCase):
         self.assertEqual(run("git", "-C", self.repo_path, "remote"), "")
 
 
+class MountsTest(BottleTestCase):
+    """More than one repo in a bottle, each at its own path; none of them special."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.notes = self.make_repo("notes")
+
+    def two(self, fake: "FakeSmolvm") -> bottles.Bottle:
+        return bottles.create({"features": [], "memory": "2G"}, "two", [
+            bottles.MountRequest("/work/app", self.repo_path),
+            bottles.MountRequest("/notes", self.notes, remotes=["agent:fetch=ns/n-out,push=ns/n-out"]),
+        ])
+
+    def test_each_repo_is_mounted_checked_out_and_served_at_its_path(self) -> None:
+        fake = self.fake()
+        bottle = self.two(fake)
+        self.assertEqual([(m.source, m.target) for m in fake.create_args["mounts"]],
+                         [(self.repo_path / ".git/objects", "/mnt/objects/work/app"),
+                          (self.notes / ".git/objects", "/mnt/objects/notes")])
+        self.assertEqual(fake.made, ("root", "install -d -o genie -g genie /work/app /notes"))
+        script = fake.workspace_script
+        self.assertIn("git init -q -b main /work/app", script)
+        self.assertIn("echo /mnt/objects/notes > /notes/.git/objects/info/alternates", script)
+        self.assertIn("remote add origin http://bottle.host/git/work/app/origin", script)
+        self.assertIn("remote add agent http://bottle.host/git/notes/agent", script)
+        self.assertEqual([(r.git_dir, r.at, [x.name for x in r.remotes]) for r in fake.egress_repos],
+                         [(self.repo_path / ".git", "work/app", ["origin", "host"]),
+                          (self.notes / ".git", "notes", ["agent"])])
+        self.assertEqual(bottles.get("two").mounts, bottle.mounts)   # survives the JSON round trip
+
+    def test_the_first_mount_is_where_things_start(self) -> None:
+        fake = self.fake()
+        bottle = self.two(fake)
+        self.assertEqual(bottle.workdir, "/work/app")
+        self.assertEqual(fake.create_args["env"]["BOTTLE_WORKDIR"], "/work/app")
+        context = bottles.context(bottle)
+        self.assertIn("- `/work/app` is a checkout of `example`", context)
+        self.assertIn("- `/notes` is a checkout of `notes`", context)
+        self.assertEqual(bottles.Bottle("b", "id", "base", 0.0).workdir, "/home/genie")
+
+    def test_paths_that_cant_be_mounts(self) -> None:
+        self.fake()
+        for paths, why in ((["notes"], "invalid mount path"), (["/a b"], "invalid mount path"),
+                           (["/work", "/work/app"], "overlap"), (["/notes", "/notes"], "overlap")):
+            with self.subTest(paths), self.assertRaisesRegex(BottleError, why):
+                bottles.create({"features": [], "memory": "2G"}, "x",
+                               [bottles.MountRequest(p, self.repo_path) for p in paths])
+        self.assertEqual(bottles.load(), {})
+
+    def test_a_record_from_before_mounts_is_its_one_repo_at_workspace(self) -> None:
+        bottles._write({})
+        record = {"name": "old", "id": "i", "image": "base", "branch": "main", "commit": "c" * 40, "created": 0.0,
+                  "status": "ready", "git_repo": str(self.repo_path),
+                  "remotes": [{"name": "agent", "fetch": "ns/a", "push": "ns/a", "advance": "main"}]}
+        write_json(bottles.registry_path(), {"version": 1, "bottles": {"old": record}})
+        [mount] = bottles.get("old").mounts
+        # Where its machine has them: objects at the old place, remotes straight under /git.
+        self.assertEqual((mount.path, mount.repo, mount.branch, mount.objects, mount.at),
+                         ("/workspace", str(self.repo_path), "main", "/mnt/repo/objects", ""))
+        self.assertEqual(mount.remotes, (host.Remote("agent", "ns/a", "ns/a"),))   # advance is gone
+        self.assertEqual(mount.url("agent"), "http://bottle.host/git/agent")
+
+
 class StatusTest(BottleTestCase):
     def test_every_bottle_or_those_named(self) -> None:
         fake = self.fake()
         a = self.create()
-        b = bottles.create({"features": [], "memory": "2G"}, "spec", git_repo=self.repo_path,
-                                     remotes=["work:fetch=ns/t-in,push=ns/t-out"])
+        b = bottles.create({"features": [], "memory": "2G"}, "spec", [bottles.MountRequest(
+            "/workspace", self.repo_path, remotes=["work:fetch=ns/t-in,push=ns/t-out"])])
         fake.machines[b.machine] = "stopped"
         self.assertEqual([(r["name"], r["state"]) for r in bottles.status()], [("example", "running"), ("spec", "stopped")])
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
         self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "git_repo": str(self.repo_path),
-            "branch": "main", "commit": self.head, "features": [], "memory": "2G",
-            "spec": {"features": [], "memory": "2G"}, "remotes": ["work:fetch=ns/t-in,push=ns/t-out"],
+            "name": "spec", "state": "stopped", "created": None, "features": [], "memory": "2G",
+            "spec": {"features": [], "memory": "2G"},
+            "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
+                        "remotes": ["work:fetch=ns/t-in,push=ns/t-out"]}],
         })
-        self.assertEqual(bottles.status([a.name])[0]["remotes"], ["origin:fetch=upstream", "host:fetch=heads"])
+        self.assertEqual(bottles.status([a.name])[0]["mounts"][0]["remotes"], ["origin:fetch=upstream", "host:fetch=heads"])
         self.assertEqual(json.loads(json.dumps(bottles.status())), bottles.status())
 
 
@@ -878,18 +942,24 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
         self.fake_smolvm = self.fake()
         run("git", "-C", self.repo_path, "branch", "feature")
         self.bottle = bottles.create(
-            {"features": [], "memory": "2G"}, "t", git_repo=self.repo_path, checkout="feature",
-            remotes=["origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/t-in,push=ns/t-out"],
+            {"features": [], "memory": "2G"}, "t", [bottles.MountRequest(
+                "/workspace", self.repo_path, "feature",
+                ["origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/t-in,push=ns/t-out"])],
             context="Extra.\n",
         )
-        services = host.HostServices(bottles.git_dir(self.bottle), self.tmp / "view.git", remotes=self.bottle.remotes)
+        [mount] = self.bottle.mounts
+        services = host.HostServices((host.Served(bottles.git_dir(mount), mount.remotes, mount.at or "",
+                                                  self.tmp / "view.git"),))
         server, env = await serve_bottle_host(services)
         self.addAsyncCleanup(self._close, server)
         self.workspace, self.home = self.tmp / "workspace", self.tmp / "home"
         self.home.mkdir()
-        self.env = {**env, "HOME": str(self.home)}
-        script = (self.fake_smolvm.workspace_script.replace(bottles.OBJECTS_MOUNT, str(self.repo_path / ".git/objects"))
-                  .replace(bottles.WORKSPACE, str(self.workspace)))
+        # The setup's own global config (safe.directory), in its home rather than the tests' /dev/null.
+        self.env = {**env, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        # The mount's path where it's a path, not where it's in a remote's URL (bottle.host/git/workspace/...).
+        url = f"{host.GIT_PATH}{mount.path}/"
+        script = (self.fake_smolvm.workspace_script.replace(mount.objects, str(self.repo_path / ".git/objects"))
+                  .replace(url, "\0").replace(mount.path, str(self.workspace)).replace("\0", url))
         result = await self.run_(["sh", "-c", script])
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -919,7 +989,7 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_writes_the_context(self) -> None:
         # The script had /workspace rewritten to the stand-in, and so did the context in it.
-        expected = bottles.context(self.bottle).replace(bottles.WORKSPACE, str(self.workspace))
+        expected = bottles.context(self.bottle).replace("/workspace", str(self.workspace))
         self.assertEqual((self.home / "BOTTLE.md").read_text(), expected)
 
     async def test_a_push_to_work_lands_in_its_namespace(self) -> None:

@@ -45,8 +45,9 @@ class EndToEndTest(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", str(REPO), str(cls.repo)], check=True)
         spec = cls.work / "spec.json"
         spec.write_text(json.dumps({"features": ["tools"], "memory": "8G"}))
-        cls.bottle("new", "--spec", str(spec), "--name", NAME, "--git-repo", str(cls.repo),
-                   "--git-remote", "origin:fetch=upstream", "--git-remote", "agent:fetch=ns/e2e-out,push=ns/e2e-out")
+        cls.bottle("new", "--spec", str(spec), "--name", NAME, "--mount", f"/workspace={cls.repo}",
+                   "--git-remote", "/workspace:origin:fetch=upstream",
+                   "--git-remote", "/workspace:agent:fetch=ns/e2e-out,push=ns/e2e-out")
         cls.addClassCleanup(cls.bottle, "delete", NAME, check=False)
 
     @classmethod

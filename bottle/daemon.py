@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from bottle import auth, ca, cache, decider as decider_, egress, messages
-from bottle.host import HostServices, Remote, ServiceError
+from bottle.host import HostServices, Remote, Served, ServiceError
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log
 
@@ -58,8 +58,7 @@ def socket_path() -> Path:
 
 
 def bind_decider(
-    bottle: str, git_dir: Path | None = None, features: tuple[str, ...] | list[str] = (),
-    remotes: tuple[Remote, ...] = (),
+    bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = (),
 ) -> tuple[str, str]:
     """Have the decider answer `bottle`'s flows; return its address and the bottle's new token, in hex.
 
@@ -67,8 +66,9 @@ def bind_decider(
     else: whoever holds it can speak for the bottle.
     """
     message = {
-        "op": "bind", "bottle": bottle, "git_dir": str(git_dir) if git_dir else None,
-        "features": list(features), "remotes": [r.spec for r in remotes],
+        "op": "bind", "bottle": bottle, "features": list(features),
+        "repos": [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at,
+                   "remotes": [remote.spec for remote in r.remotes]} for r in repos],
     }
     reply = _request(message, start=True)
     return reply["decider"], reply["token"]
@@ -172,9 +172,10 @@ class Daemon:
                 case "ping":
                     reply = {"ok": True}
                 case "bind":
-                    git_dir = Path(message["git_dir"]) if message.get("git_dir") else None
-                    remotes = tuple(Remote.parse(spec) for spec in message.get("remotes", ()))
-                    token = await self.bind(message["bottle"], git_dir, tuple(message.get("features", ())), remotes)
+                    repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
+                                         tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
+                                  for r in message.get("repos", ()))
+                    token = await self.bind(message["bottle"], repos, tuple(message.get("features", ())))
                     reply = {"ok": True, "decider": self.decider_address, "token": token.hex()}
                 case "release":
                     await self.release(message["bottle"])
@@ -195,20 +196,20 @@ class Daemon:
         writer.close()
 
     def _gateway(
-        self, bottle: str, git_dir: Path | None, remotes: tuple[Remote, ...], injections: tuple[egress.Injection, ...],
+        self, bottle: str, repos: tuple[Served, ...], injections: tuple[egress.Injection, ...],
         intercepted: tuple[str, ...], caches: tuple[cache.Cached, ...] = (),
     ) -> egress.Gateway:
         """What decides and serves `bottle`'s flows."""
         # The bottle's own CA, which bottle made when it started the bottle.
         certificates = functools.partial(ca.server_context, bottle, intercepted)
         return egress.Gateway(
-            bottle, self.policy, services=HostServices(git_dir, remotes=remotes, bottle=bottle, deliver=self.deliver, peers=self.peers), injections=injections,
+            bottle, self.policy, services=HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers), injections=injections,
             certificates=certificates, caches=caches, store=self.store,
         )
 
     async def bind(
-        self, bottle: str, git_dir: Path | None = None, features: tuple[str, ...] = (),
-        remotes: tuple[Remote, ...] = (), token: bytes | None = None,
+        self, bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = (),
+        token: bytes | None = None,
     ) -> bytes:
         """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
@@ -219,7 +220,7 @@ class Daemon:
             intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
             injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features) if i.host.lower() in intercepted)
             caches = tuple(c for c in await asyncio.to_thread(cache.cached_for, features) if c.host in intercepted)
-            gateway = self._gateway(bottle, git_dir, remotes, injections, intercepted, caches)
+            gateway = self._gateway(bottle, repos, injections, intercepted, caches)
             return self.decider.bind(bottle, gateway, token)
 
     async def deliver(self, sender: str, to: str, text: str) -> None:
@@ -269,7 +270,7 @@ class Daemon:
         registry = await asyncio.to_thread(bottles.load)
         if "list-bottles" not in _permissions(registry.get(asker)):
             raise ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
-        return [{"name": name, "repo": Path(bottle.git_repo).name if bottle.git_repo else None,
+        return [{"name": name, "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
                  "thread": bottle.spec.get("thread")}
                 for name, bottle in sorted(registry.items()) if name != asker and self.decider.bound(name)]
 
@@ -281,15 +282,15 @@ class Daemon:
     async def restore(self, bound: list[tuple]) -> None:
         """Answer the flows of bottles the decider gave tokens to before bottled last stopped.
 
-        Each is (name, git dir, features, remotes), as bound_bottles() gives
-        them. Their machines still hold those tokens, so the same ones are bound.
+        Each is (name, the repos it's served, features), as bound_bottles()
+        gives them. Their machines still hold those tokens, so the same ones are bound.
         """
-        for bottle, git_dir, features, remotes in bound:
+        for bottle, repos, features in bound:
             token = self.decider.tokens.get(bottle)
             if token is None:
                 continue
             try:
-                await self.bind(bottle, git_dir, features, remotes, token)
+                await self.bind(bottle, repos, features, token)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore its decisions: %s", bottle, e)
 
@@ -299,12 +300,12 @@ def _permissions(bottle) -> list[str]:
     return bottle.spec.get("permissions", []) if bottle is not None else []
 
 
-def bound_bottles() -> list[tuple[str, Path | None, tuple[str, ...], tuple[Remote, ...]]]:
-    """(name, repo git dir, features, remotes) of every ready bottle that has a token at the decider."""
+def bound_bottles() -> list[tuple[str, tuple[Served, ...], tuple[str, ...]]]:
+    """(name, the repos it's served, features) of every ready bottle that has a token at the decider."""
     from bottle import bottles  # bottles imports this module
 
     tokens = decider_.Decider().tokens
-    return [(b.name, bottles.git_dir(b), tuple(b.features), b.remotes) for b in bottles.load().values()
+    return [(b.name, bottles.served(b), tuple(b.features)) for b in bottles.load().values()
             if b.status == "ready" and b.name in tokens]
 
 

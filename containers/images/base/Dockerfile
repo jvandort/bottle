@@ -57,9 +57,6 @@ COPY profile.sh /etc/profile.d/bottle.sh
 ENV LANG=C.UTF-8 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bottle-egress.crt
 RUN printf '%s\n' "LANG=$LANG" "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS" > /etc/environment
 
-# Default directory for `exec` sessions: the project.
-WORKDIR /workspace
-
 LABEL org.opencontainers.image.title="bottle/base"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/bottle-entrypoint"]

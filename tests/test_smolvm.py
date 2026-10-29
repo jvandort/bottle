@@ -149,7 +149,7 @@ class SmolvmBottleTest(GitTestCase):
     def create(self, memory: str | None = "8G", mac_mib: int = 16384) -> bottles.Bottle:
         spec = {"features": [], **({"memory": memory} if memory else {})}
         with mock.patch.object(bottles.specs, "host_memory_mib", return_value=mac_mib):
-            return bottles.create(spec, "b", self.repo_path)
+            return bottles.create(spec, "b", [bottles.MountRequest("/workspace", self.repo_path)])
 
     def test_a_new_bottle_is_a_machine_bound_to_the_decider(self) -> None:
         bottle = self.create()
@@ -157,7 +157,7 @@ class SmolvmBottleTest(GitTestCase):
         self.assertEqual(bottles.get("b").archive, "base.tar")
         self.assertEqual(self.calls, [
             "create", "bind b", "start 127.0.0.1:47329 token", "contract as genie", "trust CA as root",
-            "bottle.host as root", "workspace as genie",
+            "bottle.host as root", "workspace as root", "workspace as genie",
         ])
 
     def test_its_memory_must_be_set(self) -> None:
@@ -172,7 +172,7 @@ class SmolvmBottleTest(GitTestCase):
 
     def test_its_machine_has_the_repos_objects_read_only_stand_ins_and_no_proxy(self) -> None:
         self.create(memory="8G")
-        self.assertEqual([m.target for m in self.created["mounts"]], [bottles.OBJECTS_MOUNT])
+        self.assertEqual([m.target for m in self.created["mounts"]], ["/mnt/objects/workspace"])
         self.assertEqual(self.created["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "stand-in")
         self.assertFalse({"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} & set(self.created["env"]))
         self.assertEqual(self.created["memory_mib"], 8192)

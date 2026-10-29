@@ -73,14 +73,15 @@ cat > "$home/.claude/settings.json" <<JSON
 }
 JSON
 
-# Claude's own state file: first-run setup done, and /workspace trusted, so its
-# project settings apply without the trust dialog; and the channel, as a user
+# Claude's own state file: first-run setup done, and / trusted -- the bottle is
+# the sandbox, and Claude honours a parent directory's trust -- so a project's
+# settings apply without the trust dialog wherever its repos are mounted; and the channel, as a user
 # MCP server, so a session started with it named in
 # --dangerously-load-development-channels server:events runs it (folio does).
 cat > "$home/.claude.json" <<JSON
 {
   "hasCompletedOnboarding": true,
-  "projects": { "/workspace": { "hasTrustDialogAccepted": true } },
+  "projects": { "/": { "hasTrustDialogAccepted": true } },
   "mcpServers": {
     "events": { "type": "stdio", "command": "/usr/local/bin/bottle-event", "args": ["serve"] }
   }

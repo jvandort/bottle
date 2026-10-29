@@ -161,7 +161,7 @@ class DeciderTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_restarted_bottled_honours_the_tokens_it_gave(self) -> None:
         token = await self.bind()
         await self.stop()
-        self.bound = [("b", None, (), ())]
+        self.bound = [("b", (), ())]
         await self.start()
         for _ in range(200):
             if self.daemon.decider.bindings:
@@ -171,7 +171,7 @@ class DeciderTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_restart_doesnt_restore_a_bottle_without_a_token(self) -> None:
         await self.stop()
-        self.bound = [("other", None, (), ())]
+        self.bound = [("other", (), ())]
         await self.start()
         await asyncio.sleep(0.05)
         self.assertEqual(self.daemon.decider.bindings, {})

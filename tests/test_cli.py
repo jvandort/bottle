@@ -122,20 +122,45 @@ class SpecCommandsTest(CliTestCase):
         context = self.tmp / "context.md"
         context.write_text("More.\n")
         repo = self.make_repo()
-        bottle = mock.Mock(git_repo=str(repo), branch="main", commit="c" * 40, features=("tools",), memory=None)
+        from bottle import bottles
+        bottle = mock.Mock(mounts=(bottles.Mount("/workspace", str(repo), "main", "c" * 40),), features=("tools",),
+                           memory=None)
         bottle.name = "project"
         with mock.patch("bottle.bottles.create", return_value=bottle) as create:
-            code, out, _ = self.run_cli("new", "--spec", spec, "--git-repo", str(repo), "--git-remote", "origin:fetch=upstream",
-                                        "--checkout", "main", "--name", "project", "--context", str(context))
+            code, out, _ = self.run_cli("new", "--spec", spec, "--mount", f"/workspace={repo}",
+                                        "--git-remote", "/workspace:origin:fetch=upstream", "--checkout", "/workspace=main",
+                                        "--name", "project", "--context", str(context))
         self.assertEqual(code, 0)
-        create.assert_called_once_with({"features": ["tools"], "memory": "2G"}, "project", repo, ["origin:fetch=upstream"],
-                                       "main", "More.\n")
-        self.assertIn(f"Created bottle 'project', with {repo} at main (cccccccccccc)", out)
+        create.assert_called_once_with({"features": ["tools"], "memory": "2G"}, "project",
+                                       [bottles.MountRequest("/workspace", repo, "main", ["origin:fetch=upstream"])],
+                                       "More.\n")
+        self.assertIn(f"Created bottle 'project', with {repo} at main on /workspace", out)
+
+    def test_new_refuses_a_checkout_or_remote_for_no_mount(self) -> None:
+        spec = self.spec('{"features": [], "memory": "2G"}')
+        for extra in (["--checkout", "/notes=main"], ["--git-remote", "/notes:origin:fetch=upstream"], ["--mount", "notes"]):
+            with self.subTest(extra):
+                code, _, err = self.run_cli("new", "--spec", spec, "--name", "x", *extra)
+                self.assertNotEqual(code, 0)
+                self.assertIn("invalid --", err)
+
+    def test_status_is_short_and_a_named_bottle_is_shown_in_full(self) -> None:
+        rows = [{"name": "app-fix", "state": "running", "created": 0.0, "features": ["claude", "tools"], "memory": "4G",
+                 "spec": {}, "mounts": [{"path": "/workspace", "repo": "/src/app", "branch": "main", "commit": "c" * 40,
+                                         "remotes": ["agent:fetch=ns/a,push=ns/a"]}]}]
+        with mock.patch("bottle.bottles.status", return_value=rows):
+            _, brief, _ = self.run_cli("status")
+            _, full, _ = self.run_cli("status", "app-fix")
+        self.assertEqual([line.split() for line in brief.splitlines()], [["NAME", "STATE", "MEMORY"], ["app-fix", "running", "4G"]])
+        self.assertEqual(full.splitlines(), [
+            "app-fix  running", "  memory    4G", "  features  claude, tools",
+            "  /workspace  /src/app at main", "    agent:fetch=ns/a,push=ns/a",
+        ])
 
     def test_status_shows_missing_bottles(self) -> None:
         self.assertEqual(self.run_cli("status", "gone", "--json"), (0, '[\n  {\n    "name": "gone",\n    "state": "missing"\n  }\n]\n', ""))
         code, out, _ = self.run_cli("status", "gone")
-        self.assertEqual(out.splitlines()[1].split(), ["gone", "-", "-", "-", "-", "missing"])
+        self.assertEqual(out.split(), ["gone", "missing"])
 
 
 if __name__ == "__main__":

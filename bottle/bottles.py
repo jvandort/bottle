@@ -6,12 +6,14 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a smolvm machine, bottle-<name> (see smolvm.py), with its repo's objects
-    mounted read-only, if it has a repo
+  - a smolvm machine, bottle-<name> (see smolvm.py), with each of its mounts'
+    repos' objects mounted read-only
   - a token at bottled's decider, which smolvm asks about each of the
-    machine's connections before making them, and which serves the bottle's git
+    machine's connections before making them, and which serves each mount's git
     remotes at bottle.host (see decider.py, egress.py, host.py)
-  - a checkout at /workspace that borrows those objects via alternates
+  - for each mount, a checkout at its path that borrows those objects via
+    alternates. Which paths is the bottle's creator's to say; none is special,
+    but the first is where a shell or a command starts (genie's home without one).
 
 What it installs, and its memory, come from a spec its creator owns (see
 specs.py). Its remotes are the ones it was created with, and nothing is
@@ -43,9 +45,14 @@ from bottle.store import bottle_home, namespace, read_json, write_json
 
 log = logging.getLogger("bottle.bottles")
 
-OBJECTS_MOUNT = "/mnt/repo/objects"
-WORKSPACE = "/workspace"
+OBJECTS_ROOT = "/mnt/objects"   # a mount at /x has its objects at /mnt/objects/x
 USER = "genie"
+HOME = f"/home/{USER}"
+# A mount's path: absolute, of name-like segments, so it's safe in a URL and a shell.
+MOUNT_PATH = re.compile(r"(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+")
+# How a bottle made before mounts had its one repo: at /workspace, its objects at
+# /mnt/repo/objects, its remotes at http://bottle.host/git/<remote>.
+LEGACY_PATH, LEGACY_OBJECTS = "/workspace", "/mnt/repo/objects"
 CONTEXT_FILE = "BOTTLE.md"  # in genie's home
 GIT_URL = f"http://{host.HOST}{host.GIT_PATH}"
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -58,7 +65,6 @@ CONTRACT = (
     ("bottle-entrypoint is installed", "test -x /usr/local/bin/bottle-entrypoint"),
     ("the genie user has UID 1000", '[ "$(id -un)" = genie ] && [ "$(id -u)" = 1000 ]'),
     ("genie has passwordless sudo", "sudo -n true"),
-    ("/workspace exists and genie can write to it", "test -d /workspace && test -w /workspace"),
     ("git is installed", "command -v git"),
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
@@ -69,12 +75,52 @@ CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
 
 
 @dataclass(frozen=True)
+class Mount:
+    """A repo in the bottle: its objects mounted read-only, checked out at `path`
+    borrowing them, and served the remotes it was given."""
+
+    path: str  # where it's checked out, absolute
+    repo: str  # its toplevel on the host, whose objects are mounted
+    branch: str | None  # None: a detached commit
+    commit: str
+    remotes: tuple[host.Remote, ...] = ()
+    objects: str = ""  # where its objects are mounted in the bottle (default: under OBJECTS_ROOT)
+    at: str | None = None  # where its remotes are under bottle.host/git (default: its path, less the /)
+
+    def __post_init__(self) -> None:
+        known = {f.name for f in fields(host.Remote)}
+        object.__setattr__(self, "remotes", tuple(  # dicts, when read from JSON; options since removed are dropped
+            host.Remote(**{k: v for k, v in r.items() if k in known}) if isinstance(r, dict) else r
+            for r in self.remotes))
+        if not self.objects:
+            object.__setattr__(self, "objects", OBJECTS_ROOT + self.path)
+        if self.at is None:
+            object.__setattr__(self, "at", self.path.lstrip("/"))
+
+    @property
+    def checkout(self) -> str:
+        """What's checked out, for display: the branch, or the detached commit."""
+        return self.branch or f"({self.commit[:12]})"
+
+    def url(self, remote: str) -> str:
+        return f"{GIT_URL}/{self.at}/{remote}" if self.at else f"{GIT_URL}/{remote}"
+
+
+@dataclass(frozen=True)
+class MountRequest:
+    """A mount as `bottle new` is asked for one: the repo, where, from what, served what."""
+
+    path: str
+    repo: Path
+    checkout: str | None = None  # a branch or commit (default: origin's default branch, else what's checked out)
+    remotes: list[str] | None = None  # --git-remote specs, less the path (default: origin and host, read-only)
+
+
+@dataclass(frozen=True)
 class Bottle:
     name: str
     id: str
     image: str
-    branch: str | None  # None: a detached commit
-    commit: str  # "" when there's no checkout: a bottle with no repo
     created: float
     # "creating" until setup finishes, "ready" after; "broken" if cleanup failed.
     status: str = "creating"
@@ -84,10 +130,8 @@ class Bottle:
     memory: str | None = None
     # The spec it was made from, canonical.
     spec: dict = field(default_factory=dict)
-    # Its repo, the toplevel path its objects are mounted from; None: no repo.
-    git_repo: str | None = None
-    # The remotes it's served.
-    remotes: tuple[host.Remote, ...] = ()
+    # Its repos, each checked out at its path; the first is where a shell starts.
+    mounts: tuple[Mount, ...] = ()
     # Its creator's addition to ~/BOTTLE.md (`bottle new --context`).
     context: str = ""
     # The image archive its machine was made from, which is kept while it exists.
@@ -95,8 +139,8 @@ class Bottle:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
-        object.__setattr__(self, "remotes", tuple(  # dicts, when read from JSON
-            host.Remote(**r) if isinstance(r, dict) else r for r in self.remotes))
+        object.__setattr__(self, "mounts", tuple(  # dicts, when read from JSON
+            Mount(**m) if isinstance(m, dict) else m for m in self.mounts))
 
     @property
     def environment(self) -> str:
@@ -104,9 +148,9 @@ class Bottle:
         return "+".join([self.image, *sorted(self.features)])
 
     @property
-    def checkout(self) -> str:
-        """What's checked out, for display: the branch, or the detached commit."""
-        return self.branch or (f"({self.commit[:12]})" if self.commit else "-")
+    def workdir(self) -> str:
+        """Where a shell or a command starts: the first mount, else genie's home."""
+        return self.mounts[0].path if self.mounts else HOME
 
     @property
     def machine(self) -> str:
@@ -121,7 +165,19 @@ def load() -> dict[str, Bottle]:
     data = read_json(registry_path()) or {"bottles": {}}
     known = {f.name for f in fields(Bottle)}
     # Keys a record from an older bottle may have (its driver, say) are left out.
-    return {name: Bottle(**{k: v for k, v in entry.items() if k in known}) for name, entry in data["bottles"].items()}
+    return {name: Bottle(**{k: v for k, v in _mounted(entry).items() if k in known})
+            for name, entry in data["bottles"].items()}
+
+
+def _mounted(entry: dict) -> dict:
+    """A record from before mounts, with its one repo as the mount it always was."""
+    if "mounts" in entry or not entry.get("git_repo"):
+        return entry
+    return {**entry, "mounts": [{
+        "path": LEGACY_PATH, "repo": entry["git_repo"], "branch": entry.get("branch"),
+        "commit": entry.get("commit", ""), "remotes": entry.get("remotes", []),
+        "objects": LEGACY_OBJECTS, "at": "",
+    }]}
 
 
 def get(name: str) -> Bottle:
@@ -149,63 +205,68 @@ def _write(bottles: dict[str, Bottle]) -> None:
 
 
 def create(
-    spec: dict, name: str, git_repo: Path | None = None, remotes: list[str] | None = None,
-    checkout: str | None = None, context: str = "", image: str = images.BASE,
+    spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "", image: str = images.BASE,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
     `name` is the creator's choice, and the bottle's identity: there's no
     default, so a creator never has to find out what it got, and a taken name
-    is refused rather than numbered. `git_repo` is the repo whose objects are
-    mounted and whose remotes are served; without one the bottle has an empty
-    /workspace and no remotes.
-    `remotes` are `--git-remote` specs (see host.Remote); None serves origin
-    and host, read-only. `checkout` is a branch or commit of `git_repo`
-    (default: origin's default branch, else what the repo has checked out).
-    Nothing is registered in the repo: the bottle's creator reads what it
-    pushes, from the namespaces it chose.
+    is refused rather than numbered. Each mount is a repo whose objects are
+    mounted and whose remotes are served, checked out at its path; without
+    any, the bottle has no repo. Nothing is registered in a repo: the bottle's
+    creator reads what it pushes, from the namespaces it chose.
     """
     spec = specs.canonical(spec)
     installed = [f.spec for f in features_.resolve(list(spec["features"]))]
-    if git_repo is None:
-        if remotes or checkout:
-            raise BottleError("--git-remote and --checkout need --git-repo")
-        repo, start, served = None, repos.Start(None, ""), ()
-    else:
-        path = repos.toplevel(git_repo)
-        repo = repos.Repo(repos.derive_name(path), path)
-        start = _start_at(repo, checkout)
-        served = _parse_remotes(remotes)
     existing = load()
     if not NAME_PATTERN.fullmatch(name):
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
-    if repo is not None:
-        _refuse_a_second_writer(repo, served, existing.values())
+    planned = _plan_mounts(mounts or [], existing.values())
     prereqs.ensure_smolvm()
     tag = features_.ensure_built(image, installed)
     auth.ensure_logged_in(installed)
 
     bottle = Bottle(
-        name, uuid.uuid4().hex, image, start.branch, start.commit, time.time(),
+        name, uuid.uuid4().hex, image, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
-        git_repo=str(repo.path) if repo else None, remotes=served, context=context,
+        mounts=tuple(m for m, _ in planned), context=context,
     )
-    bottle = _bring_up(bottle, repo, tag)
+    bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
     log.info("%s: created, %s, features %s", name,
-             f"{repo.path} at {bottle.checkout}" if repo else "no repo", ", ".join(installed) or "none")
+             ", ".join(f"{m.repo} at {m.checkout} on {m.path}" for m in bottle.mounts) or "no repo",
+             ", ".join(installed) or "none")
     return bottle
 
 
-def _bring_up(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
+def _plan_mounts(requests: list[MountRequest], others) -> list[tuple[Mount, repos.Repo]]:
+    """Each requested mount, checked and worked out, with its repo; nothing written."""
+    planned: list[tuple[Mount, repos.Repo]] = []
+    for request in requests:
+        path = request.path.rstrip("/") or request.path
+        if not MOUNT_PATH.fullmatch(path):
+            raise BottleError(f"invalid mount path {request.path!r}: an absolute path of names, e.g. /workspace")
+        for earlier, _ in planned:
+            if path == earlier.path or path.startswith(earlier.path + "/") or earlier.path.startswith(path + "/"):
+                raise BottleError(f"mounts {earlier.path} and {path} overlap")
+        toplevel = repos.toplevel(request.repo)
+        repo = repos.Repo(repos.derive_name(toplevel), toplevel)
+        start = _start_at(repo, request.checkout)
+        served = _parse_remotes(request.remotes)
+        _refuse_a_second_writer(repo, served, others)
+        planned.append((Mount(path, str(repo.path), start.branch, start.commit, served), repo))
+    return planned
+
+
+def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     """Create the bottle's machine from `tag`, and set it up; roll it all back on failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if smolvm.state(bottle.machine) is not None:
         raise BottleError(f"a machine named {bottle.machine} already exists; choose another name with --name")
     _save(bottle)
     try:
-        bottle = _run_machine(bottle, repo, tag)
+        bottle = _run_machine(bottle, mounted, tag)
     except BaseException as failure:
         log.warning("%s: creating failed, rolling back: %s", bottle.name, _describe(failure))
         try:
@@ -254,21 +315,17 @@ def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], 
         return
     mine = repos.objects_dir(repo)
     for other in others:
-        theirs = {r.push_namespace for r in other.remotes if r.push}
-        shared = ours & theirs
-        if shared and _objects(other) == mine:
-            raise BottleError(
-                f"bottle {other.name} already pushes into namespace {min(shared)} of {repo.path}; "
-                "each namespace has one writer"
-            )
+        for mount in other.mounts:
+            shared = ours & {r.push_namespace for r in mount.remotes if r.push}
+            directory = git_dir(mount)
+            if shared and directory is not None and directory / "objects" == mine:
+                raise BottleError(
+                    f"bottle {other.name} already pushes into namespace {min(shared)} of {repo.path}; "
+                    "each namespace has one writer"
+                )
 
 
-def _objects(bottle: Bottle) -> Path | None:
-    directory = git_dir(bottle)
-    return directory / "objects" if directory else None
-
-
-def _run_machine(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
+def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     """Create and start a fresh machine for the bottle from `tag`'s archive, and set it up from scratch."""
     archive = images.archive_of(tag)
     if archive is None:
@@ -279,14 +336,15 @@ def _run_machine(bottle: Bottle, repo: repos.Repo | None, tag: str) -> Bottle:
     # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open.
     smolvm.create(
         bottle.machine, str(archive),
-        mounts=[smolvm.Mount(repos.objects_dir(repo), OBJECTS_MOUNT)] if repo else [],
-        env=_machine_env(bottle.features, bottle.spec.get("permissions", ())), memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
+        mounts=[smolvm.Mount(repos.objects_dir(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
+        env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
+        memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
     )
     _start_machine(bottle)
     verify_contract(bottle)
     trust_egress_ca(bottle)
     point_at_host(bottle)
-    _init_workspace(bottle)
+    _init_mounts(bottle)
     return bottle
 
 
@@ -298,7 +356,7 @@ def _start_machine(bottle: Bottle) -> None:
     trust_egress_ca installs it once the machine is up.
     """
     ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
-    decider, token = daemon.bind_decider(bottle.name, git_dir(bottle), bottle.features, bottle.remotes)
+    decider, token = daemon.bind_decider(bottle.name, served(bottle), bottle.features)
     smolvm.start(bottle.machine, decider, token)
 
 
@@ -356,17 +414,24 @@ def throwaway(feature_specs: list[str]):
         log.info("%s: throwaway bottle removed", name)
 
 
-def git_dir(bottle: Bottle) -> Path | None:
-    """The git dir of the bottle's repo, which its remotes are served from; None if it has none, or it's gone."""
+def git_dir(mount: Mount) -> Path | None:
+    """The git dir of a mount's repo, which its remotes are served from; None if it's gone."""
     try:
-        return repos.objects_dir(repos.Repo("", Path(bottle.git_repo))).parent if bottle.git_repo else None
+        return repos.objects_dir(repos.Repo("", Path(mount.repo))).parent
     except BottleError:
         return None
 
 
-def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
-    """What a bottle's machine is created with: the stand-ins its features asked for, never credentials,
-    and its permissions, as BOTTLE_PERMISSIONS, so the tools that use them know to offer them.
+def served(bottle: Bottle) -> tuple[host.Served, ...]:
+    """What bottled serves the bottle at bottle.host: each mount's repo and remotes."""
+    return tuple(host.Served(git_dir(m), m.remotes, m.at or "") for m in bottle.mounts)
+
+
+def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, ...] | list[str] = (),
+                 workdir: str = HOME) -> dict[str, str]:
+    """What a bottle's machine is created with: the stand-ins its features asked for, never credentials;
+    its permissions, as BOTTLE_PERMISSIONS, so the tools that use them know to offer them; and where a
+    login starts, as BOTTLE_WORKDIR (the base image's profile goes there).
 
     BOTTLE_PERMISSIONS only says what bottled would allow: bottled checks the
     bottle's spec, not this, so a bottle that sets it itself gains nothing.
@@ -374,9 +439,8 @@ def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, 
     Every exec sees these. SSH sessions only see /etc/environment, so the base
     image's entrypoint mirrors there the ones BOTTLE_MIRROR_ENV names.
     """
-    env = auth.standins_for(features) | ({"BOTTLE_PERMISSIONS": ",".join(permissions)} if permissions else {})
-    if not env:
-        return {}
+    env = (auth.standins_for(features) | ({"BOTTLE_PERMISSIONS": ",".join(permissions)} if permissions else {})
+           | {"BOTTLE_WORKDIR": workdir})
     return env | {"BOTTLE_MIRROR_ENV": " ".join(sorted(env))}
 
 
@@ -391,16 +455,16 @@ def context(bottle: Bottle) -> str:
     the context it adds; this says what's there.
     """
     lines = [f"# Bottle\n\nYou're `{USER}`, running in a bottle: a sandboxed Linux VM with passwordless sudo.\n"]
-    if bottle.git_repo:
-        at = f"on the `{bottle.branch}` branch" if bottle.branch else "at a detached commit"
-        lines.append(f"- `{WORKSPACE}` is a checkout of `{Path(bottle.git_repo).name}`, {at}.")
-        if bottle.remotes:
+    for mount in bottle.mounts:
+        at = f"on the `{mount.branch}` branch" if mount.branch else "at a detached commit"
+        lines.append(f"- `{mount.path}` is a checkout of `{Path(mount.repo).name}`, {at}.")
+        if mount.remotes:
             lines.append("  Its remotes are served by the host:")
-            lines += [f"  - `{r.name}`: {_describe_remote(r, bottle.remotes)}" for r in bottle.remotes]
+            lines += [f"  - `{r.name}`: {_describe_remote(r)}" for r in mount.remotes]
         else:
             lines.append("  It has no remotes.")
-    else:
-        lines.append(f"- `{WORKSPACE}` is empty: this bottle has no repo.")
+    if not bottle.mounts:
+        lines.append("- This bottle has no repo.")
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     resolved = features_.resolve(list(bottle.features))
@@ -422,13 +486,11 @@ def context(bottle: Bottle) -> str:
     return text + (f"\n{bottle.context}" if bottle.context else "")
 
 
-def _describe_remote(remote: host.Remote, remotes: tuple[host.Remote, ...] = ()) -> str:
+def _describe_remote(remote: host.Remote) -> str:
     if remote.fetch == host.UPSTREAM:
         what = "the repo's upstream, up to date whenever you fetch."
     elif remote.fetch == host.HEADS:
         what = "the user's own branches, as they stand in their repo."
-        # A branch another remote advances is the bottle's own work, come back.
-        what += "".join(f" Its `{r.advance}` follows what you push to `{r.name}`." for r in remotes if r.advance)
     else:
         what = "refs the host keeps for this bottle."
     if remote.push is None:
@@ -436,43 +498,50 @@ def _describe_remote(remote: host.Remote, remotes: tuple[host.Remote, ...] = ())
     # Fetching reads other refs than pushing writes (a two-lane exchange, say), so say so,
     # or an agent fetching to check its push finds nothing and pushes again.
     echo = "" if remote.push == remote.fetch else " Fetching it doesn't show your own pushes."
-    advance = (f" A push of `{remote.advance}` also moves the user's own `{remote.advance}` and its working tree,"
-               " when nothing of theirs is in the way." if remote.advance else "")
-    return f"{what} You can push to it: pushes can't rewrite or delete what's already there.{echo}{advance}"
+    return f"{what} You can push to it: pushes can't rewrite or delete what's already there.{echo}"
 
 
-def _init_workspace(bottle: Bottle) -> None:
-    """Check out the bottle's branch or commit at /workspace, borrowing the mounted objects, with its remotes.
+def _init_mounts(bottle: Bottle) -> None:
+    """Check out each mount's branch or commit at its path, borrowing its mounted objects, with its remotes;
+    then write the context.
 
-    Without a repo, just the context. No branch tracks anything: which remote
-    a branch pulls from is its creator's to decide.
+    Each path is made for genie (as root: it may be anywhere), and marked a
+    safe directory for git, whoever ends up owning it. No branch tracks
+    anything: which remote a branch pulls from is its creator's to decide.
     """
+    paths = " ".join(shlex.quote(m.path) for m in bottle.mounts)
+    if paths:
+        try:
+            _exec(bottle, ["sh", "-c", f"install -d -o {USER} -g {USER} {paths}"], user="root")
+        except BottleError as e:
+            raise BottleError(f"making {paths} failed: {e}") from None
     script = ["set -e"]
-    if bottle.git_repo:
-        commit = shlex.quote(bottle.commit)
-        if bottle.branch:
-            branch = shlex.quote(bottle.branch)
-            script += [f"git init -q -b {branch} {WORKSPACE}"]
+    for mount in bottle.mounts:
+        path, commit = shlex.quote(mount.path), shlex.quote(mount.commit)
+        script += [f"git config --global --add safe.directory {path}"]
+        if mount.branch:
+            branch = shlex.quote(mount.branch)
+            script += [f"git init -q -b {branch} {path}"]
             point_head = f"update-ref refs/heads/{branch} {commit}"
         else:
-            script += [f"git init -q {WORKSPACE}"]
+            script += [f"git init -q {path}"]
             point_head = f"update-ref --no-deref HEAD {commit}"
         script += [
-            f"echo {OBJECTS_MOUNT} > {WORKSPACE}/.git/objects/info/alternates",
-            f"git -C {WORKSPACE} {point_head}",
-            f"git -C {WORKSPACE} reset -q --hard",
+            f"echo {shlex.quote(mount.objects)} > {path}/.git/objects/info/alternates",
+            f"git -C {path} {point_head}",
+            f"git -C {path} reset -q --hard",
         ]
-        names = [r.name for r in bottle.remotes]
-        script += [f"git -C {WORKSPACE} remote add {name} {GIT_URL}/{name}" for name in names]
+        names = [r.name for r in mount.remotes]
+        script += [f"git -C {path} remote add {name} {shlex.quote(mount.url(name))}" for name in names]
         if ORIGIN in names:
-            script += [f"git -C {WORKSPACE} config checkout.defaultRemote {ORIGIN}"]
+            script += [f"git -C {path} config checkout.defaultRemote {ORIGIN}"]
         if names:
-            script += [f"git -C {WORKSPACE} fetch -q --multiple {' '.join(names)}"]
+            script += [f"git -C {path} fetch -q --multiple {' '.join(names)}"]
     script += [f"printf '%s' {shlex.quote(context(bottle))} > \"$HOME/{CONTEXT_FILE}\""]
     try:
         _exec(bottle, ["sh", "-c", "\n".join(script)], user=USER)
     except BottleError as e:
-        raise BottleError(f"setting up {WORKSPACE} failed: {e}") from None
+        raise BottleError(f"checking out {paths or 'nothing'} failed: {e}") from None
 
 
 def start(name: str) -> Bottle:
@@ -558,12 +627,12 @@ def verify_contract(bottle: Bottle) -> None:
 
 
 def shell(name: str) -> NoReturn:
-    """Open a login shell in the bottle, at /workspace."""
+    """Open a login shell in the bottle, at its first mount."""
     _attach(name, ["bash", "-l"], tty=True)
 
 
 def exec_(name: str, argv: list[str]) -> NoReturn:
-    """Run one command in the bottle, at /workspace, and exit with its status.
+    """Run one command in the bottle, at its first mount, and exit with its status.
 
     A TTY only when this process has one on both ends, so output stays clean
     when it's piped or redirected.
@@ -577,7 +646,7 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    command = smolvm.exec_command(bottle.machine, argv, user=USER, workdir=WORKSPACE, tty=tty)
+    command = smolvm.exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
     os.execvp(command[0], command)
 
 
@@ -609,10 +678,9 @@ def status(names: list[str] = ()) -> list[dict]:
         bottle, state = states[name]
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created,
-            "git_repo": bottle.git_repo,
-            "branch": bottle.branch, "commit": bottle.commit or None,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
-            "remotes": [r.spec for r in bottle.remotes],
+            "mounts": [{"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,
+                        "remotes": [r.spec for r in m.remotes]} for m in bottle.mounts],
         })
     return rows
 

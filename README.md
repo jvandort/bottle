@@ -54,8 +54,8 @@ Bottle on its own:
 
 ```sh
 echo '{"features": ["tools", "claude"], "memory": "4G"}' > spec.json
-bottle new --spec spec.json --name foo --git-repo ~/path/to/foo
-bottle shell foo          # Open a shell at /workspace; run `claude` here
+bottle new --spec spec.json --name foo --mount /workspace=~/path/to/foo
+bottle shell foo          # Open a shell at /workspace, its first mount; run `claude` here
 ```
 
 ## Prerequisites
@@ -74,9 +74,9 @@ missing, and asks first.
 | `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
 | `bottle new` | Create a bottle from a spec |
 | `bottle spec validate` | Check a spec, and print it in canonical form |
-| `bottle shell` | Open a shell in a bottle, at `/workspace` |
+| `bottle shell` | Open a shell in a bottle, at its first mount |
 | `bottle exec` | Run one command in a bottle |
-| `bottle status` | List bottles and their state |
+| `bottle status` | List bottles and their state; name one to see all of it |
 | `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
 | `bottle daemon start` / `stop` | Manage `bottled`, which decides bottles' connections |
@@ -188,7 +188,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   install breaks. Option: `externallyManaged` (default `false`) keeps the
   marker, and Debian's behaviour, if you'd rather work in a venv.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
-  the bottle's `/workspace` is trusted, first-run setup is done, it reaches the
+  every directory is trusted (the bottle is the sandbox), first-run setup is done, it reaches the
   API through the egress proxy, which holds the `claude` credential
   (`bottle auth login claude`) so the agent can spend its own subscription
   token without ever being able to read it, and it reads
@@ -221,7 +221,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
 
   ```sh
   echo '{"features": ["tools", "github"]}' > spec.json
-  bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
+  bottle new --spec spec.json --name reponame --mount /workspace=~/src/reponame
   bottle exec reponame -- gh pr list
   ```
 - `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
@@ -235,7 +235,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
 
   ```sh
   echo '{"features": ["tools", "teamcity:server=https://teamcity.example.com"]}' > spec.json
-  bottle new --spec spec.json --name reponame --git-repo ~/src/reponame
+  bottle new --spec spec.json --name reponame --mount /workspace=~/src/reponame
   bottle exec reponame -- teamcity run list
   ```
 - `develocity`: [Develocity's MCP server](https://docs.develocity.ai/2026.3/integrations/agentic-ai/mcp-servers/ai-agents/)
@@ -279,7 +279,7 @@ has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]`
+### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE]`
 
 Creates a bottle from a **spec**: a file giving its features and memory, owned
 by whoever creates the bottle. `NAME` is required, and is the bottle's identity:
@@ -298,15 +298,20 @@ bottled checks the bottle's spec, never the bottle; the bottle sees its
 permissions as `BOTTLE_PERMISSIONS`, so its tools know what to offer. Folio
 never gives a thread's bottle permissions.
 
-`--git-repo PATH` is the repo whose objects are mounted read-only, so nothing
-is cloned and the bottle can't change your repo except by pushing to a remote
-it's served. It's checked out at `/workspace` at `--checkout`: a branch (the
-repo's, else origin's) or a commit, by default the origin remote's default
-branch, or, if there's no origin, whatever the repo has checked out. Without
-`--git-repo` the bottle has an empty `/workspace`.
+Each `--mount PATH=REPO` checks a repo out in the bottle at PATH, any absolute
+path: none is special. Its objects are mounted read-only, so nothing is
+cloned and the bottle can't change the repo except by pushing to a remote
+it's served. The first mount is where `bottle shell` and `bottle exec` start
+(genie's home, without one), and where an SSH login goes. `--checkout
+PATH=REF` says what's checked out there: a branch (the repo's, else
+origin's) or a commit, by default the origin remote's default branch, or, if
+there's no origin, whatever the repo has checked out. Without a mount the
+bottle has no repo.
 
-Each `--git-remote` serves the bottle one remote, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`,
-live, at `http://bottle.host/`, which bottled answers. What a fetch sees is one of three views:
+Each `--git-remote PATH:REMOTE` serves the mount at PATH one remote,
+`NAME:fetch=VIEW[,push=ns/NAMESPACE]`, live, at
+`http://bottle.host/git/<PATH>/<NAME>`, which bottled answers. What a fetch
+sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
   Fetching first fetches your repo's `origin` on the host (at most once a
@@ -328,24 +333,22 @@ nowhere, though one you're reading in curate comes along by curate's own hook:
 the fetch runs with your repo's hooks, as yours would. The push succeeds either way, and its
 output tells the bottle what moved and what didn't (`remote: bottle: ...`);
 bottled logs it too. `git config bottle.follow false` in your repo turns it
-off. A remote can also `advance=BRANCH`: your BRANCH follows its pushes the
-same way, tracking or not (folio's broker's notes). A namespace is what confines the
+off. A namespace is what confines the
 bottle: every ref its `receive-pack` resolves is inside it, and your own refs
 aren't advertised to it at all. Pushes are append-only, refusing force-pushes
 and deletes, so nothing you've already read changes underneath you; no other
 bottle may push into the same namespace; and your repo's own hooks don't run.
 Reading one namespace and writing another makes a two-lane exchange, where
 neither side's push is ever refused for what the other did: that's how
-[folio](folio/README.md) gives each thread its lane. Without any
-`--git-remote`, the bottle gets `origin` (`upstream`) and `host` (`heads`),
-both read-only.
+[folio](folio/README.md) gives each thread its lane. A mount given no
+`--git-remote` gets `origin` (`upstream`) and `host` (`heads`), both read-only.
 
 ```sh
-bottle new --spec spec.json --name foo-fix-tests --git-repo ~/src/foo --checkout main \
-  --git-remote origin:fetch=upstream \
-  --git-remote host:fetch=heads \
-  --git-remote agent:fetch=ns/fix-tests-out,push=ns/fix-tests-out \
-  --git-remote user:fetch=ns/fix-tests-in
+bottle new --spec spec.json --name foo-fix-tests --mount /workspace=~/src/foo --checkout /workspace=main \
+  --git-remote /workspace:origin:fetch=upstream \
+  --git-remote /workspace:host:fetch=heads \
+  --git-remote /workspace:agent:fetch=ns/fix-tests-out,push=ns/fix-tests-out \
+  --git-remote /workspace:user:fetch=ns/fix-tests-in
 ```
 
 `--context FILE` adds the file's contents to the end of `~/BOTTLE.md`, which
@@ -365,11 +368,11 @@ Every spec gives its memory.
 
 ### `bottle shell BOTTLE`
 
-Opens a shell in the bottle at `/workspace`, starting the bottle if it's stopped.
+Opens a shell in the bottle at its first mount, starting the bottle if it's stopped.
 
 ### `bottle exec BOTTLE COMMAND [ARG]...`
 
-Runs one command in the bottle, at `/workspace`, and exits with its status,
+Runs one command in the bottle, at its first mount, and exits with its status,
 starting the bottle if it's stopped. Put `--` before the command if it takes
 options of its own. Its output is a terminal only if bottle's is, so piping and
 redirecting work.
@@ -381,9 +384,10 @@ bottle exec reponame cat /workspace/report.json | jq .failures
 
 ### `bottle status [BOTTLE]... [--json]`
 
-Shows every bottle's state, or just those named; a name with no bottle shows as
-`missing`. With `--json`, one object per bottle with what it was made from: its
-repo, branch and commit, features, memory, spec and remotes.
+Shows every bottle's name, state and memory, a line each. Name bottles to see
+all of each: its features, and each mount's path, repo, branch and remotes. A
+name with no bottle shows as `missing`. With `--json`, one object per bottle
+with what it was made from: features, memory, spec and mounts.
 
 ### `bottle start BOTTLE` / `bottle stop BOTTLE`
 

@@ -61,25 +61,27 @@ def main(argv: list[str] | None = None) -> int:
     new = commands.add_parser(
         "new",
         help="create a bottle from a spec",
-        usage="bottle new --spec FILE --name NAME [--git-repo PATH [--git-remote REMOTE]... [--checkout REF]] [--context FILE]",
-        description="Create a bottle, in its own VM, with the spec's features and memory, and --git-repo checked "
-        "out at /workspace if given. NAME is required, and a name that's taken is refused.",
+        usage="bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] "
+        "[--git-remote PATH:REMOTE]...]... [--context FILE]",
+        description="Create a bottle, in its own VM, with the spec's features and memory, and each --mount's repo "
+        "checked out at its path. The first mount is where a shell or a command starts. NAME is required, "
+        "and a name that's taken is refused.",
     )
     new.add_argument("--spec", metavar="FILE", required=True,
                      help='its features and memory, e.g. {"features": ["tools"], "memory": "8G"}')
     new.add_argument("--name", required=True, help="its name, which is its identity")
     new.add_argument(
-        "--git-repo", metavar="PATH",
-        help="the repo whose objects are mounted, read-only, and whose remotes are served",
+        "--mount", action="append", default=[], metavar="PATH=REPO",
+        help="check out REPO at PATH, its objects mounted read-only and its remotes served (repeatable)",
     )
     new.add_argument(
-        "--git-remote", action="append", metavar="REMOTE",
-        help="with --git-repo: a remote to serve, NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being upstream, "
-        "heads or ns/NAMESPACE (repeatable; default: origin:fetch=upstream and host:fetch=heads)",
+        "--git-remote", action="append", default=[], metavar="PATH:REMOTE",
+        help="a remote to serve the mount at PATH, NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being upstream, "
+        "heads or ns/NAMESPACE (repeatable; a mount given none gets origin:fetch=upstream and host:fetch=heads)",
     )
     new.add_argument(
-        "--checkout", metavar="REF",
-        help="with --git-repo: the branch or commit to check out (default: origin's default branch, "
+        "--checkout", action="append", default=[], metavar="PATH=REF",
+        help="the branch or commit to check out at PATH (default: origin's default branch, "
         "else what the repo has checked out)",
     )
     new.add_argument("--context", metavar="FILE", help="add this file to what the bottle tells its agent (~/BOTTLE.md)")
@@ -87,9 +89,10 @@ def main(argv: list[str] | None = None) -> int:
 
     status = commands.add_parser(
         "status", help="show bottles' state",
-        description="Show every bottle's state, or just those named. A name with no bottle shows as missing.",
+        description="Show every bottle's state and memory; or, for those named, everything about them: "
+        "features, mounts, remotes. A name with no bottle shows as missing.",
     )
-    status.add_argument("names", nargs="*", metavar="BOTTLE", help="the bottles to show (default: all)")
+    status.add_argument("names", nargs="*", metavar="BOTTLE", help="the bottles to show in full (default: all, in brief)")
     status.add_argument("--json", action="store_true", help="print JSON: one object per bottle, with what it was made from")
     status.set_defaults(run=_status, parser=status)
 
@@ -258,11 +261,37 @@ def _new(args: argparse.Namespace) -> int:
     context = _read_context(args.context)
     spec = specs.read(Path(args.spec).expanduser())
     print("Creating a bottle...", file=sys.stderr)
-    git_repo = Path(args.git_repo).expanduser() if args.git_repo else None
-    bottle = bottles.create(spec, args.name, git_repo, args.git_remote, args.checkout, context)
+    bottle = bottles.create(spec, args.name, _mount_requests(args), context)
     print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
+
+
+def _mount_requests(args: argparse.Namespace):
+    """--mount, --checkout and --git-remote, as the mounts they describe."""
+    from bottle import bottles
+
+    mounts: dict[str, Path] = {}
+    for given in args.mount:
+        path, equals, repo = given.partition("=")
+        if not equals or not path or not repo:
+            raise BottleError(f"invalid --mount {given!r}: use PATH=REPO, e.g. /workspace=~/src/app")
+        if path in mounts:
+            raise BottleError(f"two mounts at {path}")
+        mounts[path] = Path(repo).expanduser()
+    checkouts: dict[str, str] = {}
+    for given in args.checkout:
+        path, equals, ref = given.partition("=")
+        if not equals or path not in mounts:
+            raise BottleError(f"invalid --checkout {given!r}: use PATH=REF, PATH a --mount's")
+        checkouts[path] = ref
+    remotes: dict[str, list[str]] = {}
+    for given in args.git_remote:
+        path, colon, remote = given.partition(":")
+        if not colon or path not in mounts:
+            raise BottleError(f"invalid --git-remote {given!r}: use PATH:NAME:fetch=VIEW..., PATH a --mount's")
+        remotes.setdefault(path, []).append(remote)
+    return [bottles.MountRequest(path, repo, checkouts.get(path), remotes.get(path)) for path, repo in mounts.items()]
 
 
 def _read_context(path: str | None) -> str:
@@ -275,9 +304,8 @@ def _read_context(path: str | None) -> str:
 
 
 def _describe(bottle) -> str:
-    at = f"{bottle.branch} ({bottle.commit[:12]})" if bottle.branch else f"commit {bottle.commit[:12]}"
-    source = f"{bottle.git_repo} at {at}" if bottle.git_repo else "no repo"
-    return f"bottle '{bottle.name}', with {source} and features {_settings(bottle)}"
+    mounted = ", ".join(f"{m.repo} at {m.checkout} on {m.path}" for m in bottle.mounts) or "no repo"
+    return f"bottle '{bottle.name}', with {mounted} and features {_settings(bottle)}"
 
 
 def _shell(args: argparse.Namespace) -> int:
@@ -296,15 +324,24 @@ def _status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    table = [("NAME", "REPO", "BRANCH", "FEATURES", "MEMORY", "STATE")]
-    for row in rows:
+    if not args.names:
+        table = [("NAME", "STATE", "MEMORY")]
+        table += [(row["name"], row["state"], row.get("memory") or "-") for row in rows]
+        _table(table)
+        return 0
+    for n, row in enumerate(rows):
+        print(("\n" if n else "") + f"{row['name']}  {row['state']}")
         if row["state"] == "missing":
-            table.append((row["name"], "-", "-", "-", "-", "missing"))
             continue
-        checkout = row["branch"] or (f"({row['commit'][:12]})" if row["commit"] else "-")
-        table.append((row["name"], row["git_repo"] or "-", checkout,
-                      " ".join(row["features"]) or "-", row["memory"], row["state"]))
-    _table(table)
+        print(f"  memory    {row['memory']}")
+        print(f"  features  {', '.join(row['features']) or '-'}")
+        for mount in row["mounts"]:
+            at = mount["branch"] or f"({mount['commit'][:12]})"
+            print(f"  {mount['path']}  {mount['repo']} at {at}")
+            for remote in mount["remotes"]:
+                print(f"    {remote}")
+        if not row["mounts"]:
+            print("  no repo")
     return 0
 
 

@@ -1,4 +1,2 @@
 [init]
 	defaultBranch = main
-[safe]
-	directory = /workspace

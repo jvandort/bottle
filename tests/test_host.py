@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 from pathlib import Path
 import json
 import os
@@ -51,7 +52,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         remotes = tuple(host.Remote.parse(spec) for spec in (
             "origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out",
         ))
-        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
+        services = host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),))
         self.services = services
         server, self.env = await serve_bottle_host(services)
         self.addAsyncCleanup(self._close, server)
@@ -219,7 +220,7 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         # Fail closed: with no namespace a push would write the host's own refs.
         # Remote.parse never makes such a remote; this is the hook catching one anyway.
         await self.work()
-        self.services.remotes = (host.Remote("work", host.HEADS, host.NS),)
+        self.services.repos = (dataclasses.replace(self.services.repos[0], remotes=(host.Remote("work", host.HEADS, host.NS),)),)
         result = await self.push("work")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no namespace", result.stderr)
@@ -262,17 +263,16 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.repo = self.make_repo("app")
-        remotes = (host.Remote.parse("agent:fetch=ns/t-out,push=ns/t-out"),
-                   host.Remote.parse("notes:fetch=ns/n-out,push=ns/n-out,advance=main"))
-        server, self.env = await serve_bottle_host(host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes))
+        remotes = (host.Remote.parse("agent:fetch=ns/t-out,push=ns/t-out"),)
+        server, self.env = await serve_bottle_host(
+            host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),)))
         self.addAsyncCleanup(RemotesTest._close, server)
         for key, value in (("url", str(self.repo)), ("fetch", "+refs/heads/*:refs/remotes/bottle/t/*"),
                            ("uploadpack", "git --namespace=t-out upload-pack")):
             run("git", "-C", self.repo, "config", f"remote.bottle/t.{key}", value)
         self.workspace = self.tmp / "workspace"
         run("git", "clone", "-q", self.repo, self.workspace)
-        for name in ("agent", "notes"):
-            run("git", "-C", self.workspace, "remote", "add", name, f"http://bottle.host/git/{name}")
+        run("git", "-C", self.workspace, "remote", "add", "agent", "http://bottle.host/git/agent")
         run("git", "-C", self.workspace, "checkout", "-q", "-b", "genie/x")
         self.write("a.txt", "first\n")
         await self.push()
@@ -388,16 +388,6 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual("", await self.push())
         self.assertEqual(before, self.users())
 
-    async def test_advance_moves_its_branch_tracking_or_not(self) -> None:
-        run("git", "-C", self.repo, "config", "bottle.follow", "false")  # advance is its own
-        run("git", "-C", self.repo, "switch", "-q", "main")
-        run("git", "-C", self.workspace, "switch", "-q", "main")
-        pushed = self.write("Now.md", "in flight: nothing\n")
-        said = await self.push("main", remote="notes")
-        self.assertEqual(pushed, self.users("main"))
-        self.assertEqual("in flight: nothing\n", (self.repo / "Now.md").read_text())
-        self.assertEqual(f"bottle: moved the user's main to {pushed[:12]}, files and all", said)
-
     async def test_ignored_files_dont_stop_it(self) -> None:
         self.write(".gitignore", ".obsidian/\n")
         await self.push()
@@ -407,14 +397,47 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         await self.push()
         self.assertEqual(pushed, self.users())
 
-    def test_advance_needs_push_and_a_branch(self) -> None:
-        self.assertEqual("main", host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main").advance)
-        self.assertEqual("a:fetch=ns/x,push=ns/x,advance=notes/main",
-                         host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=notes/main").spec)
-        for spec in ("a:fetch=ns/x,advance=main", "a:fetch=ns/x,push=ns/x,advance=../main",
-                     "a:fetch=ns/x,push=ns/x,advance=-x", "a:fetch=ns/x,push=ns/x,advance=main.lock"):
-            with self.subTest(spec), self.assertRaises(BottleError):
-                host.Remote.parse(spec)
+    def test_a_remote_has_no_advance_any_more(self) -> None:
+        with self.assertRaises(BottleError):
+            host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main")
+
+
+class RoutingTest(unittest.TestCase):
+    """Which mount's repo a /git/... request is for: each mount's remotes are under its path."""
+
+    def setUp(self) -> None:
+        agent = host.Remote.parse("agent:fetch=ns/a,push=ns/a")
+        self.workspace = host.Served(Path("/repos/app/.git"), (agent, host.Remote.parse("origin:fetch=upstream")), "workspace")
+        self.notes = host.Served(Path("/repos/notes/.git"), (agent,), "notes")
+        self.nested = host.Served(Path("/repos/deep/.git"), (agent,), "workspace/deep")
+        self.services = host.HostServices((self.workspace, self.notes, self.nested))
+
+    def test_each_mount_by_its_path(self) -> None:
+        for path, served, remote, rest in (
+            ("/git/workspace/agent/info/refs", self.workspace, "agent", "/info/refs"),
+            ("/git/workspace/origin/git-upload-pack", self.workspace, "origin", "/git-upload-pack"),
+            ("/git/notes/agent/info/refs", self.notes, "agent", "/info/refs"),
+            ("/git/workspace/deep/agent/info/refs", self.nested, "agent", "/info/refs"),
+        ):
+            with self.subTest(path):
+                routed = self.services.route(path)
+                assert routed is not None
+                self.assertEqual((routed[0], routed[1].name, routed[2]), (served, remote, rest))
+
+    def test_nothing_else(self) -> None:
+        for path in ("/git/agent/info/refs", "/git/notes/origin/info/refs", "/git/other/agent/x", "/messages"):
+            with self.subTest(path):
+                self.assertIsNone(self.services.route(path))
+
+    def test_a_bottle_from_before_mounts_keeps_its_remotes_at_git(self) -> None:
+        legacy = host.HostServices((host.Served(Path("/repos/app/.git"), self.workspace.remotes, ""),))
+        routed = legacy.route("/git/agent/info/refs")
+        assert routed is not None
+        self.assertEqual(routed[1].name, "agent")
+
+    def test_a_repo_thats_gone_serves_nothing(self) -> None:
+        gone = host.HostServices((host.Served(None, self.workspace.remotes, "workspace"),))
+        self.assertIsNone(gone.route("/git/workspace/agent/info/refs"))
 
 
 class MessagesTest(unittest.IsolatedAsyncioTestCase):
@@ -674,7 +697,7 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         remotes = tuple(host.Remote.parse(spec) for spec in (
             "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",
         ))
-        services = host.HostServices(self.repo / ".git", self.tmp / "view.git", remotes=remotes)
+        services = host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),))
         server, self.env = await serve_bottle_host(services)
         self.addAsyncCleanup(RemotesTest._close, server)
         self.workspace = self.tmp / "workspace"

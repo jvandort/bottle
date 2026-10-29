@@ -6,15 +6,11 @@ refs as the bottle named them, inside its namespace (GIT_NAMESPACE). What it
 says on stdout reaches the bottle as `remote:` lines in its push's output,
 and goes to $BOTTLE_HOOK_LOG for bottled's log.
 
-Two kinds of branch follow a push:
-
-- **Tracking.** A branch of the host's whose upstream is a remote reading this
-  namespace -- folio's `bottle/<thread>`, whose uploadpack is `git
-  --namespace=<thread>-out upload-pack` -- follows the bottle's branch of the
-  same name. That remote is fetched first, so its tracking refs are current
-  too. On unless the repo says `git config bottle.follow false`.
-- **advance=BRANCH**, a remote's option ($BOTTLE_ADVANCE): the host's BRANCH
-  follows the bottle's, tracking or not (folio's broker's main).
+A branch of the host's follows a push when its upstream is a remote reading
+the push's namespace -- folio's `bottle/<thread>`, whose uploadpack is `git
+--namespace=<thread>-out upload-pack` -- and the bottle pushed the branch of
+that name. That remote is fetched first, so its tracking refs are current too.
+On unless the repo says `git config bottle.follow false`.
 
 Following is `git merge --ff-only`, in whichever worktree has the branch
 checked out, and nothing else: a branch with commits of the host's own, a
@@ -100,7 +96,6 @@ def follow(branch: str, commit: str, where: Path, label: str) -> str:
 def main() -> int:
     git_dir = Path(os.environ.get("GIT_DIR", ".")).resolve()
     namespace = os.environ.get("GIT_NAMESPACE", "")
-    advance = os.environ.get("BOTTLE_ADVANCE", "")
     pushed = {}
     for line in sys.stdin:
         old, new, ref = line.split()
@@ -113,8 +108,6 @@ def main() -> int:
     with open(git_dir / "bottle-follow.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         targets: dict[str, str] = {}  # host branch -> commit
-        if advance in pushed:
-            targets[advance] = pushed[advance]
         main_worktree = git_dir.parent if git_dir.name == ".git" else None
         fetched: list[str] = []
         if git("config", "--bool", "bottle.follow", cwd=git_dir).stdout.strip() != "false":
