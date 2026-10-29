@@ -19,7 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .errors import Refused
-from .gitcmd import commit_tree, git, merge_tree, metadata, rev, run, tree_of
+from .gitcmd import Objects, commit_tree, git, merge_tree, metadata, run
 from .state import Repo, Session, named, short
 from .ui import default_base, interactive, pick_base
 
@@ -46,10 +46,6 @@ def find(repo: Repo, name: str) -> Session:
                               f"before copying the review.")
             return s
     raise Refused(f"no review of {name} to copy. `curate list` shows them.")
-
-
-def subject(commit: str) -> str:
-    return git("log", "-1", "--format=%s", commit)
 
 
 # -- the base --------------------------------------------------------------
@@ -81,7 +77,7 @@ def names_for(commit: str, source: Session, head: str,
              if not any(_glob(p, r) for p in skip) and not r.endswith("/HEAD")]
     tips = {} if tips is None else tips
     for line in MAINLINES:
-        tip = tips[line] = tips[line] if line in tips else rev(line)
+        tip = tips[line] = tips[line] if line in tips else source.repo.objects.rev(line)
         if tip and run(["merge-base", "--is-ancestor", commit, tip]).returncode == 0:
             name = git("rev-parse", "--abbrev-ref", line)
             if name not in names:
@@ -99,7 +95,7 @@ def _glob(pattern: str, ref: str) -> bool:
     return ref.startswith(pattern[:-1]) if pattern.endswith("*") else ref == pattern
 
 
-def guess(head: str, names: list[str],
+def guess(head: str, names: list[str], objects: Objects,
           tips: dict[str, str | None] | None = None) -> tuple[str | None, str | None, str | None]:
     """Where the new line left the line the old base came from.
 
@@ -118,7 +114,7 @@ def guess(head: str, names: list[str],
     seen: set[str] = set()
     tips = {} if tips is None else tips
     for via in [*candidates, *MAINLINES]:
-        tip = (tips[via] if via in tips else rev(via)) if via else None
+        tip = (tips[via] if via in tips else objects.rev(via)) if via else None
         # Several names for one commit (origin/HEAD and origin/main, say) are
         # one candidate: the first name found wins, as an equal distance would.
         if tip is None or tip in seen:
@@ -132,7 +128,7 @@ def guess(head: str, names: list[str],
         if best is None or distance < best[0]:
             best = (distance, base, git("rev-parse", "--abbrev-ref", via), tip)
     if best is None:
-        return default_base(head)
+        return default_base(head, objects)
     return best[1], best[2], best[3]
 
 
@@ -140,19 +136,19 @@ def choose_base(source: Session, head: str) -> str:
     """The old base if nothing says otherwise; asked, if anything does."""
     tips: dict[str, str | None] = {}         # mainlines, resolved once for both
     names = names_for(source.base, source, head, tips)
-    best, via, tip = guess(head, names, tips)
+    best, via, tip = guess(head, names, source.repo.objects, tips)
     if best == source.base:
         return source.base
     said = ", ".join(names) or "no branch"
     header = [f"Copying the review of {named(source.working)}",
-              f"  old base  {source.base[:8]}  ({said})  {subject(source.base)}",
+              f"  old base  {source.base[:8]}  ({said})  {source.repo.objects.subject(source.base)}",
               ""]
     if not interactive():
         where = f"{best[:8]}" if best else "somewhere else"
         raise Refused(
             f"{named(head)} looks to be based on {where}, not on the old base "
             f"{source.base[:8]} ({said}). Pass --from <base> to say which.")
-    return pick_base(head, best, via, tip, header=header,
+    return pick_base(head, source.repo.objects, best, via, tip, header=header,
                      marks={source.base: "old base"},
                      hide=source.repo.clean_lines())
 
@@ -170,7 +166,7 @@ def approved_tree(repo: Repo, source: Session) -> str:
 
 def carry(repo: Repo, source: Session, base: str) -> Carried:
     """The new clean line and approved tree. Writes objects, and no refs."""
-    old_tip = rev(source.clean)
+    old_tip = repo.objects.rev(source.clean)
     if old_tip is None:
         raise Refused(f"{named(source.clean)} does not exist")
     approved = approved_tree(repo, source)
@@ -188,7 +184,7 @@ def carry(repo: Repo, source: Session, base: str) -> Carried:
                (line.partition("\x1f") for line in out.splitlines())]
     result = Carried(tip=base, approved="")
     done = source.base                   # the old commit the new tip stands for
-    tip_tree = tree_of(base)
+    tip_tree = repo.objects.tree(base)
     for i, (c, said) in enumerate(commits):
         tree, conflicts = merge_tree(base=f"{c}^", ours=result.tip, theirs=c)
         if conflicts:

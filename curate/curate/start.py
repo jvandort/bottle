@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from .branches import fetch, local_for, switch_to, to_review
 from .carry import Carried, carry, choose_base, find, report
 from .errors import Refused
-from .gitcmd import git, rev, run
+from .gitcmd import Objects, git, run
 from .hooks import install
 from .pick import choose
 from .state import CLEAN_PREFIX, Repo, Session, encode, named, short, write
 from .ui import ask_for_base, interactive, uninterrupted
 
 
-def branch_conflict(name: str) -> str | None:
+def branch_conflict(name: str, objects: Objects) -> str | None:
     """A branch that cannot coexist with `name`, because refs are paths.
 
     refs/heads/curate and refs/heads/curate/anything cannot both exist: one is
@@ -24,7 +24,7 @@ def branch_conflict(name: str) -> str | None:
     parts = name.split("/")
     for i in range(1, len(parts)):
         prefix = "/".join(parts[:i])
-        if rev(f"refs/heads/{prefix}") is not None:
+        if objects.rev(f"refs/heads/{prefix}") is not None:
             return prefix
     under = run(["for-each-ref", "--count=1", "--format=%(refname:short)",
                  f"refs/heads/{name}/"])
@@ -83,22 +83,22 @@ def start_chosen(repo: Repo) -> int:
     head = repo.head
     cursor = next((i for i, r in enumerate(rows) if r.value == head), 0)
     chosen = choose(["Review which branch?", ""], rows, cursor=cursor)
-    local, tip = local_for(chosen)
+    local, tip = local_for(chosen, repo.objects)
 
     if local != head and any(s.working == local for s in repo.sessions()):
         # Nothing to start, but somewhere to go: this is how you get back to it.
-        switch_to(local, chosen, tip)
+        switch_to(local, chosen, tip, repo.objects)
         repo.recover()
         print(f"curate: {named(local)} has a review already; switched to it.")
         return 0
 
     # Every question before anything moves, so cancelling the base leaves you
     # where you were, and so does anything prepare refuses.
-    base = ask_for_base(tip, repo.clean_lines())
+    base = ask_for_base(tip, repo.objects, repo.clean_lines())
     beginning = prepare(repo, local, base_arg=base)
     with uninterrupted():
         if local != head:
-            switch_to(local, chosen, tip)
+            switch_to(local, chosen, tip, repo.objects)
         begin(repo, beginning)
     return 0
 
@@ -124,7 +124,7 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
     """Everything `start` checks and works out, for a working line that need
     not be checked out -- nor exist yet, when `transfer` is about to make it."""
     working_name = short(working)
-    if rev(f"refs/heads/{CLEAN_PREFIX}") is not None:
+    if repo.objects.rev(f"refs/heads/{CLEAN_PREFIX}") is not None:
         # Refs are paths, so this branch rules out the whole namespace. Curate
         # could dodge it with a different name, but then the rule people have
         # to remember stops being one rule.
@@ -135,7 +135,7 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
             f"Rename it: `git branch -m {CLEAN_PREFIX} <something-else>`.")
 
     clean_name = clean_arg or f"{CLEAN_PREFIX}/{working_name}"
-    blocker = branch_conflict(clean_name)
+    blocker = branch_conflict(clean_name, repo.objects)
     if blocker:
         raise Refused(f"'{clean_name}' collides with the branch '{blocker}': "
                       f"refs are paths, so git cannot have both")
@@ -144,14 +144,14 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
     if session.exists:
         raise Refused(f"a review of '{clean_name}' already exists. "
                       f"`curate status`, or `curate drop {clean_name}`.")
-    if rev(f"refs/heads/{clean_name}") is not None:
+    if repo.objects.rev(f"refs/heads/{clean_name}") is not None:
         raise Refused(f"branch {clean_name} already exists")
 
     if source and source.working == working:
         raise Refused(f"that is the review of {named(working)}, the branch you are on")
 
     if base_arg:
-        base = rev(base_arg)
+        base = repo.objects.rev(base_arg)
         if base is None:
             raise Refused(f"cannot resolve {base_arg}")
     elif source:
@@ -159,7 +159,7 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
     elif interactive():
         # Asking beats guessing: --from is the one argument that decides what
         # the review contains, so a person present gets to see and confirm it.
-        base = ask_for_base(working, repo.clean_lines())
+        base = ask_for_base(working, repo.objects, repo.clean_lines())
     else:
         # And with nobody to ask, the flag, as every command takes one: a
         # guess nobody saw is a review of the wrong commits.

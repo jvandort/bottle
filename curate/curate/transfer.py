@@ -11,7 +11,7 @@ from .branches import (branches, fetch, local_for, remote_of, remotes,
                        switch_to)
 from .carry import choose_base, names_for
 from .errors import Refused
-from .gitcmd import git, rev, run
+from .gitcmd import git, run
 from .modes import switch_mode
 from .pick import Row, choose
 from .start import begin, prepare
@@ -28,7 +28,7 @@ def remotes_to_fetch(source: Session, head: str) -> list[str] | None:
     wanted = [first]
     for name in names_for(source.base, source, head):
         branch = name.split("~")[0].split("^")[0]
-        if rev(f"refs/heads/{branch}") is not None:
+        if source.repo.objects.rev(f"refs/heads/{branch}") is not None:
             r = remote_of(branch)
         else:
             r = next((x for x in remotes() if branch.startswith(f"{x}/")), None)
@@ -66,7 +66,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     which = remotes_to_fetch(source, source.working)
     fetch(which)
     if argv:
-        chosen = (f"refs/heads/{argv[0]}" if rev(f"refs/heads/{argv[0]}") else
+        chosen = (f"refs/heads/{argv[0]}" if repo.objects.rev(f"refs/heads/{argv[0]}") else
                   git("rev-parse", "--symbolic-full-name", argv[0], check=False))
         if not chosen.startswith(("refs/heads/", "refs/remotes/")):
             raise Refused(f"no branch {argv[0]}")
@@ -75,7 +75,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     else:
         raise Refused("which branch? `curate transfer <branch>`")
 
-    local, tip = local_for(chosen, "curate transfer")
+    local, tip = local_for(chosen, repo.objects, "curate transfer")
     if local == source.working:
         raise Refused(f"that is {named(local)}, the branch under review already")
     if local in repo.clean_lines():
@@ -96,7 +96,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         if mode == "review":
             switch_mode(repo, "write")
         try:
-            switch_to(local, chosen, tip)
+            switch_to(local, chosen, tip, repo.objects)
         except Refused:
             # The branch is back as it was; put the review back with it.
             if mode == "review":

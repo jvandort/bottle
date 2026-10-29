@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import Refused
-from .gitcmd import (Conflicts, blob, commit_tree, git, git_ok, merge_tree,
-                     metadata, parents_of, rev, run, tree_of)
+from .gitcmd import (Conflicts, commit_tree, git, git_ok, merge_tree,
+                     metadata, parents_of, run)
 from .state import Repo, Session, named, read, short, write
 from .timing import timed
 
@@ -83,11 +83,11 @@ def materialise(session: Session, conflicts: Conflicts) -> Path:
         scratch.parent.mkdir(parents=True, exist_ok=True)
         for n, label in SIDES.items():
             # A missing stage means the file was added on one side only.
-            content = blob(sides[n][1]) if n in sides else None
+            content = session.repo.objects.contents(sides[n][1]) if n in sides else None
             scratch.with_name(scratch.name + "." + label).write_bytes(content or b"")
         # The conflicted tree already has ordinary markers in it, so it is the
         # right starting point whether or not a merge tool shows up.
-        scratch.write_bytes(blob(f"{tree}:{path}") or b"")
+        scratch.write_bytes(session.repo.objects.contents(f"{tree}:{path}") or b"")
     write(session.fixup_dir / "materialised", "1")
     return stages
 
@@ -117,7 +117,7 @@ def scan(session: Session,
             resolved.append(f"0\t{'0' * 40}\t{path}")
             continue
         now = scratch.read_bytes()
-        given = blob(f"{tree}:{path}") or b""
+        given = session.repo.objects.contents(f"{tree}:{path}") or b""
         done = not conflicted(now) if conflicted(given) else now != given
         if not done:
             outstanding.append(path)
@@ -189,7 +189,7 @@ def replay(repo: Repo, session: Session, new: str,
             save_conflict(session, "replay", read(session.fixup_dir / "target"),
                           y, new, todo, tree, conflicts)
             report_conflict(repo, session, conflicts,
-                            step=2, total=2, into=git("log", "-1", "--format=%s", y),
+                            step=2, total=2, into=repo.objects.subject(y),
                             later_range=None)
             return None, 2
         env, message = metadata(y)
@@ -238,11 +238,11 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
     if len(targets) != 1:
         raise Refused("usage: curate fixup <commit>")
 
-    clean_tip = rev(session.clean)
+    clean_tip = repo.objects.rev(session.clean)
     if clean_tip is None:
         raise Refused(f"the clean line {named(session.clean)} no longer exists. "
                       f"`curate drop {short(session.working)}` to forget the review.")
-    target = rev(targets[0])
+    target = repo.objects.rev(targets[0])
     if target is None:
         raise Refused(f"cannot resolve {targets[0]}")
     if not git_ok("merge-base", "--is-ancestor", target, clean_tip):
@@ -253,7 +253,7 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
                       "a merge cannot be replayed")
 
     approved = git("write-tree")
-    if approved == tree_of(clean_tip):
+    if approved == repo.objects.tree(clean_tip):
         raise Refused("nothing approved to fix up: the clean tip already has "
                       "exactly what you have staged")
 

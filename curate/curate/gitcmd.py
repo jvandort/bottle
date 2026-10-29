@@ -5,12 +5,13 @@ porcelain commands it relies on are the user's: `git add -p` and, in review
 mode, `git commit`.
 """
 
+import atexit
 import os
 import subprocess
 from pathlib import Path
 
 from .errors import Refused
-from .timing import timed
+from .timing import looked_up, timed
 
 HOOK_GUARD = "CURATE_IN_HOOK"
 
@@ -56,28 +57,101 @@ def git_ok(*args: str, index: str | Path | None = None,
     return run(list(args), index=index, env=env).returncode == 0
 
 
-def blob(spec: str) -> bytes | None:
-    """A blob's exact bytes, or None if it is not there.
+class Objects:
+    """What names resolve to, and what objects hold, from one `git cat-file
+    --batch-command` kept open.
 
-    Never `git()` for file content: that strips, which silently reindents the
-    first line and drops trailing blank lines. File content is bytes and is
-    handled as bytes the whole way -- see `fixup.materialise`.
+    Most of what curate asks git is a question like "where is this branch?" or
+    "what does this file say on that side?", and a git apiece costs tens of
+    milliseconds on macOS. This asks them all of one process instead, started
+    by the first question -- so a command that asks none starts nothing -- and
+    stopped when curate exits. Each answer is read as git has it at that
+    moment, so what curate's own git just wrote is what the next question
+    sees: there is nothing to keep fresh. Repo holds one for the command; pass
+    it to whatever needs it.
+
+    Some names git refuses with a fatal error rather than "missing" --
+    `wip@{upstream}` for a branch with none -- and the process exits. That name
+    resolves to nothing, as it would have for `rev-parse --verify -q`, and the
+    next question starts another.
     """
-    with timed(["git", "cat-file", "blob", spec]):
-        p = subprocess.run(["git", "cat-file", "blob", spec],
-                           capture_output=True, env=environment())
-    return p.stdout if p.returncode == 0 else None
 
+    def __init__(self) -> None:
+        self._process: subprocess.Popen[bytes] | None = None
 
-def rev(spec: str) -> str | None:
-    """Resolve a rev, or None."""
-    p = run(["rev-parse", "--verify", "-q", f"{spec}^{{}}"])
-    return p.stdout.strip() if p.returncode == 0 else None
+    def rev(self, spec: str) -> str | None:
+        """The commit (or other object) `spec` names, tags peeled; None if it names nothing."""
+        found = self._ask("info", f"{spec}^{{}}")
+        return found[0] if found else None
 
+    def tree(self, spec: str) -> str | None:
+        """The tree of the commit `spec` names; None if it names nothing."""
+        found = self._ask("info", f"{spec}^{{tree}}")
+        return found[0] if found else None
 
-def tree_of(spec: str) -> str | None:
-    p = run(["rev-parse", "--verify", "-q", f"{spec}^{{tree}}"])
-    return p.stdout.strip() if p.returncode == 0 else None
+    def contents(self, spec: str) -> bytes | None:
+        """An object's exact bytes -- a blob's are the file's -- or None if it is not there.
+
+        Bytes, never text: decoding and stripping would reindent a first line
+        and drop trailing blank lines (see `fixup.materialise`).
+        """
+        found = self._ask("contents", spec)
+        return found[1] if found else None
+
+    def subject(self, commit: str) -> str:
+        """A commit's subject, as `git log --format=%s` gives it; "" if there is no such commit."""
+        raw = self.contents(f"{commit}^{{commit}}")
+        if raw is None:
+            return ""
+        message = raw.split(b"\n\n", 1)[1] if b"\n\n" in raw else b""
+        return " ".join(message.lstrip(b"\n").split(b"\n\n", 1)[0].decode(errors="replace").split("\n")).strip()
+
+    def _ask(self, command: str, name: str) -> tuple[str, bytes] | None:
+        """(oid, contents) -- contents only for `contents` -- or None if `name` names nothing."""
+        if not name or "\n" in name:
+            return None
+        process = self._started()
+        assert process.stdin is not None and process.stdout is not None
+        with looked_up(name if command == "info" else f"{command} {name}"):
+            try:
+                process.stdin.write(f"{command} {name}\n".encode())
+                process.stdin.flush()
+                header = process.stdout.readline()
+                # "<oid> <type> <size>", or "<name> missing" / "<name> ambiguous".
+                fields = header.split()
+                if len(fields) != 3:
+                    if not header:                   # git gave up on this name, and exited
+                        self.close()
+                    return None
+                body = b""
+                if command == "contents":
+                    body = process.stdout.read(int(fields[2]))
+                    process.stdout.read(1)            # the newline after the contents
+            except BrokenPipeError:                  # gave up on the name before, and exited
+                self.close()
+                return None
+        return fields[0].decode(), body
+
+    def _started(self) -> "subprocess.Popen[bytes]":
+        if self._process is None:
+            with timed(["git", "cat-file", "--batch-command"]):
+                self._process = subprocess.Popen(
+                    ["git", "cat-file", "--batch-command"], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment())
+            atexit.register(self.close)
+        return self._process
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        atexit.unregister(self.close)
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except BrokenPipeError:
+            pass
+        process.wait()
 
 
 def only_on(ref: str, *ignoring: str) -> list[str]:

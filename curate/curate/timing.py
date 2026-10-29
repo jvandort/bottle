@@ -41,6 +41,7 @@ def log_into(state: Path) -> None:
 
 
 WAITING = ["(waiting for you)"]     # what `waiting` logs in place of a command
+LOOKUP = "(lookup)"                 # what `looked_up` logs before the name asked about
 
 
 @contextmanager
@@ -49,6 +50,14 @@ def waiting() -> Iterator[None]:
     list like a subprocess, kept out of the subprocess total, and not counted
     towards whether the command was slow."""
     with timed(WAITING):
+        yield
+
+
+@contextmanager
+def looked_up(name: str) -> Iterator[None]:
+    """Time a question put to the cat-file process (gitcmd.Objects): logged in
+    the list, but no subprocess -- the one it asks was counted when it started."""
+    with timed([LOOKUP, name]):
         yield
 
 
@@ -72,15 +81,17 @@ def slow() -> float:
 def entry(argv: list[str], code: int | str) -> str:
     total = time.perf_counter() - _began
     waited = sum(d for _, d, a in _calls if a is WAITING)
-    run = [d for _, d, a in _calls if a is not WAITING]
+    lookups = [d for _, d, a in _calls if a[:1] == [LOOKUP]]
+    run = [d for _, d, a in _calls if a is not WAITING and a[:1] != [LOOKUP]]
     when = _when.isoformat(timespec="milliseconds")
     asked = f"waited for you {waited:.3f}s; " if waited else ""
+    looked = f"; lookups {sum(lookups):.3f}s in {len(lookups)}" if lookups else ""
     lines = [f"{when} pid {os.getpid()} {total:.3f}s "
-             f"({asked}subprocesses {sum(run):.3f}s in {len(run)}) exit {code}: "
+             f"({asked}subprocesses {sum(run):.3f}s in {len(run)}{looked}) exit {code}: "
              f"curate {shlex.join(argv)}"]
     if total - waited >= slow():
         lines += [f"    +{start:.3f}s {d:.3f}s "
-                  f"{a[0] if a is WAITING else shlex.join(a)}"
+                  f"{a[0] if a is WAITING else ' '.join(a) if a[:1] == [LOOKUP] else shlex.join(a)}"
                   for start, d, a in _calls]
     return "\n".join(lines) + "\n"
 

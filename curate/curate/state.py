@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from .errors import Refused
-from .gitcmd import commit_tree, git, rev, run, tree_of
+from .gitcmd import Objects, commit_tree, git, run
 
 VERSION = "0.1"                  # the tool version
 
@@ -137,7 +137,8 @@ class Session:
             p = run(["write-tree"], index=idx)
             if p.returncode == 0:
                 return p.stdout.strip()
-        return tree_of(self.ref) or tree_of(self.clean)
+        objects = self.repo.objects
+        return objects.tree(self.ref) or objects.tree(self.clean)
 
     def record(self, mode: str) -> None:
         """Put the approved set in a ref, so an index file can be lost freely.
@@ -146,16 +147,16 @@ class Session:
         would move a ref for no reason, and callers watch for that.
         """
         tree = self.approved_tree(mode)
-        if tree is None or tree_of(self.ref) == tree:
+        if tree is None or self.repo.objects.tree(self.ref) == tree:
             return
-        tip = rev(self.clean)
+        tip = self.repo.objects.rev(self.clean)
         parents = [tip] if tip else []
         git("update-ref", self.ref, commit_tree(tree, parents, "approved"))
 
     def rebuild(self, mode: str) -> None:
         """Rebuild a lost index file from the ref. Costs one re-stat."""
         path = self.index(mode)
-        source = (self.ref if mode == "review" and rev(self.ref) else
+        source = (self.ref if mode == "review" and self.repo.objects.rev(self.ref) else
                   self.clean if mode == "review" else self.working)
         tmp = path.with_suffix(".rebuilding")
         self.repo.index_of(source, tmp)
@@ -172,6 +173,7 @@ class Repo:
             raise Refused("not a git repository")
         self.gitdir = Path(found.stdout.strip())
         self.state = self.gitdir / "curate"
+        self.objects = Objects()                     # what names resolve to; see gitcmd
 
     def index_of(self, tree: str, path: Path | str) -> None:
         """An index file at `path` holding `tree`, with the stat cache filled

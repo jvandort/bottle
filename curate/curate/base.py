@@ -11,20 +11,21 @@ tips are in the reflogs of the clean line and of the approvals ref.
 
 from .carry import carry, guess, names_for, what_carried
 from .errors import Refused
-from .gitcmd import git, rev, run
+from .gitcmd import git, run
 from .modes import switch_mode
 from .state import Repo, Session, named, write
 from .ui import interactive, pick_base, uninterrupted
 
 
 def ask(repo: Repo, session: Session) -> str:
-    names = names_for(session.base, session, session.working)
-    best, via, tip = guess(session.working, names)
+    tips: dict[str, str | None] = {}
+    names = names_for(session.base, session, session.working, tips)
+    best, via, tip = guess(session.working, names, repo.objects, tips)
     said = ", ".join(names) or "no branch"
-    subject = git("log", "-1", "--format=%s", session.base)
+    subject = repo.objects.subject(session.base)
     header = [f"The review of {named(session.working)}",
               f"  current base  {session.base[:8]}  ({said})  {subject}", ""]
-    return pick_base(session.working, best, via, tip, header=header,
+    return pick_base(session.working, repo.objects, best, via, tip, header=header,
                      marks={session.base: "current base"},
                      hide=repo.clean_lines())
 
@@ -39,7 +40,7 @@ def cmd_update_base(repo: Repo, argv: list[str]) -> int:
         raise Refused("a fixup is paused on a conflict. Finish it or abort it first.")
 
     if argv:
-        base = rev(argv[0])
+        base = repo.objects.rev(argv[0])
         if base is None:
             raise Refused(f"cannot resolve {argv[0]}")
     elif interactive():
@@ -52,7 +53,7 @@ def cmd_update_base(repo: Repo, argv: list[str]) -> int:
 
     # Writes objects and no refs, so a refusal here leaves nothing behind.
     carried = carry(repo, session, base)
-    old_clean, old_base = rev(session.clean), session.base
+    old_clean, old_base = repo.objects.rev(session.clean), session.base
 
     # Every question is answered. From here on, things change -- together.
     with uninterrupted():

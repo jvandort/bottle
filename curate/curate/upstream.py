@@ -15,7 +15,7 @@ index was built for the old tip, so it goes; it rebuilds on the next switch.
 
 import sys
 
-from .gitcmd import rev, run
+from .gitcmd import run
 from .state import Repo, named, short
 
 ZERO = "0" * 40
@@ -32,7 +32,7 @@ def follow(repo: Repo, moved: list[tuple[str, str, str]]) -> None:
         return
     upstream = run(["rev-parse", "--symbolic-full-name", f"{short(session.working)}@{{upstream}}"]).stdout.strip()
     new = next((n for _, n, ref in moved if ref == upstream and n != ZERO), None)
-    tip = rev(session.working)
+    tip = repo.objects.rev(session.working)
     if not upstream or new is None or tip is None or new == tip:
         return
     if run(["merge-base", "--is-ancestor", tip, new]).returncode != 0:

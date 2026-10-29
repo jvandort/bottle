@@ -3,7 +3,7 @@
 import os
 
 from .errors import Refused
-from .gitcmd import git, rev, run
+from .gitcmd import git, run
 from .state import Repo, named, shown
 
 
@@ -26,7 +26,7 @@ def switch_mode(repo: Repo, to: str) -> int:
         return 0
 
     target = session.clean if to == "review" else session.working
-    if rev(target) is None:
+    if repo.objects.rev(target) is None:
         raise Refused(f"{named(target)} does not exist")
     # The approved set, before we move it. Only reading can have changed it
     # since it was last recorded; in write mode it sits parked, untouched.

@@ -2,7 +2,7 @@
 
 from .carry import names_for
 from .errors import Refused
-from .gitcmd import git, only_on, rev
+from .gitcmd import git, only_on
 from .hooks import foreign, me
 from .modes import switch_mode
 from .state import Repo, Session, named, short, shown
@@ -38,7 +38,7 @@ def problems(repo: Repo) -> list[str]:
         # Both are recoverable: deleting a branch takes its reflog, but commits made
         # on it are still in HEAD's, and the objects outlive the ref until gc.
         for line, name in ((s.clean, "clean"), (s.working, "working")):
-            if rev(line) is not None:
+            if repo.objects.rev(line) is not None:
                 continue
             other = s.working if name == "clean" else s.clean
             wrong.append(
@@ -55,7 +55,7 @@ def based_on(session: Session) -> str:
     anything calls it anything, and what it says."""
     names = names_for(session.base, session, session.working)
     called = f" ({', '.join(names)})" if names else ""
-    subject = git("log", "-1", "--format=%s", session.base, check=False)
+    subject = session.repo.objects.subject(session.base)
     return f"{session.base[:8]}{called} {subject}"
 
 
@@ -148,7 +148,7 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
         # something: a commit approved onto it that no other ref has. A copied
         # review starts with commits on it, but the review it was copied from
         # still has them, so those are not lost.
-        tip = rev(s.clean)
+        tip = repo.objects.rev(s.clean)
         empty = s.base and tip == s.base
         lost = [] if empty or tip is None else only_on(s.clean, s.ref)
         if not lost and tip is not None:

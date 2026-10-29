@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from .carry import names_for
 from .errors import Refused
-from .gitcmd import commit_tree, git, metadata, rev, run, tree_of
+from .gitcmd import commit_tree, git, metadata, run
 from .modes import switch_mode
 from .pick import Row, choose, choose_many
 from .state import Repo, Session, named, short
@@ -88,8 +88,8 @@ def listed(paths: list[str], most: int = 10) -> str:
 def line_to_ship(repo: Repo, session: Session) -> str:
     """The clean line if you curated one, the working line otherwise; refused
     unless everything is reviewed, and committed on the working line."""
-    working = rev(session.working)
-    clean = rev(session.clean)
+    working = repo.objects.rev(session.working)
+    clean = repo.objects.rev(session.clean)
     if working is None or clean is None:
         raise Refused("a line of this review is missing. `curate status` says which.")
     files = files_tree(session)
@@ -106,7 +106,7 @@ def line_to_ship(repo: Repo, session: Session) -> str:
         raise Refused(f"{len(unreviewed)} file(s) still unreviewed:\n"
                       f"{listed(unreviewed)}\n`curate read` and finish first.")
     if clean != session.base:
-        if tree_of(clean) != tree_of(working):
+        if repo.objects.tree(clean) != repo.objects.tree(working):
             raise Refused(
                 f"the clean line {named(session.clean)} has commits on it, but "
                 f"not all of what you approved. Commit the rest there first.")
@@ -223,7 +223,7 @@ def destination(session: Session, tip: str, into: str | None) -> str:
             return None, f"{name!r} is not a branch name"
         if ref in taken:
             return None, f"{name} belongs to a review"
-        if rev(ref) is not None and not can_take(ref, tip):
+        if session.repo.objects.rev(ref) is not None and not can_take(ref, tip):
             return None, f"{name} cannot be fast-forwarded to this"
         if checked_out_elsewhere(ref):
             return None, f"{name} is checked out in another worktree"
@@ -291,7 +291,7 @@ def finish_review(repo: Repo, session: Session, keep: str) -> list[str]:
               for line in (s.clean, s.working)}
     gone = []
     for ref in (session.clean, session.working):
-        tip = rev(ref)
+        tip = repo.objects.rev(ref)
         if tip is not None and ref not in others and ref != keep:
             git("branch", "-D", short(ref))
             gone.append(f"{named(ref)} (was {tip[:8]})")
@@ -344,14 +344,14 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
     target = destination(session, tip, into)
     # What a branch being fast-forwarded already has stays exactly as it is.
     commits = commits_in(tip, f"^{session.base}",
-                         *([f"^{target}"] if rev(target) else []))
+                         *([f"^{target}"] if repo.objects.rev(target) else []))
 
     # Every question is answered. From here on, things change, and stopping
     # half way would leave a destination moved and a review that refuses to
     # integrate again -- so nothing stops it.
     with uninterrupted():
         new_tip = rewrite(commits, adopted).get(tip, tip) if commits else tip
-        old_target = rev(target)
+        old_target = repo.objects.rev(target)
         if repo.mode == "review":
             switch_mode(repo, "write")
         git("update-ref", "-m", "curate integrate", target, new_tip,

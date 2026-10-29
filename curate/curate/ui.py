@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-from .gitcmd import git, rev, run
+from .gitcmd import Objects, git, run
 from .pick import Row, choose
 from .state import named, short
 
@@ -43,16 +43,16 @@ def uninterrupted() -> Iterator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
-def default_base(head: str) -> tuple[str, str, str] | tuple[None, None, None]:
+def default_base(head: str, objects: Objects) -> tuple[str, str, str] | tuple[None, None, None]:
     """Where this branch left the line it came from, if that can be worked out.
 
     Only ever a suggestion, offered as the default answer and never taken
     silently: where the clean line starts decides what there is to review.
     """
-    mine = rev(head)
+    mine = objects.rev(head)
     for candidate in (f"{short(head)}@{{upstream}}", "origin/HEAD", "origin/main",
                       "origin/master", "main", "master"):
-        other = rev(candidate)
+        other = objects.rev(candidate)
         if other is None or other == mine:
             continue
         found = run(["merge-base", head, candidate])
@@ -75,8 +75,8 @@ def suggestion(head: str, base: str, via: str, tip: str) -> str:
             f"({named(via)} has {behind} commit{plural} since)")
 
 
-def ask_for_base(head: str, hide: set[str]) -> str:
-    return pick_base(head, *default_base(head), hide=hide)
+def ask_for_base(head: str, objects: Objects, hide: set[str]) -> str:
+    return pick_base(head, objects, *default_base(head, objects), hide=hide)
 
 
 def decorations(refs: str) -> str:
@@ -89,7 +89,7 @@ def decorations(refs: str) -> str:
     return ", ".join(names)
 
 
-def history(tip: str, guess: str | None,
+def history(tip: str, objects: Objects, guess: str | None,
             hide: set[str]) -> list[tuple[str, str, str]]:
     """(oid, subject, refs) down the first-parent line from `tip`, as far as
     a little past the guess. `hide` is refs not to name commits by."""
@@ -109,12 +109,12 @@ def history(tip: str, guess: str | None,
     if guess and past is None:
         # Reached through a merge rather than down the first parent: still
         # the best guess, so it goes in the list, at the end.
-        subject = git("log", "-1", "--format=%s", guess)
+        subject = objects.subject(guess)
         found.append((guess, subject, ""))
     return found
 
 
-def pick_base(head: str, guess: str | None, via: str | None,
+def pick_base(head: str, objects: Objects, guess: str | None, via: str | None,
               tip: str | None, header: list[str] | None = None,
               marks: dict[str, str] | None = None,
               hide: set[str] | None = None) -> str:
@@ -128,7 +128,7 @@ def pick_base(head: str, guess: str | None, via: str | None,
     marks = marks or {}
     rows: list[Row] = []
     cursor = 0
-    found = history(head, guess, hide or set())
+    found = history(head, objects, guess, hide or set())
     if guess and found[0][0] != guess:
         found = found[1:]
     for oid, subject, refs in found:
@@ -144,7 +144,7 @@ def pick_base(head: str, guess: str | None, via: str | None,
     lines += [f"Clean line for {named(head)} starts at:", ""]
 
     def typed(text: str) -> tuple[str | None, str]:
-        found = rev(text)
+        found = objects.rev(text)
         return (found, "") if found else (None, f"cannot resolve {text}")
 
     base = choose(lines, rows, cursor=cursor, typed=typed)

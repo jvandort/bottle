@@ -11,7 +11,8 @@ import subprocess
 from .support import CURATE, CurateTestCase, TIMEOUT
 
 ENTRY = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}\S* pid \d+ "
-                   r"\d+\.\d{3}s \((?:waited for you \d+\.\d{3}s; )?subprocesses \d+\.\d{3}s in \d+\) "
+                   r"\d+\.\d{3}s \((?:waited for you \d+\.\d{3}s; )?subprocesses \d+\.\d{3}s in \d+"
+                   r"(?:; lookups \d+\.\d{3}s in \d+)?\) "
                    r"exit (\S+): curate (.*)$")
 
 
@@ -42,8 +43,10 @@ class Timing(CurateTestCase):
     def test_a_slow_one_lists_every_git_it_ran(self) -> None:
         self.start(self.base)
         self.curate("status", slow="0")
-        detail = self.log.read_text().splitlines()[-1]
-        self.assertRegex(detail, r"^    \+\d+\.\d{3}s \d+\.\d{3}s git ")
+        details = [line for line in self.log.read_text().splitlines() if line.startswith("    +")]
+        self.assertTrue(any(re.match(r"^    \+\d+\.\d{3}s \d+\.\d{3}s git ", d) for d in details), details)
+        # What was asked of the cat-file process is listed too, by name, apart from the gits.
+        self.assertTrue(any(re.match(r"^    \+\d+\.\d{3}s \d+\.\d{3}s \(lookup\) ", d) for d in details), details)
 
     def test_a_hook_you_fired_is_logged_and_curates_own_are_not(self) -> None:
         """`git add` in read mode is the user's, and runs post-index-change.
@@ -66,7 +69,7 @@ class Timing(CurateTestCase):
         were the base list waiting for someone to choose."""
         self.on_a_terminal(["start"], ["\r", "\r"])
         line = self.log.read_text().splitlines()[-1]
-        found = re.search(r"\(waited for you (\d+\.\d{3})s; subprocesses \S+ in (\d+)\)", line)
+        found = re.search(r"\(waited for you (\d+\.\d{3})s; subprocesses \S+ in (\d+)[;)]", line)
         assert found, line
         self.assertGreaterEqual(float(found[1]), 0.25, "the pause before the key")
         self.assertGreater(int(found[2]), 5, "the git it ran, not the two waits")

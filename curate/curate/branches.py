@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from .errors import Refused
-from .gitcmd import environment, git, rev, run
+from .gitcmd import Objects, environment, git, run
 from .pick import Row
 from .state import Repo, named, short
 from .timing import timed
@@ -100,7 +100,7 @@ def to_review(repo: Repo) -> list[Row]:
     return kept
 
 
-def local_for(ref: str, again: str | None = None) -> tuple[str, str]:
+def local_for(ref: str, objects: Objects, again: str | None = None) -> tuple[str, str]:
     """The local branch for a chosen ref, and the commit it should be at.
     `again`, if there is one, is the command that takes the branch, to run
     once a refusal is sorted out.
@@ -113,7 +113,7 @@ def local_for(ref: str, again: str | None = None) -> tuple[str, str]:
     if not any(ref.startswith(f"refs/remotes/{r}/") for r in known):
         raise Refused(f"{ref} is not on any remote")
     local = f"refs/heads/{branch_name(ref, known)}"
-    mine = rev(local)
+    mine = objects.rev(local)
     if mine is None or git_ok("merge-base", "--is-ancestor", local, ref):
         return local, ref                         # created, or fast-forwarded
     if git_ok("merge-base", "--is-ancestor", ref, local):
@@ -146,13 +146,13 @@ def track(local: str, chosen: str) -> None:
     git("config", f"branch.{name}.merge", f"refs/heads/{rest[len(remote) + 1:]}")
 
 
-def switch_to(local: str, chosen: str, tip: str) -> None:
+def switch_to(local: str, chosen: str, tip: str, objects: Objects) -> None:
     """Make `local` what `local_for` said, and check it out.
 
     Refused if git will not switch, with the branch put back as it was: made
     if it was not there, moved back if it was fast-forwarded.
     """
-    before = rev(local)
+    before = objects.rev(local)
     if before is None:
         git("branch", "--no-track", short(local), chosen)
         track(local, chosen)

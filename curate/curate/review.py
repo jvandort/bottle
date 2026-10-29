@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .branches import branch_name, fetch, local_for, remotes, switch_to, to_review
 from .errors import Refused
-from .gitcmd import rev, run
+from .gitcmd import Objects, run
 from .modes import switch_mode
 from .pick import choose
 from .start import begin, prepare
@@ -42,7 +42,7 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
         raise Refused(f"unexpected argument: {names[1]}")
 
     if names:
-        chosen = resolve(names[0])
+        chosen = resolve(names[0], repo.objects)
     elif interactive():
         fetch(None)
         rows = to_review(repo)
@@ -56,7 +56,7 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
                       "To read the review you are in, `curate read`.")
     if chosen in repo.clean_lines():
         raise Refused(f"{named(chosen)} is a clean line; review the branch it was made from")
-    local, tip = local_for(chosen, again="curate review")
+    local, tip = local_for(chosen, repo.objects, again="curate review")
 
     moving = local != repo.head
     if moving:
@@ -70,7 +70,7 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
     beginning = None
     if target is None:
         # Asked now, before anything moves.
-        base = from_arg or (ask_for_base(tip, repo.clean_lines()) if interactive() else None)
+        base = from_arg or (ask_for_base(tip, repo.objects, repo.clean_lines()) if interactive() else None)
         if base is None:
             raise Refused(f"{named(local)} has no review yet. Where does its clean line start? "
                           f"`curate review {short(local)} --from <base>`")
@@ -85,7 +85,7 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
             if was_reading:
                 switch_mode(repo, "write")          # parks the approvals: the review is paused
             try:
-                switch_to(local, chosen, tip)
+                switch_to(local, chosen, tip, repo.objects)
             except Refused:
                 if was_reading:
                     switch_mode(repo, "review")
@@ -99,11 +99,11 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
     return 0
 
 
-def resolve(name: str) -> str:
+def resolve(name: str, objects: Objects) -> str:
     """The branch `name` means: a local one, a remote one by its full name
     (origin/x), or the one remote branch called that."""
     for ref in (f"refs/heads/{name}", f"refs/remotes/{name}"):
-        if rev(ref) is not None:
+        if objects.rev(ref) is not None:
             return ref
     known = remotes()
     refs = run(["for-each-ref", "--format=%(refname)", "refs/remotes/"]).stdout.split()
