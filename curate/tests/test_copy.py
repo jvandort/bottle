@@ -15,7 +15,7 @@ class Copying(CurateTestCase):
         self.repo.git("branch", "main")
         self.branch("feature-1", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "a.txt")
         self.repo.git("commit", "-q", "-m", "Change a")
         self.repo.git("add", "b.txt")                 # approved, not committed
@@ -48,7 +48,7 @@ class Copying(CurateTestCase):
         return result.stdout
 
     def reviewing(self) -> list[str]:
-        self.repo.curate("review")
+        self.repo.curate("read")
         return self.repo.short_status()
 
 
@@ -94,14 +94,14 @@ class SameBase(Copying):
         self.assertEqual(self.refs(), self.old)
 
     def test_review_copy_begins_it_and_switches_in(self) -> None:
-        result = self.repo.curate("review", "--copy", "feature-1")
+        result = self.repo.curate("read", "--copy", "feature-1")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
         self.assertEqual(self.repo.short_status(), ["A  b.txt", "?? c.txt"])
 
     def test_review_copy_refuses_where_there_is_already_a_review(self) -> None:
         self.copy()
-        result = self.repo.curate("review", "--copy", "feature-1")
+        result = self.repo.curate("read", "--copy", "feature-1")
         self.assertEqual(result.returncode, 1)
         self.assertIn("already has one", result.stderr)
 
@@ -185,7 +185,7 @@ class NewBase(Copying):
         self.repo.git("switch", "-q", "feature-1")
         self.repo.write("g.txt", "g, changed\n")
         self.repo.commit_all("change g")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "g.txt")
         self.repo.curate("write")
         self.repo.git("switch", "-q", "main")

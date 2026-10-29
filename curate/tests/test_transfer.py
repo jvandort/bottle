@@ -20,7 +20,7 @@ class Transfer(CurateTestCase):
         self.repo.commit_all("agent work")
         self.repo.git("push", "-q", "-u", "agent", "feature-1")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "a.txt")
         self.repo.git("commit", "-q", "-m", "Change a")
         self.repo.git("add", "b.txt")                 # approved, not committed
@@ -49,7 +49,7 @@ class Transfer(CurateTestCase):
         self.assertEqual(self.repo.git("rev-parse", "--abbrev-ref", "feature-2@{upstream}"),
                          "agent/feature-2")
         fields = self.repo.status_fields()
-        self.assertEqual(fields["mode"], "review")
+        self.assertEqual(fields["mode"], "read")
         self.assertEqual(fields["working"], "refs/heads/feature-2")
         self.assertEqual(self.repo.short_status(), ["A  b.txt", "?? c.txt"])
         self.assertIn("feature-1", self.repo.curate("list").stdout)
@@ -69,7 +69,7 @@ class Transfer(CurateTestCase):
         self.assertIn("<show local>", out)
         fields = self.repo.status_fields()
         self.assertEqual((fields["mode"], fields["working"]),
-                         ("review", "refs/heads/feature-2"))
+                         ("read", "refs/heads/feature-2"))
 
     def test_show_local_lists_local_branches(self) -> None:
         self.agent_pushes("feature-2", self.base, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
@@ -85,7 +85,7 @@ class Transfer(CurateTestCase):
         self.repo.write("g.txt", "G\n")
         moved = self.repo.commit_all("upstream")
         self.repo.git("switch", "-q", "feature-1")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.agent_pushes("feature-2", moved, {"a.txt": "A1\na2\na3\n", "b.txt": "B\n"})
         before = self.repo.git("for-each-ref", "refs/heads", "refs/curate")
         result = self.repo.curate("transfer", "agent/feature-2")
@@ -134,7 +134,7 @@ class Transfer(CurateTestCase):
         self.assertEqual(self.repo.git("branch", "--list", "feature-2"), "")
         fields = self.repo.status_fields()
         self.assertEqual((fields["mode"], fields["working"]),
-                         ("review", "refs/heads/feature-1"))
+                         ("read", "refs/heads/feature-1"))
 
     def test_a_local_branch_behind_the_remote_is_fast_forwarded(self) -> None:
         pushed = self.agent_pushes("feature-2", self.base,

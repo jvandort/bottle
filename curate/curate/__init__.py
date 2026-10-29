@@ -11,6 +11,7 @@ One module per seam, and the dependencies run one way:
     branches  which branch to review, and getting onto it
     carry     copying a review onto a rebased branch, and finding its base
     start     beginning one: which branch, the base, and naming the clean line
+    review    pausing the review you are in to read another
     transfer  copying the review you are in onto the branch that replaced it
     base      moving the review you are in onto a new base, in place
     integrate shipping a finished review, adopting others' commits on the way

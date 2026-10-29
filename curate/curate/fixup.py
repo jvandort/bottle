@@ -223,7 +223,7 @@ def cmd_fixup(repo: Repo, argv: list[str]) -> int:
 
     if repo.mode != "review":
         raise Refused("fixup folds in what you have approved, so it needs review "
-                      "mode: `curate review`")
+                      "mode: `curate read`")
 
     if "--continue" in argv:
         if not session.fixup_pending:

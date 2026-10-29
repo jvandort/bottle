@@ -1,9 +1,9 @@
 """The `git` verb: run a git command as if you were in write mode.
 
-In review mode HEAD is the clean line, where half of git is beside the point:
+In read mode HEAD is the clean line, where half of git is beside the point:
 the clean line has no upstream to pull from, its log is not the branch's, and
 `git status` is the review rather than a report on your work. So catching up
-with the working line is `curate write`, the command, `curate review` -- three
+with the working line is `curate write`, the command, `curate read` -- three
 commands to run one, and the two on the outside are bookkeeping.
 
 This is those three as one. It borrows write mode for exactly as long as the
@@ -45,7 +45,7 @@ def run_git(argv: list[str]) -> int:
 
 
 def restore(repo: Repo, session: Session) -> None:
-    """Back to review mode, unless the command moved HEAD out from under us.
+    """Back to read mode, unless the command moved HEAD out from under us.
 
     A checkout inside the borrowed write mode is legal and sometimes the point,
     but it means the working line is no longer where you are standing, so there
@@ -57,7 +57,7 @@ def restore(repo: Repo, session: Session) -> None:
     print(f"curate: HEAD is {named(repo.head)} now, not {named(session.working)}, "
           f"so there was no\n        review to come back to. Your command ran, "
           f"and your approvals are safe in\n        {session.ref}.\n"
-          f"To get back:  git switch {short(session.working)} && curate review",
+          f"To get back:  git switch {short(session.working)} && curate read",
           file=sys.stderr)
 
 

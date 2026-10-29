@@ -104,7 +104,7 @@ def line_to_ship(repo: Repo, session: Session) -> str:
     unreviewed = changed(approved, files) if approved else []
     if unreviewed:
         raise Refused(f"{len(unreviewed)} file(s) still unreviewed:\n"
-                      f"{listed(unreviewed)}\n`curate review` and finish first.")
+                      f"{listed(unreviewed)}\n`curate read` and finish first.")
     if clean != session.base:
         if tree_of(clean) != tree_of(working):
             raise Refused(

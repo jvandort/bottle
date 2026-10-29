@@ -87,7 +87,7 @@ class Start(CurateTestCase):
     def test_refuses_from_review_mode(self) -> None:
         base = self.make_base()
         self.start(base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         result = self.repo.curate("start", "--from", base, "--clean", "another")
         self.assertEqual(result.returncode, 1)
         self.assertIn("finish the current review first", result.stderr)
@@ -101,7 +101,7 @@ class Start(CurateTestCase):
 
 
 class WrongBase(CurateTestCase):
-    """The mistake you cannot see until review mode shows you the list.
+    """The mistake you cannot see until read mode shows you the list.
 
     By then `start` has made a branch, so undoing it has to be one command that
     leaves the repository able to start again.
@@ -138,7 +138,7 @@ class WrongBase(CurateTestCase):
     def test_drop_keeps_a_clean_branch_with_work_on_it(self) -> None:
         """Once something is approved onto it, it is work, and work stays."""
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.repo.git("commit", "-q", "-m", "Rename the thing")
         self.repo.curate("write")
@@ -149,7 +149,7 @@ class WrongBase(CurateTestCase):
         """The approved set is a commit on top of the clean line, so it reaches
         every commit there. It goes with the review, so it cannot vouch for them."""
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.repo.git("commit", "-q", "-m", "Rename the thing")
         self.repo.write("f.txt", "ONE\nTWO\nthree\n")
@@ -161,7 +161,7 @@ class WrongBase(CurateTestCase):
     def test_drop_deletes_a_clean_branch_whose_commits_another_branch_has(self) -> None:
         """Pushed, or copied into another review: deleting it loses nothing."""
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.repo.git("commit", "-q", "-m", "Rename the thing")
         self.repo.curate("write")
@@ -172,19 +172,19 @@ class WrongBase(CurateTestCase):
         self.assertIn("on another branch too", result.stdout)
 
     def test_dropping_the_review_you_are_in_leaves_review_mode_first(self) -> None:
-        """Realising the base is wrong happens in review mode, not out of it."""
+        """Realising the base is wrong happens in read mode, not out of it."""
         self.start(self.wrong)
-        self.repo.curate("review")
+        self.repo.curate("read")
         result = self.repo.curate("drop", "wip")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
-        self.assertEqual(self.repo.short_status(), [], "left in review mode")
-        self.assertIn("left review mode; HEAD is 'wip' again", result.stdout)
+        self.assertEqual(self.repo.short_status(), [], "left in read mode")
+        self.assertIn("left read mode; HEAD is 'wip' again", result.stdout)
 
     def test_drop_with_no_branch_drops_the_review_you_are_in(self) -> None:
         """You are standing on it; naming it again is busywork."""
         self.start(self.wrong)
-        self.repo.curate("review")
+        self.repo.curate("read")
         result = self.repo.curate("drop")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.branch_exists("curate/wip"))
@@ -217,7 +217,7 @@ class WrongBase(CurateTestCase):
     def test_drop_with_no_branch_follows_head_moved_by_git(self) -> None:
         """HEAD moved behind curate's back still names the review to drop."""
         self.start(self.wrong)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.curate("write")
         self.repo.git("switch", "-q", "curate/wip")
         result = self.repo.curate("drop")

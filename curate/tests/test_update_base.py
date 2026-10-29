@@ -19,7 +19,7 @@ class UpdateBase(CurateTestCase):
         self.repo.write("b.txt", "B\n")
         self.repo.commit_all("work on feature")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "a.txt")
         self.repo.git("commit", "-q", "-m", "Change a")
         self.repo.git("add", "b.txt")                 # approved, not committed
@@ -36,7 +36,7 @@ class UpdateBase(CurateTestCase):
         return result.stdout
 
     def test_what_upstream_did_is_not_left_to_review(self) -> None:
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertIn(" M g.txt", self.repo.short_status())     # the reason for this
         self.update_base("main")
         self.assertEqual(self.repo.short_status(), ["A  b.txt"])
@@ -47,19 +47,19 @@ class UpdateBase(CurateTestCase):
         self.update_base("main")
         for cache in (self.repo.path / ".git" / "curate").rglob("index.*"):
             cache.unlink()
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.short_status(), ["A  b.txt"])
 
     def test_it_comes_back_in_the_mode_it_left(self) -> None:
         self.update_base("main")
         self.assertEqual(self.repo.status_fields()["mode"], "write")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.curate("update-base", self.base)
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
 
     def test_and_the_review_can_be_integrated(self) -> None:
         self.update_base("main")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("commit", "-q", "-m", "Add b")
         result = self.repo.curate("integrate", "--into", "shipped")
         self.assertEqual(result.returncode, 0, result.stderr)

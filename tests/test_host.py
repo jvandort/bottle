@@ -340,7 +340,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual("bottle: didn't move the user's genie/x: it's in the middle of a merge", said)
 
     async def test_not_when_the_branch_isnt_checked_out(self) -> None:
-        # Under a curate review, HEAD is curate/genie/x: the branch isn't checked out, so nothing moves.
+        # In curate's read mode, HEAD is curate/genie/x: the branch isn't checked out, so nothing moves.
         run("git", "-C", self.repo, "switch", "-q", "-c", "curate/genie/x")
         before = self.users()
         pushed = self.write("a.txt", "second\n")

@@ -20,7 +20,7 @@ Following is `git merge --ff-only`, in whichever worktree has the branch
 checked out, and nothing else: a branch with commits of the host's own, a
 change in the way, or a worktree in the middle of a merge, rebase,
 cherry-pick, revert or bisect is left as it is, and the bottle is told why.
-A branch checked out nowhere -- under a curate review, say, where HEAD is
+A branch checked out nowhere -- in curate's read mode, say, where HEAD is
 curate/<branch> -- isn't touched. The repo's hooks don't run, as for the push
 itself.
 

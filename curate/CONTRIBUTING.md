@@ -104,7 +104,7 @@ disk, `merge-tree --write-tree` does a three-way merge entirely in the object
 database (which is what lets `fixup` work without a checkout), `commit-tree`
 makes a commit and touches nothing else, and `symbolic-ref` is the whole of a
 mode switch. Two porcelain commands appear deliberately: `git add -p`, which
-the editor usually does instead, and `git commit` in review mode, which is the
+the editor usually does instead, and `git commit` in read mode, which is the
 editor's commit button and is correct because HEAD is the clean line.
 
 ## Versions

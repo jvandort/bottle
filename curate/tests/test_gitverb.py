@@ -13,10 +13,10 @@ class GitVerb(CurateTestCase):
         self.repo.write("junk.txt", "debug\n")
         self.tip = self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
 
     def test_it_runs_git_against_the_working_line(self) -> None:
-        """In review mode HEAD is the clean line, so the log is the wrong one."""
+        """In read mode HEAD is the clean line, so the log is the wrong one."""
         result = self.repo.curate("git", "log", "--format=%s")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["their work", "base"])
@@ -24,7 +24,7 @@ class GitVerb(CurateTestCase):
     def test_and_comes_back_to_review_mode(self) -> None:
         self.repo.curate("git", "log", "--oneline")
         fields = self.repo.status_fields()
-        self.assertEqual(fields["mode"], "review")
+        self.assertEqual(fields["mode"], "read")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), fields["clean"])
 
     def test_approvals_survive_the_round_trip(self) -> None:
@@ -41,7 +41,7 @@ class GitVerb(CurateTestCase):
     def test_a_failing_command_still_comes_back(self) -> None:
         result = self.repo.curate("git", "no-such-command")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
 
     def test_the_exit_code_is_git_s(self) -> None:
         self.assertEqual(self.repo.curate("git", "rev-parse", "--verify", "-q",
@@ -74,7 +74,7 @@ class GitVerb(CurateTestCase):
         result = self.repo.curate("git")
         self.assertEqual(result.returncode, 1)
         self.assertIn("usage", result.stderr)
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
 
 
 class WritingThroughIt(CurateTestCase):
@@ -86,12 +86,12 @@ class WritingThroughIt(CurateTestCase):
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
 
     def test_a_commit_lands_on_the_working_line_and_the_review_returns(self) -> None:
         self.repo.curate("git", "commit", "--allow-empty", "-q", "-m", "from write mode")
         self.assertEqual(self.repo.log("wip")[0], "from write mode")
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"),
                          self.repo.status_fields()["clean"])
 
@@ -103,7 +103,7 @@ class WritingThroughIt(CurateTestCase):
         self.repo.write("g.txt", "theirs\n")
         self.repo.curate("git", "add", "g.txt")
         self.repo.curate("git", "commit", "-q", "-m", "more of theirs")
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
         self.assertEqual(self.repo.short_status(), ["?? g.txt"])
 
 
@@ -117,7 +117,7 @@ class MovingHead(CurateTestCase):
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "-A")
         self.repo.git("commit", "-q", "-m", "Everything")     # so git allows it
 
@@ -128,11 +128,11 @@ class MovingHead(CurateTestCase):
         self.assertEqual(fields["mode"], "none")
         self.assertEqual(fields["consistent"], "yes")  # leaving the branch in write mode is ordinary
         self.assertIn("no\n        review to come back to", result.stderr)
-        self.assertIn("git switch wip && curate review", result.stderr)
+        self.assertIn("git switch wip && curate read", result.stderr)
 
     def test_and_the_approved_set_is_still_there_afterwards(self) -> None:
         approved = self.repo.index_tree()
         self.repo.curate("git", "switch", "-q", "elsewhere")
         self.repo.git("switch", "-q", "wip")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), approved)

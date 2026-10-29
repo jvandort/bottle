@@ -17,7 +17,7 @@ class Guardrails(CurateTestCase):
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
 
     def approve_everything(self) -> None:
         self.repo.git("add", "-A")
@@ -49,7 +49,7 @@ class Guardrails(CurateTestCase):
         fields = self.repo.status_fields()
         self.assertEqual(fields["consistent"], "yes")
         self.assertNotIn("clean", fields, "still claiming the review it left")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertNotIn("moved it out from under", result.stderr)
         self.assertIn("no review here", result.stderr)
 
@@ -60,7 +60,7 @@ class Guardrails(CurateTestCase):
         self.repo.git("switch", "-q", "elsewhere")
         self.start(self.base)
         self.repo.git("switch", "-q", "wip")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
 
@@ -84,9 +84,9 @@ class Guardrails(CurateTestCase):
         self.repo.git("commit", "-q", "-m", "Everything")
         self.repo.git("switch", "-q", "elsewhere")
         self.repo.curate("write")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("switch", "-q", "wip")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.index_tree(), approved, "approvals were destroyed")
 
@@ -108,7 +108,7 @@ class Guardrails(CurateTestCase):
         self.repo.git("add", "-A")
         ref = self.repo.git("for-each-ref", "--format=%(refname)", "refs/curate")
         before = self.repo.git("rev-parse", ref)
-        later = subprocess.run([CURATE, "review"], cwd=self.repo.path,
+        later = subprocess.run([CURATE, "read"], cwd=self.repo.path,
                                capture_output=True, text=True,
                                env={**os.environ, "GIT_COMMITTER_DATE": "@4000000000 +0000"}, timeout=TIMEOUT)
         self.assertEqual(later.returncode, 0, later.stderr)
@@ -120,7 +120,7 @@ class Guardrails(CurateTestCase):
         self.approve_everything()
         self.repo.git("switch", "-q", "elsewhere")
         self.repo.git("switch", "-q", "wip")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.repo.index_tree(), (approved, self.repo.tree_of("HEAD")))
 
@@ -159,7 +159,7 @@ class TornWrite(CurateTestCase):
         # As if the process died after writing `mode` and before `active`.
         (self.state / "active").write_text(stale)
 
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"),
                          "refs/heads/curate/second")
@@ -168,7 +168,7 @@ class TornWrite(CurateTestCase):
     def test_a_mode_left_behind_is_re_anchored_too(self) -> None:
         """And the other half: active written, mode not."""
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         (self.state / "mode").write_text("write\n")   # HEAD still says review
 
         result = self.repo.curate("write")

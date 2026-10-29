@@ -15,7 +15,7 @@ class Fixup(CurateTestCase):
         self.repo.write("b.txt", "B\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.stage_hunk("a.txt", "A\nA more\n", "A\n")   # approve part of a.txt
         self.repo.git("commit", "-q", "-m", "Add feature A")
         self.repo.git("add", "b.txt")
@@ -116,7 +116,7 @@ class FixupConflicts(CurateTestCase):
         self.repo.write("f.txt", "four\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.stage_hunk("f.txt", "four\n", "two\n")
         self.repo.git("commit", "-q", "-m", "A")
         self.repo.stage_hunk("f.txt", "four\n", "three\n")
@@ -170,7 +170,7 @@ class FixupConflicts(CurateTestCase):
         self.assertEqual(self.repo.curate("write").returncode, 0)
         self.repo.write("g.txt", "more work\n")
         self.repo.commit_all("carried on")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.status_fields()["fixup"], "pending")
 
     def test_continue_finishes_after_both_resolutions(self) -> None:
@@ -303,7 +303,7 @@ class TwoAtOnce(CurateTestCase):
         self.repo.write("f.txt", f"{branch} four\n")
         self.repo.commit_all(f"{branch} work")
         self.assertEqual(self.repo.curate("start", "--from", base).returncode, 0)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.stage_hunk("f.txt", "", f"{branch} two\n")
         self.repo.git("commit", "-q", "-m", f"{branch} A")
         self.repo.stage_hunk("f.txt", "", f"{branch} three\n")
@@ -326,7 +326,7 @@ class TwoAtOnce(CurateTestCase):
 
         # Back to the first, which is exactly where it was left.
         self.repo.git("switch", "-q", "one")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.status_fields()["fixup"], "pending")
         self.assertEqual(self.repo.status_fields()["clean"], first)
 
@@ -339,7 +339,7 @@ class TwoAtOnce(CurateTestCase):
         self.assertEqual(self.repo.status_fields()["fixup"], "none")
         self.repo.curate("write")
         self.repo.git("switch", "-q", "two")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.status_fields()["clean"], second)
         self.assertEqual(self.repo.status_fields()["fixup"], "pending")
 
@@ -362,7 +362,7 @@ class Bytes(CurateTestCase):
         self.repo.write("f.txt", self.CONTENT.replace("1", "4"))
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.stage_hunk("f.txt", "", self.CONTENT.replace("1", "2"))
         self.repo.git("commit", "-q", "-m", "A")
         self.repo.stage_hunk("f.txt", "", self.CONTENT.replace("1", "3"))
@@ -404,7 +404,7 @@ class BinaryConflict(CurateTestCase):
         (self.repo.path / "f.bin").write_bytes(b"final\0\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         for name in ("A", "B"):
             self.repo.git("update-index", "--add", "--cacheinfo",
                           f"100644,{self.repo.blob(name + chr(0))},f.bin")

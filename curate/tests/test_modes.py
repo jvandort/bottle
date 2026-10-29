@@ -13,21 +13,29 @@ class ModeSwitch(CurateTestCase):
         self.start(self.base)
 
     def test_review_mode_points_head_at_the_clean_line(self) -> None:
-        self.repo.curate("review")
+        self.repo.curate("read")
         fields = self.repo.status_fields()
-        self.assertEqual(fields["mode"], "review")
+        self.assertEqual(fields["mode"], "read")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), fields["clean"])
+
+    def test_read_mode_is_stored_as_every_curate_knows_it(self) -> None:
+        """`curate read` renamed the mode, not the state: a curate from before reads it as its own."""
+        self.repo.curate("read")
+        state = self.repo.path / ".git" / "curate"
+        self.assertEqual((state / "mode").read_text().strip(), "review")
+        self.assertEqual((state / "version").read_text().strip(), "1")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
 
     def test_switching_does_not_touch_a_single_file(self) -> None:
         """The property the whole design rests on: no files move, so no reindex."""
         before = self.repo.mtimes()
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.mtimes(), before)
         self.repo.curate("write")
         self.assertEqual(self.repo.mtimes(), before)
 
     def test_unstaged_in_review_mode_is_the_review_to_do_list(self) -> None:
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(sorted(self.repo.short_status()), [" M f.txt", "?? junk.txt"])
 
     def test_write_mode_hides_the_review_and_shows_only_your_own_edits(self) -> None:
@@ -38,17 +46,17 @@ class ModeSwitch(CurateTestCase):
 
     def test_the_reflog_says_which_switch_was_which(self) -> None:
         """Which matters when a line has gone missing and you are reading it."""
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.curate("write")
         reflog = self.repo.git("reflog", "--format=%gs")
-        self.assertIn("curate: review mode", reflog)
+        self.assertIn("curate: read mode", reflog)
         self.assertIn("curate: write mode", reflog)
 
     def test_each_mode_keeps_its_own_staged_set(self) -> None:
         self.repo.curate("write")
         self.repo.write("mine.txt", "mine\n")
         self.repo.git("add", "mine.txt")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.repo.curate("write")
         self.assertIn("A  mine.txt", self.repo.short_status(), "write staging was clobbered")
@@ -66,7 +74,7 @@ class Switching(CurateTestCase):
 
     def test_switch_toggles_both_ways(self) -> None:
         self.repo.curate("switch")
-        self.assertEqual(self.repo.status_fields()["mode"], "review")
+        self.assertEqual(self.repo.status_fields()["mode"], "read")
         self.repo.curate("switch")
         self.assertEqual(self.repo.status_fields()["mode"], "write")
 
@@ -100,22 +108,22 @@ class SwitchFailure(CurateTestCase):
         not move under."""
         lock = self.repo.path / ".git" / "index.lock"
         lock.write_text("")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         lock.unlink()
         self.assertEqual(result.returncode, 1)
         self.assertIn("holds .git/index.lock", result.stderr)
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
-        self.assertEqual(self.repo.curate("review").returncode, 0)
+        self.assertEqual(self.repo.curate("read").returncode, 0)
 
     def test_a_line_deleted_by_hand_is_not_switched_to(self) -> None:
         self.repo.git("branch", "-D", "curate/wip")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 1)
         self.assertIn("'curate/wip' does not exist", result.stderr)
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
 
     def test_a_failed_switch_leaves_the_indexes_where_they_were(self) -> None:
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         approved = self.repo.index_tree()
         self.repo.curate("write")
@@ -125,7 +133,7 @@ class SwitchFailure(CurateTestCase):
         # symbolic-ref without stopping anything before it.
         lock = self.repo.path / ".git" / "HEAD.lock"
         lock.write_text("")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         lock.unlink()
 
         self.assertEqual(result.returncode, 1)
@@ -133,5 +141,5 @@ class SwitchFailure(CurateTestCase):
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/wip")
         self.assertEqual(self.repo.status_fields()["mode"], "write")
 
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), approved, "approvals were lost")

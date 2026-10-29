@@ -10,7 +10,7 @@ class WorkingLineMoves(CurateTestCase):
         self.repo.write("f.txt", "ONE\ntwo\nthree\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.approved = self.repo.index_tree()
 
@@ -18,7 +18,7 @@ class WorkingLineMoves(CurateTestCase):
         self.repo.curate("write")
         self.repo.write("g.txt", "new\n")
         self.repo.commit_all("more")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), self.approved)
         self.assertEqual(self.repo.short_status(), ["M  f.txt", "?? g.txt"])
 
@@ -26,7 +26,7 @@ class WorkingLineMoves(CurateTestCase):
         """Content-based approval is why rebasing and squashing cost nothing."""
         self.repo.curate("write")
         self.repo.git("commit", "-q", "--amend", "-m", "their work, reworded")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), self.approved)
         self.assertEqual(self.repo.short_status(), ["M  f.txt"])
 
@@ -34,7 +34,7 @@ class WorkingLineMoves(CurateTestCase):
         self.repo.curate("write")
         self.repo.write("f.txt", "ONE\nTWO\nthree\n")
         self.repo.commit_all("changed it again")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.short_status(), ["MM f.txt"])
         self.assertNotIn("+ONE", self.repo.git("diff"), "the approved line reappeared")
 
@@ -43,6 +43,6 @@ class WorkingLineMoves(CurateTestCase):
         self.repo.curate("write")
         self.repo.write("g.txt", "new\n")
         self.repo.commit_all("more")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.git("rev-parse", self.repo.status_fields()["clean"]),
                          clean_before)

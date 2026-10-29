@@ -86,14 +86,14 @@ class Hooks(CurateTestCase):
 
     def test_but_not_on_every_other_command(self) -> None:
         (self.hooks / "post-commit").write_text("#!/bin/sh\necho mine\n")
-        for verb in ("list", "review", "write"):
+        for verb in ("list", "read", "write"):
             with self.subTest(verb=verb):
                 self.assertNotIn("leaving your existing", self.repo.curate(verb).stderr)
 
     def test_commit_all_in_review_mode_is_recorded_at_once(self) -> None:
         """`git commit -a` stages into a temporary index, which the
         post-index-change hook leaves alone; post-commit records it instead."""
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("commit", "-q", "-a", "-m", "all of it")
         ref = self.repo.git("for-each-ref", "--format=%(refname)", "refs/curate")
         self.assertEqual(self.repo.tree_of(ref), self.repo.tree_of("curate/wip"))
@@ -102,7 +102,7 @@ class Hooks(CurateTestCase):
         """With someone else's post-index-change, an approval reaches the ref
         at the next command -- which has to be every command, a switch included."""
         (self.hooks / "post-index-change").write_text("#!/bin/sh\nexit 0\n")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         approved = self.repo.index_tree()
         self.repo.curate("write")

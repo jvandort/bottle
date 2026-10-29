@@ -40,7 +40,7 @@ class Signing(CurateTestCase):
         self.repo.write("b.txt", "B\n")
         self.repo.commit_all("their work")
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "b.txt")
         self.repo.git("commit", "-q", "--no-gpg-sign", "-m", "Add b")
         self.repo.git("add", "a.txt")                   # to fold into "Add b"
@@ -89,7 +89,7 @@ class SignedConflicts(CurateTestCase):
         self.repo.write("f.txt", "four\n")
         self.repo.commit_all("their work")
         self.start(base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.stage_hunk("f.txt", "four\n", "two\n")
         self.repo.git("commit", "-q", "--no-gpg-sign", "-m", "A")
         self.repo.stage_hunk("f.txt", "four\n", "three\n")

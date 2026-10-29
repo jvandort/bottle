@@ -4,7 +4,7 @@ import os
 
 from .errors import Refused
 from .gitcmd import git, rev, run
-from .state import Repo, named
+from .state import Repo, named, shown
 
 
 class NoReview(Refused):
@@ -46,7 +46,7 @@ def switch_mode(repo: Repo, to: str) -> int:
             live.replace(parked)
         session.index(to).replace(live)       # renames: atomic, and free
         try:
-            git("symbolic-ref", "-m", f"curate: {to} mode", "HEAD", target)
+            git("symbolic-ref", "-m", f"curate: {shown(to)} mode", "HEAD", target)
         except Refused:
             # Every other failure here leaves HEAD and the recorded mode
             # disagreeing, which the invariant catches. This one would not:

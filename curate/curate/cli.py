@@ -16,6 +16,7 @@ from .integrate import cmd_integrate
 from .hooks import cmd_hook, install as install_hooks
 from .modes import NoReview, switch_mode
 from .start import cmd_start
+from .review import cmd_review
 from .transfer import cmd_transfer
 from .state import STATE_VERSION, VERSION, Repo, named
 from .ui import interactive
@@ -25,11 +26,16 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                --copy <branch> copies that branch's review.
                                With no arguments, on a terminal, it fetches
                                and asks which branch, then where it starts.
-  curate review                read your files against the clean line. Stage a
+  curate read                  read your files against the clean line. Stage a
                                hunk to approve it, commit to ship it. With no
                                review here, it asks which branch, as `start`.
                                --copy <branch> begins this branch's review as
                                a copy of that one's, for a rebased branch.
+  curate review <branch>       pause the review you are in and read <branch>'s,
+                               beginning one if it has none (--from <base>,
+                               or it asks). Refused, with nothing moved, while
+                               your files have changes the working line
+                               doesn't. With no branch, it asks which.
   curate write                 back to an ordinary repository, to write code.
   curate git <command>         run a git command as if you were in write mode,
                                whatever mode you are in, then come back. So
@@ -62,7 +68,7 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
   curate drop [<branch>]       forget a review started by `start`: the one
                                you are in, or the one <branch> names.
 
-In review mode your editor does the work: staging is approving, and committing
+In read mode your editor does the work: staging is approving, and committing
 extends the clean line. Unstaged is your review to-do list, so the review
 is finished when `git status` is empty."""
 
@@ -81,8 +87,9 @@ COMMANDS: dict[str, Callable[[Repo, list[str]], int]] = {
     "transfer": cmd_transfer,
     "update-base": cmd_update_base,
     "integrate": cmd_integrate,
+    "review": cmd_review,
 }
-MODE_VERBS = ("write", "review", "switch")
+MODE_VERBS = ("write", "read", "switch")
 INTERNAL = {"hook": cmd_hook}
 
 
@@ -159,12 +166,13 @@ def run(argv: list[str]) -> int:
 
     try:
         if verb in MODE_VERBS:
-            if rest and verb != "review":
+            if rest and verb != "read":
                 raise Refused(f"unexpected argument: {rest[0]}")
-            to = verb if verb != "switch" else (
+            # `curate read` is the mode the code calls "review" (state.shown).
+            to = {"read": "review"}.get(verb, verb) if verb != "switch" else (
                 "write" if repo.mode == "review" else "review")
             if rest:
-                # `review --copy <branch>` says how to begin a review, so it
+                # `read --copy <branch>` says how to begin a review, so it
                 # only makes sense where there is none to switch into.
                 if repo.session() is not None:
                     raise Refused(f"{rest[0]} begins a review, and this "

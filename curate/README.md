@@ -36,7 +36,7 @@ itself through the symlink.
 
 ```sh
 curate start          # fetches, asks which branch, then where its clean line begins
-curate review         # now you are reading
+curate read           # now you are reading
 ```
 
 Which branch is a list of every branch, local and fetched, newest first, with
@@ -45,7 +45,7 @@ local branch tracking it; one that already has a review is switched back to
 rather than started again. Give `start` any argument and it asks nothing about
 the branch: the one you are on is the working line.
 
-In review mode your editor is the tool. Stage a hunk to approve it; commit to
+In read mode your editor is the tool. Stage a hunk to approve it; commit to
 put it on the clean line. Unstaged means unreviewed, so `git status` **is** your
 review to-do list, and the review is done when it is empty.
 
@@ -66,10 +66,12 @@ A summary; `curate --help` is the real thing.
 curate                       status here, or the command list if no review
 curate start --from <base>   begin. --clean <branch> to name the clean line,
                              --copy <branch> to copy that branch's review
-curate review                switch to review mode; --copy <branch> begins
+curate read                  switch to read mode; --copy <branch> begins
                              this branch's review as a copy of that one's.
                              With no review here, asks which branch to start,
                              as a bare `curate start` does
+curate review <branch>       pause the review you are in, and read <branch>'s,
+                             beginning it if need be (--from <base>)
 curate write                 switch back
 curate switch                toggle between the two
 curate git <command>         run a git command in write mode, whatever mode
@@ -100,7 +102,7 @@ curate drop [<branch>]       forget a review started by `start`; the one
 
 Your files are identical in both. Only `HEAD` and the index move.
 
-So in review mode, `git status` shows the clean line's tip against your actual
+So in read mode, `git status` shows the clean line's tip against your actual
 files: everything you have not yet read. In write mode `HEAD` is the working
 line instead, so `git status` is back to showing your uncommitted edits, and
 the clean line is just another branch you are not on.
@@ -130,7 +132,7 @@ There is no `approve` verb, on purpose. Staging is approving, and your editor
 already does that well:
 
 ```sh
-curate review
+curate read
 git add -p f.py              # approve some hunks
 git add f.py                 # approve the whole file
 git commit -m "Add the thing"   # put the approved set on the clean line
@@ -193,7 +195,7 @@ git on the working line, so `curate git` runs it for you.
 curate git pull              # plain conflicts, in your working tree, as usual
 ```
 
-That is write mode, the command, and review mode again -- borrowed for exactly
+That is write mode, the command, and read mode again -- borrowed for exactly
 as long as the pull takes. It works the same from write mode, where it is
 simply `git`, so you never have to know which mode you were in to type it.
 `log`, `fetch`, `diff`, `status`: anything that wants HEAD to be the
@@ -204,7 +206,7 @@ You can still do it by hand, which is all `curate git` does:
 ```sh
 curate write
 git pull
-curate review                # your approvals come back untouched
+curate read                  # your approvals come back untouched
 ```
 
 They come back because the approved set is a *tree*: it records content, and
@@ -215,7 +217,7 @@ It is a history nobody reads, where an extra commit costs nothing.
 If the command checks something else out -- `curate git switch elsewhere` --
 there is no review to come back to, because the working line is no longer where
 you are standing. curate says so and leaves you there; `git switch <working>
-&& curate review` returns.
+&& curate read` returns.
 
 ## When the branch is replaced rather than updated
 
@@ -240,7 +242,7 @@ By hand, it is:
 
 ```sh
 git switch feature-2
-curate review --copy feature-1
+curate read --copy feature-1
 ```
 
 The clean line and your approvals come across, and since approval is content,
@@ -317,7 +319,7 @@ got wrong leaves the review it came from exactly as it was.
 
 ## Starting from the wrong base
 
-You often cannot tell until review mode shows you a list that is far too long
+You often cannot tell until read mode shows you a list that is far too long
 or far too short.
 
 ```sh
@@ -331,7 +333,7 @@ anywhere, `drop` leaves the branch alone and tells you how to delete it by hand.
 
 ## Leaving
 
-**You can switch branches straight out of review mode.** Once a review is
+**You can switch branches straight out of read mode.** Once a review is
 finished, git no longer refuses the checkout, and curate treats it as though
 you had run `curate write` first: it stands the review down.
 
@@ -352,7 +354,21 @@ are in.
 One review per branch, kept separately, so switching away does not lose your
 place in either. `curate list` shows them; `curate drop` forgets one.
 
-You can only *look* at one at a time, because there is one working tree.
+You can only *look* at one at a time, because there is one working tree, and
+`curate review` moves between them:
+
+```sh
+curate review feature-2      # pause this review, read feature-2's
+curate review feature-1      # and back, approvals where you left them
+```
+
+The review you leave is paused, not ended: its approvals, and a fixup paused
+on a conflict, wait for you. A branch with no review yet gets one, as `start`
+would: `--from <base>`, or on a terminal it asks. With no branch, it asks
+which. It refuses, and moves nothing, while your files have anything the
+working line you are leaving does not -- an edit, staged or not, or a new
+file -- since that would travel onto the other branch and show up as unread
+there. Commit it in write mode first.
 
 ## Where it keeps things
 

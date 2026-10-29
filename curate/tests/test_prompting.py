@@ -21,10 +21,10 @@ class Prompting(CurateTestCase):
         self.repo.commit_all("their work")
 
     def test_switching_to_review_mode_with_no_review_asks_and_starts_one(self) -> None:
-        out = self.on_a_terminal(["review"], ["\r", "/", self.base, "\r"])
+        out = self.on_a_terminal(["read"], ["\r", "/", self.base, "\r"])
         self.assertIn("Clean line for 'wip' starts at", out)
         fields = self.repo.status_fields()
-        self.assertEqual(fields["mode"], "review")
+        self.assertEqual(fields["mode"], "read")
         self.assertEqual(self.repo.git("rev-parse", fields["clean"]), self.base)
 
     def test_a_suggestion_names_the_branch_not_the_commit_message(self) -> None:
@@ -64,21 +64,21 @@ class Prompting(CurateTestCase):
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
     def test_eof_cancels_and_creates_nothing(self) -> None:
-        out = self.on_a_terminal(["review"], ["\x04"])
+        out = self.on_a_terminal(["read"], ["\x04"])
         self.assertIn("cancelled", out)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
         self.assertFalse((self.repo.path / ".git" / "curate" / "sessions").exists())
 
     def test_off_a_terminal_it_refuses_rather_than_blocking(self) -> None:
         """A pipe has nobody to answer, so the old refusal has to survive."""
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 1)
         self.assertIn("curate start", result.stderr)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
 
     def test_a_terminal_curses_cannot_drive_is_no_terminal_at_all(self) -> None:
         """One way of asking, not a second one kept alive for dumb terminals."""
-        out = self.on_a_terminal(["review"], [], term="dumb")
+        out = self.on_a_terminal(["read"], [], term="dumb")
         self.assertIn("curate start --from", out)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
 
@@ -151,7 +151,7 @@ class Picking(CurateTestCase):
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.first)
 
     def test_q_cancels_and_creates_nothing(self) -> None:
-        out = self.on_a_terminal(["review"], ["q"])
+        out = self.on_a_terminal(["read"], ["q"])
         self.assertIn("cancelled", out)
         self.assertEqual(self.repo.git("branch", "--list", "curate/wip"), "")
         self.assertFalse((self.repo.path / ".git" / "curate" / "sessions").exists())

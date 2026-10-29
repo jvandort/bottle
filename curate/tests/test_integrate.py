@@ -28,7 +28,7 @@ class Integrating(CurateTestCase):
 
     def review_all(self) -> None:
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "-A")
 
     def integrate(self, *args: str) -> str:
@@ -99,7 +99,7 @@ class Adopting(Integrating):
         self.repo.git("switch", "-q", "-c", "other", self.base)
         self.repo.curate("start", "--from", self.base, "--clean", "other-clean")
         self.repo.git("switch", "-q", "feature")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertIn("other-clean belongs to a review",
                       self.refused("--into", "other-clean", "--adopt", "genie"))
 
@@ -172,7 +172,7 @@ class Unfinished(Integrating):
 
     def test_anything_unreviewed_is_refused(self) -> None:
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "b.txt")
         self.assertIn("1 file(s) still unreviewed:\n  c.txt", self.refused("--into", "main"))
 
@@ -200,7 +200,7 @@ class Curated(Integrating):
         self.commit("wip", {"b.txt": "B\n"}, by=GENIE)
         self.commit("more wip", {"c.txt": "C\n"}, by=GENIE)
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "b.txt")
         self.repo.git("commit", "-q", "-m", "Add b")
 
@@ -277,7 +277,7 @@ class Copied(Integrating):
     def next_version(self, name: str, files: dict[str, str], copying: str) -> None:
         self.repo.git("switch", "-q", "-c", name, self.base)
         self.commit(f"squashed into {name}", files, by=GENIE)
-        result = self.repo.curate("review", "--copy", copying)
+        result = self.repo.curate("read", "--copy", copying)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.repo.git("add", "-A")
 
@@ -311,7 +311,7 @@ class Copied(Integrating):
         self.commit("Something else", {"e.txt": "E\n"})
         self.start(self.base)
         self.repo.git("switch", "-q", "feature-2")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.integrate("--into", "main", "--adopt", "genie")
         self.assertIn("unrelated", self.repo.curate("list").stdout)
         self.assertIn("curate/unrelated", self.branches())
@@ -325,7 +325,7 @@ class Copied(Integrating):
         self.commit("New work", {"n.txt": "N\n"}, by=GENIE)
         self.start(self.base)
         self.repo.git("switch", "-q", "feature-2")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.integrate("--into", "main", "--adopt", "genie")
         self.assertIn("feature-1", self.repo.curate("list").stdout)
         self.assertEqual(self.repo.git("log", "-1", "--format=%s", "feature-1"), "New work")
@@ -347,7 +347,7 @@ class CopiedOnTop(Integrating):
         self.repo.curate("write")
         self.repo.git("switch", "-q", "-c", "on-top")
         self.commit("Add c", {"c.txt": "C\n"}, by=GENIE)
-        result = self.repo.curate("review", "--copy", "feature")
+        result = self.repo.curate("read", "--copy", "feature")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.repo.git("add", "-A")
 

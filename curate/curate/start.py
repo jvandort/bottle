@@ -72,7 +72,7 @@ def start_chosen(repo: Repo) -> int:
     """Ask which branch to review, out of everything there is, then begin.
 
     The branch you are on is the one offered, but it is not taken silently:
-    `curate review` on a branch that merely happens to be checked out is as
+    `curate read` on a branch that merely happens to be checked out is as
     likely to be a mistake as a decision. Fetching first, because the branch
     worth reviewing is often the one somebody just pushed.
     """
@@ -173,8 +173,9 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
     return Beginning(session, working, base, source, carried)
 
 
-def begin(repo: Repo, b: Beginning) -> None:
-    """Write what `prepare` worked out: the clean line, and the review."""
+def begin(repo: Repo, b: Beginning, opening: bool = False) -> None:
+    """Write what `prepare` worked out: the clean line, and the review.
+    `opening`: the caller goes on to open it in read mode, so says so itself."""
     session, source, carried = b.session, b.source, b.carried
     with uninterrupted():
         git("branch", b.clean_name, carried.tip)
@@ -199,7 +200,8 @@ def begin(repo: Repo, b: Beginning) -> None:
         report(source, carried)
     print(f"curate: clean line '{b.clean_name}' at {carried.tip[:8]}, "
           f"working line '{working_name}'.")
-    print(f"        `curate review` to start reading; `curate write` to go back.")
+    if not opening:
+        print(f"        `curate read` to start reading; `curate write` to go back.")
     if source:
         print(f"        Wrong base? `curate drop {working_name}` undoes the copy.")
         print(f"        The review of {named(source.working)} is untouched, and "

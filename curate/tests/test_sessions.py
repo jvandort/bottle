@@ -13,7 +13,7 @@ class Sessions(CurateTestCase):
 
     def test_two_branches_keep_separate_reviews(self) -> None:
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         approved = self.repo.index_tree()
         self.repo.curate("write")
@@ -21,11 +21,11 @@ class Sessions(CurateTestCase):
         self.repo.write("g.txt", "other work\n")
         self.repo.commit_all("work on second")
         self.repo.curate("start", "--from", self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.short_status(), ["?? g.txt"])
         self.repo.curate("write")
         self.repo.git("switch", "-q", "wip")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), approved, "the first review was lost")
 
     def test_list_shows_every_session_and_drop_removes_one(self) -> None:
@@ -63,13 +63,13 @@ class Sessions(CurateTestCase):
     def test_an_index_file_is_only_a_cache(self) -> None:
         """Deleting it must cost a re-stat, not the approvals."""
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         approved = self.repo.index_tree()
         self.repo.curate("write")
         for stale in (self.repo.path / ".git" / "curate").rglob("index.review"):
             stale.unlink()
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), approved)
 
 
@@ -90,7 +90,7 @@ class LeavingInWriteMode(CurateTestCase):
         self.repo.commit_all("work on wip")
         self.repo.git("branch", "unrelated", self.base)
         self.start(self.base)
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         self.approved = self.repo.index_tree()
         self.repo.curate("write")
@@ -103,7 +103,7 @@ class LeavingInWriteMode(CurateTestCase):
 
     def test_review_there_offers_a_review_instead_of_refusing(self) -> None:
         """The reported bug: every mode verb refused, on every branch."""
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertNotIn("moved it out from under", result.stderr)
         self.assertIn("no review here", result.stderr)
 
@@ -112,12 +112,12 @@ class LeavingInWriteMode(CurateTestCase):
         self.repo.commit_all("work on unrelated")
         result = self.repo.curate("start", "--from", self.base)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.repo.curate("review").returncode, 0)
+        self.assertEqual(self.repo.curate("read").returncode, 0)
         self.assertEqual(self.repo.short_status(), ["?? g.txt"])
 
     def test_coming_back_finds_the_review_where_it_was(self) -> None:
         self.repo.git("switch", "-q", "wip")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.index_tree(), self.approved,
                          "the approvals did not come back")

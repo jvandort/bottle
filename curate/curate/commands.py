@@ -5,7 +5,7 @@ from .errors import Refused
 from .gitcmd import git, only_on, rev
 from .hooks import foreign, me
 from .modes import switch_mode
-from .state import Repo, Session, named, short
+from .state import Repo, Session, named, short, shown
 
 
 def problems(repo: Repo) -> list[str]:
@@ -64,7 +64,7 @@ def cmd_status(repo: Repo, argv: list[str]) -> int:
     wrong = problems(repo)
     session = repo.session()
     consistent = repo.consistent()
-    mode = repo.mode if consistent else "away"
+    mode = shown(repo.mode) if consistent else "away"
     fields = {"mode": mode}
     if session is not None:
         fields.update({
@@ -143,7 +143,7 @@ def cmd_drop(repo: Repo, argv: list[str]) -> int:
                 # You cannot drop the review you are standing in: the index
                 # being dropped is the live one. Do it rather than refuse.
                 switch_mode(repo, "write")
-                print(f"curate: left review mode; HEAD is {named(s.working)} again.")
+                print(f"curate: left read mode; HEAD is {named(s.working)} again.")
         # The clean branch is ours to delete unless deleting it loses
         # something: a commit approved onto it that no other ref has. A copied
         # review starts with commits on it, but the review it was copied from

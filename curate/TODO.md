@@ -8,9 +8,9 @@ The rule this section keeps coming back to: **round one is IDE-first, and the
 git tools you already use should be convenient from inside a review.** Not new
 tools that duplicate them.
 
-- **Say why git refused, when the reason is curate.** `git pull` in review mode
+- **Say why git refused, when the reason is curate.** `git pull` in read mode
   gives you `There is no tracking information for the current branch`, which is
-  true, useless, and says nothing about review mode -- HEAD is the clean line,
+  true, useless, and says nothing about read mode -- HEAD is the clean line,
   which has no upstream and never will. A `post-checkout`-style hook cannot
   intercept this, but `curate status` could notice the clean line has no
   upstream and say so.
@@ -52,7 +52,7 @@ tools that duplicate them.
 Known, and mostly deliberate. Here rather than in the README because they are
 things to fix or decide, not things to learn.
 
-- **Files the working line added show as unversioned** in review mode, since
+- **Files the working line added show as unversioned** in read mode, since
   the clean line does not know them. Staging fixes the display.
 - **Updating a working line someone else writes does move files.** Unavoidable,
   because the working line moved, and the only operation that does.

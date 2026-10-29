@@ -1,4 +1,4 @@
-"""`curate start` and `curate review` with nothing to go on: which branch?
+"""`curate start` and `curate read` with nothing to go on: which branch?
 
 On a terminal they fetch, list every branch newest first with the one you are
 on as the default, and only then ask where the clean line starts.
@@ -46,10 +46,10 @@ class Choosing(CurateTestCase):
 
     def test_review_asks_too_and_ends_up_reviewing_the_choice(self) -> None:
         self.newer_branch("other", "elsewhere")
-        self.on_a_terminal(["review"], ["g", "\r", "\r"])
+        self.on_a_terminal(["read"], ["g", "\r", "\r"])
         fields = self.repo.status_fields()
         self.assertEqual((fields["mode"], fields["working"]),
-                         ("review", "refs/heads/other"))
+                         ("read", "refs/heads/other"))
 
     def test_a_branch_only_on_the_remote_is_fetched_and_made_local(self) -> None:
         tip = self.newer_branch("pushed", "from somebody else")
@@ -84,11 +84,11 @@ class Choosing(CurateTestCase):
         self.start(self.base)
         self.repo.curate("write")
         self.repo.git("switch", "-q", "wip")
-        out = self.on_a_terminal(["review"], ["g", "\r"])  # other is newest
+        out = self.on_a_terminal(["read"], ["g", "\r"])  # other is newest
         self.assertIn("has a review", out)
         fields = self.repo.status_fields()
         self.assertEqual((fields["mode"], fields["working"]),
-                         ("review", "refs/heads/other"))
+                         ("read", "refs/heads/other"))
 
     def test_with_arguments_it_does_not_ask(self) -> None:
         self.newer_branch("other", "elsewhere")

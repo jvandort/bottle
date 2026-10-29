@@ -82,7 +82,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         raise Refused(f"{named(local)} is the clean line of a review")
     if any(s.working == local for s in repo.sessions()):
         raise Refused(f"{named(local)} has a review already: "
-                      f"`git switch {short(local)} && curate review`")
+                      f"`git switch {short(local)} && curate read`")
     # Everything start would check, and the copy itself, before anything
     # moves: a copy refused after the switch would leave you on the new branch
     # with no review to transfer again.

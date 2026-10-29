@@ -46,13 +46,13 @@ class Timing(CurateTestCase):
         self.assertRegex(detail, r"^    \+\d+\.\d{3}s \d+\.\d{3}s git ")
 
     def test_a_hook_you_fired_is_logged_and_curates_own_are_not(self) -> None:
-        """`git add` in review mode is the user's, and runs post-index-change.
+        """`git add` in read mode is the user's, and runs post-index-change.
         The ones git fires under curate's own git return at once."""
         self.start(self.base)
-        self.curate("review")
+        self.curate("read")
         self.repo.git("add", "f.txt")
         self.assertEqual([cmd for _, cmd in self.entries()],
-                         [f"start --from {self.base}", "review",
+                         [f"start --from {self.base}", "read",
                           "hook post-index-change 0 0"])
 
     def test_nothing_is_written_where_there_is_no_review(self) -> None:
@@ -62,7 +62,7 @@ class Timing(CurateTestCase):
         self.assertFalse(self.log.parent.exists())
 
     def test_waiting_for_an_answer_is_not_counted_as_slow(self) -> None:
-        """The case that prompted it: 19s for a `curate review`, of which 14
+        """The case that prompted it: 19s for a `curate read`, of which 14
         were the base list waiting for someone to choose."""
         self.on_a_terminal(["start"], ["\r", "\r"])
         line = self.log.read_text().splitlines()[-1]

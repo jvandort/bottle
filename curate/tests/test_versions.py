@@ -24,7 +24,7 @@ class Versions(CurateTestCase):
 
     def test_state_from_a_newer_curate_is_refused_not_guessed_at(self) -> None:
         (self.state / "version").write_text("99\n")
-        result = self.repo.curate("review")
+        result = self.repo.curate("read")
         self.assertEqual(result.returncode, 1)
         self.assertIn("99", result.stderr)
 
@@ -38,14 +38,14 @@ class Versions(CurateTestCase):
 
     def test_and_migrating_costs_the_caches_but_not_the_approvals(self) -> None:
         """The whole basis of the migration: index files are derived."""
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("add", "f.txt")
         approved = self.repo.index_tree()
         self.repo.curate("write")
         (self.state / "version").write_text("0\n")
         self.assertEqual(self.repo.curate("list").returncode, 0)
         self.assertEqual(list(self.state.rglob("index.*")), [], "a cache survived")
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.assertEqual(self.repo.index_tree(), approved, "approvals were lost")
 
     def test_a_missing_stamp_is_malformed_state(self) -> None:
@@ -65,7 +65,7 @@ class Versions(CurateTestCase):
     def test_malformed_state_refuses_every_command_alike(self) -> None:
         """Including status: there is no leniency to be had anywhere."""
         (self.state / "version").unlink()
-        for verb in ("status", "write", "review", "list", "fixup"):
+        for verb in ("status", "write", "read", "list", "fixup"):
             with self.subTest(verb=verb):
                 self.assertEqual(self.repo.curate(verb).returncode, 1)
 
@@ -108,6 +108,6 @@ class Problems(CurateTestCase):
         self.assertEqual(self.repo.status_fields()["problems"], "0")
 
     def test_a_deleted_working_line_is_reported(self) -> None:
-        self.repo.curate("review")
+        self.repo.curate("read")
         self.repo.git("update-ref", "-d", "refs/heads/wip")
         self.assertEqual(self.repo.status_fields()["problems"], "1")

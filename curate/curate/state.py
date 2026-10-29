@@ -39,6 +39,13 @@ STATE_VERSION = 1
 CLEAN_PREFIX = "curate"          # clean lines live in their own namespace
 
 
+def shown(mode: str) -> str:
+    """A mode as you see it. The one you read in is "review" on disk and in
+    the code -- its name until it became `curate read`, kept so state stays
+    the same for every curate -- and "read" everywhere it reaches you."""
+    return "read" if mode == "review" else mode
+
+
 def read(path: Path) -> str:
     try:
         return path.read_text().strip()
@@ -322,11 +329,11 @@ class Repo:
         if session is None or expected is None or self.head == expected:
             return
         raise Refused(
-            f"{self.mode} mode expects HEAD to be {named(expected)}, but "
+            f"{shown(self.mode)} mode expects HEAD to be {named(expected)}, but "
             f"HEAD is {named(self.head)}.\n"
             f"Something moved it out from under the review. Nothing has been "
             f"touched, and your approvals are safe in {session.ref}.\n"
-            f"To get back:  git switch {short(session.working)} && curate review")
+            f"To get back:  git switch {short(session.working)} && curate read")
 
     def recover(self) -> None:
         """Anchor on HEAD: it is the one thing here git keeps honest.
@@ -370,7 +377,7 @@ class Repo:
             # so stand down rather than refuse -- HEAD returning to the working
             # line picks the review up again, above.
             #
-            # Review mode is the switch made without `curate write` first, which
+            # In read mode, it is the switch made without `curate write` first, which
             # git allows the moment a review is finished. The live index was the
             # approved set, but git has already rewritten it for HEAD's branch;
             # refusing now cannot bring it back, only keep you from working.
