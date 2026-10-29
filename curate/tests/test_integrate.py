@@ -103,11 +103,11 @@ class Adopting(Integrating):
         self.assertIn("other-clean belongs to a review",
                       self.refused("--into", "other-clean", "--adopt", "genie"))
 
-    def test_a_branch_that_cannot_fast_forward_is_refused(self) -> None:
-        self.repo.git("update-ref", "refs/heads/main", self.repo.git(
-            "commit-tree", self.repo.tree_of(self.base), "-p", self.base, "-m", "moved"))
-        self.assertIn("cannot be fast-forwarded",
-                      self.refused("--into", "main", "--adopt", "genie"))
+    def test_a_branch_without_the_base_is_refused(self) -> None:
+        self.repo.git("update-ref", "refs/heads/elsewhere", self.repo.git(
+            "commit-tree", self.repo.tree_of(self.base), "-m", "unrelated"))
+        self.assertIn("cannot be fast-forwarded to this, nor replayed onto",
+                      self.refused("--into", "elsewhere", "--adopt", "genie"))
 
     def test_on_a_terminal_one_author_is_one_enter(self) -> None:
         out = self.on_a_terminal(["integrate"], ["\r", "\r", "mine", "\r"])
@@ -118,13 +118,16 @@ class Adopting(Integrating):
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "mine"), "Test")
         self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/mine")
 
-    def test_on_a_terminal_only_branches_it_fast_forwards_are_offered(self) -> None:
+    def test_on_a_terminal_only_branches_it_fast_forwards_or_replays_onto_are_offered(self) -> None:
         self.repo.git("branch", "behind", self.base)
-        self.repo.git("branch", "diverged", self.repo.git(
+        self.repo.git("branch", "moved", self.repo.git(
             "commit-tree", self.repo.tree_of(self.base), "-p", self.base, "-m", "moved"))
+        self.repo.git("branch", "unrelated", self.repo.git(
+            "commit-tree", self.repo.tree_of(self.base), "-m", "unrelated"))
         out = self.on_a_terminal(["integrate"], ["\r", "q"])
         self.assertIn("behind", out)
-        self.assertNotIn("diverged", out)
+        self.assertIn("replays onto it", out)
+        self.assertNotIn("unrelated", out)
 
     def test_on_a_terminal_main_is_the_best_guess(self) -> None:
         out = self.on_a_terminal(["integrate"], ["\r", "j", "\r"])
@@ -359,3 +362,76 @@ class CopiedOnTop(Integrating):
         self.assertEqual(self.repo.git("branch", "--list", "on-top", "curate/*"), "")
         self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
         self.assertEqual(result.stderr, "")
+
+
+class Replaying(Integrating):
+    """genie's two commits reviewed on feature; main moved on since, by a commit of its own."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.first = self.commit("Add b", {"b.txt": "B\n"}, by=GENIE)
+        self.tip = self.commit("Add c", {"c.txt": "C\n"}, by=GENIE)
+        self.review_all()
+        self.moved = self.move_main({"x.txt": "X\n"})
+
+    def move_main(self, files: dict[str, str], message: str = "Elsewhere") -> str:
+        """A commit on main, made without touching the files or HEAD of the review."""
+        index = str(self.repo.path / ".git" / "other-index")
+        env = {"GIT_INDEX_FILE": index}
+        self.repo.git("read-tree", "main", env=env)
+        for path, text in files.items():
+            blob = self.repo.blob(text)
+            self.repo.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=env)
+        commit = self.repo.git("commit-tree", self.repo.git("write-tree", env=env), "-p", "main", "-m", message)
+        self.repo.git("update-ref", "refs/heads/main", commit)
+        return commit
+
+    def test_off_a_terminal_it_takes_replay_to_replay(self) -> None:
+        err = self.refused("--into", "main", "--adopt", "genie")
+        self.assertIn("main' has moved on by 1 commit(s) since this review's base", err)
+        self.assertIn("--replay", err)
+
+    def test_replayed_onto_main_with_what_it_had_and_adopted(self) -> None:
+        out = self.integrate("--into", "main", "--adopt", "genie", "--replay")
+        self.assertEqual(self.repo.log("main"), ["Add c", "Add b", "Elsewhere", "base"])
+        self.assertEqual(self.repo.git("rev-parse", "main~2"), self.moved)
+        date = self.repo.git("log", "-1", "--format=%aI", self.tip)
+        self.assertEqual(self.author("main"), f"Test <test@example.com> {date}")
+        self.assertEqual(sorted(self.repo.git("ls-tree", "--name-only", "main").split()),
+                         ["a.txt", "b.txt", "c.txt", "x.txt"])
+        self.assertIn("replayed onto it", out)
+        self.assertIn("untested", out)
+
+    def test_your_files_become_the_destinations(self) -> None:
+        self.integrate("--into", "main", "--no-adopt", "genie", "--replay")
+        self.assertEqual(self.repo.git("symbolic-ref", "HEAD"), "refs/heads/main")
+        self.assertEqual(self.repo.read("x.txt"), "X\n")
+        self.assertEqual(self.repo.short_status(), [])
+        self.assertEqual(self.author("main"), self.author(self.tip))
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")
+
+    def test_a_commit_main_has_already_is_dropped(self) -> None:
+        """As when one branch's commits were integrated, rewritten, before another that has them."""
+        self.move_main({"b.txt": "B\n"}, "Add b, adopted")
+        out = self.integrate("--into", "main", "--adopt", "genie", "--replay")
+        self.assertEqual(self.repo.log("main"), ["Add c", "Add b, adopted", "Elsewhere", "base"])
+        self.assertIn("integrated 1 commit(s)", out)
+        self.assertIn(f"1 more had nothing left to do there, so were dropped: {self.first[:8]}", out)
+
+    def test_a_conflict_changes_nothing(self) -> None:
+        self.move_main({"c.txt": "not C\n"})
+        err = self.refused("--into", "main", "--adopt", "genie", "--replay")
+        self.assertIn(f"replaying {self.tip[:8]} conflicts, in:\n  c.txt", err)
+        self.assertIn("feature", self.repo.curate("list").stdout)
+        self.assertEqual(self.repo.read("c.txt"), "C\n")
+
+    def test_on_a_terminal_it_asks_first(self) -> None:
+        out = self.on_a_terminal(["integrate", "--into", "main", "--adopt", "genie"], ["\r"])
+        self.assertIn("Replay the commits onto it", out)
+        self.assertEqual(self.repo.log("main"), ["Add c", "Add b", "Elsewhere", "base"])
+
+    def test_on_a_terminal_picking_it_from_the_list_is_the_say_so(self) -> None:
+        out = self.on_a_terminal(["integrate", "--adopt", "genie"], ["j", "j", "\r"])  # past wip, at the base
+        self.assertIn("replays onto it, best guess", out)
+        self.assertNotIn("Replay the commits onto it", out)
+        self.assertEqual(self.repo.log("main"), ["Add c", "Add b", "Elsewhere", "base"])

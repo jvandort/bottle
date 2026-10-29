@@ -62,8 +62,10 @@ HELP = """  curate start --from <base>   begin. The clean line starts at <base>;
                                or make a new one, with the clean line if you
                                curated one and the working line if not. Asks
                                whether to adopt others' commits as yours, then
-                               where to; drops the review and both its lines.
-                               --into <branch>, --adopt / --no-adopt <author>.
+                               where to: one that has moved on since the base
+                               is replayed onto first. Drops the review and
+                               both its lines. --into <branch>, --replay,
+                               --adopt / --no-adopt <author>.
   curate list                  every review in this repository.
   curate drop [<branch>]       forget a review started by `start`: the one
                                you are in, or the one <branch> names.

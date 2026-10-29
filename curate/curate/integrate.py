@@ -6,11 +6,15 @@ only when everything is reviewed and committed: an uncommitted change is one
 whoever writes the working line has not seen. Commits by others are adopted,
 rewritten as yours, or kept as theirs, a decision made per author. The
 destination is a new branch, or one that can be fast-forwarded, and never
-anything else.
+anything else -- but for one that has moved on since the review's base: with
+your say-so, the commits are replayed onto it, as a rebase would, and it's
+fast-forwarded to them. Your approvals hold, since each commit changes what it
+did; the combination is untested, which it says. A conflict changes nothing.
 
 Every question comes before anything changes. Then the commits are rewritten
 in the object database, the destination moved and switched to -- your files
-already match it, so nothing on disk moves -- and the review is over: dropped,
+already match it, so nothing on disk moves, unless it was replayed onto -- and
+the review is over: dropped,
 and both its lines deleted. Their old tips are printed, so nothing is out of
 reach.
 """
@@ -20,7 +24,7 @@ from dataclasses import dataclass
 
 from .carry import names_for
 from .errors import Refused
-from .gitcmd import commit_tree, git, metadata, run
+from .gitcmd import commit_tree, git, merge_tree, metadata, run
 from .modes import switch_mode
 from .pick import Row, choose, choose_many
 from .state import Repo, Session, named, short
@@ -207,8 +211,20 @@ def can_take(branch: str, tip: str) -> bool:
     return run(["merge-base", "--is-ancestor", branch, tip]).returncode == 0
 
 
-def destination(session: Session, tip: str, into: str | None) -> str:
-    """refs/heads/<name>: an existing branch to fast-forward, or a new one.
+def moved_on(session: Session, branch: str) -> bool:
+    """A branch that has the review's base and has moved on since: one to replay the review onto."""
+    return run(["merge-base", "--is-ancestor", session.base, branch]).returncode == 0
+
+
+@dataclass
+class Destination:
+    ref: str
+    replay: bool                     # moved on since the base: the commits are replayed onto it
+    said_so: bool = False            # picked from a list that said it replays
+
+
+def destination(session: Session, tip: str, into: str | None) -> Destination:
+    """refs/heads/<name>: an existing branch to fast-forward, or to replay onto, or a new one.
 
     Never this review's working line, nor any review's clean line: what is on
     a clean line is what that review approved, and nothing else puts it there.
@@ -223,20 +239,26 @@ def destination(session: Session, tip: str, into: str | None) -> str:
             return None, f"{name!r} is not a branch name"
         if ref in taken:
             return None, f"{name} belongs to a review"
-        if session.repo.objects.rev(ref) is not None and not can_take(ref, tip):
-            return None, f"{name} cannot be fast-forwarded to this"
+        replay = session.repo.objects.rev(ref) is not None and not can_take(ref, tip)
+        if replay and not moved_on(session, ref):
+            return None, (f"{name} cannot be fast-forwarded to this, nor replayed onto: "
+                          f"it does not have the review's base")
         if checked_out_elsewhere(ref):
             return None, f"{name} is checked out in another worktree"
         return ref, ""
+
+    def found(ref: str, said_so: bool = False) -> Destination:
+        replay = session.repo.objects.rev(ref) is not None and not can_take(ref, tip)
+        return Destination(ref, replay, said_so and replay)
 
     if into:
         ref, why = check(into)
         if ref is None:
             raise Refused(why)
-        return ref
+        return found(ref)
     if not interactive():
         raise Refused("into which branch? `--into <branch>`, new or one that "
-                      "fast-forwards")
+                      "fast-forwards or has moved on since the base")
     guesses = {n.split("~")[0] for n in names_for(session.base, session, session.working)}
     rows = [Row(["<new branch…>"], prompt="new branch: ")]
     # --merged: the branches `tip` fast-forwards, all in one call. Asking
@@ -251,12 +273,39 @@ def destination(session: Session, tip: str, into: str | None) -> str:
             continue
         rows.append(Row([name, when, subject], value=ref,
                         tag="best guess" if name in guesses else ""))
+    # Then those moved on since the base, to replay onto.
+    out = run(["for-each-ref", "--sort=-committerdate", f"--contains={session.base}",
+               f"--no-merged={tip}", "--format=%(refname)%1f%(committerdate:relative)%1f%(subject)",
+               "refs/heads/"]).stdout
+    for line in out.splitlines():
+        ref, when, subject = line.split("\x1f")
+        name = short(ref)
+        if ref in taken or checked_out_elsewhere(ref):
+            continue
+        rows.append(Row([name, when, subject], value=ref,
+                        tag="replays onto it" + (", best guess" if name in guesses else "")))
 
     def typed(text: str) -> tuple[str | None, str]:
         return check(text.strip())
 
-    return choose([f"Integrate {named(session.working)} into:", ""], rows,
-                  typed=typed, cancelled="cancelled; nothing was changed")
+    picked = choose([f"Integrate {named(session.working)} into:", ""], rows,
+                    typed=typed, cancelled="cancelled; nothing was changed")
+    return found(picked, said_so=any(row.value == picked and "replays" in row.tag for row in rows))
+
+
+def agree_to_replay(target: Destination, base: str, said: bool) -> None:
+    """Replaying needs your say-so: --replay, a list that said it replays, or a yes."""
+    if said or target.said_so:
+        return
+    ahead = git("rev-list", "--count", f"{base}..{target.ref}")
+    what = (f"{named(target.ref)} has moved on by {ahead} commit(s) since this review's base, "
+            f"so it cannot be fast-forwarded to this")
+    if not interactive():
+        raise Refused(f"{what}. `--replay` replays the commits onto it, as a rebase "
+                      f"would; the result is untested together.")
+    choose([f"{what}.", "Replay the commits onto it, as a rebase would? Your approvals "
+            "hold; the result is untested together.", ""],
+           [Row(["Replay onto it"], value="yes")], cancelled="cancelled; nothing was changed")
 
 
 # -- doing it --------------------------------------------------------------
@@ -264,19 +313,45 @@ def destination(session: Session, tip: str, into: str | None) -> str:
 def rewrite(commits: list[Commit], adopt: set[str]) -> dict[str, str]:
     """Adopted commits as yours, author date kept; anything above one rebuilt
     on its new parent. Below the first, nothing changes."""
-    name, email = me()
     new: dict[str, str] = {}
     for c in commits:
         mapped = [new.get(p, p) for p in c.parents]
-        adopted = c.email in adopt
-        if not adopted and mapped == c.parents:
-            new[c.oid] = c.oid
-            continue
-        env, message = metadata(c.oid)
-        if adopted:
-            env |= {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email}
-        new[c.oid] = commit_tree(c.tree, mapped, message, env=env, sign=True)
+        new[c.oid] = c.oid if c.email not in adopt and mapped == c.parents else remade(c, c.tree, mapped, adopt)
     return new
+
+
+def remade(c: Commit, tree: str, parents: list[str], adopt: set[str]) -> str:
+    """`c` with this tree and these parents: the same message, author and author date -- you, if adopted."""
+    env, message = metadata(c.oid)
+    if c.email in adopt:
+        name, email = me()
+        env |= {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email}
+    return commit_tree(tree, parents, message, env=env, sign=True)
+
+
+def replay(commits: list[Commit], onto: str, adopt: set[str]) -> tuple[str, int, list[Commit]]:
+    """The commits replayed onto `onto`, adopted as `rewrite` would: the new tip, how many
+    there are, and those that had nothing left to do there (on it already), dropped.
+    A merge commit, or a conflict, refuses: the commits made are only objects, unreferenced."""
+    if any(len(c.parents) != 1 for c in commits):
+        raise Refused("a merge commit cannot be replayed. Rebase the working line onto the "
+                      "destination yourself, then `curate update-base`.")
+    new: dict[str, str] = {}
+    dropped: list[Commit] = []
+    tip = onto
+    for c in commits:
+        parent = new.get(c.parents[0], onto)
+        tree, conflicts = merge_tree(c.parents[0], parent, c.oid)
+        if conflicts:
+            raise Refused(f"replaying {c.oid[:8]} conflicts, in:\n{listed(sorted(conflicts))}\n"
+                          f"Nothing was changed. Rebase the working line onto the destination "
+                          f"yourself, then `curate update-base`.")
+        if tree == git("rev-parse", f"{parent}^{{tree}}"):
+            new[c.oid] = parent
+            dropped.append(c)
+        else:
+            new[c.oid] = tip = remade(c, tree, [parent], adopt)
+    return tip, len(commits) - len(dropped), dropped
 
 
 def finish_review(repo: Repo, session: Session, keep: str) -> list[str]:
@@ -317,9 +392,14 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
     into: str | None = None
     adopt: list[str] = []
     keep: list[str] = []
+    said_replay = False
     i = 0
     while i < len(argv):
         flag = argv[i]
+        if flag == "--replay":
+            said_replay = True
+            i += 1
+            continue
         value = argv[i + 1] if i + 1 < len(argv) else None
         if flag in ("--into", "--adopt", "--no-adopt") and value is None:
             raise Refused(f"{flag} needs a value")
@@ -341,19 +421,30 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
 
     tip = line_to_ship(repo, session)
     adopted = to_adopt(others(tip, f"^{session.base}"), adopt, keep)
-    target = destination(session, tip, into)
+    chosen = destination(session, tip, into)
+    target = chosen.ref
+    old_target = repo.objects.rev(target)
+    if chosen.replay:
+        agree_to_replay(chosen, session.base, said_replay)
     # What a branch being fast-forwarded already has stays exactly as it is.
-    commits = commits_in(tip, f"^{session.base}",
-                         *([f"^{target}"] if repo.objects.rev(target) else []))
+    commits = commits_in(tip, f"^{session.base}", *([f"^{target}"] if old_target else []))
+    dropped: list[Commit] = []
+    count = len(commits)
+    if chosen.replay and old_target:
+        # Every question is answered; a conflict refuses here, having made only objects.
+        new_tip, count, dropped = replay(commits, old_target, adopted)
 
-    # Every question is answered. From here on, things change, and stopping
-    # half way would leave a destination moved and a review that refuses to
-    # integrate again -- so nothing stops it.
+    # From here on, things change, and stopping half way would leave a
+    # destination moved and a review that refuses to integrate again -- so
+    # nothing stops it.
     with uninterrupted():
-        new_tip = rewrite(commits, adopted).get(tip, tip) if commits else tip
-        old_target = repo.objects.rev(target)
+        if not chosen.replay:
+            new_tip = rewrite(commits, adopted).get(tip, tip) if commits else tip
         if repo.mode == "review":
             switch_mode(repo, "write")
+        if chosen.replay:
+            # Your files are the shipped line's: they become the destination's, with what it has since.
+            git("read-tree", "-m", "-u", tip, new_tip)
         git("update-ref", "-m", "curate integrate", target, new_tip,
             *([old_target] if old_target else []))
         # Not a checkout: your files already match the destination, so this is
@@ -368,12 +459,18 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         ended = [(prior.working, finish_review(repo, prior, keep=target))
                  for prior in priors]
 
-    how = (f"fast-forwarded from {old_target[:8]}" if old_target
+    how = (f"replayed onto it at {old_target[:8]}" if chosen.replay and old_target
+           else f"fast-forwarded from {old_target[:8]}" if old_target
            else "a new branch")
-    print(f"curate: integrated {len(commits)} commit(s) into {named(target)}, {how}.")
+    print(f"curate: integrated {count} commit(s) into {named(target)}, {how}.")
     if adopted:
-        count = sum(1 for c in commits if c.email in adopted)
-        print(f"        adopted {count} of them as yours.")
+        mine = sum(1 for c in commits if c.email in adopted and c not in dropped)
+        print(f"        adopted {mine} of them as yours.")
+    if dropped:
+        print(f"        {len(dropped)} more had nothing left to do there, so were dropped: "
+              + ", ".join(c.oid[:8] for c in dropped) + ".")
+    if chosen.replay:
+        print("        what it makes together is untested: run your tests.")
     if gone:
         print(f"        the review is over; deleted {', and '.join(gone)}.")
     for working, deleted in ended:

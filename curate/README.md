@@ -85,7 +85,8 @@ curate transfer [<branch>]   copy this review onto the branch that replaced
 curate update-base [<base>]  move this review onto a new base, for a working
                              line rebased in place
 curate integrate             ship a finished review onto a branch, new or
-                             fast-forwarded, and end the review
+                             fast-forwarded -- or replayed onto, if it moved
+                             on since the base -- and end the review
 curate list                  every review in this repository
 curate drop [<branch>]       forget a review started by `start`; the one
                              you are in unless you name a branch
@@ -317,8 +318,20 @@ below it is every branch the line can fast-forward, with the one the base came
 from marked. `--into <branch>` says without asking. Nothing changes until both
 questions are answered.
 
+A branch that has moved on since the review's base -- `main`, once you've
+integrated something else onto it -- can't be fast-forwarded, but it can be
+replayed onto, as a rebase would, and then fast-forwarded. The list offers
+those after the others, marked `replays onto it`, and picking one is your
+say-so; `--into` one asks first, and off a terminal it takes `--replay`.
+Your approvals hold, since each commit changes what it did, but the result is
+untested together, which it says. A commit with nothing left to do there --
+already integrated, as another review's adopted copy -- is dropped. A merge
+commit, or any conflict, refuses, changing nothing: rebase the working line
+yourself, then `curate update-base`.
+
 Then it happens: the destination moves, you are switched to it -- your files
-already match it, so nothing on disk changes -- and the review is over. It is
+already match it, so nothing on disk changes, unless it was replayed onto --
+and the review is over. It is
 dropped, and both its lines are deleted; everything they held is on the
 destination now. So is every review it was copied from, by `transfer` or
 `--copy`: those were earlier versions of the same work. Their old tips are
