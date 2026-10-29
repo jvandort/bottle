@@ -20,7 +20,7 @@ class BrokerTest(FolioTestCase):
         self.assertEqual(broker.GITIGNORE, (self.vault() / ".gitignore").read_text())
         self.assertEqual("", git("-C", str(self.vault()), "status", "--porcelain"))
         bottle = self.bottle()
-        self.assertEqual(str(self.vault()), bottle["git_repo"])
+        self.assertEqual(str(self.vault()), bottle["mounts"][0]["repo"])
         self.assertEqual(self.calls("exec")[-1][-3:-1], ["attach", "claude"])
 
     def test_its_spec_is_folios_with_a_brokers_permissions(self) -> None:
@@ -28,10 +28,13 @@ class BrokerTest(FolioTestCase):
         self.assertEqual({"features": ["claude", "tools"], "memory": "2G",
                           "permissions": ["list-bottles", "message-any"]}, self.bottle()["spec"])
 
-    def test_its_lane_advances_the_vaults_main_and_it_has_no_origin(self) -> None:
+    def test_the_vaults_main_tracks_its_lane_and_it_has_no_origin(self) -> None:
         self.ok("broker")
-        self.assertEqual(["host:fetch=heads", "agent:fetch=ns/broker-out,push=ns/broker-out,advance=main",
-                          "user:fetch=ns/broker-in"], self.bottle()["remotes"])
+        self.assertEqual(["host:fetch=heads", "agent:fetch=ns/broker-out,push=ns/broker-out",
+                          "user:fetch=ns/broker-in"], self.bottle()["mounts"][0]["remotes"])
+        # So bottle's follow moves it as the broker pushes main.
+        self.assertEqual("refs/remotes/bottle/broker/main",
+                         git("-C", str(self.vault()), "for-each-ref", "--format=%(upstream)", "refs/heads/main"))
 
     def test_its_context_is_the_brokers(self) -> None:
         self.ok("broker")
@@ -57,7 +60,7 @@ class BrokerTest(FolioTestCase):
         self.ok("broker")
         self.assertEqual(2, len(self.calls("new")))
         self.assertIn("message-any", self.bottle()["spec"]["permissions"])
-        self.assertIn("advance=main", " ".join(self.bottle()["remotes"]))
+        self.assertEqual("bottle/broker", git("-C", str(self.vault()), "config", "branch.main.remote"))
 
     def test_pausing_no_broker(self) -> None:
         result = self.folio("broker", "pause")

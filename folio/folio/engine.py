@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
@@ -63,12 +64,24 @@ def validate_spec(spec: dict) -> dict:
         return json.loads(_run("spec", "validate", "--json", path).stdout)
 
 
-def new(name: str, spec: dict, git_repo: Path, remotes: list[str], checkout: str | None, context: str) -> None:
+@dataclass(frozen=True)
+class Mount:
+    """A repo for a bottle: checked out at `path`, from `checkout` (None: bottle's default), served `remotes`."""
+
+    path: str
+    repo: Path
+    checkout: str | None
+    remotes: list[str]
+
+
+def new(name: str, spec: dict, mounts: list[Mount], context: str) -> None:
     """Create a bottle. Attached to this terminal: an image build shows, and a login can ask."""
     with _file(json.dumps(spec)) as spec_path, _file(context) as context_path:
-        argv = [*command(), "new", "--spec", spec_path, "--name", name, "--git-repo", str(git_repo),
-                *[arg for remote in remotes for arg in ("--git-remote", remote)],
-                *(["--checkout", checkout] if checkout else []), "--context", context_path]
+        argv = [*command(), "new", "--spec", spec_path, "--name", name]
+        for m in mounts:
+            argv += ["--mount", f"{m.path}={m.repo}", *(["--checkout", f"{m.path}={m.checkout}"] if m.checkout else []),
+                     *[arg for remote in m.remotes for arg in ("--git-remote", f"{m.path}:{remote}")]]
+        argv += ["--context", context_path]
         result = subprocess.run(argv)
         if result.returncode != 0:
             raise failed(["new", name], result.returncode)

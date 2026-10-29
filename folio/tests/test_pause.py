@@ -23,7 +23,7 @@ class PauseTestCase(FolioTestCase):
 
     @property
     def claude(self) -> Path:
-        return self.workspace.parent / "home" / ".claude"
+        return Path(self.fake()["bottles"][self.bottle]["home"]) / ".claude"
 
     def ws(self, *args: str) -> str:
         return git("-C", str(self.workspace), *args)

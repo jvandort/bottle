@@ -173,8 +173,9 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     """Create the thread's bottle from the repo's spec as it is now, served the thread's lane."""
     if thread.broker:
         repo.remember()
-        engine.new(thread.bottle, engine.validate_spec(broker.SPEC), repo.path, broker.remotes(thread.name),
-                   thread.base, broker.CONTEXT + DURABLE)
+        broker.follow(repo.path, thread.name)
+        engine.new(thread.bottle, engine.validate_spec(broker.SPEC),
+                   [engine.Mount(WORKSPACE, repo.path, thread.base, broker.remotes(thread.name))], broker.CONTEXT + DURABLE)
         return
     # Checked again each time: a feature can have changed since the spec was saved.
     spec = check_repo_spec(engine.validate_spec(repo.spec() or DEFAULT_SPEC))
@@ -182,7 +183,8 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     if repo.spec() != spec:
         repo.save_spec(spec)
     # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
-    engine.new(thread.bottle, spec | {"thread": thread.name}, repo.path, lanes.bottle_remotes(thread.name), thread.base,
+    engine.new(thread.bottle, spec | {"thread": thread.name},
+               [engine.Mount(WORKSPACE, repo.path, thread.base, lanes.bottle_remotes(thread.name))],
                advice(thread.name, repo.name))
 
 

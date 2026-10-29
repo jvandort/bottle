@@ -19,10 +19,11 @@ class NewTest(FolioTestCase):
         self.assertIn("Started thread fix-it", out)
         self.assertIn("Work in it with: folio claude fix-it", out)
         bottle = self.fake()["bottles"][f"{self.key}-fix-it"]
-        self.assertEqual(bottle["git_repo"], str(self.repo))
-        self.assertEqual(bottle["remotes"], ["origin:fetch=upstream", "host:fetch=heads",
-                                             "agent:fetch=ns/fix-it-out,push=ns/fix-it-out", "user:fetch=ns/fix-it-in"])
-        self.assertIsNone(bottle["checkout"])
+        [workspace] = bottle["mounts"]
+        self.assertEqual((workspace["path"], workspace["repo"]), ("/workspace", str(self.repo)))
+        self.assertEqual(workspace["remotes"], ["origin:fetch=upstream", "host:fetch=heads",
+                                                "agent:fetch=ns/fix-it-out,push=ns/fix-it-out", "user:fetch=ns/fix-it-in"])
+        self.assertIsNone(workspace["checkout"])
         self.assertEqual(bottle["sessions"], {})
         self.assertEqual(self.calls("exec"), [])
         self.assertIn("# Thread `fix-it`", bottle["context"])
@@ -39,7 +40,7 @@ class NewTest(FolioTestCase):
     def test_from_a_branch(self) -> None:
         git("-C", str(self.repo), "branch", "release")
         self.ok("new", "fix-it", "--from", "release")
-        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["checkout"], "release")
+        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["mounts"][0]["checkout"], "release")
 
     def test_the_repos_spec_is_checked_and_saved_first(self) -> None:
         self.ok("new", "fix-it")

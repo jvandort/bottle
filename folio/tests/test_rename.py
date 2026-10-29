@@ -51,7 +51,7 @@ class RenameTest(FolioTestCase):
         self.ok("shell", "sort-it")
         bottle = self.fake()["bottles"][f"{self.key}-sort-it"]
         self.assertIn("# Thread `sort-it`", bottle["context"])
-        self.assertIn("agent:fetch=ns/sort-it-out,push=ns/sort-it-out", bottle["remotes"])
+        self.assertIn("agent:fetch=ns/sort-it-out,push=ns/sort-it-out", bottle["mounts"][0]["remotes"])
         self.assertEqual("sort-it", bottle["spec"]["thread"])
 
     def test_a_name_thats_taken_or_invalid_is_refused(self) -> None:

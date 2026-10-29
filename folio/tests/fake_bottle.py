@@ -2,9 +2,9 @@
 """A stand-in for bottle's CLI, for folio's tests: $FOLIO_BOTTLE points here.
 
 It keeps its bottles in $FAKE_BOTTLE_STATE, a JSON file, and logs every call
-there. A bottle's /workspace is a real clone of its --git-repo, beside the
-state file, and `exec` runs commands in it, with /workspace rewritten and
-$HOME a home of the bottle's own, which starts with the settings.json an image
+there. Each --mount is a real clone of its repo, beside the state file, and
+`exec` runs commands with every mount's path rewritten to its clone (the first
+mount's is the bottle's "workspace") and $HOME a home of the bottle's own, which starts with the settings.json an image
 would give it; shpool is pretended, by keeping each bottle's sessions in the
 state. Failures look like
 bottle's: `bottle: error: ...` on stderr, exit 1.
@@ -64,17 +64,25 @@ def main(argv: list[str]) -> int:
                 fail(f"a bottle named {name!r} already exists")
             if os.environ.get("FAKE_BOTTLE_FAIL_NEW"):
                 fail("creating failed")
-            workspace = STATE.parent / "bottles" / name / "workspace"
-            (workspace.parent / "home" / ".claude").mkdir(parents=True)
-            (workspace.parent / "home" / ".claude" / "settings.json").write_text('{"from": "the image"}')
-            subprocess.run(["git", "clone", "-q", "--shared", option(rest, "--git-repo"), str(workspace)], check=True)
-            if option(rest, "--checkout"):
-                subprocess.run(["git", "-C", str(workspace), "checkout", "-q", option(rest, "--checkout")], check=True)
+            root = STATE.parent / "bottles" / name
+            (root / "home" / ".claude").mkdir(parents=True)
+            (root / "home" / ".claude" / "settings.json").write_text('{"from": "the image"}')
+            mounts = []
+            for given in option(rest, "--mount", many=True):
+                path, _, repo = given.partition("=")
+                checkout = next((c.partition("=")[2] for c in option(rest, "--checkout", many=True)
+                                 if c.partition("=")[0] == path), None)
+                remotes = [g.partition(":")[2] for g in option(rest, "--git-remote", many=True) if g.partition(":")[0] == path]
+                clone = root / "mounts" / path.strip("/")
+                subprocess.run(["git", "clone", "-q", "--shared", repo, str(clone)], check=True)
+                if checkout:
+                    subprocess.run(["git", "-C", str(clone), "checkout", "-q", checkout], check=True)
+                mounts.append({"path": path, "repo": repo, "checkout": checkout, "remotes": remotes, "dir": str(clone)})
             bottles[name] = {
                 "state": "running", "spec": json.loads(Path(option(rest, "--spec")).read_text()),
-                "git_repo": option(rest, "--git-repo"), "remotes": option(rest, "--git-remote", many=True),
-                "checkout": option(rest, "--checkout"), "context": Path(option(rest, "--context")).read_text(),
-                "workspace": str(workspace), "sessions": {},
+                "mounts": mounts, "context": Path(option(rest, "--context")).read_text(),
+                "workspace": mounts[0]["dir"] if mounts else str(root / "home"), "home": str(root / "home"),
+                "sessions": {},
             }
             save(state)
             print(f"Created bottle '{name}'")
@@ -87,7 +95,7 @@ def main(argv: list[str]) -> int:
             bottles[name]["state"] = "running"
             save(state)
         case ["delete", name]:
-            shutil.rmtree(Path(bottles.pop(name)["workspace"]).parent)
+            shutil.rmtree(Path(bottles.pop(name)["home"]).parent)
             save(state)
         case ["exec", name, "--", *command]:
             bottle = bottles[name]
@@ -109,9 +117,11 @@ def main(argv: list[str]) -> int:
                 case ["kill", "-HUP", *_]:
                     bottle["sessions"] = {}
                 case _:
-                    rewritten = [arg.replace("/workspace", bottle["workspace"]) for arg in command]
+                    rewritten = command
+                    for mount in sorted(bottle["mounts"], key=lambda m: len(m["path"]), reverse=True):
+                        rewritten = [arg.replace(mount["path"], mount["dir"]) for arg in rewritten]
                     save(state)
-                    home = str(Path(bottle["workspace"]).parent / "home")
+                    home = bottle["home"]
                     return subprocess.run(rewritten, env={**os.environ, "HOME": home}).returncode
             save(state)
         case _:

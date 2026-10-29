@@ -14,12 +14,13 @@ What makes it the broker:
   message-any. No repo's threads can have them (repos.check_repo_spec); none
   lets it start, stop or make anything.
 - **Its notes are its memory, kept on main.** The broker pushes main to its
-  lane as it goes, and its remote advances the vault's own main to it
-  (bottle's `advance`), so the vault's working tree, which Obsidian opens, is
-  always the broker's latest. `.obsidian/` is ignored, so Obsidian's own files
+  lane as it goes, and the vault's own main tracks it, so bottle's follow
+  keeps the vault's working tree, which Obsidian opens, the broker's latest. `.obsidian/` is ignored, so Obsidian's own files
   never stand in the way.
 - **Its context** (CONTEXT) says what it's for and how it keeps its notes.
 """
+
+from pathlib import Path
 
 from . import repos
 from .git import git
@@ -46,12 +47,22 @@ def vault() -> repos.Repo:
 
 
 def remotes(thread: str) -> list[str]:
-    """The broker's bottle's remotes: a thread's, but for origin, which the vault hasn't, and with
-    the agent's lane advancing the vault's main."""
+    """The broker's bottle's remotes: a thread's, but for origin, which the vault hasn't."""
     from . import lanes
 
-    return [remote + (",advance=main" if remote.startswith("agent:") else "")
-            for remote in lanes.bottle_remotes(thread) if not remote.startswith("origin:")]
+    return [remote for remote in lanes.bottle_remotes(thread) if not remote.startswith("origin:")]
+
+
+def follow(vault: Path, thread: str) -> None:
+    """Make the vault's main track the broker's, so bottle's follow keeps it current as the broker pushes.
+
+    Config alone: the tracking branch needn't exist yet for a push to find the
+    branch that tracks it.
+    """
+    from . import lanes
+
+    git("config", "branch.main.remote", lanes.remote_name(thread), repo=vault)
+    git("config", "branch.main.merge", "refs/heads/main", repo=vault)
 
 
 CONTEXT = """\
