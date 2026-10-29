@@ -51,7 +51,8 @@ resume makes a new one. Anything outside `/workspace` is gone: the scratchpad,
 anything `/workspace` ignores. A pause can come at any time.
 
 Keep only throwaway files outside `/workspace`. Work in any other worktree or
-clone is committed and pushed as you go, or it's lost.
+clone is committed and pushed to `agent` as you go, on a `genie/` branch like
+any other, or it's lost.
 """
 
 
