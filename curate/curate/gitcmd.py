@@ -154,6 +154,68 @@ class Objects:
         process.wait()
 
 
+class Refs:
+    """The branches, remote branches and tags as they stood, read with one git.
+
+    For working out what to do before anything is written -- a command's
+    questions, its lists -- where git would otherwise be asked about one name
+    at a time. Never kept past a write: it is a snapshot, and curate's own
+    writes would make it wrong. So it is made where the planning starts and
+    passed to what plans, and nothing that runs after a write is given it.
+
+    It answers only what it is sure of: a name that is ambiguous (a tag and a
+    branch, say), or not a branch, remote branch or tag at all, goes to git
+    as it always did. So an answer from here is the one git would give.
+    """
+
+    UPSTREAM = "@{upstream}"
+
+    def __init__(self) -> None:
+        out = run(["for-each-ref", "--format=%(refname)%1f%(refname:short)%1f%(upstream)%1f%(symref)",
+                   "refs/heads", "refs/remotes", "refs/tags"]).stdout
+        self._short: dict[str, str] = {}
+        self._upstream: dict[str, str] = {}
+        self._symref: dict[str, str] = {}
+        for line in out.splitlines():
+            ref, short, upstream, symref = line.split("\x1f")
+            self._short[ref], self._upstream[ref] = short, upstream
+            if symref:
+                self._symref[ref] = symref
+
+    def full(self, name: str) -> str:
+        """What `git rev-parse --symbolic-full-name <name>` says, or "" if nothing.
+
+        `name` may end in @{upstream}. A symbolic ref (origin/HEAD) is the ref
+        it points at, as git has it.
+        """
+        upstream = name.endswith(self.UPSTREAM)
+        ref = self._ref(name[:-len(self.UPSTREAM)] if upstream else name)
+        if ref is None:
+            return git("rev-parse", "--symbolic-full-name", name, check=False)
+        if upstream:
+            return self._upstream.get(ref, "")
+        return ref
+
+    def abbrev(self, name: str) -> str:
+        """What `git rev-parse --abbrev-ref <name>` says, or "" if nothing."""
+        full = self.full(name)
+        if full in self._short:
+            return self._short[full]
+        return git("rev-parse", "--abbrev-ref", name, check=False) if full else ""
+
+    def _ref(self, name: str) -> str | None:
+        """The ref `name` means, symbolic refs followed; None when only git can say."""
+        if name.startswith("refs/"):
+            found = [name] if name in self._short else []
+        else:
+            # git's order, from `git help revisions`; more than one is ambiguous.
+            found = [c for c in (f"refs/{name}", f"refs/tags/{name}", f"refs/heads/{name}",
+                                 f"refs/remotes/{name}", f"refs/remotes/{name}/HEAD") if c in self._short]
+        if len(found) != 1:
+            return None
+        return self._symref.get(found[0], found[0])
+
+
 def only_on(ref: str, *ignoring: str) -> list[str]:
     """The commits on `ref` that no other ref can reach, newest first.
 

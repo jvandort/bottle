@@ -11,7 +11,7 @@ tips are in the reflogs of the clean line and of the approvals ref.
 
 from .carry import carry, guess, names_for, what_carried
 from .errors import Refused
-from .gitcmd import git, run
+from .gitcmd import Refs, git, run
 from .modes import switch_mode
 from .state import Repo, Session, named, write
 from .ui import interactive, pick_base, uninterrupted
@@ -19,8 +19,9 @@ from .ui import interactive, pick_base, uninterrupted
 
 def ask(repo: Repo, session: Session) -> str:
     tips: dict[str, str | None] = {}
-    names = names_for(session.base, session, session.working, tips)
-    best, via, tip = guess(session.working, names, repo.objects, tips)
+    refs = Refs()                            # read once, for the question
+    names = names_for(session.base, session, session.working, tips, refs)
+    best, via, tip = guess(session.working, names, repo.objects, tips, refs)
     said = ", ".join(names) or "no branch"
     subject = repo.objects.subject(session.base)
     header = [f"The review of {named(session.working)}",

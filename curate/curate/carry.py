@@ -19,7 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .errors import Refused
-from .gitcmd import Objects, commit_tree, git, merge_tree, metadata, run
+from .gitcmd import Objects, Refs, commit_tree, git, merge_tree, metadata, run
 from .state import Repo, Session, named, short
 from .ui import default_base, interactive, pick_base
 
@@ -50,24 +50,24 @@ def find(repo: Repo, name: str) -> Session:
 
 # -- the base --------------------------------------------------------------
 
-def excluded(source: Session, head: str) -> list[str]:
+def excluded(source: Session, head: str, refs: Refs | None = None) -> list[str]:
     """Refs that would name the old base by the branches under review: true,
     and no help in finding the line it came from."""
-    refs = [*source.repo.clean_lines(), "refs/curate/*"]
+    skip = [*source.repo.clean_lines(), "refs/curate/*"]
     for line in (source.working, head):
-        refs.append(line)
-        up = git("rev-parse", "--symbolic-full-name", f"{short(line)}@{{upstream}}",
-                 check=False)
+        skip.append(line)
+        up = (refs.full(f"{short(line)}@{{upstream}}") if refs else
+              git("rev-parse", "--symbolic-full-name", f"{short(line)}@{{upstream}}", check=False))
         if up.startswith("refs/"):
-            refs.append(up)
-    return refs
+            skip.append(up)
+    return skip
 
 
 def names_for(commit: str, source: Session, head: str,
-              tips: dict[str, str | None] | None = None) -> list[str]:
+              tips: dict[str, str | None] | None = None, refs: Refs | None = None) -> list[str]:
     """What a person would call this commit: the branches on it, and where it
     is on a mainline. Failing both, whatever name-rev finds."""
-    skip = excluded(source, head)
+    skip = excluded(source, head, refs)
     # %(refname:short) is what `rev-parse --abbrev-ref` says, without a git
     # a ref: with a remote a bottle, a mainline commit has dozens on it.
     on = git("for-each-ref", "--points-at", commit,
@@ -79,7 +79,7 @@ def names_for(commit: str, source: Session, head: str,
     for line in MAINLINES:
         tip = tips[line] = tips[line] if line in tips else source.repo.objects.rev(line)
         if tip and run(["merge-base", "--is-ancestor", commit, tip]).returncode == 0:
-            name = git("rev-parse", "--abbrev-ref", line)
+            name = refs.abbrev(line) if refs else git("rev-parse", "--abbrev-ref", line)
             if name not in names:
                 ahead = git("rev-list", "--count", f"{commit}..{tip}")
                 names.append(f"{name}~{ahead}")
@@ -96,7 +96,8 @@ def _glob(pattern: str, ref: str) -> bool:
 
 
 def guess(head: str, names: list[str], objects: Objects,
-          tips: dict[str, str | None] | None = None) -> tuple[str | None, str | None, str | None]:
+          tips: dict[str, str | None] | None = None,
+          refs: Refs | None = None) -> tuple[str | None, str | None, str | None]:
     """Where the new line left the line the old base came from.
 
     Every candidate is a line the new one might have been rebased onto: the
@@ -108,7 +109,8 @@ def guess(head: str, names: list[str], objects: Objects,
     candidates: list[str] = []
     for name in names:
         branch = name.split("~")[0].split("^")[0]
-        up = git("rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", check=False)
+        up = (refs.abbrev(f"{branch}@{{upstream}}") if refs else
+              git("rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", check=False))
         candidates += [up, branch] if up else [branch]
     best: tuple[int, str, str, str] | None = None
     seen: set[str] = set()
@@ -126,17 +128,17 @@ def guess(head: str, names: list[str], objects: Objects,
         base = found.stdout.strip()
         distance = int(git("rev-list", "--count", f"{base}..{head}"))
         if best is None or distance < best[0]:
-            best = (distance, base, git("rev-parse", "--abbrev-ref", via), tip)
+            best = (distance, base, refs.abbrev(via) if refs else git("rev-parse", "--abbrev-ref", via), tip)
     if best is None:
         return default_base(head, objects)
     return best[1], best[2], best[3]
 
 
-def choose_base(source: Session, head: str) -> str:
+def choose_base(source: Session, head: str, refs: Refs | None = None) -> str:
     """The old base if nothing says otherwise; asked, if anything does."""
     tips: dict[str, str | None] = {}         # mainlines, resolved once for both
-    names = names_for(source.base, source, head, tips)
-    best, via, tip = guess(head, names, source.repo.objects, tips)
+    names = names_for(source.base, source, head, tips, refs)
+    best, via, tip = guess(head, names, source.repo.objects, tips, refs)
     if best == source.base:
         return source.base
     said = ", ".join(names) or "no branch"

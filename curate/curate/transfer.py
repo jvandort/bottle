@@ -11,7 +11,7 @@ from .branches import (branches, fetch, local_for, remote_of, remotes,
                        switch_to)
 from .carry import choose_base, names_for
 from .errors import Refused
-from .gitcmd import git, run
+from .gitcmd import Refs, git, run
 from .modes import switch_mode
 from .pick import Row, choose
 from .start import begin, prepare
@@ -19,17 +19,17 @@ from .state import Repo, Session, named, short
 from .ui import interactive, uninterrupted
 
 
-def remotes_to_fetch(source: Session, head: str) -> list[str] | None:
+def remotes_to_fetch(source: Session, head: str, refs: Refs) -> list[str] | None:
     """The working line's remote, and the old base's. None means all of them:
     with no remote to go on, it is not obvious which one has the new line."""
-    first = remote_of(source.working)
+    first = remote_of(source.working, refs)
     if first is None:
         return None
     wanted = [first]
-    for name in names_for(source.base, source, head):
+    for name in names_for(source.base, source, head, refs=refs):
         branch = name.split("~")[0].split("^")[0]
         if source.repo.objects.rev(f"refs/heads/{branch}") is not None:
-            r = remote_of(branch)
+            r = remote_of(branch, refs)
         else:
             r = next((x for x in remotes() if branch.startswith(f"{x}/")), None)
         if r and r not in wanted:
@@ -37,9 +37,8 @@ def remotes_to_fetch(source: Session, head: str) -> list[str] | None:
     return wanted
 
 
-def choose_line(source: Session, fetched: list[str] | None) -> str:
-    up = git("rev-parse", "--symbolic-full-name",
-             f"{short(source.working)}@{{upstream}}", check=False)
+def choose_line(source: Session, fetched: list[str] | None, refs: Refs) -> str:
+    up = refs.full(f"{short(source.working)}@{{upstream}}")
     skip = {source.working, up} | source.repo.clean_lines()
     if fetched is None:
         rows = branches("refs/remotes/", skip=skip)
@@ -63,15 +62,17 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
         raise Refused("a fixup is paused on a conflict. Finish it or abort it "
                       "before transferring the review.")
 
-    which = remotes_to_fetch(source, source.working)
+    # Planning reads the refs once, before the fetch and again after it.
+    which = remotes_to_fetch(source, source.working, Refs())
     fetch(which)
+    refs = Refs()
     if argv:
         chosen = (f"refs/heads/{argv[0]}" if repo.objects.rev(f"refs/heads/{argv[0]}") else
-                  git("rev-parse", "--symbolic-full-name", argv[0], check=False))
+                  refs.full(argv[0]))
         if not chosen.startswith(("refs/heads/", "refs/remotes/")):
             raise Refused(f"no branch {argv[0]}")
     elif interactive():
-        chosen = choose_line(source, which)
+        chosen = choose_line(source, which, refs)
     else:
         raise Refused("which branch? `curate transfer <branch>`")
 
@@ -86,7 +87,7 @@ def cmd_transfer(repo: Repo, argv: list[str]) -> int:
     # Everything start would check, and the copy itself, before anything
     # moves: a copy refused after the switch would leave you on the new branch
     # with no review to transfer again.
-    beginning = prepare(repo, local, base_arg=choose_base(source, tip),
+    beginning = prepare(repo, local, base_arg=choose_base(source, tip, refs),
                         source=source)
 
     # Every question is answered. From here on, things change, and stopping

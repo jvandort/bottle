@@ -11,14 +11,17 @@ import subprocess
 import sys
 
 from .errors import Refused
-from .gitcmd import Objects, environment, git, run
+from .gitcmd import Objects, Refs, environment, git, run
 from .pick import Row
 from .state import Repo, named, short
 from .timing import timed
 
 
-def remote_of(branch: str) -> str | None:
+def remote_of(branch: str, refs: Refs | None = None) -> str | None:
     """The remote a local branch tracks, or None. "." is a local upstream."""
+    upstream = refs.full(f"{short(branch)}@{{upstream}}") if refs else ""
+    if upstream.startswith("refs/remotes/"):
+        return next((r for r in remotes() if upstream.startswith(f"refs/remotes/{r}/")), None)
     found = git("config", f"branch.{short(branch)}.remote", check=False)
     return found if found and found != "." else None
 
