@@ -29,8 +29,9 @@ class NewTest(FolioTestCase):
         self.assertIn("genie/fix-it-1", bottle["context"])
         self.assertIn("git fetch bottle/fix-it && git switch genie/<feature>-N", bottle["context"])
         self.assertIn("`git push -u agent <branch>`", bottle["context"])
-        self.assertIn("**Fetch when you're given a prompt** (`git fetch user`)", bottle["context"])
-        self.assertIn("its first branch should be\n`genie/fix-it-1`", bottle["context"])
+        self.assertIn("**Fetch `user`** when you get a prompt", bottle["context"])
+        self.assertIn("this thread's first is\n`genie/fix-it-1`", bottle["context"])
+        self.assertIn("**Push as you go**, without being asked", bottle["context"])
         self.assertNotIn("work`", bottle["context"])
         self.assertEqual(git("-C", str(self.repo), "config", "remote.bottle/fix-it.uploadpack"),
                          "git --namespace=fix-it-out upload-pack")
@@ -280,6 +281,12 @@ class ConfigureTest(FolioTestCase):
         [bottle] = self.fake()["bottles"].values()
         self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "thread": "fix-it"})
         self.assertNotIn("thread", repos.current(self.repo).spec())
+
+    def test_a_threads_context_says_what_a_pause_keeps(self) -> None:
+        self.ok("new", "fix-it")
+        [bottle] = self.fake()["bottles"].values()
+        self.assertIn("## What survives", bottle["context"])
+        self.assertIn("Anything outside `/workspace` is gone", bottle["context"])
 
     def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
         for key, value in (("permissions", ["message-any"]), ("thread", "other")):

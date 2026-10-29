@@ -39,7 +39,9 @@ class BrokerTest(FolioTestCase):
         self.assertIn("You are the broker", context)
         self.assertIn("git push agent main", context)
         self.assertNotIn("genie/broker-1", context)  # a thread's branches aren't its memory
-        self.assertIn("`For you.md`, at the vault's root, is the user's", context)
+        self.assertIn("**`For you.md`**, at the root, is the user's", context)
+        self.assertIn("this overrides any default of committing", context)
+        self.assertIn("## What survives a pause", context)
 
     def test_shell_and_claude_are_its_sessions(self) -> None:
         self.ok("broker", "shell")

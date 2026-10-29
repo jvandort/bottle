@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import broker, engine, lanes, snapshots, store
-from .advice import advice
+from .advice import DURABLE, advice
 from .errors import FolioError
 from .repos import DEFAULT_SPEC, Repo, check_repo_spec
 
@@ -174,7 +174,7 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     if thread.broker:
         repo.remember()
         engine.new(thread.bottle, engine.validate_spec(broker.SPEC), repo.path, broker.remotes(thread.name),
-                   thread.base, broker.CONTEXT)
+                   thread.base, broker.CONTEXT + DURABLE)
         return
     # Checked again each time: a feature can have changed since the spec was saved.
     spec = check_repo_spec(engine.validate_spec(repo.spec() or DEFAULT_SPEC))
