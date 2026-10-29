@@ -21,8 +21,10 @@ checked out, and nothing else: a branch with commits of the host's own, a
 change in the way, or a worktree in the middle of a merge, rebase,
 cherry-pick, revert or bisect is left as it is, and the bottle is told why.
 A branch checked out nowhere -- in curate's read mode, say, where HEAD is
-curate/<branch> -- isn't touched. The repo's hooks don't run, as for the push
-itself.
+curate/<branch> -- isn't touched here. The repo's hooks don't run, as for the
+push itself, but for the fetch, which is what you'd run yourself: its
+`reference-transaction` hook is how curate brings a branch you're reading
+along, and what the hooks say goes to the bottle too.
 
 The bottle never learns host paths from this: a worktree is named by its
 directory's name, and only when it isn't the main one.
@@ -113,10 +115,15 @@ def main() -> int:
         targets: dict[str, str] = {}  # host branch -> commit
         if advance in pushed:
             targets[advance] = pushed[advance]
+        main_worktree = git_dir.parent if git_dir.name == ".git" else None
+        fetched: list[str] = []
         if git("config", "--bool", "bottle.follow", cwd=git_dir).stdout.strip() != "false":
             readers = _readers(git_dir, namespace)
             for remote in readers:
-                git("fetch", "--quiet", remote, cwd=git_dir)
+                # With the repo's own hooks, from its working tree, as `git fetch` would be run there.
+                result = subprocess.run(["git", "fetch", "--quiet", remote], cwd=main_worktree or git_dir,
+                                        env=ENV, capture_output=True, text=True)
+                fetched += [line.strip() for line in (result.stderr + result.stdout).splitlines() if line.strip()]
             upstreams = git("for-each-ref", "--format=%(refname:short)\t%(upstream)", "refs/heads", cwd=git_dir).stdout
             for line in upstreams.splitlines():
                 local, _, upstream = line.partition("\t")
@@ -125,8 +132,7 @@ def main() -> int:
                     if branch != upstream and branch in pushed:
                         targets.setdefault(local, pushed[branch])
         checked_out = worktrees(git_dir)
-        main_worktree = git_dir.parent if git_dir.name == ".git" else None
-        said = []
+        said = fetched
         for branch, commit in sorted(targets.items()):
             where = checked_out.get(branch)
             if where is None:

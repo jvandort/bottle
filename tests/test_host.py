@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 import json
 import os
 import subprocess
@@ -348,6 +349,19 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before, self.users())
         self.assertEqual("first\n", (self.repo / "a.txt").read_text())
         self.assertEqual(pushed, self.users("bottle/t/genie/x"))  # fetched all the same
+
+    async def test_a_branch_youre_reading_in_curate_comes_along_by_curates_own_hook(self) -> None:
+        curate = Path(__file__).resolve().parents[1] / "bin" / "curate"
+        for args in (("start", "--from", "main"), ("read",)):
+            result = subprocess.run([str(curate), *args], cwd=self.repo, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual("refs/heads/curate/genie/x", run("git", "-C", self.repo, "symbolic-ref", "HEAD"))
+        pushed = self.write("a.txt", "second\n")
+        said = await self.push()
+        self.assertEqual(pushed, self.users())
+        self.assertEqual("second\n", (self.repo / "a.txt").read_text())
+        self.assertEqual("refs/heads/curate/genie/x", run("git", "-C", self.repo, "symbolic-ref", "HEAD"))
+        self.assertIn("curate: 'genie/x' followed bottle/t/genie/x", said)
 
     async def test_in_whichever_worktree_has_it(self) -> None:
         run("git", "-C", self.repo, "switch", "-q", "main")

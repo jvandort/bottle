@@ -324,7 +324,8 @@ whichever worktree has it checked out, and the remote's tracking refs are
 fetched. Only when nothing would be lost: a branch with commits of yours, a
 change in the way, or a worktree in the middle of a merge, rebase,
 cherry-pick, revert or bisect is left alone; so is a branch checked out
-nowhere, as in curate's read mode. The push succeeds either way, and its
+nowhere, though one you're reading in curate comes along by curate's own hook:
+the fetch runs with your repo's hooks, as yours would. The push succeeds either way, and its
 output tells the bottle what moved and what didn't (`remote: bottle: ...`);
 bottled logs it too. `git config bottle.follow false` in your repo turns it
 off. A remote can also `advance=BRANCH`: your BRANCH follows its pushes the
