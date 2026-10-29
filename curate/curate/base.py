@@ -52,9 +52,11 @@ def cmd_update_base(repo: Repo, argv: list[str]) -> int:
         print(f"curate: the base is {base[:8]} already; nothing to change.")
         return 0
 
+    old_clean, old_base = repo.objects.rev(session.clean), session.base
+    if old_clean is None:
+        raise Refused(f"{named(session.clean)} does not exist")
     # Writes objects and no refs, so a refusal here leaves nothing behind.
     carried = carry(repo, session, base)
-    old_clean, old_base = repo.objects.rev(session.clean), session.base
 
     # Every question is answered. From here on, things change -- together.
     with uninterrupted():

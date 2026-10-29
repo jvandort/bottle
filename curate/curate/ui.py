@@ -76,7 +76,8 @@ def suggestion(head: str, base: str, via: str, tip: str) -> str:
 
 
 def ask_for_base(head: str, objects: Objects, hide: set[str]) -> str:
-    return pick_base(head, objects, *default_base(head, objects), hide=hide)
+    guess, via, tip = default_base(head, objects)
+    return pick_base(head, objects, guess, via, tip, hide=hide)
 
 
 def decorations(refs: str) -> str:

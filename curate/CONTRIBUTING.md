@@ -76,7 +76,9 @@ python3 -m mypy --strict .        # from this directory: package and tests
 ```
 
 `--strict`, so an unannotated function is an error rather than a silently
-untyped one. The floor is 3.11, which buys `X | None` in annotations without
+untyped one. `tests/test_types.py` runs it with the suite, so a type error
+fails the tests like any other bug; without mypy installed it is skipped, and
+says so. The floor is 3.11, which buys `X | None` in annotations without
 `from __future__ import annotations`, and builtin generics (`dict[str, str]`)
 rather than `typing` imports.
 
