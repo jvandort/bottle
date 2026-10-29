@@ -7,7 +7,8 @@ One module per seam, and the dependencies run one way:
     gitcmd    every call made to git, and reading merge-tree's output
     state     what a review is: Session, Repo, the invariant, the versions
     modes     the mode switch -- two renames and a symbolic-ref
-    hooks     the three hooks, installing them and handling them
+    upstream  bringing the working line along when its upstream moves while you read
+    hooks     the four hooks, installing them and handling them
     branches  which branch to review, and getting onto it
     carry     copying a review onto a rebased branch, and finding its base
     start     beginning one: which branch, the base, and naming the clean line

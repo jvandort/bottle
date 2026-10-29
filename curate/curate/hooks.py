@@ -1,8 +1,10 @@
-"""The three hooks, and what they do when git fires them.
+"""The four hooks, and what they do when git fires them.
 
 `post-index-change` is what makes an approval durable the instant it is made;
 `post-commit` does the same for a commit, and `post-checkout` stands a review
 down when HEAD leaves it, so that switching away needs no `curate write`.
+`reference-transaction` brings the working line along when a fetch moves its
+upstream while you read (see upstream.py).
 """
 
 import os
@@ -10,8 +12,9 @@ import sys
 
 from .gitcmd import HOOK_GUARD
 from .state import Repo, read
+from .upstream import follow
 
-HOOKS = ("post-index-change", "post-checkout", "post-commit")
+HOOKS = ("post-index-change", "post-checkout", "post-commit", "reference-transaction")
 MARKER = "# installed by curate; safe to delete"
 
 
@@ -27,11 +30,22 @@ def script(name: str, me: str) -> str:
     is most of the times it fires: `cmd_hook` would only return, and an
     interpreter that starts just to do that is tens of milliseconds a time.
     """
+    # reference-transaction fires for every ref git moves -- each commit, each
+    # checkout -- and three times each. Only a committed one that moved a
+    # remote-tracking ref can concern curate, so the shell decides that, and
+    # Python starts only for a fetch.
+    only_fetches = (
+        '[ "$1" = committed ] || exit 0\n'
+        'MOVED=$(cat)\n'
+        'case "$MOVED" in *" refs/remotes/"*) ;; *) exit 0 ;; esac\n'
+        if name == "reference-transaction" else "")
+    feed = 'printf "%s\\n" "$MOVED" | ' if only_fetches else ""
     return (f"#!/bin/sh\n{MARKER}\n"
             f'[ "${HOOK_GUARD}" = 1 ] && exit 0  # curate\'s own git\n'
+            f"{only_fetches}"
             f'CURATE="{me}"\n'
             f'[ -f "$CURATE" ] || exit 0        # curate moved or went away\n'
-            f'"{sys.executable}" "$CURATE" hook {name} "$@" || true\n'
+            f'{feed}"{sys.executable}" "$CURATE" hook {name} "$@" || true\n'
             f"exit 0\n")
 
 
@@ -120,5 +134,17 @@ def cmd_hook(repo: Repo, argv: list[str]) -> int:
         if repo.mode != "review" or repo.head != session.clean:
             return 0
         session.record("review")
+        return 0
+
+    if name == "reference-transaction":
+        if args[:1] != ["committed"]:
+            return 0
+        moved = []
+        for line in sys.stdin.read().splitlines():
+            old, _, rest = line.partition(" ")
+            new, _, ref = rest.partition(" ")
+            if ref:
+                moved.append((old, new, ref))
+        follow(repo, moved)
         return 0
     return 0

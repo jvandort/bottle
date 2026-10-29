@@ -191,6 +191,14 @@ finishing one does not disturb the other.
 An agent's branch, a colleague's, your own from another machine: it is ordinary
 git on the working line, so `curate git` runs it for you.
 
+While you read, a fetch does it for you: when one moves the branch the working
+line tracks, the working line follows -- files and all, a fast-forward -- and
+what arrived shows up as unread, without leaving read mode. Your approvals stay
+staged. It stays put, and says why, when the working line has commits its
+upstream doesn't (that is `curate git pull`'s to merge) or an edit of yours is
+in the way. A `reference-transaction` hook does it, so it happens whoever
+fetched.
+
 ```sh
 curate git pull              # plain conflicts, in your working tree, as usual
 ```
