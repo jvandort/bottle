@@ -28,7 +28,10 @@ def switch_mode(repo: Repo, to: str) -> int:
     target = session.clean if to == "review" else session.working
     if rev(target) is None:
         raise Refused(f"{named(target)} does not exist")
-    session.record(frm)                       # the approved set, before we move it
+    # The approved set, before we move it. Only reading can have changed it
+    # since it was last recorded; in write mode it sits parked, untouched.
+    if frm == "review":
+        session.record(frm)
     if not session.index(to).exists():
         session.rebuild(to)
 
@@ -62,5 +65,5 @@ def switch_mode(repo: Repo, to: str) -> int:
 
     run(["update-index", "--refresh", "-q"])  # rebuild the stat cache; no files move
     repo.set_state(to, session)
-    session.record(to)
+    # Not recorded again: a switch moves the approved set, it never changes it.
     return 0

@@ -67,7 +67,8 @@ def excluded(source: Session, head: str) -> list[str]:
     return refs
 
 
-def names_for(commit: str, source: Session, head: str) -> list[str]:
+def names_for(commit: str, source: Session, head: str,
+              tips: dict[str, str | None] | None = None) -> list[str]:
     """What a person would call this commit: the branches on it, and where it
     is on a mainline. Failing both, whatever name-rev finds."""
     skip = excluded(source, head)
@@ -78,8 +79,9 @@ def names_for(commit: str, source: Session, head: str) -> list[str]:
              "refs/heads", "refs/remotes", "refs/tags").splitlines()
     names = [name for r, _, name in (line.partition("\x1f") for line in on)
              if not any(_glob(p, r) for p in skip) and not r.endswith("/HEAD")]
+    tips = {} if tips is None else tips
     for line in MAINLINES:
-        tip = rev(line)
+        tip = tips[line] = tips[line] if line in tips else rev(line)
         if tip and run(["merge-base", "--is-ancestor", commit, tip]).returncode == 0:
             name = git("rev-parse", "--abbrev-ref", line)
             if name not in names:
@@ -97,7 +99,8 @@ def _glob(pattern: str, ref: str) -> bool:
     return ref.startswith(pattern[:-1]) if pattern.endswith("*") else ref == pattern
 
 
-def guess(head: str, names: list[str]) -> tuple[str | None, str | None, str | None]:
+def guess(head: str, names: list[str],
+          tips: dict[str, str | None] | None = None) -> tuple[str | None, str | None, str | None]:
     """Where the new line left the line the old base came from.
 
     Every candidate is a line the new one might have been rebased onto: the
@@ -112,10 +115,15 @@ def guess(head: str, names: list[str]) -> tuple[str | None, str | None, str | No
         up = git("rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", check=False)
         candidates += [up, branch] if up else [branch]
     best: tuple[int, str, str, str] | None = None
+    seen: set[str] = set()
+    tips = {} if tips is None else tips
     for via in [*candidates, *MAINLINES]:
-        tip = rev(via) if via else None
-        if tip is None:
+        tip = (tips[via] if via in tips else rev(via)) if via else None
+        # Several names for one commit (origin/HEAD and origin/main, say) are
+        # one candidate: the first name found wins, as an equal distance would.
+        if tip is None or tip in seen:
             continue
+        seen.add(tip)
         found = run(["merge-base", head, tip])
         if found.returncode != 0:
             continue
@@ -130,8 +138,9 @@ def guess(head: str, names: list[str]) -> tuple[str | None, str | None, str | No
 
 def choose_base(source: Session, head: str) -> str:
     """The old base if nothing says otherwise; asked, if anything does."""
-    names = names_for(source.base, source, head)
-    best, via, tip = guess(head, names)
+    tips: dict[str, str | None] = {}         # mainlines, resolved once for both
+    names = names_for(source.base, source, head, tips)
+    best, via, tip = guess(head, names, tips)
     if best == source.base:
         return source.base
     said = ", ".join(names) or "no branch"

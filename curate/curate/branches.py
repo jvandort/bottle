@@ -6,6 +6,7 @@ on a remote so far. Everything here but `switch_to` writes nothing, so a
 question cancelled part way leaves the repository as it was.
 """
 
+import functools
 import subprocess
 import sys
 
@@ -22,8 +23,10 @@ def remote_of(branch: str) -> str | None:
     return found if found and found != "." else None
 
 
+@functools.cache
 def remotes() -> list[str]:
     # Longest first, so `bottle/rebase` is found before a remote called `bottle`.
+    # Asked once a command: nothing curate does adds or removes a remote.
     return sorted(git("remote").split(), key=len, reverse=True)
 
 
