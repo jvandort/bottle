@@ -108,6 +108,7 @@ its reach until you resume it.
 | `folio claude [THREAD]` | Attach to the thread's Claude, starting the thread if it's new |
 | `folio shell [THREAD]` | Attach to the thread's shell, starting the thread if it's new |
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
+| `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec: its threads' features and memory |

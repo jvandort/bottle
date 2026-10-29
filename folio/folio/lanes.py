@@ -71,6 +71,26 @@ def forget(repo: Path, thread: str) -> None:
         git("remote", "remove", remote_name(thread), repo=repo)
 
 
+def rename(repo: Path, old: str, new: str) -> None:
+    """Move the lane: both namespaces' refs to the new thread's, and the remote to `bottle/<new>`.
+
+    One update-ref transaction moves every lane ref, so a failure moves none.
+    `git remote rename` takes the remote's fetched branches along, and the
+    upstream of every branch of yours that tracked one; registering again then
+    points its uploadpack and receivepack at the new namespaces.
+    """
+    moves = []
+    for direction in (OUT, IN):
+        old_prefix, new_prefix = f"refs/namespaces/{namespace(old, direction)}/", f"refs/namespaces/{namespace(new, direction)}/"
+        for ref, commit in branches(repo, old, direction, full=True).items():
+            moves += [f"create {new_prefix}{ref.removeprefix(old_prefix)} {commit}\n", f"delete {ref} {commit}\n"]
+    if moves:
+        git("update-ref", "--stdin", repo=repo, input="start\n" + "".join(moves) + "commit\n")
+    if succeeds("config", "--get", f"remote.{remote_name(old)}.url", repo=repo):
+        git("remote", "rename", remote_name(old), remote_name(new), repo=repo)
+    register(repo, new)
+
+
 def branches(repo: Path, thread: str, direction: str = OUT, full: bool = False) -> dict[str, str]:
     """The lane's refs: branch name (or, with `full`, the whole ref) to commit."""
     prefix = f"refs/namespaces/{namespace(thread, direction)}/"

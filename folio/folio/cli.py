@@ -46,6 +46,16 @@ def main(argv: list[str] | None = None) -> int:
     pause.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
     pause.set_defaults(run=_pause, command="pause")
 
+    rename = commands.add_parser(
+        "rename", help="rename a paused thread",
+        description="Rename a thread: its record, its lane, and the bottle/THREAD remote, which your branches "
+        "tracking it follow. Its branches keep their names. A thread with a bottle is paused first: "
+        "`folio pause THREAD`.",
+    )
+    rename.add_argument("thread", metavar="THREAD", help="the thread")
+    rename.add_argument("new", metavar="NEW", help="its new name: lowercase words joined by '-'")
+    rename.set_defaults(run=_rename)
+
     list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
     list_.set_defaults(run=_list)
 
@@ -188,6 +198,14 @@ def _open_notes(path) -> int:
         print(obsidian.open_vault(path))
     else:
         print(f"The broker's notes are in {path}: open that folder as a vault in Obsidian.")
+    return 0
+
+
+def _rename(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = threads.rename(repo, threads.load(repo, args.thread), args.new)
+    print(f"Renamed thread {args.thread} to {thread.name}. Its branches: git fetch bottle/{thread.name}; "
+          f"resume it with: folio claude {thread.name}")
     return 0
 
 

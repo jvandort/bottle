@@ -349,6 +349,31 @@ def losses(repo: Repo, thread: Thread) -> list[str]:
     return lost
 
 
+def rename(repo: Repo, thread: Thread, new: str) -> Thread:
+    """Call the thread `new`: its record, its lane and its remote, and the bottle it gets next.
+
+    Only without a bottle: a bottle's name is its thread's, and can't change,
+    so a running or stopped thread is paused first. Its branches keep their
+    names; the addresses other bottles had for it stop working, as its bottle's
+    name changes.
+    """
+    if not NAME.fullmatch(new):
+        raise FolioError(f"invalid thread name {new!r}: use lowercase letters and digits, in words joined by '-'")
+    if store.current_slot(directory(repo, new)) is not None:
+        raise FolioError(f"thread {new} already exists")
+    if thread.broker:
+        raise FolioError("the broker is called the broker")
+    state = states(repo, [thread])[thread.name]["state"]
+    if state not in ("paused", "missing"):
+        raise FolioError(f"thread {thread.name} has a bottle, whose name can't change: pause it first "
+                         f"(`folio pause {thread.name}`), then rename it")
+    lanes.rename(repo.path, thread.name, new)
+    directory(repo, thread.name).rename(directory(repo, new))
+    renamed = Thread(**{**asdict(thread), "name": new, "bottle": f"{repo.key}-{new}"})
+    _save(repo, renamed)
+    return renamed
+
+
 def delete(repo: Repo, thread: Thread) -> None:
     """Delete the thread: its bottle, its lane and remote, and its record and snapshot."""
     if states(repo, [thread])[thread.name]["state"] not in ("missing", "paused"):
