@@ -49,14 +49,18 @@ def register(repo: Path, thread: str) -> None:
     reads. Every setting is written with --replace-all, so registering again
     repairs a remote that was edited.
     """
-    name = remote_name(thread)
+    register_remote(repo, remote_name(thread), namespace(thread, OUT), namespace(thread, IN))
+
+
+def register_remote(repo: Path, name: str, out: str, in_: str) -> None:
+    """Make `name` a lane remote of the repo: fetch reads namespace `out`, push writes `in_` (see register)."""
     settings = {
         "url": str(repo),
         "fetch": f"+refs/heads/*:refs/remotes/{name}/*",
-        "uploadpack": f"git --namespace={namespace(thread, OUT)} upload-pack",
+        "uploadpack": f"git --namespace={out} upload-pack",
         # The user's own lane, so no restrictions: rewriting what they haven't
         # handed over yet is theirs to do.
-        "receivepack": f"git -c receive.denyCurrentBranch=ignore --namespace={namespace(thread, IN)} receive-pack",
+        "receivepack": f"git -c receive.denyCurrentBranch=ignore --namespace={in_} receive-pack",
     }
     for key, value in settings.items():
         git("config", "--replace-all", f"remote.{name}.{key}", value, repo=repo)

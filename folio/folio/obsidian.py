@@ -1,4 +1,4 @@
-"""Opening the broker's notes in Obsidian, on a Mac.
+"""Opening notes -- a thread's, or the broker's -- in Obsidian, on a Mac.
 
 Obsidian has no documented way to make a folder a vault: its URIs only open
 vaults it already knows, and its CLI can't add one. So folio does what
@@ -114,11 +114,11 @@ def open_vault(path: Path) -> str:
     known = vault_id(path)
     if known is None and _vaults() is not None:
         if _running():
-            if not _confirm("Obsidian has to restart to add the broker's vault. Quit and reopen it?"):
-                return ("Obsidian is running, and has to restart to add the broker's vault: quit it, and run "
-                        "`folio broker notes` again.")
+            if not _confirm("Obsidian has to restart to add the notes as a vault. Quit and reopen it?"):
+                return ("Obsidian is running, and has to restart to add the notes as a vault: quit it, and run "
+                        "the command again.")
             if not _quit():
-                return "Obsidian didn't quit; quit it, and run `folio broker notes` again."
+                return "Obsidian didn't quit; quit it, and run the command again."
         known = _register(path)
     if known is not None:
         subprocess.run([_command("open"), f"obsidian://open?vault={urllib.parse.quote(known)}"], check=False)

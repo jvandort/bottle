@@ -193,4 +193,4 @@ class DeletePausedTest(PauseTestCase):
         self.assertIn("genie/fix-it-1: in the snapshot, never pushed", out.getvalue())
         self.assertIn("uncommitted changes in the snapshot", out.getvalue())
         self.assertEqual(self.calls("delete"), [["delete", self.bottle]])  # the pause's; none for the delete
-        self.assertFalse((self.repo_.directory / "fix-it").exists())
+        self.assertEqual(["notes"], [p.name for p in (self.repo_.directory / "fix-it").iterdir()])

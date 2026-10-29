@@ -59,6 +59,16 @@ crash, a restart); **paused**, its bottle deleted and a snapshot kept; or
 lane. Attaching to a stopped thread starts it, and to a paused one resumes it
 in a new bottle. Either way only running processes are lost.
 
+## Notes
+
+Every thread has notes of its own: a repo its agent keeps at `/notes` in its
+bottle, for what the work teaches it -- reproducers, research, tools it built,
+leads it can't follow yet. The agent commits to `main` and pushes as it goes,
+and your copy, `~/.folio/<repo key>/<thread>/notes`, follows it (its `main`
+tracks the agent's), so `folio notes THREAD` opens them in Obsidian, current.
+They're the thread's for good: a rename takes them along, a delete leaves
+them, and a new thread of the same name finds them.
+
 ## Pausing
 
 `folio pause` snapshots a thread and deletes its bottle, so a thread you're
@@ -108,6 +118,7 @@ its reach until you resume it.
 | `folio claude [THREAD]` | Attach to the thread's Claude, starting the thread if it's new |
 | `folio shell [THREAD]` | Attach to the thread's shell, starting the thread if it's new |
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
+| `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |

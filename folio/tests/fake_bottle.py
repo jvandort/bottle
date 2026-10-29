@@ -88,7 +88,11 @@ def main(argv: list[str]) -> int:
             print(f"Created bottle '{name}'")
         case ["status", "--json", *names]:
             print(json.dumps([
-                {"name": n, "state": bottles[n]["state"], "features": bottles[n]["spec"]["features"]}
+                # Each mount's objects as its clone has them (--shared: the repo's own), and its remotes' URLs.
+                {"name": n, "state": bottles[n]["state"], "features": bottles[n]["spec"]["features"],
+                 "mounts": [{"path": m["path"], "objects": str(Path(m["repo"]) / ".git" / "objects"),
+                             "urls": {r.partition(":")[0]: f"http://bottle.host/git{m['path']}/{r.partition(':')[0]}"
+                                      for r in m["remotes"]}} for m in bottles[n]["mounts"]]}
                 if n in bottles else {"name": n, "state": "missing"} for n in names
             ]))
         case ["start", name]:

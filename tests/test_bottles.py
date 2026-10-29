@@ -928,7 +928,8 @@ class StatusTest(BottleTestCase):
             "name": "spec", "state": "stopped", "created": None, "features": [], "memory": "2G",
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
-                        "remotes": ["work:fetch=ns/t-in,push=ns/t-out"]}],
+                        "remotes": ["work:fetch=ns/t-in,push=ns/t-out"], "objects": "/mnt/objects/workspace",
+                        "urls": {"work": "http://bottle.host/git/workspace/work"}}],
         })
         self.assertEqual(bottles.status([a.name])[0]["mounts"][0]["remotes"], ["origin:fetch=upstream", "host:fetch=heads"])
         self.assertEqual(json.loads(json.dumps(bottles.status())), bottles.status())

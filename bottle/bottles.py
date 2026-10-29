@@ -679,8 +679,10 @@ def status(names: list[str] = ()) -> list[dict]:
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
+            # Where its objects and remotes are, as a checkout restored into it has to point.
             "mounts": [{"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,
-                        "remotes": [r.spec for r in m.remotes]} for m in bottle.mounts],
+                        "remotes": [r.spec for r in m.remotes], "objects": m.objects,
+                        "urls": {r.name: m.url(r.name) for r in m.remotes}} for m in bottle.mounts],
         })
     return rows
 

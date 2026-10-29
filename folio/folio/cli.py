@@ -46,6 +46,14 @@ def main(argv: list[str] | None = None) -> int:
     pause.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
     pause.set_defaults(run=_pause, command="pause")
 
+    notes_ = commands.add_parser(
+        "notes", help="open a thread's notes in Obsidian",
+        description="Open the thread's notes -- the repo its agent keeps at /notes -- in Obsidian, adding them "
+        "as a vault the first time. A deleted thread's notes are kept, and open the same way.",
+    )
+    notes_.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
+    notes_.set_defaults(run=_notes, command="notes")
+
     rename = commands.add_parser(
         "rename", help="rename a paused thread",
         description="Rename a thread: its record, its lane, and the bottle/THREAD remote, which your branches "
@@ -197,8 +205,23 @@ def _open_notes(path) -> int:
     if obsidian.installed():
         print(obsidian.open_vault(path))
     else:
-        print(f"The broker's notes are in {path}: open that folder as a vault in Obsidian.")
+        print(f"The notes are in {path}: open that folder as a vault in Obsidian.")
     return 0
+
+
+def _notes(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    if args.thread is not None:
+        name = args.thread                          # a deleted thread's notes too
+    else:
+        thread = _thread(args, repo)
+        if thread is None:
+            return 0
+        name = thread.name
+    path = threads.notes_dir(repo, name)
+    if not path.exists():
+        raise FolioError(f"thread {name} has no notes yet: its bottle starts them")
+    return _open_notes(path)
 
 
 def _rename(args: argparse.Namespace) -> int:

@@ -19,7 +19,8 @@ class NewTest(FolioTestCase):
         self.assertIn("Started thread fix-it", out)
         self.assertIn("Work in it with: folio claude fix-it", out)
         bottle = self.fake()["bottles"][f"{self.key}-fix-it"]
-        [workspace] = bottle["mounts"]
+        [workspace, notes] = bottle["mounts"]
+        self.assertEqual((notes["path"], notes["repo"]), ("/notes", str(repos.current(self.repo).directory / "fix-it" / "notes")))
         self.assertEqual((workspace["path"], workspace["repo"]), ("/workspace", str(self.repo)))
         self.assertEqual(workspace["remotes"], ["origin:fetch=upstream", "host:fetch=heads",
                                                 "agent:fetch=ns/fix-it-out,push=ns/fix-it-out", "user:fetch=ns/fix-it-in"])
@@ -185,7 +186,8 @@ class DeleteTest(FolioTestCase):
         self.assertEqual(self.fake()["bottles"], {})
         self.assertEqual(git("-C", str(self.repo), "for-each-ref", "refs/namespaces"), "")
         self.assertEqual(git("-C", str(self.repo), "remote"), "")
-        self.assertFalse((self.repo_.directory / "fix-it").exists())
+        # The record and snapshot are gone; the notes stay, for a thread of the same name.
+        self.assertEqual(["notes"], [p.name for p in (self.repo_.directory / "fix-it").iterdir()])
 
     def test_without_a_terminal_it_needs_yes(self) -> None:
         result = self.folio("delete", "fix-it")
@@ -287,7 +289,10 @@ class ConfigureTest(FolioTestCase):
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
         self.assertIn("## What survives", bottle["context"])
-        self.assertIn("Anything outside `/workspace` is gone", bottle["context"])
+        self.assertIn("A pause keeps `/workspace`, `/notes` and your conversation", bottle["context"])
+        self.assertIn("## Your notes", bottle["context"])
+        self.assertIn("git -C /notes push agent main", bottle["context"])
+        self.assertIn("could resume this thread from them alone", bottle["context"])
 
     def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
         for key, value in (("permissions", ["message-any"]), ("thread", "other")):

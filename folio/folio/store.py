@@ -20,11 +20,13 @@ next write removes it, so a thread never has more than two.
 
 import json
 import os
+import re
 import shutil
 import time
 from pathlib import Path
 
 CURRENT = "current"
+SLOT = re.compile(r"\d{8}T\d{6}\.\d{3}Z")  # a slot's name: when it was written (_new_slot)
 
 
 def folio_home() -> Path:
@@ -99,10 +101,11 @@ def _new_slot(directory: Path) -> Path:
 def _remove_leftovers(directory: Path, keep: Path | None) -> None:
     """Slots `current` doesn't point to: what a crash mid-write leaves behind.
 
-    Dot-names are left alone: they're work in progress beside the slots (see staging()).
+    Only slots, by their names: anything else beside them -- a thread's notes,
+    the dot-named work in progress of staging() -- is left alone.
     """
     for entry in directory.iterdir():
-        if entry.is_dir() and not entry.is_symlink() and entry != keep and not entry.name.startswith("."):
+        if entry.is_dir() and not entry.is_symlink() and entry != keep and SLOT.fullmatch(entry.name):
             shutil.rmtree(entry, ignore_errors=True)
 
 
