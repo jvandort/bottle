@@ -88,7 +88,7 @@ class PauseAndResumeTest(PauseTestCase):
         self.assertEqual((self.claude / "projects" / "-workspace" / "memory" / "fact.md").read_text(), "remembered")
         self.assertFalse((self.claude / "plugins").exists())
         self.assertEqual((self.claude / "settings.json").read_text(), '{"from": "the old bottle"}')  # /model and all
-        self.assertEqual(self.calls("exec")[-1][-3:-1], ["attach", "claude"])
+        self.assertEqual(self.calls("exec")[-1][-4:-2], ["attach", "claude"])
 
     def test_a_resumed_thread_has_no_snapshot_left_to_go_stale(self) -> None:
         self.ok("pause", "fix-it")

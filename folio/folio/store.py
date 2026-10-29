@@ -1,7 +1,7 @@
 """Where folio keeps what it knows, and how it writes it so a reader never sees half.
 
     $FOLIO_HOME (default ~/.folio)/
-      repos/<name>/              the repos folio owns: the broker's vault (see broker.py)
+      repos/broker/              where the broker kept its notes, before notes.py (see broker.py)
       <repo key>/                one per repo (see repos.py)
         repo.json                the repo's path and name
         spec.json                the repo's bottle spec, canonical

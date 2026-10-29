@@ -1,39 +1,41 @@
 import json
 import shlex
+import shutil
 import stat
 from pathlib import Path
 
-from folio import broker
+from folio import broker, notes, repos, snapshots, store
 from tests.support import FolioTestCase, git
 
 
 class BrokerTest(FolioTestCase):
-    def vault(self):
-        return self.home / "repos" / "broker"
+    def vault(self) -> Path:
+        return broker.notes_path(broker.repo())
 
     def bottle(self) -> dict:
         return self.fake()["bottles"]["broker"]
 
-    def test_the_broker_is_a_thread_in_a_vault_folio_owns(self) -> None:
+    def test_the_broker_is_a_thread_that_mounts_only_its_notes(self) -> None:
         self.ok("broker")
+        self.assertEqual(self.home / f"broker-{repos.path_hash(self.home / 'repos' / 'broker')}" / "broker" / "notes",
+                         self.vault())
         self.assertEqual("main", git("-C", str(self.vault()), "symbolic-ref", "--short", "HEAD"))
-        self.assertEqual(broker.GITIGNORE, (self.vault() / ".gitignore").read_text())
+        self.assertEqual(notes.GITIGNORE, (self.vault() / ".gitignore").read_text())
         self.assertEqual("", git("-C", str(self.vault()), "status", "--porcelain"))
-        bottle = self.bottle()
-        self.assertEqual(str(self.vault()), bottle["mounts"][0]["repo"])
-        self.assertEqual(self.calls("exec")[-1][-3:-1], ["attach", "claude"])
+        self.assertEqual([(notes.MOUNT, str(self.vault()))], [(m["path"], m["repo"]) for m in self.bottle()["mounts"]])
+        self.assertFalse((self.home / "repos" / "broker").exists())
+        self.assertEqual(self.calls("exec")[-1][-4:-2], ["attach", "claude"])
 
     def test_its_spec_is_folios_with_a_brokers_permissions(self) -> None:
         self.ok("broker")
         self.assertEqual({"features": ["claude", "tools"], "memory": "2G",
                           "permissions": ["list-bottles", "message-any"]}, self.bottle()["spec"])
 
-    def test_the_vaults_main_tracks_its_lane_and_it_has_no_origin(self) -> None:
+    def test_the_vaults_main_tracks_its_lane_as_any_threads_notes(self) -> None:
         self.ok("broker")
-        self.assertEqual(["host:fetch=heads", "agent:fetch=ns/broker-out,push=ns/broker-out",
-                          "user:fetch=ns/broker-in"], self.bottle()["mounts"][0]["remotes"])
+        self.assertEqual(notes.REMOTES, self.bottle()["mounts"][0]["remotes"])
         # So bottle's follow moves it as the broker pushes main.
-        self.assertEqual("refs/remotes/bottle/broker/main",
+        self.assertEqual("refs/remotes/bottle/main",
                          git("-C", str(self.vault()), "for-each-ref", "--format=%(upstream)", "refs/heads/main"))
 
     def test_its_context_is_the_brokers(self) -> None:
@@ -49,7 +51,7 @@ class BrokerTest(FolioTestCase):
 
     def test_shell_and_claude_are_its_sessions(self) -> None:
         self.ok("broker", "shell")
-        self.assertEqual(self.calls("exec")[-1][-3:-1], ["attach", "shell"])
+        self.assertEqual(self.calls("exec")[-1][-4:-2], ["attach", "shell"])
         self.ok("broker", "claude")
         self.assertEqual(1, len(self.calls("new")))  # the same broker
 
@@ -60,18 +62,12 @@ class BrokerTest(FolioTestCase):
         self.ok("broker")
         self.assertEqual(2, len(self.calls("new")))
         self.assertIn("message-any", self.bottle()["spec"]["permissions"])
-        self.assertEqual("bottle/broker", git("-C", str(self.vault()), "config", "branch.main.remote"))
+        self.assertEqual("bottle", git("-C", str(self.vault()), "config", "branch.main.remote"))
 
     def test_pausing_no_broker(self) -> None:
         result = self.folio("broker", "pause")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("no broker to pause", result.stderr)
-
-    def test_thread_commands_dont_work_in_the_vault(self) -> None:
-        self.ok("broker")
-        result = self.folio("claude", "other", cwd=self.vault())
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("folio broker", result.stderr)
 
     def test_a_repos_threads_never_get_its_permissions(self) -> None:
         self.ok("broker")
@@ -161,7 +157,7 @@ class BrokerTest(FolioTestCase):
         log = self.obsidian({}, running=True)
         with mock.patch.dict("os.environ", self.env), mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch("builtins.input", return_value="y"):
-            out = obsidian.open_vault(broker.vault().path)
+            out = obsidian.open_vault(notes.ensure(self.vault()))
         commands = log.read_text().splitlines()
         quit_at = next(i for i, c in enumerate(commands) if c.startswith("osascript"))
         open_at = next(i for i, c in enumerate(commands) if c.startswith("open obsidian:"))
@@ -178,3 +174,78 @@ class BrokerTest(FolioTestCase):
                 self.assertEqual(config, self.config.read_text())
                 self.assertEqual(["obsidian://choose-vault"], self.opened(log))
                 self.assertIn("Open folder as vault", out)
+
+
+
+class MigrationTest(FolioTestCase):
+    """A broker from before notes: its vault at ~/.folio/repos/broker, its lane broker-out/-in, mounted at /workspace."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.old = self.home / "repos" / "broker"
+
+    def make_old(self) -> None:
+        self.old.mkdir(parents=True)
+        git("init", "-q", "-b", "main", str(self.old))
+        (self.old / "For you.md").write_text("priorities\n")
+        git("-C", str(self.old), "add", ".")
+        git("-C", str(self.old), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "memory")
+        self.head = git("-C", str(self.old), "rev-parse", "HEAD")
+        git("-C", str(self.old), "update-ref", "refs/namespaces/broker-out/refs/heads/main", self.head)
+        git("-C", str(self.old), "update-ref", "refs/namespaces/broker-in/refs/heads/idea", self.head)
+        git("-C", str(self.old), "remote", "add", "bottle/broker", str(self.old))
+
+    def new(self) -> Path:
+        return broker.notes_path(broker.repo())
+
+    def assert_moved(self) -> None:
+        self.assertFalse(self.old.exists())
+        self.assertEqual("priorities\n", (self.new() / "For you.md").read_text())
+        self.assertEqual(self.head, git("-C", str(self.new()), "rev-parse", "refs/namespaces/notes-out/refs/heads/main"))
+        self.assertEqual(self.head, git("-C", str(self.new()), "rev-parse", "refs/namespaces/notes-in/refs/heads/idea"))
+        self.assertEqual("", git("-C", str(self.new()), "for-each-ref", "refs/namespaces/broker-out",
+                                 "refs/namespaces/broker-in"))
+        self.assertNotIn("bottle/broker", git("-C", str(self.new()), "remote").split())
+        self.assertEqual("bottle", git("-C", str(self.new()), "config", "branch.main.remote"))
+
+    def test_a_broker_with_no_bottle_moves_its_vault_history_lane_and_all(self) -> None:
+        self.make_old()
+        result = self.folio("broker")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Moved the broker's notes", result.stderr)
+        self.assert_moved()
+        self.assertEqual(str(self.new()), self.fake()["bottles"]["broker"]["mounts"][0]["repo"])
+
+    def test_a_running_brokers_vault_moves_when_its_paused(self) -> None:
+        self.ok("broker")
+        shutil.rmtree(self.new())   # as a broker started before notes has none
+        self.make_old()
+        self.env["FOLIO_OPEN"] = "no-such-opener"
+        result = self.folio("broker", "notes")
+        self.assertIn(str(self.old), result.stdout)
+        self.assertIn("when it's next paused", result.stderr)
+        self.assertTrue(self.old.exists())
+        self.ok("broker", "pause")
+        self.assert_moved()
+
+    def test_a_snapshot_from_before_restores_its_vault_and_conversation_at_notes(self) -> None:
+        self.ok("broker")
+        home = Path(self.fake()["bottles"]["broker"]["home"])
+        (home / ".claude" / "projects" / "-workspace").mkdir(parents=True)
+        (home / ".claude" / "projects" / "-workspace" / "s.jsonl").write_text("talk\n")
+        (Path(self.fake()["bottles"]["broker"]["mounts"][0]["dir"]) / "mine.md").write_text("unpushed\n")
+        self.ok("broker", "pause")
+        slot = store.current_slot(broker.repo().directory / broker.NAME)
+        (slot / snapshots.NOTES_ARCHIVE).rename(slot / snapshots.WORKSPACE_ARCHIVE)
+        self.ok("broker", "shell")
+        home = Path(self.fake()["bottles"]["broker"]["home"])
+        self.assertEqual("talk\n", (home / ".claude" / "projects" / "-notes" / "s.jsonl").read_text())
+        self.assertFalse((home / ".claude" / "projects" / "-workspace").exists())
+        mount = Path(self.fake()["bottles"]["broker"]["mounts"][0]["dir"])
+        self.assertEqual("unpushed\n", (mount / "mine.md").read_text())
+
+    def test_thread_commands_dont_work_in_the_old_vault(self) -> None:
+        self.make_old()
+        result = self.folio("claude", "other", cwd=self.old)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("folio broker", result.stderr)

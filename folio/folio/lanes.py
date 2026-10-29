@@ -75,6 +75,18 @@ def forget(repo: Path, thread: str) -> None:
         git("remote", "remove", remote_name(thread), repo=repo)
 
 
+def move_namespace(repo: Path, old: str, new: str) -> None:
+    """Move every ref of namespace `old` to namespace `new`, in one update-ref transaction."""
+    refs = git("for-each-ref", "--format=%(objectname) %(refname)", f"refs/namespaces/{old}/", repo=repo)
+    moves = []
+    for line in refs.splitlines():
+        commit, ref = line.split(" ", 1)
+        moved = f"refs/namespaces/{new}/" + ref.removeprefix(f"refs/namespaces/{old}/")
+        moves += [f"create {moved} {commit}\n", f"delete {ref} {commit}\n"]
+    if moves:
+        git("update-ref", "--stdin", repo=repo, input="start\n" + "".join(moves) + "commit\n")
+
+
 def rename(repo: Path, old: str, new: str) -> None:
     """Move the lane: both namespaces' refs to the new thread's, and the remote to `bottle/<new>`.
 

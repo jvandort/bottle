@@ -96,13 +96,15 @@ folio broker notes      # its notes, in Obsidian
 when it starts), and opens it. Obsidian has no documented way to add a vault,
 so this is the undocumented one: its `obsidian.json`.
 
-It's a thread like any other, in a repo folio owns rather than one of yours:
-its vault, `~/.folio/repos/broker`, an Obsidian vault of the broker's own
-notes, which it organizes as it sees fit. It commits them on `main` and pushes
-as it goes, and each push fast-forwards the vault's own `main` and working
-tree (bottle's `advance`), so the vault Obsidian opens is always its latest.
-Hand it a branch the way you would any thread: push it to `bottle/broker` from
-the vault.
+It's a thread like any other, but with no repo of yours: its bottle mounts only
+its notes, at `/notes`, kept as any thread's are (see Notes), in
+`~/.folio/broker-<hash>/broker/notes`. It commits them on `main` and pushes as
+it goes, so the vault Obsidian opens is always its latest. Hand it a branch
+the way you would any thread's notes: push it to `bottle` from the vault.
+
+A broker from before kept its vault at `~/.folio/repos/broker`, mounted at
+`/workspace`. folio moves it -- history, lane and all -- the next time the
+broker has no bottle: at `folio broker pause`, or when it starts one.
 
 Its bottle, `broker`, is made folio's way, not from a repo's spec: `claude` and
 `tools`, 2G, and two permissions no thread has: `list-bottles`, to see the

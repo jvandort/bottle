@@ -1,68 +1,70 @@
 """The broker: one thread outside every repo of yours, that talks to the others.
 
-It's a thread like any other -- a bottle, a lane, Claude, pause and resume --
-in a repo folio owns rather than one of yours: its vault, the broker's own
-long-term memory, as notes for Obsidian. The vault lives where folio keeps the
-repos it owns (store.py), and is made the first time the broker is wanted.
+It's a thread like any other -- a bottle, notes, Claude, pause and resume --
+but for having no repo of yours: its bottle mounts only its notes, at /notes,
+its long-term memory, kept for Obsidian like any thread's (notes.py), in its
+thread's directory. Its repo is only an identity, for where folio keeps its
+state: the path its vault used to be, ~/.folio/repos/broker, so a broker from
+before keeps its state.
 
 What makes it the broker:
 
 - **Its bottle is `broker`**, and there's one. A thread's bottle is
   `<repo key>-<thread>`, so nothing collides with it.
-- **Its spec is folio's, not the repo's**: Claude, the tools, 2G, and the two
+- **Its spec is folio's, not a repo's**: Claude, the tools, 2G, and the two
   permissions a broker needs (see bottle's specs.py), list-bottles and
   message-any. No repo's threads can have them (repos.check_repo_spec); none
   lets it start, stop or make anything.
-- **Its notes are its memory, kept on main.** The broker pushes main to its
-  lane as it goes, and the vault's own main tracks it, so bottle's follow
-  keeps the vault's working tree, which Obsidian opens, the broker's latest. `.obsidian/` is ignored, so Obsidian's own files
-  never stand in the way.
 - **Its context** (CONTEXT) says what it's for and how it keeps its notes.
+
+A broker from before kept its vault at that old path, mounted at /workspace;
+migrate() moves it to the notes' place, history, lane and all, when the broker
+has no bottle to pull it out from under.
 """
 
+import shutil
 from pathlib import Path
 
-from . import repos
-from .git import git
+from . import lanes, notes, repos
+from .git import git, succeeds
 
 NAME = "broker"
 SPEC = {"features": ["claude", "tools"], "memory": "2G", "permissions": ["list-bottles", "message-any"]}
-# What Obsidian writes for whoever has the vault open: theirs, not the broker's memory.
-GITIGNORE = ".obsidian/\n.trash/\n"
 
 
-def vault() -> repos.Repo:
-    """The broker's vault, made with its first commit if there isn't one yet."""
+def repo() -> repos.Repo:
+    """The broker's identity, for where folio keeps its state: the path its vault used to be."""
+    return repos.Repo(NAME, repos.owned_path(NAME))
+
+
+def notes_path(identity: repos.Repo) -> Path:
+    """Where the broker's notes are: its thread's notes, as any thread's (threads.notes_dir)."""
+    return identity.directory / NAME / "notes"
+
+
+def old_vault() -> Path | None:
+    """The vault of a broker from before notes, if it's still where that broker kept it."""
     path = repos.owned_path(NAME)
-    if not (path / ".git").exists():
-        path.mkdir(parents=True, exist_ok=True)
-        git("init", "-q", "-b", "main", str(path))
-        (path / ".gitignore").write_text(GITIGNORE)
-        # Obsidian's settings for it, so Obsidian takes it for a vault it knows, not a new one (see obsidian.py).
-        (path / ".obsidian").mkdir()
-        git("add", ".gitignore", repo=path)
-        git("-c", "user.name=folio", "-c", "user.email=folio@localhost",
-            "commit", "-q", "-m", "The broker's vault", repo=path)
-    return repos.Repo(NAME, path)
+    return path if (path / ".git").exists() else None
 
 
-def remotes(thread: str) -> list[str]:
-    """The broker's bottle's remotes: a thread's, but for origin, which the vault hasn't."""
-    from . import lanes
+def migrate(identity: repos.Repo) -> bool:
+    """Move an old vault to the broker's notes: its history, its lane renamed to the notes'; whether it moved.
 
-    return [remote for remote in lanes.bottle_remotes(thread) if not remote.startswith("origin:")]
-
-
-def follow(vault: Path, thread: str) -> None:
-    """Make the vault's main track the broker's, so bottle's follow keeps it current as the broker pushes.
-
-    Config alone: the tracking branch needn't exist yet for a push to find the
-    branch that tracks it.
+    Only with no bottle (the caller's to know): a running broker has the old
+    vault mounted, and moving it would pull it out from under the agent.
     """
-    from . import lanes
-
-    git("config", "branch.main.remote", lanes.remote_name(thread), repo=vault)
-    git("config", "branch.main.merge", "refs/heads/main", repo=vault)
+    old, new = old_vault(), notes_path(identity)
+    if old is None or new.exists():
+        return False
+    new.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(old), str(new))
+    lanes.move_namespace(new, lanes.namespace(NAME, lanes.OUT), notes.OUT)
+    lanes.move_namespace(new, lanes.namespace(NAME, lanes.IN), notes.IN)
+    if succeeds("config", "--get", f"remote.{lanes.remote_name(NAME)}.url", repo=new):
+        git("remote", "remove", lanes.remote_name(NAME), repo=new)
+    notes.ensure(new)
+    return True
 
 
 CONTEXT = """\
@@ -104,7 +106,7 @@ what was skipped.
 
 ## Your memory
 
-`/workspace` is your vault, which the user reads in Obsidian: Markdown notes,
+`/notes` is your vault, which the user reads in Obsidian: Markdown notes,
 `[[wiki links]]` between them, a note per thread or topic as suits you.
 
 - **`For you.md`**, at the root, is the user's: first, the ranked priorities

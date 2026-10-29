@@ -116,7 +116,7 @@ def main(argv: list[str]) -> int:
                 case ["shpool", "kill", session]:
                     del bottle["sessions"][session]
                     bottle["exited"] = [n for n in bottle.get("exited", []) if n != session]
-                case ["sh", "-c", _, "attach", _, _]:
+                case ["sh", "-c", _, "attach", _, _, _]:
                     pass  # attached; the call log is the evidence
                 case ["kill", "-HUP", *_]:
                     bottle["sessions"] = {}

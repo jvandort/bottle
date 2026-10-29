@@ -51,7 +51,9 @@ CLAUDE, SHELL = "claude", "shell"
 # asks to confirm each time it starts.
 SESSIONS = {
     CLAUDE: 'set --; '
-            'if ls "$HOME"/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then set -- --continue; fi; '
+            # Claude keeps a directory's conversations under its path, /s and .s made -s.
+            'if ls "$HOME/.claude/projects/$(pwd | sed "s|[/.]|-|g")"/*.jsonl >/dev/null 2>&1; '
+            'then set -- --continue; fi; '
             'if command -v bottle-event >/dev/null; '
             'then set -- "$@" --dangerously-load-development-channels server:events; fi; '
             'exec claude "$@"',
@@ -80,7 +82,7 @@ status=$?
 [ $(($(date +%s) - started)) -le 1 ] || exit $status
 echo "folio: shpool couldn't show the $1 session any more, so it's been started again" >&2
 shpool kill "$1"
-env TERM={TERM} shpool attach --background --dir {WORKSPACE} --cmd "$2" "$1" || exit $status
+env TERM={TERM} shpool attach --background --dir "$3" --cmd "$2" "$1" || exit $status
 attach "$1"
 """
 SNAPSHOT = (snapshots.WORKSPACE_ARCHIVE, snapshots.NOTES_ARCHIVE, snapshots.CLAUDE_ARCHIVE, snapshots.WORK)
@@ -159,8 +161,15 @@ def notes_dir(repo: Repo, name: str) -> Path:
 
 
 def mounts(thread: Thread) -> list[str]:
-    """The paths of the thread's bottle's mounts: its repo's checkout, and its notes."""
-    return [WORKSPACE] if thread.broker else [WORKSPACE, notes.MOUNT]
+    """The paths of the thread's bottle's mounts: its repo's checkout, and its notes; the broker, its notes."""
+    return [notes.MOUNT] if thread.broker else [WORKSPACE, notes.MOUNT]
+
+
+def workdir(thread: Thread) -> str:
+    """Where the thread's sessions start: its bottle's first mount, as bottle has it -- a bottle
+    made before this folio may have them elsewhere -- else the first the thread would get."""
+    row = engine.status([thread.bottle])[thread.bottle]
+    return next((m["path"] for m in row.get("mounts", [])), mounts(thread)[0])
 
 
 def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False) -> Thread:
@@ -173,7 +182,8 @@ def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False
     thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", now, now, base, broker_)
     _make_bottle(repo, thread)
     try:
-        lanes.register(repo.path, name)
+        if not broker_:
+            lanes.register(repo.path, name)
         _save(repo, thread)
     except BaseException:
         _undo(repo, thread)
@@ -185,9 +195,9 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     """Create the thread's bottle from the repo's spec as it is now, served the thread's lane."""
     if thread.broker:
         repo.remember()
-        broker.follow(repo.path, thread.name)
+        notes_path = notes.ensure(notes_dir(repo, thread.name), "The broker's notes")
         engine.new(thread.bottle, engine.validate_spec(broker.SPEC),
-                   [engine.Mount(WORKSPACE, repo.path, thread.base, broker.remotes(thread.name))], broker.CONTEXT + durable(mounts(thread)))
+                   [engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)], broker.CONTEXT + durable(mounts(thread)))
         return
     # Checked again each time: a feature can have changed since the spec was saved.
     spec = check_repo_spec(engine.validate_spec(repo.spec() or DEFAULT_SPEC))
@@ -204,7 +214,8 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
 
 def _undo(repo: Repo, thread: Thread) -> None:
     """What create did, undone, as far as it got."""
-    for step in (lambda: engine.delete(thread.bottle), lambda: lanes.forget(repo.path, thread.name),
+    for step in (lambda: engine.delete(thread.bottle),
+                 lambda: thread.broker or lanes.forget(repo.path, thread.name),
                  lambda: shutil.rmtree(directory(repo, thread.name), ignore_errors=True)):
         try:
             step()
@@ -232,7 +243,7 @@ def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
     _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}), dict.fromkeys(SNAPSHOT))
     # -f detaches anything else on it: closing a terminal doesn't hang up its
     # attach inside the VM.
-    engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session, session_command(session)])
+    engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session, session_command(session), workdir(thread)])
 
 
 def _ensure_running(repo: Repo, thread: Thread) -> None:
@@ -273,7 +284,7 @@ def pause(repo: Repo, thread: Thread) -> None:
             snapshots.check(archive)
         claude, work = staging / snapshots.CLAUDE_ARCHIVE, staging / snapshots.WORK
         engine.run_to_file(thread.bottle, ["sh", "-c", snapshots.CLAUDE_OUT], claude)
-        engine.run_to_file(thread.bottle, ["sh", "-c", work_script(WORKSPACE)], work)
+        engine.run_to_file(thread.bottle, ["sh", "-c", work_script(workdir(thread))], work)
         snapshots.check(claude)
         _save(repo, thread, {**archived, snapshots.CLAUDE_ARCHIVE: claude, snapshots.WORK: work})
     finally:
@@ -298,16 +309,23 @@ def _stop_sessions(thread: Thread) -> None:
 def _resume(repo: Repo, thread: Thread) -> None:
     """A new bottle for a paused thread, with its snapshot restored; on any failure, still paused."""
     slot = _snapshot(repo, thread)
-    lanes.register(repo.path, thread.name)  # repairs it, if it was edited meanwhile
+    if not thread.broker:
+        lanes.register(repo.path, thread.name)  # repairs it, if it was edited meanwhile
     _make_bottle(repo, thread)
     try:
         for path in mounts(thread):
-            if (slot / ARCHIVES[path]).exists():        # a snapshot from before notes has none of them
-                engine.run_from_file(thread.bottle, ["sh", "-c", snapshots.workspace_in(path)], slot / ARCHIVES[path])
+            archive = slot / ARCHIVES[path]
+            if thread.broker and not archive.exists():  # a broker from before notes had its vault at /workspace
+                archive = slot / ARCHIVES[WORKSPACE]
+            if archive.exists():                        # a snapshot from before notes has none of them
+                engine.run_from_file(thread.bottle, ["sh", "-c", snapshots.workspace_in(path)], archive)
         # Where this bottle has each mount's objects and remotes: an older snapshot's checkout had them elsewhere.
         for mount in engine.status([thread.bottle])[thread.bottle].get("mounts", []):
             engine.run(thread.bottle, ["sh", "-c", snapshots.repoint(mount["path"], mount["objects"], mount["urls"])])
         engine.run_from_file(thread.bottle, ["sh", "-c", snapshots.CLAUDE_IN], slot / snapshots.CLAUDE_ARCHIVE)
+        if thread.broker:  # its conversation, too, was kept under the directory its vault was in
+            engine.run(thread.bottle, ["sh", "-c", 'cd "$HOME/.claude/projects" 2>/dev/null && [ -d -workspace ] '
+                                                   '&& [ ! -e -notes ] && mv -- -workspace -notes || true'])
     except BaseException:
         try:
             engine.delete(thread.bottle)
@@ -330,7 +348,7 @@ def _ensure_session(thread: Thread, session: str) -> None:
         # Its program exited, but shpool keeps the session, and attaching to it
         # would start a plain shell in its place.
         engine.run(thread.bottle, ["shpool", "kill", session], check=False)
-    engine.run(thread.bottle, ["env", f"TERM={TERM}", "shpool", "attach", "--background", "--dir", WORKSPACE,
+    engine.run(thread.bottle, ["env", f"TERM={TERM}", "shpool", "attach", "--background", "--dir", workdir(thread),
                                "--cmd", session_command(session), session])
 
 
@@ -346,6 +364,8 @@ def losses(repo: Repo, thread: Thread) -> list[str]:
     work that never reached the lane: read from the bottle, which is started
     if it's stopped, or from a paused thread's snapshot.
     """
+    if thread.broker:
+        return []  # no lane in a repo of yours, and its notes stay where they are
     lost = [f"{branch}: pushed, but not on your branches or origin's" for branch in lanes.unintegrated(repo.path, thread.name)]
     state = states(repo, [thread])[thread.name]["state"]
     if state == "missing":
@@ -356,7 +376,7 @@ def losses(repo: Repo, thread: Thread) -> list[str]:
     else:
         if state != "running":
             engine.start(thread.bottle)
-        work = engine.run(thread.bottle, ["sh", "-c", work_script(WORKSPACE)]).stdout
+        work = engine.run(thread.bottle, ["sh", "-c", work_script(workdir(thread))]).stdout
     tips, dirty = {}, False
     for line in work.splitlines():
         name, _, commit = line.partition("\t")
@@ -401,7 +421,8 @@ def delete(repo: Repo, thread: Thread) -> None:
     they stay where they are, and a new thread of the same name finds them."""
     if states(repo, [thread])[thread.name]["state"] not in ("missing", "paused"):
         engine.delete(thread.bottle)
-    lanes.forget(repo.path, thread.name)
+    if not thread.broker:
+        lanes.forget(repo.path, thread.name)
     kept = notes_dir(repo, thread.name)
     for entry in directory(repo, thread.name).iterdir():
         if entry != kept:

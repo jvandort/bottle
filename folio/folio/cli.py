@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from . import broker, engine, lanes, obsidian, picker, repos, threads
+from . import broker, engine, lanes, notes, obsidian, picker, repos, threads
 from .errors import FolioError
 
 
@@ -181,23 +181,31 @@ def _pause(args: argparse.Namespace) -> int:
 
 
 def _broker(args: argparse.Namespace) -> int:
-    vault = broker.vault()
+    identity = broker.repo()
+    thread = threads.load(identity, broker.NAME) if threads.exists(identity, broker.NAME) else None
+    state = threads.states(identity, [thread])[broker.NAME]["state"] if thread else "new"
+    if state in ("new", "missing", "paused") and broker.migrate(identity):
+        print(f"Moved the broker's notes to {broker.notes_path(identity)}", file=sys.stderr)
+    elif broker.old_vault() is not None and args.command != "pause":
+        print(f"The broker's notes move to {broker.notes_path(identity)} when it's next paused "
+              "(`folio broker pause`) and resumed", file=sys.stderr)
     if args.command == "notes":
-        return _open_notes(vault.path)
-    if threads.exists(vault, broker.NAME):
-        thread = threads.load(vault, broker.NAME)
-    elif args.command == "pause":
+        old = broker.old_vault()
+        return _open_notes(old if old is not None else notes.ensure(broker.notes_path(identity), "The broker's notes"))
+    if thread is None and args.command == "pause":
         raise FolioError("there's no broker to pause; `folio broker` starts it")
-    else:
+    if thread is None:
         print("Starting the broker...", file=sys.stderr)
-        thread = threads.create(vault, broker.NAME, broker_=True)
-        print(f"Started the broker. Its notes: {vault.path}", flush=True)
+        thread = threads.create(identity, broker.NAME, broker_=True)
+        print(f"Started the broker. Its notes: {broker.notes_path(identity)}", flush=True)
     if args.command == "pause":
         print("Pausing the broker...", file=sys.stderr)
-        threads.pause(vault, thread)
+        threads.pause(identity, thread)
+        if broker.migrate(identity):
+            print(f"Moved the broker's notes to {broker.notes_path(identity)}", file=sys.stderr)
         print("Paused the broker. Resume it with: folio broker")
         return 0
-    threads.attach(vault, thread, threads.CLAUDE if args.command == "claude" else threads.SHELL)
+    threads.attach(identity, thread, threads.CLAUDE if args.command == "claude" else threads.SHELL)
 
 
 def _open_notes(path) -> int:
@@ -302,7 +310,8 @@ def _configure_show(args: argparse.Namespace) -> int:
 def _repo_list(args: argparse.Namespace) -> int:
     rows = [("REPO", "PATH", "THREADS")]
     for repo in repos.known():
-        where = str(repo.path) if repo.path.is_dir() else f"{repo.path} (gone)"
+        where = ("(the broker)" if repo.path == repos.owned_path(broker.NAME)
+                 else str(repo.path) if repo.path.is_dir() else f"{repo.path} (gone)")
         rows.append((repo.key, where, str(len(threads.all_(repo)))))
     _table(rows)
     return 0
