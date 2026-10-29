@@ -192,7 +192,8 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   API through the egress proxy, which holds the `claude` credential
   (`bottle auth login claude`) so the agent can spend its own subscription
   token without ever being able to read it, and it reads
-  bottle's context for the agent (`~/BOTTLE.md`) as its instructions. It also
+  bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Sessions
+  start on Opus 5.5 at medium effort. It also
   has a channel, `bottle-event`, an MCP server that brings events into a
   running session (`bottle exec NAME -- bottle-event send -f FROM TEXT`, which
   waits until the session takes it) and gives the agent a `send` tool for

@@ -41,8 +41,8 @@ install -m 0755 bottle-event /usr/local/bin/bottle-event
 
 # Settings for the bottle's user, so Claude starts working straight away:
 # the permission mode (bypassPermissions by default: the bottle is the
-# sandbox), no confirmation before bypass mode, a theme, no spinner tips, and
-# the renderer.
+# sandbox), no confirmation before bypass mode, Opus 5.5 at medium effort, a
+# theme, no spinner tips, and the renderer.
 #
 # attribution is empty for commits and pull requests, so Claude adds no
 # Co-Authored-By trailer or "Generated with" line. What a bottle commits is
@@ -63,6 +63,8 @@ install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$home/.claude"
 cat > "$home/.claude/settings.json" <<JSON
 {
   "permissions": { "defaultMode": "$PERMISSIONMODE" },
+  "model": "claude-opus-5-5",
+  "effortLevel": "medium",
   "skipDangerousModePermissionPrompt": true,
   "theme": "$THEME",
   "tui": "$TUI",
