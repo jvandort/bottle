@@ -95,6 +95,19 @@ class ReviewAnother(CurateTestCase):
         self.assertIn("curate review other --from <base>", why)
         self.assertEqual(("read", "refs/heads/wip"), self.where())
 
+    def test_a_clean_line_left_over_from_a_lost_review_is_named_as_such(self) -> None:
+        self.repo.git("branch", "curate/other", self.base)
+        why = self.refused("other", "--from", self.base)
+        self.assertIn("curate/other already exists, but no review has it", why)
+        self.assertIn("with nothing 'other' doesn't have", why)
+        self.assertIn("git branch -D curate/other", why)
+        self.assertEqual(("read", "refs/heads/wip"), self.where())
+
+    def test_and_says_when_it_has_commits_of_its_own(self) -> None:
+        self.repo.git("branch", "curate/other", "wip")
+        self.assertIn("with commits of its own: `git log other..curate/other`",
+                      self.refused("other", "--from", self.base))
+
     def test_from_is_only_for_beginning_one(self) -> None:
         self.review("other", "--from", self.base)
         self.assertIn("has a review already", self.refused("wip", "--from", self.base))

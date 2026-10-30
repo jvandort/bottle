@@ -20,7 +20,7 @@ from .errors import Refused
 from .gitcmd import Objects, run
 from .modes import switch_mode
 from .pick import choose
-from .start import begin, prepare
+from .start import begin, clean_line_for, prepare
 from .state import Repo, named, short
 from .ui import ask_for_base, interactive, uninterrupted
 
@@ -69,7 +69,8 @@ def cmd_review(repo: Repo, argv: list[str]) -> int:
     target = next((s for s in repo.sessions() if s.working == local), None)
     beginning = None
     if target is None:
-        # Asked now, before anything moves.
+        # Asked now, before anything moves, and once nothing will refuse the answer.
+        clean_line_for(repo, local)
         base = from_arg or (ask_for_base(tip, repo.objects, repo.clean_lines()) if interactive() else None)
         if base is None:
             raise Refused(f"{named(local)} has no review yet. Where does its clean line start? "

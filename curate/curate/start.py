@@ -94,6 +94,7 @@ def start_chosen(repo: Repo) -> int:
 
     # Every question before anything moves, so cancelling the base leaves you
     # where you were, and so does anything prepare refuses.
+    clean_line_for(repo, local)
     base = ask_for_base(tip, repo.objects, repo.clean_lines())
     beginning = prepare(repo, local, base_arg=base)
     with uninterrupted():
@@ -118,11 +119,9 @@ class Beginning:
         return short(self.session.clean)
 
 
-def prepare(repo: Repo, working: str, base_arg: str | None = None,
-            clean_arg: str | None = None,
-            source: Session | None = None) -> Beginning:
-    """Everything `start` checks and works out, for a working line that need
-    not be checked out -- nor exist yet, when `transfer` is about to make it."""
+def clean_line_for(repo: Repo, working: str, clean_arg: str | None = None) -> str:
+    """The name a new review's clean line gets, refused if it can't: checked
+    before any question, so nobody answers one for nothing."""
     working_name = short(working)
     if repo.objects.rev(f"refs/heads/{CLEAN_PREFIX}") is not None:
         # Refs are paths, so this branch rules out the whole namespace. Curate
@@ -140,12 +139,36 @@ def prepare(repo: Repo, working: str, base_arg: str | None = None,
         raise Refused(f"'{clean_name}' collides with the branch '{blocker}': "
                       f"refs are paths, so git cannot have both")
 
-    session = Session(repo, encode(clean_name))
-    if session.exists:
+    if Session(repo, encode(clean_name)).exists:
         raise Refused(f"a review of '{clean_name}' already exists. "
                       f"`curate status`, or `curate drop {clean_name}`.")
-    if repo.objects.rev(f"refs/heads/{clean_name}") is not None:
+    clean = repo.objects.rev(f"refs/heads/{clean_name}")
+    if clean is not None and not clean_name.startswith(f"{CLEAN_PREFIX}/"):
         raise Refused(f"branch {clean_name} already exists")
+    if clean is not None:
+        # In curate's namespace, and no review has it, or the check above
+        # would have said so: what's left of one whose record is gone.
+        mine = repo.objects.rev(working)
+        if mine is None:
+            what = ""
+        elif git("rev-list", "-n1", clean, "--not", mine, check=False) == "":
+            what = f", with nothing {named(working)} doesn't have"
+        else:
+            what = f", with commits of its own: `git log {working_name}..{clean_name}`"
+        raise Refused(f"branch {clean_name} already exists, but no review has it: it's left over "
+                      f"from one whose record is gone{what}. If you don't need it, "
+                      f"`git branch -D {clean_name}`, and start again.")
+
+    return clean_name
+
+
+def prepare(repo: Repo, working: str, base_arg: str | None = None,
+            clean_arg: str | None = None,
+            source: Session | None = None) -> Beginning:
+    """Everything `start` checks and works out, for a working line that need
+    not be checked out -- nor exist yet, when `transfer` is about to make it."""
+    clean_name = clean_line_for(repo, working, clean_arg)
+    session = Session(repo, encode(clean_name))
 
     if source and source.working == working:
         raise Refused(f"that is the review of {named(working)}, the branch you are on")

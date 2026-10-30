@@ -63,6 +63,12 @@ class Prompting(CurateTestCase):
         self.assertIn("cannot resolve nonsense", out)
         self.assertEqual(self.repo.git("rev-parse", "curate/wip"), self.base)
 
+    def test_a_clean_line_left_over_is_refused_before_asking(self) -> None:
+        self.repo.git("branch", "curate/wip", self.base)
+        out = self.on_a_terminal(["start"], ["\r"])             # wip, from the branches
+        self.assertIn("curate/wip already exists, but no review has it", out)
+        self.assertNotIn("Clean line for", out)
+
     def test_eof_cancels_and_creates_nothing(self) -> None:
         out = self.on_a_terminal(["read"], ["\x04"])
         self.assertIn("cancelled", out)
