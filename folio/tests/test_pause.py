@@ -145,6 +145,16 @@ class PauseAndResumeTest(PauseTestCase):
         self.ok("pause", "fix-it")
         self.assertEqual(self.calls("start"), [["start", self.bottle]])
 
+    def test_a_bottle_from_before_notes_pauses_without_them_and_resumes_with_them(self) -> None:
+        state = self.fake()
+        bottle = state["bottles"][self.bottle]
+        bottle["mounts"] = [m for m in bottle["mounts"] if m["path"] != "/notes"]
+        self.state.write_text(json.dumps(state))
+        self.ok("pause", "fix-it")
+        self.assertFalse((self.slot() / snapshots.NOTES_ARCHIVE).exists())
+        self.ok("shell", "fix-it")
+        self.assertIn("/notes", [m["path"] for m in self.fake()["bottles"][self.bottle]["mounts"]])
+
 
 class FailureTest(PauseTestCase):
     def test_a_snapshot_that_doesnt_read_back_whole_deletes_nothing(self) -> None:

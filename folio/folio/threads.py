@@ -165,11 +165,16 @@ def mounts(thread: Thread) -> list[str]:
     return [notes.MOUNT] if thread.broker else [WORKSPACE, notes.MOUNT]
 
 
-def workdir(thread: Thread) -> str:
-    """Where the thread's sessions start: its bottle's first mount, as bottle has it -- a bottle
-    made before this folio may have them elsewhere -- else the first the thread would get."""
+def bottle_mounts(thread: Thread) -> list[str]:
+    """The paths of the mounts the thread's bottle has, as bottle has them -- a bottle made
+    before this folio may have fewer, or have them elsewhere -- else the thread's."""
     row = engine.status([thread.bottle])[thread.bottle]
-    return next((m["path"] for m in row.get("mounts", [])), mounts(thread)[0])
+    return [m["path"] for m in row.get("mounts", [])] or mounts(thread)
+
+
+def workdir(thread: Thread) -> str:
+    """Where the thread's sessions start: its bottle's first mount."""
+    return bottle_mounts(thread)[0]
 
 
 def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False) -> Thread:
@@ -280,7 +285,7 @@ def pause(repo: Repo, thread: Thread) -> None:
     staging = store.staging(directory(repo, thread.name))
     try:
         archived: dict[str, Path | None] = dict.fromkeys(ARCHIVES.values())   # none left from an older snapshot
-        for path in mounts(thread):
+        for path in (p for p in bottle_mounts(thread) if p in ARCHIVES):
             archive = archived[ARCHIVES[path]] = staging / ARCHIVES[path]
             engine.run_to_file(thread.bottle, ["sh", "-c", snapshots.workspace_out(path)], archive)
             snapshots.check(archive)
