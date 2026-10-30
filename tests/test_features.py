@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["claude", "develocity", "github", "jvm", "python", "teamcity", "tools"])
+        self.assertEqual(features.available(), ["cc", "chromium", "claude", "develocity", "github", "jvm", "python", "teamcity", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
@@ -22,6 +22,11 @@ class RealFeaturesTest(unittest.TestCase):
                              if f.id == feature_id]
                 self.assertTrue(feature.agent_context())
                 self.assertNotIn("${", feature.agent_context())
+
+    def test_chromium_brings_python(self) -> None:
+        self.assertEqual(["python", "chromium"], [f.id for f in features.resolve(["chromium"])])
+        [_, chromium] = features.resolve(["chromium:playwright=1.65.0"])
+        self.assertIn("Playwright 1.65.0", chromium.agent_context())
 
     def test_claude_options(self) -> None:
         self.assertEqual(

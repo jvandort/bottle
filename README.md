@@ -18,7 +18,7 @@ permissions inside. Take back only the commits you want.
   network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   `bottled` attaches it there. The bottle never holds the token.
-- **Composable features.** `tools`, `jvm`, `python`, `claude`, `github`, `teamcity`, `develocity`, in the
+- **Composable features.** `tools`, `jvm`, `python`, `cc`, `chromium`, `claude`, `github`, `teamcity`, `develocity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
   file. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -187,6 +187,15 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   removed, since a bottle is disposable and a new one undoes whatever an
   install breaks. Option: `externallyManaged` (default `false`) keeps the
   marker, and Debian's behaviour, if you'd rather work in a venv.
+- `cc`: gcc as `cc`, with the C library headers (`libc6-dev`, which gcc only
+  recommends and every link needs): what cargo needs to link build scripts,
+  even when the output is wasm. No g++ or make.
+- `chromium`: Playwright for Python, with the headless Chromium build it's
+  made for (`playwright install --with-deps --only-shell chromium`, at
+  `/opt/ms-playwright`, in the image), to see a built web page actually
+  render; Chromium's own `--screenshot` captures before scripts have run.
+  Brings `python`. Option: `playwright` (default `1.64.1`); its Chromium comes
+  with it.
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
   every directory is trusted (the bottle is the sandbox), first-run setup is done, it reaches the
   API through the egress proxy, which holds the `claude` credential

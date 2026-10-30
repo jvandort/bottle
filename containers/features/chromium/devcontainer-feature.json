@@ -1,0 +1,24 @@
+{
+  "id": "chromium",
+  "version": "1.0.0",
+  "name": "Chromium",
+  "description": "Playwright for Python, with the headless Chromium it's made for: to see a built web page actually render.",
+  "containerEnv": {
+    "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright"
+  },
+  "dependsOn": {
+    "python": {}
+  },
+  "options": {
+    "playwright": {
+      "type": "string",
+      "default": "1.64.1",
+      "description": "The Playwright release; its Chromium comes with it."
+    }
+  },
+  "customizations": {
+    "bottle": {
+      "context": "Playwright ${playwright} for Python is installed, with its headless Chromium, in the image: `p.chromium.launch()`. There's nothing for `playwright install` to do; anything more it fetches (headed Chromium, other browsers) takes minutes and is lost at a pause."
+    }
+  }
+}
