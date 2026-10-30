@@ -45,6 +45,12 @@ local branch tracking it; one that already has a review is switched back to
 rather than started again. Give `start` any argument and it asks nothing about
 the branch: the one you are on is the working line.
 
+In any of curate's lists, `/` searches, as in vim: the list narrows to the
+rows with what you type, enter stops typing and keeps it narrowed for `j`, `k`
+and enter as ever, `/` again edits the search, and esc brings every row back.
+Where a list takes text too -- a base, any revision; a new branch -- what you
+type is the answer when no row matches.
+
 In read mode your editor is the tool. Stage a hunk to approve it; commit to
 put it on the clean line. Unstaged means unreviewed, so `git status` **is** your
 review to-do list, and the review is done when it is empty.

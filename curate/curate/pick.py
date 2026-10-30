@@ -1,7 +1,12 @@
 """Choosing from a list, on a terminal: one row, or a checkbox on each.
 
 Two halves. `Picker` is what the list is and what a key does to it, and knows
-nothing about terminals, so tests drive it directly. `choose` and
+nothing about terminals, so tests drive it directly.
+
+`/` searches, as in vim: the list narrows to the rows with what you type in
+them, and enter stops typing and keeps it narrowed, for j and k and enter as
+ever; esc brings every row back. A list that takes text too (`typed`) takes
+what you typed when no row matches: so `/main~1` is a revision. `choose` and
 `choose_many` draw it with curses and feed it keys.
 """
 
@@ -39,6 +44,9 @@ class Picker:
     chosen: str | None = None
     cancelled: bool = False
     typed: Typed | None = None
+    searching: str | None = None     # the search typed so far, while typing it
+    query: str = ""                  # the search the list is narrowed to
+    everything: list[Row] | None = None   # all the rows, while a search shows some
     # A checkbox on each row, and enter only from the last: getting there
     # means having passed every row, so every one is a decision made.
     checkboxes: bool = False
@@ -77,6 +85,8 @@ class Picker:
         elif row.prompt and self.typed is not None:
             self.typing, self.prompt, self.message = "", row.prompt, ""
         elif row.expand is not None:
+            if self.everything is not None:     # its rows go in the whole list
+                self.end_search()
             self.rows[self.cursor:self.cursor + 1] = row.expand()
             self.cursor = min(self.cursor, len(self.rows) - 1)
             self.scroll()
@@ -85,7 +95,9 @@ class Picker:
 
     def key(self, k: str) -> None:
         """One key: a character, or a curses name such as KEY_UP."""
-        if self.typing is not None:
+        if self.searching is not None:
+            self.search_key(k)
+        elif self.typing is not None:
             self.type_key(k)
         elif k in ("j", "KEY_DOWN"):
             self.move(1)
@@ -104,10 +116,73 @@ class Picker:
             self.move(len(self.rows))
         elif k in ("\n", "\r", "KEY_ENTER"):
             self.enter()
+        elif k == "\x1b" and self.everything is not None:
+            self.end_search()
         elif k in ("q", "\x1b", "\x03", "\x04"):
             self.cancelled = True
-        elif k == "/" and self.typed is not None:
-            self.typing, self.prompt, self.message = "", "/", ""
+        elif k == "/" and not self.checkboxes:
+            if self.everything is None:
+                self.everything = self.rows
+            self.searching, self.message = self.query, ""
+
+    # -- searching -----------------------------------------------------------
+
+    def search_key(self, k: str) -> None:
+        assert self.searching is not None
+        if k in ("\n", "\r", "KEY_ENTER"):
+            self.search_enter()
+        elif k in ("\x1b", "\x03"):
+            self.end_search()
+        elif k in ("KEY_BACKSPACE", "\x7f", "\x08"):
+            if not self.searching:
+                self.end_search()
+            else:
+                self.narrow(self.searching[:-1])
+        elif k == "KEY_DOWN":
+            self.move(1)
+        elif k == "KEY_UP":
+            self.move(-1)
+        elif k == "KEY_NPAGE":
+            self.move(self.height)
+        elif k == "KEY_PPAGE":
+            self.move(-self.height)
+        elif len(k) == 1 and k.isprintable():
+            self.narrow(self.searching + k)
+
+    def narrow(self, text: str) -> None:
+        """The rows with `text` in them, any case; the cursor on one that's exactly it, else the first."""
+        assert self.everything is not None
+        self.searching = self.query = text
+        needle = text.lower()
+        self.rows = [r for r in self.everything
+                     if needle in "  ".join([*r.cells, r.tag]).lower()]
+        self.cursor = next((i for i, r in enumerate(self.rows) if r.cells[0].lower() == needle), 0)
+        self.top = 0
+        self.scroll()
+
+    def end_search(self) -> None:
+        """Back to every row, the cursor on the one it was on."""
+        assert self.everything is not None
+        here = self.rows[self.cursor] if self.rows else None
+        self.rows, self.everything, self.searching, self.query = self.everything, None, None, ""
+        self.cursor = next((i for i, r in enumerate(self.rows) if r is here), 0)
+        self.scroll()
+
+    def search_enter(self) -> None:
+        """Stop typing, the list kept narrowed; with nothing typed, every row back. When nothing
+        matches, a list that takes text takes it, or says why not."""
+        text = self.searching or ""
+        if not text:
+            self.end_search()
+        elif self.rows:
+            self.searching = None
+        elif self.typed is not None:
+            value, why = self.typed(text)
+            if value is not None:
+                self.chosen = value
+            else:
+                self.message = why
+                self.end_search()
 
     def type_key(self, k: str) -> None:
         assert self.typing is not None and self.typed is not None
@@ -152,14 +227,19 @@ class Picker:
         return out
 
     def footer(self) -> str:
+        if self.searching is not None:
+            if self.rows or not self.searching:
+                return f"/{self.searching}"
+            return f"/{self.searching}   no match" + ("; enter takes it as typed" if self.typed else "")
+        if self.everything is not None and not self.message:
+            return f"/{self.query}   j/k move   enter choose   / edit   esc all rows"
         if self.typing is not None:
             return f"{self.prompt}{self.typing}"
         if self.message:
             return self.message
         if self.checkboxes:
             return "j/k move   space toggles   enter on the last row confirms   q/esc cancel"
-        typing = "   / type one" if self.typed is not None else ""
-        return f"j/k move   enter choose{typing}   q/esc cancel"
+        return "j/k move   enter choose   / search   q/esc cancel"
 
 
 def choose(header: list[str], rows: list[Row], cursor: int = 0,

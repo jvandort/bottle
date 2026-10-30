@@ -185,7 +185,7 @@ class PickerKeys(unittest.TestCase):
         p = Picker(self.rows(2), typed=lambda t: (t, ""))
         for k in ["/", "a", "KEY_LEFT", "\t", "b"]:
             p.key(k)
-        self.assertEqual(p.footer(), "/ab")
+        self.assertEqual(p.footer(), "/ab   no match; enter takes it as typed")
 
     def test_columns_line_up_and_the_cursor_row_is_marked(self) -> None:
         p = Picker([Row(["a", "x"], value="a"), Row(["bbb", "y"], value="b")], cursor=1)
@@ -232,7 +232,7 @@ class PickerKeys(unittest.TestCase):
         p = Picker(self.rows(2), typed=lambda t: (None, f"cannot resolve {t}"))
         for k in "/xy\x7f":
             p.key(k)
-        self.assertEqual(p.footer(), "/x")
+        self.assertEqual(p.footer(), "/x   no match; enter takes it as typed")
         p.key("\n")
         self.assertFalse(p.done)
         self.assertEqual(p.footer(), "cannot resolve x")
@@ -247,14 +247,95 @@ class PickerKeys(unittest.TestCase):
         p = Picker(self.rows(2), typed=typed)
         p.key("/")
         p.key("\n")
-        self.assertIsNone(p.typing)
-        self.assertEqual((asked, p.footer()), ([], "j/k move   enter choose   / type one   q/esc cancel"))
+        self.assertIsNone(p.searching)
+        self.assertEqual((asked, p.footer()), ([], "j/k move   enter choose   / search   q/esc cancel"))
         self.assertFalse(p.done)
 
-    def test_a_list_with_nothing_to_type_ignores_slash(self) -> None:
+    def test_slash_narrows_the_list_and_enter_keeps_it_for_j_and_k(self) -> None:
+        p = Picker([Row(["main", "x"], value="m"), Row(["feature", "y"], value="f"),
+                    Row(["other", "y"], value="o", tag="best guess")])
+        for k in "/Y\n":
+            p.key(k)
+        self.assertEqual([r.value for r in p.rows], ["f", "o"])     # any column, any case
+        self.assertEqual(p.footer(), "/Y   j/k move   enter choose   / edit   esc all rows")
+        p.key("j")
+        self.assertFalse(p.done)
+        p.key("\n")
+        self.assertEqual(p.chosen, "o")
+
+    def test_search_matches_tags_and_prefers_a_row_that_is_exactly_it(self) -> None:
+        p = Picker([Row(["main2"], value="2"), Row(["main"], value="m"), Row(["x"], value="x", tag="best guess")])
+        for k in "/main":
+            p.key(k)
+        self.assertEqual(p.rows[p.cursor].value, "m")
+        for k in "\x1b/guess":
+            p.key(k)
+        self.assertEqual([r.value for r in p.rows], ["x"])
+
+    def test_slash_again_edits_the_search(self) -> None:
+        p = Picker(self.rows(12))
+        for k in "/1\n/":
+            p.key(k)
+        self.assertEqual(p.footer(), "/1")
+        for k in "1\n":
+            p.key(k)
+        self.assertEqual([r.value for r in p.rows], ["11"])
+
+    def test_escape_brings_back_every_row_with_the_cursor_where_it_was(self) -> None:
+        for keys in ("/3\x1b", "/3\n\x1b"):        # while typing, or after
+            with self.subTest(keys=keys):
+                p = Picker(self.rows(5))
+                for k in keys:
+                    p.key(k)
+                self.assertEqual((len(p.rows), p.cursor, p.searching, p.everything), (5, 3, None, None))
+                self.assertFalse(p.done)
+
+    def test_escape_with_every_row_shown_cancels_as_ever(self) -> None:
         p = Picker(self.rows(2))
+        p.key("\x1b")
+        self.assertTrue(p.cancelled)
+
+    def test_backspace_past_the_start_ends_the_search(self) -> None:
+        p = Picker(self.rows(3))
+        for k in ["/", "1", "KEY_BACKSPACE", "KEY_BACKSPACE"]:
+            p.key(k)
+        self.assertIsNone(p.searching)
+        self.assertEqual(len(p.rows), 3)
+
+    def test_with_no_match_enter_does_nothing_in_a_list_that_takes_no_text(self) -> None:
+        p = Picker(self.rows(2))
+        for k in "/zz":
+            p.key(k)
+        self.assertEqual(p.footer(), "/zz   no match")
+        p.key("\n")
+        self.assertFalse(p.done)
+
+    def test_a_list_that_takes_text_takes_it_when_nothing_matches(self) -> None:
+        def typed(text: str) -> tuple[str | None, str]:
+            return ({"main~1": "m1"}.get(text), f"cannot resolve {text}")
+
+        rows = [Row(["abc", "(main) x"], value="m"), Row(["def", "Merge main"], value="d")]
+        p = Picker(list(rows), typed=typed)
+        for k in "/main~1\n":
+            p.key(k)
+        self.assertEqual(p.chosen, "m1")
+        p = Picker(list(rows), typed=typed)
+        for k in "/nope\n":
+            p.key(k)
+        self.assertEqual((p.done, p.footer(), len(p.rows)), (False, "cannot resolve nope", 2))
+
+    def test_an_expanding_row_found_by_search_expands_in_the_whole_list(self) -> None:
+        more = Row(["<show local>"], expand=lambda: self.rows(2))
+        p = Picker([Row(["a"], value="a"), more])
+        for k in "/local\n\n":
+            p.key(k)
+        self.assertEqual([r.value for r in p.rows], ["a", "0", "1"])
+        self.assertIsNone(p.everything)
+
+    def test_checkboxes_have_no_search(self) -> None:
+        p = Picker(self.rows(2), checkboxes=True)
         p.key("/")
-        self.assertIsNone(p.typing)
+        self.assertIsNone(p.searching)
 
     def test_a_row_with_a_prompt_asks_for_text_when_chosen(self) -> None:
         new = Row(["<new branch>"], prompt="new branch: ")

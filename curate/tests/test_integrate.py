@@ -161,7 +161,7 @@ class SeveralAuthors(Integrating):
     def test_on_a_terminal_each_author_is_ticked_or_not(self) -> None:
         # The list is ordered newest first: Jane, then genie. Tick genie only,
         # and enter from the last row.
-        out = self.on_a_terminal(["integrate"], ["j", " ", "\r", "/", "main", "\r"])
+        out = self.on_a_terminal(["integrate"], ["j", " ", "\r", "/", "main", "\r", "\r"])
         self.assertIn(f"{self.genie[:8]}  genie's", out)
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "main~1"), "Test")
         self.assertEqual(self.repo.git("log", "-1", "--format=%an", "main"), "Jane")
