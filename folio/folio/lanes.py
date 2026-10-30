@@ -12,14 +12,23 @@ arrives. The user's repo gets them as one remote, `bottle/<thread>`, which
 folio owns: fetching reads the agent's lane, pushing hands over into the
 user's. So a thread's branches can be fetched whether or not it has a bottle
 right now.
+
+A branch the user deletes from the remote (`git push bottle/<thread>
+:refs/heads/<branch>`, as `curate integrate` does, `remote.<name>.curateDelete`
+saying to) is deleted from the agent's lane too, by the remote's receive-pack
+hook (`hooks/pre-receive`): if it's still what the user last fetched of it,
+and the push is refused if not. Nothing else deletes from the out lane.
 """
 
+import shlex
 from pathlib import Path
 
 from .git import git, succeeds
 
 OUT, IN = "out", "in"
 REMOTE_PREFIX = "bottle/"
+# The lane remote's receive-pack hooks, by their path in this folio.
+HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 
 
 def namespace(thread: str, direction: str) -> str:
@@ -59,8 +68,12 @@ def register_remote(repo: Path, name: str, out: str, in_: str) -> None:
         "fetch": f"+refs/heads/*:refs/remotes/{name}/*",
         "uploadpack": f"git --namespace={out} upload-pack",
         # The user's own lane, so no restrictions: rewriting what they haven't
-        # handed over yet is theirs to do.
-        "receivepack": f"git -c receive.denyCurrentBranch=ignore --namespace={in_} receive-pack",
+        # handed over yet is theirs to do. Its hook takes a delete through to
+        # the agent's lane, which is why curate deletes there; the -c settings
+        # reach it, saying where that is.
+        "receivepack": f"git -c core.hooksPath={shlex.quote(str(HOOKS))} -c folio.remote={name} -c folio.out={out} "
+                       f"-c receive.denyCurrentBranch=ignore --namespace={in_} receive-pack",
+        "curateDelete": "true",
     }
     for key, value in settings.items():
         git("config", "--replace-all", f"remote.{name}.{key}", value, repo=repo)

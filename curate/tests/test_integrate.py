@@ -1,5 +1,7 @@
 """`curate integrate`: a finished review onto a branch, and the review gone."""
 
+import subprocess
+
 from .support import CurateTestCase
 from .test_signing import fake_gpg, signed
 
@@ -435,3 +437,38 @@ class Replaying(Integrating):
         self.assertIn("replays onto it, best guess", out)
         self.assertNotIn("Replay the commits onto it", out)
         self.assertEqual(self.repo.log("main"), ["Add c", "Add b", "Elsewhere", "base"])
+
+
+class DeletingUpstream(Copied):
+    """feature-1's review copied into feature-2's, each tracking a branch of a remote."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.remote = self.repo.path.parent / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
+        self.repo.git("remote", "add", "up", str(self.remote))
+        for name in ("feature-1", "feature-2"):
+            self.repo.git("push", "-q", "-u", "up", f"{name}:genie/{name}")
+
+    def upstream(self) -> str:
+        return subprocess.run(["git", "-C", str(self.remote), "branch", "--format=%(refname:short)"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_each_ended_reviews_upstream_is_deleted_where_the_remote_says_to(self) -> None:
+        self.repo.git("config", "remote.up.curateDelete", "true")
+        out = self.integrate("--into", "main", "--adopt", "genie")
+        self.assertEqual(self.upstream(), "")
+        self.assertIn("Deleted genie/feature-2 from up.", out)
+        self.assertIn("Deleted genie/feature-1 from up.", out)
+
+    def test_not_where_it_doesnt(self) -> None:
+        out = self.integrate("--into", "main", "--adopt", "genie")
+        self.assertEqual(self.upstream(), "genie/feature-1\ngenie/feature-2")
+        self.assertNotIn("Deleted", out)
+
+    def test_a_refused_delete_is_said_and_the_integrate_stands(self) -> None:
+        self.repo.git("config", "remote.up.curateDelete", "true")
+        subprocess.run(["git", "-C", str(self.remote), "config", "receive.denyDeletes", "true"], check=True)
+        out = self.integrate("--into", "main", "--adopt", "genie")
+        self.assertIn("Kept genie/feature-2 on up: it refused the delete. The integrate stands.", out)
+        self.assertEqual(self.repo.curate("list").stdout.strip(), "no reviews")

@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from folio import lanes
 from tests.support import FolioTestCase, git
@@ -75,3 +76,63 @@ class LaneTest(FolioTestCase):
         lanes.forget(self.repo, "t")
         self.assertEqual(lanes.branches(self.repo, "t-2"), {"x": self.head})
         self.assertEqual(git("-C", str(self.repo), "remote"), "bottle/t-2")
+
+
+class DeleteTest(FolioTestCase):
+    """A delete pushed to the lane remote: the agent's branch goes too, if it's still what was fetched."""
+
+    bottle_pushes = LaneTest.bottle_pushes
+    new_commit = LaneTest.new_commit
+
+    def setUp(self) -> None:
+        super().setUp()
+        lanes.register(self.repo, "t")
+        self.head = git("-C", str(self.repo), "rev-parse", "HEAD")
+        self.work = self.new_commit("agent work")
+        self.bottle_pushes("genie/t-1", self.work)
+        git("-C", str(self.repo), "fetch", "-q", "bottle/t")
+
+    def lane(self) -> dict[str, str]:
+        return lanes.branches(self.repo, "t")
+
+    def tracking(self) -> str:
+        return git("-C", str(self.repo), "for-each-ref", "--format=%(refname)", "refs/remotes/bottle/t/")
+
+    def delete(self, branch: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", "push", "bottle/t", f":refs/heads/{branch}"],
+                              cwd=self.repo, capture_output=True, text=True)
+
+    def test_the_agents_branch_goes_with_its_tracking_ref(self) -> None:
+        result = self.delete("genie/t-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("folio: deleted genie/t-1 from the agent's lane", result.stderr)
+        self.assertEqual((self.lane(), self.tracking()), ({}, ""))
+
+    def test_one_the_agent_pushed_to_since_is_kept_and_the_push_refused(self) -> None:
+        later = self.new_commit("more")
+        self.bottle_pushes("genie/t-1", later)
+        result = self.delete("genie/t-1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("folio: kept genie/t-1: the agent has pushed to it since you fetched it", result.stderr)
+        self.assertEqual(self.lane(), {"genie/t-1": later})
+
+    def test_one_alongside_a_handover_goes_too(self) -> None:
+        result = subprocess.run(["git", "push", "bottle/t", "main", ":refs/heads/genie/t-1"],
+                                cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lane(), {})
+        self.assertIn("main", lanes.branches(self.repo, "t", lanes.IN))
+
+    def test_curate_integrating_it_deletes_it(self) -> None:
+        """The whole way: curate reviews the branch, integrates it, and deletes it from the lane."""
+        curate = str(Path(lanes.__file__).resolve().parents[2] / "bin" / "curate")
+        run = lambda *args: subprocess.run([curate, *args], cwd=self.repo, capture_output=True, text=True, env=self.env)
+        git("-C", str(self.repo), "switch", "-q", "genie/t-1")
+        for args in (["start", "--from", self.head], ["read"]):
+            result = run(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        git("-C", str(self.repo), "add", "-A")
+        result = run("integrate", "--into", "main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Deleted genie/t-1 from bottle/t.", result.stdout)
+        self.assertEqual((self.lane(), self.tracking()), ({}, ""))

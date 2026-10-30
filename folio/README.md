@@ -48,7 +48,11 @@ never clashes. The repo key is the repo's name and a hash of its path.
   follows the agent's pushes, files and all, when nothing of yours is in the
   way (see bottle's README). In the bottle, the agent's lane is
   its remote `agent` and yours is `user`, read-only. The agent can't rewrite
-  or delete anything it has pushed.
+  or delete anything it has pushed. You can: `git push bottle/<thread>
+  :refs/heads/<branch>` deletes the agent's branch too, if it's still what you
+  last fetched of it, and is refused if the agent has pushed to it since.
+  `curate integrate` does that for the branch it integrated. The rest stay
+  until the thread is deleted.
 - **Its agent** is told how to work: every branch it pushes is
   `genie/<feature>-N`, starting with `genie/<thread>-1`, and a rebase or a
   squash is pushed as the next N rather than over the old one.

@@ -344,6 +344,13 @@ destination now. So is every review it was copied from, by `transfer` or
 printed, in case. `curate drop` never follows that chain: dropping a copy you
 got wrong leaves the review it came from exactly as it was.
 
+Then each branch whose review just ended is deleted from its upstream, if
+that remote says to: `git config remote.<name>.curateDelete true`. It's done
+with there too. Whatever keeps the remote can refuse the delete, and folio's
+lanes do if the agent has pushed to the branch since you fetched it. It's
+pushed after the integrate, so a refusal is reported, and the integrate
+stands.
+
 ## Starting from the wrong base
 
 You often cannot tell until read mode shows you a list that is far too long

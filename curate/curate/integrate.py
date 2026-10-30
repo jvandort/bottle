@@ -17,14 +17,21 @@ already match it, so nothing on disk moves, unless it was replayed onto -- and
 the review is over: dropped,
 and both its lines deleted. Their old tips are printed, so nothing is out of
 reach.
+
+Then each branch whose review it ended is deleted from its upstream, where
+the remote says to: `remote.<name>.curateDelete`. That's done with there too,
+and whatever keeps it can refuse the delete. It's pushed once the integrate
+has happened, so a refusal is only reported.
 """
 
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 
 from .carry import names_for
 from .errors import Refused
-from .gitcmd import commit_tree, git, merge_tree, metadata, run
+from .gitcmd import commit_tree, environment, git, merge_tree, metadata, run
 from .modes import switch_mode
 from .pick import Row, choose, choose_many
 from .state import Repo, Session, named, short
@@ -388,6 +395,33 @@ def earlier(repo: Repo, session: Session) -> list[Session]:
     return found
 
 
+def upstreams(sessions: list[Session]) -> list[tuple[str, str]]:
+    """(remote, ref) each review's working line tracks, where the remote says
+    curate deletes what it integrates: read before the reviews go, as their
+    branches' config goes with them."""
+    found = []
+    for s in sessions:
+        name = short(s.working)
+        remote = git("config", "--get", f"branch.{name}.remote", check=False)
+        merge = git("config", "--get", f"branch.{name}.merge", check=False)
+        if remote and merge and git("config", "--type=bool", "--get",
+                                    f"remote.{remote}.curateDelete", check=False) == "true":
+            found.append((remote, merge))
+    return found
+
+
+def delete_upstreams(found: list[tuple[str, str]]) -> None:
+    """Push a delete of each; what the remote says comes through, and a refusal
+    is said, not raised."""
+    for remote, ref in found:
+        sys.stdout.flush()      # before what git says
+        p = subprocess.run(["git", "push", "-q", remote, f":{ref}"], env=environment())
+        if p.returncode == 0:
+            print(f"Deleted {short(ref)} from {remote}.")
+        else:
+            print(f"Kept {short(ref)} on {remote}: it refused the delete. The integrate stands.")
+
+
 def cmd_integrate(repo: Repo, argv: list[str]) -> int:
     into: str | None = None
     adopt: list[str] = []
@@ -455,6 +489,7 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         git("reset", "-q")
         # Read before the review goes: what it was copied from is in its state.
         priors = earlier(repo, session)
+        upstream = upstreams([session, *priors])
         gone = finish_review(repo, session, keep=target)
         ended = [(prior.working, finish_review(repo, prior, keep=target))
                  for prior in priors]
@@ -477,4 +512,5 @@ def cmd_integrate(repo: Repo, argv: list[str]) -> int:
         what = f"; deleted {', and '.join(deleted)}" if deleted else ""
         print(f"        so is the review of {named(working)} it was copied "
               f"from{what}.")
+    delete_upstreams(upstream)
     return 0

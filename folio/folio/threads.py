@@ -237,6 +237,8 @@ def states(repo: Repo, threads: list[Thread]) -> dict[str, dict]:
 
 def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
     """Attach this terminal to one of the thread's sessions, bringing the thread to running first."""
+    if not thread.broker:
+        lanes.register(repo.path, thread.name)  # brings its remote up to this folio's
     _ensure_running(repo, thread)
     _ensure_session(thread, session)
     # The bottle has the work now, so a snapshot would only be out of date.

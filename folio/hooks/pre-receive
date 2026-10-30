@@ -1,0 +1,27 @@
+#!/bin/sh
+# A lane remote runs this when you push to it (folio/lanes.py points its
+# receive-pack's core.hooksPath here, and sets folio.remote and folio.out).
+# A branch deleted from your lane -- `git push bottle/<thread>
+# :refs/heads/<branch>`, as curate integrate does -- is deleted from the
+# agent's too, if it's still what you last fetched of it: in one
+# compare-and-delete, so a push from the agent since keeps it, and the push
+# is refused, saying so.
+remote=$(git config folio.remote) && out=$(git config folio.out) || exit 1
+# The rest is the repo's own refs, outside the namespace; and a delete needs no
+# objects, so none of the quarantine a push with new ones gets.
+unset GIT_NAMESPACE GIT_QUARANTINE_PATH
+kept=0
+while read -r old new ref; do
+    case $new in *[!0]*) continue ;; esac
+    branch=${ref#refs/heads/}
+    lane=refs/namespaces/$out/$ref
+    agent=$(git rev-parse -q --verify "$lane") || continue
+    if [ "$agent" = "$(git rev-parse -q --verify "refs/remotes/$remote/$branch")" ] &&
+        git update-ref -d "$lane" "$agent" 2>/dev/null; then
+        echo "folio: deleted $branch from the agent's lane"
+    else
+        echo "folio: kept $branch: the agent has pushed to it since you fetched it"
+        kept=1
+    fi
+done
+exit $kept
