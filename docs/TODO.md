@@ -60,7 +60,12 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   connections fail in between. A restart that starts the new one first would
   close that gap.
 - **Supervision.** Optionally run bottled as a launchd user agent (no sudo) for
-  restart-on-crash and start-at-login.
+  restart-on-crash and start-at-login. It matters more with runners: on macOS,
+  bottled has the Local Network permission of whatever process started it, so
+  one started from an app without it can't reach a runner on the LAN ("No
+  route to host", which bottle now explains), and a link dies with it. Under
+  launchd it would be the agent's own permission, asked for once. Check what
+  macOS asks for, and of whom, for a launchd agent running Python.
 
 ## Repos and git
 
