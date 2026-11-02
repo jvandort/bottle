@@ -1,10 +1,12 @@
 # Remote runners
 
-Where bottle would split to run bottles on another machine: register a Linux
-host reachable over ssh as a runner, and `bottle new --runner NAME` makes a
-bottle there, a drone, while everything that's the user's stays on their own
-machine. Nothing here is built yet; this is the design, and the order it's
-built in.
+How bottle splits to run bottles on another machine: register a Linux host
+reachable over ssh as a runner, and `bottle new --runner NAME` makes a bottle
+there, a drone, while everything that's the user's stays on their own
+machine. This is the design, as built; the README says how to use it. It was
+first run on a real runner, Kubuntu on x86_64 driven from an Apple silicon
+Mac, on 2026-11-02: the smolvm contract suite passed there, and a drone was
+built, fetched and pushed, and recovered from its link going down.
 
 ## Terms
 
@@ -234,9 +236,9 @@ Wherever a bottle runs:
 
 ## Order of work
 
-Each step is pushed as it lands; up to the hardware, it's tested with a
-fake ssh (which runs the command locally) and the fake smolvm the tests
-already have.
+All done, in this order. Each step was tested with a fake ssh (which runs
+the command locally) and the fake smolvm the tests already have, up to the
+last, on real hardware.
 
 1. Drop the pull-through throttle; concurrent fetches share the next one.
 2. The `Runner` interface and `LocalRunner`: `bottles.py`, `images.py`,

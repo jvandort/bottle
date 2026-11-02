@@ -2,22 +2,25 @@
 
 *The perfect home for a genie.*
 
-Bottle manages sandboxed Linux VMs for coding agents, on macOS. Let the agent run with full
-permissions inside. Take back only the commits you want.
+Bottle manages sandboxed Linux VMs for coding agents, on macOS, or on a Linux machine of yours
+over ssh. Let the agent run with full permissions inside. Take back only the commits you want.
 
 - **A real VM per bottle.** Its own kernel, via [smolvm](https://github.com/smol-machines/smolvm),
   with everything it needs already installed. Starts in about a second.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
-  read-only mount of the repo's git objects, and fetches your upstream through the host. Your
+  read-only mount of the repo's git objects, and fetches your upstream through your Mac. Your
   working copy, and the rest of your machine, are never mounted.
 - **Git in, git out.** The repo is mounted read-only, and the bottle is served the git remotes
   it's given. One that takes pushes writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
 - **Network on a leash.** No proxy to configure: every connection a bottle opens is made from
-  your machine, after `bottled` decides it, so a bottle gets your VPN routes but not your local
-  network, even as root.
+  your machine (a drone's, from its runner), after `bottled` decides it, so a bottle gets your
+  VPN routes but not your local network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
   `bottled` attaches it there. The bottle never holds the token.
+- **On another machine, too.** Add a Linux machine you reach over ssh as a *runner*, and a
+  bottle there, a *drone*, works as one here does: its pushes, credentials and messages go
+  through your Mac, which stays the one place your repo and tokens are.
 - **Composable features.** `tools`, `jvm`, `python`, `cc`, `chromium`, `claude`, `github`, `teamcity`, `develocity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
   file. Images are prebuilt, and rebuilt when they go stale.
@@ -67,6 +70,16 @@ bottle shell foo          # Open a shell at /workspace, its first mount; run `cl
 Bottle installs smolvm (`brew install smol-machines/tap/smolvm`) when it's
 missing, and asks first.
 
+A runner, for bottles on another machine, needs:
+
+- Linux, with `/dev/kvm` usable by the user bottle logs in as (the `kvm` group)
+- Python 3.11+, git, and curl
+- ssh from your Mac without a prompt: a key whose passphrase is in your
+  Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since bottle
+  runs ssh in batch mode
+
+No root: `bottle runner add` installs smolvm there, asking first.
+
 ## Commands
 
 | Command | |
@@ -79,6 +92,7 @@ missing, and asks first.
 | `bottle status` | List bottles and their state; name one to see all of it |
 | `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
+| `bottle runner add` / `status` / `stop` / `remove` | The machines bottles run on: this one, and others over ssh |
 | `bottle daemon start` / `stop` | Manage `bottled`, which decides bottles' connections |
 | `bottle shutdown` | Stop every running bottle, then `bottled` |
 
@@ -161,7 +175,7 @@ bottle auth login teamcity
 Lists declared credentials and which are set; stores one read from stdin (for
 scripts); removes one. Bottles pick up changes when they next start.
 
-### `bottle build [--feature FEATURE]... [--no-cache]`
+### `bottle build [--feature FEATURE]... [--no-cache] [--runner RUNNER]`
 
 Builds the bottle image with the given features installed; `bottle new` does
 this itself when needed. Each image records what it was built from, so an image
@@ -172,6 +186,9 @@ bottle uses.
 ```sh
 bottle build --feature tools --feature claude
 ```
+
+With `--runner`, it's built on that runner, for the bottles there: each runner
+keeps its own images, built for its own CPU.
 
 Features, in the [Dev Container feature](https://containers.dev/implementors/features/)
 format (a `devcontainer-feature.json` and an `install.sh` per directory):
@@ -323,7 +340,7 @@ Each `--git-remote PATH:REMOTE` serves the mount at PATH one remote,
 sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
-  Fetching first fetches your repo's `origin` on the host, so the bottle gets
+  Fetching first fetches your repo's `origin` on your Mac, so the bottle gets
   the upstream's latest even if you haven't fetched.
 - `heads`: your repo's own branches: how the agent sees what you've integrated.
 - `ns/NAMESPACE`: the refs in one [git namespace](https://git-scm.com/docs/gitnamespaces)
@@ -363,12 +380,66 @@ bottle new --spec spec.json --name foo-fix-tests --mount /workspace=~/src/foo --
 says what the bottle, its remotes and its features are, and nothing about how
 to work in it.
 
-`--runner RUNNER` says which machine the bottle's VM runs on. `local`, this
-machine, is the default, and for now the only runner: bottles on other
-machines are designed in [docs/remote-sandbox.md](docs/remote-sandbox.md).
+`--runner RUNNER` says which machine the bottle's VM runs on: `local`, this
+machine, by default, or one added with `bottle runner add`. The image is built
+there if it isn't yet, and the spec's memory must fit that machine.
 
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.
+
+### `bottle runner add RUNNER --ssh DESTINATION` / `status` / `stop` / `remove`
+
+A **runner** is a machine bottles run on. `local` is this Mac; another is a
+Linux machine reached over ssh, and a bottle on one is a **drone**. Your Mac
+stays the **controller**: the registry, your credentials and your repos are
+here, and what a drone needs of them comes here.
+
+- **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
+  it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
+  `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
+  can't set up itself, installs smolvm's latest Linux release into
+  `~/.bottle/smolvm` there if it's missing (asking first, its checksum
+  checked), and copies bottle's own code over.
+- **`bottle runner status [RUNNER]...`** shows each runner, whether it can be
+  reached, what it lacks, and its bottles.
+- **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
+  machine can be shut down. Their disks stay there; `bottle start` starts one again.
+- **`bottle runner remove RUNNER`** forgets a runner with no bottles. Nothing
+  on the machine is touched.
+
+On a runner, everything bottle keeps is in `~/.bottle`: smolvm, bottle's code
+(copied again whenever it changes), the images built there, the HTTP cache,
+and a mirror of each repo its bottles use (`~/.bottle/git`), so a drone's
+checkout borrows objects from the runner's disk, not over the network. smolvm
+keeps its own state in `~/.smolvm`.
+
+A drone works as a local bottle does, with these differences:
+
+- **Its connections are decided on the runner**, by bottled there, so public
+  destinations go straight from the runner, and "private" means the runner's
+  network: a drone doesn't get your Mac's VPN routes. DNS is the runner's.
+- **Its git goes through your Mac.** A fetch is served from the runner's
+  mirror, brought up to date from your repo first (and your repo's `origin`
+  fetched first, for `upstream`), so the drone is sent little but refs. A push
+  goes into your repo, under the same rules as a local bottle's.
+- **Its credentials stay on your Mac.** The runner knows which hosts they're
+  for and nothing else, and sends those connections to your Mac, where bottled
+  attaches the credential and makes the connection. The cached hosts are
+  answered on the runner, behind a CA of the runner's own for the bottle.
+- **Everything that comes to your Mac goes over one ssh connection per
+  runner**, the *link*, which bottled keeps up while a bottle there needs it.
+  If it drops, a drone keeps its public network, while its fetches, pushes,
+  credentialed requests and messages fail and say why, until the link is back:
+  bottled tries again, waiting up to a minute between tries.
+
+A runner that's off is unreachable, not broken: `bottle status` shows its
+bottles as `unreachable`, a command for one fails at once, saying so, and
+nothing else waits on it.
+
+On a Mac, ssh's "No route to host" for a machine on your network is often
+macOS refusing the local network to the process that asked: give the app you
+run bottle from the Local Network permission (System Settings > Privacy &
+Security > Local Network). bottled has the permission of whatever started it.
 
 ### `bottle spec validate FILE [--json]`
 
@@ -397,9 +468,11 @@ bottle exec reponame cat /workspace/report.json | jq .failures
 ### `bottle status [BOTTLE]... [--json]`
 
 Shows every bottle's name, state and memory, a line each. Name bottles to see
-all of each: its features, and each mount's path, repo, branch and remotes. A
-name with no bottle shows as `missing`. With `--json`, one object per bottle
-with what it was made from: features, memory, spec and mounts.
+all of each: its runner, if it isn't `local`, its features, and each mount's
+path, repo, branch and remotes. A name with no bottle shows as `missing`, and
+one on a runner that can't be reached as `unreachable`. With `--json`, one
+object per bottle with what it was made from: runner, features, memory, spec
+and mounts.
 
 ### `bottle start BOTTLE` / `bottle stop BOTTLE`
 
@@ -420,7 +493,8 @@ one.
 
 ### `bottle shutdown`
 
-Stops every running bottle, then `bottled`.
+Stops every running bottle, then `bottled`. Bottles on a runner that can't be
+reached are left as they are, and it says so.
 
 ### `bottle daemon start` / `bottle daemon stop`
 
@@ -429,8 +503,9 @@ connections. smolvm asks it about each TCP connection a bottle opens, before
 making it: public destinations, IPv4 and IPv6, go straight there; private
 addresses are refused, but for a credential's own host; `bottle.host` is
 answered by bottled itself, with the bottle's git remotes. A refused
-connection is reset. DNS is smolvm's, which asks the Mac's resolver. Logs one
-line per connection, in `~/.bottle/logs`.
+connection is reset. DNS is smolvm's, which asks the resolver of the machine
+the bottle runs on. Logs one line per connection, in `~/.bottle/logs` (a
+drone's, in the runner's).
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
 one downloads every dependency again. A feature can name hosts whose
@@ -473,4 +548,12 @@ pull and build images:
 - `tests/test_end_to_end.py`: a real bottle through `bin/bottle`, in its own
   `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
 
-Elsewhere they're skipped.
+Elsewhere they're skipped. Runners are tested here with a fake ssh, which
+runs each command on this machine, in a home of its own: `tests/test_drone.py`
+is a drone end to end, with only ssh and smolvm faked. To check a real
+runner's smolvm, run the contract suite on it, from a checkout there:
+
+```sh
+BOTTLE_HOME=/tmp/bottle-contract BOTTLE_SMOLVM=$HOME/.bottle/smolvm/current/smolvm \
+  python3 -m unittest -v tests.test_smolvm_contract
+```
