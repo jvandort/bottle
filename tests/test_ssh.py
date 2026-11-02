@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -10,7 +11,8 @@ from tests.support import GitTestCase
 
 # ssh, as far as bottle uses it: options up to --, the destination, and a command for its shell, run here
 # as if at the destination, in a home of its own. "down" can't be reached. Whatever runs the tests, the
-# destination is Linux on x86_64 (uname, from $FAKE_PATH), with no smolvm on its PATH, and its shell sees
+# destination is Linux on x86_64 (uname, from $FAKE_PATH), with no smolvm on its PATH but the tests' own
+# python3 (also from $FAKE_PATH: hiding a smolvm can hide a python3 beside it), and its shell sees
 # $FAKE_KVM where it says /dev/kvm, so a test says whether the machine has KVM.
 FAKE_SSH = r"""#!/usr/bin/env bash
 while [ "$1" != "--" ]; do shift; done
@@ -48,6 +50,7 @@ class SshTestCase(GitTestCase):
         uname = self.path / "uname"
         uname.write_text('#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n')
         uname.chmod(0o755)
+        (self.path / "python3").symlink_to(sys.executable)
         env = mock.patch.dict(os.environ, {
             "BOTTLE_SSH": str(fake), "FAKE_SSH_LOG": str(self.log), "FAKE_REMOTES": str(self.remotes),
             "FAKE_KVM": str(self.kvm), "FAKE_PATH": str(self.path),
