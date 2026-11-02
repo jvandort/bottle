@@ -288,7 +288,7 @@ has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE]`
+### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER]`
 
 Creates a bottle from a **spec**: a file giving its features and memory, owned
 by whoever creates the bottle. `NAME` is required, and is the bottle's identity:
@@ -362,6 +362,10 @@ bottle new --spec spec.json --name foo-fix-tests --mount /workspace=~/src/foo --
 `--context FILE` adds the file's contents to the end of `~/BOTTLE.md`, which
 says what the bottle, its remotes and its features are, and nothing about how
 to work in it.
+
+`--runner RUNNER` says which machine the bottle's VM runs on. `local`, this
+machine, is the default, and for now the only runner: bottles on other
+machines are designed in [docs/remote-sandbox.md](docs/remote-sandbox.md).
 
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.

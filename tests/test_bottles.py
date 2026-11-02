@@ -912,6 +912,20 @@ class MountsTest(BottleTestCase):
                          ("/workspace", str(self.repo_path), "main", "/mnt/repo/objects", ""))
         self.assertEqual(mount.remotes, (host.Remote("agent", "ns/a", "ns/a"),))   # advance is gone
         self.assertEqual(mount.url("agent"), "http://bottle.host/git/agent")
+        self.assertEqual(bottles.get("old").runner, "local")   # from before runners
+
+    def test_its_runner_is_recorded(self) -> None:
+        self.fake()
+        self.create(name="here")
+        self.assertEqual(bottles.get("here").runner, "local")
+        self.assertIs(bottles.runner_of(bottles.get("here")), bottles.runners.get("local"))
+
+    def test_a_runner_there_isnt_is_refused_before_anything_is_made(self) -> None:
+        fake = self.fake()
+        with self.assertRaisesRegex(BottleError, "no runner named 'box'"):
+            bottles.create({"features": [], "memory": "2G"}, "x", [bottles.MountRequest("/workspace", self.repo_path)],
+                           runner="box")
+        self.assertEqual((bottles.load(), fake.calls), ({}, []))
 
 
 class StatusTest(BottleTestCase):
@@ -925,7 +939,7 @@ class StatusTest(BottleTestCase):
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
         self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "features": [], "memory": "2G",
+            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G",
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
                         "remotes": ["work:fetch=ns/t-in,push=ns/t-out"], "objects": "/mnt/objects/workspace",

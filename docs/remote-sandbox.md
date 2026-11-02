@@ -229,13 +229,15 @@ already have.
 2. The `Runner` interface and `LocalRunner`: `bottles.py`, `images.py`,
    bottled's message delivery and `prereqs.py` go through it. No change in
    behaviour.
-3. The registry records each bottle's runner; `bottle runner add`, `status`,
-   `remove`, and `bottle new --runner`; prerequisites checked per runner.
+3. The registry records each bottle's runner, and `bottle new --runner`
+   (only `local` until there are others).
 4. Serving split: `bottle.host` fetches served runner-side from a given git
    dir, with the step before an upstream fetch; pushes and messages handed
    to the driver. Local behaviour unchanged.
 5. `SshRunner` and the link: the connection and reconnecting, the runner
-   daemon, the decider on the runner, the forwarded socket, exec and shells.
+   daemon, the decider on the runner, the forwarded socket, exec and shells;
+   `bottle runner add`, `status` and `remove`, prerequisites checked per
+   runner.
 6. Images built and kept on remote runners, the architecture in their hash.
 7. Mirrors: cloned and refreshed over the link, with `git fetch origin`
    first for upstream; drones mount the mirror's objects.

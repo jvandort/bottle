@@ -136,6 +136,8 @@ class Bottle:
     context: str = ""
     # The image archive its machine was made from, which is kept while it exists.
     archive: str | None = None
+    # The runner its machine is on (see runners.py); records from before runners were the local one's.
+    runner: str = runners.LOCAL
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -190,7 +192,7 @@ def get(name: str) -> Bottle:
 
 def runner_of(bottle: Bottle) -> runners.Runner:
     """The runner the bottle's machine is on."""
-    return runners.get()
+    return runners.get(bottle.runner)
 
 
 def _save(bottle: Bottle) -> None:
@@ -211,6 +213,7 @@ def _write(bottles: dict[str, Bottle]) -> None:
 
 def create(
     spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "", image: str = images.BASE,
+    runner: str = runners.LOCAL,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
@@ -219,8 +222,10 @@ def create(
     is refused rather than numbered. Each mount is a repo whose objects are
     mounted and whose remotes are served, checked out at its path; without
     any, the bottle has no repo. Nothing is registered in a repo: the bottle's
-    creator reads what it pushes, from the namespaces it chose.
+    creator reads what it pushes, from the namespaces it chose. Its machine is
+    on `runner`.
     """
+    on = runners.get(runner)
     spec = specs.canonical(spec)
     installed = [f.spec for f in features_.resolve(list(spec["features"]))]
     existing = load()
@@ -229,14 +234,14 @@ def create(
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
     planned = _plan_mounts(mounts or [], existing.values())
-    runners.get().ensure_ready()
+    on.ensure_ready()
     tag = features_.ensure_built(image, installed)
     auth.ensure_logged_in(installed)
 
     bottle = Bottle(
         name, uuid.uuid4().hex, image, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
-        mounts=tuple(m for m, _ in planned), context=context,
+        mounts=tuple(m for m, _ in planned), context=context, runner=runner,
     )
     bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
     log.info("%s: created, %s, features %s", name,
@@ -685,7 +690,7 @@ def status(names: list[str] = ()) -> list[dict]:
             continue
         bottle, state = states[name]
         rows.append({
-            "name": bottle.name, "state": state, "created": bottle.created,
+            "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
             # Where its objects and remotes are, as a checkout restored into it has to point.
             "mounts": [{"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,

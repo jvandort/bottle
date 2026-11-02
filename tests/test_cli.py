@@ -133,8 +133,11 @@ class SpecCommandsTest(CliTestCase):
         self.assertEqual(code, 0)
         create.assert_called_once_with({"features": ["tools"], "memory": "2G"}, "project",
                                        [bottles.MountRequest("/workspace", repo, "main", ["origin:fetch=upstream"])],
-                                       "More.\n")
+                                       "More.\n", runner="local")
         self.assertIn(f"Created bottle 'project', with {repo} at main on /workspace", out)
+        with mock.patch("bottle.bottles.create", return_value=bottle) as create:
+            self.run_cli("new", "--spec", spec, "--name", "project", "--runner", "box")
+        self.assertEqual(create.call_args.kwargs, {"runner": "box"})
 
     def test_new_refuses_a_checkout_or_remote_for_no_mount(self) -> None:
         spec = self.spec('{"features": [], "memory": "2G"}')

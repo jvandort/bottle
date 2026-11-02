@@ -159,7 +159,8 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         self.daemon = Daemon(decider=Decider(self.tmp / "tokens.json"))
 
         def bottle(name: str, repo: str | None = None, **spec) -> mock.Mock:
-            return SimpleNamespace(machine=f"bottle-{name}", mounts=[SimpleNamespace(repo=repo)] if repo else [], spec=spec)
+            return SimpleNamespace(machine=f"bottle-{name}", mounts=[SimpleNamespace(repo=repo)] if repo else [], spec=spec,
+                                   runner="local")
 
         registry = {
             "broker": bottle("broker", "/Users/me/memories", permissions=["list-bottles", "message-any"]),
