@@ -122,6 +122,14 @@ class TransportTest(SshTestCase):
         self.kvm.unlink()
         self.assertFalse(ssh.SshTransport("box", "box").check().kvm)
 
+    def test_no_route_on_a_mac_names_the_local_network_permission(self) -> None:
+        why = "ssh: connect to host box.local port 22: No route to host"
+        with mock.patch.object(ssh.platform, "system", return_value="Darwin"):
+            self.assertIn("Local Network permission", ssh.explained(why))
+            self.assertEqual(ssh.explained("ssh: Connection refused"), "ssh: Connection refused")
+        with mock.patch.object(ssh.platform, "system", return_value="Linux"):
+            self.assertEqual(ssh.explained(why), why)
+
     def test_what_it_lacks_is_said_as_its_fixed(self) -> None:
         check = ssh.Check("Darwin", "arm64", False, "3.9", False, False, "")
         self.assertEqual(check.missing(), [

@@ -16,6 +16,7 @@ controllers stays out of the way.
 import hashlib
 import io
 import os
+import platform
 import shlex
 import subprocess
 import tarfile
@@ -36,6 +37,19 @@ PERSIST = 600
 CONNECT_TIMEOUT = 10
 # macOS caps Unix socket paths at 104 bytes; a control socket's is ssh's to extend, by up to 17.
 MAX_CONTROL_PATH = 80
+
+
+# What macOS says to a process it doesn't let reach the local network, whatever the network is doing.
+NO_ROUTE = "No route to host"
+LOCAL_NETWORK = ("on macOS, often the Local Network permission (System Settings > Privacy & Security > Local "
+                 "Network) of whatever started this: bottled has the permission of the process that started it")
+
+
+def explained(why: str) -> str:
+    """What ssh said, with the likeliest reason on a Mac when it's that there's no route."""
+    if NO_ROUTE in why and platform.system() == "Darwin":
+        return f"{why}; {LOCAL_NETWORK}"
+    return why
 
 
 def binary() -> str:
@@ -151,7 +165,7 @@ class SshTransport:
         result = subprocess.run([*self._ssh(tty=False), script], input=input, capture_output=True)
         if result.returncode == SSH_FAILED:
             why = result.stderr.decode(errors="replace").strip().splitlines()
-            raise BottleError(f"runner {self.runner} is unreachable ({why[-1] if why else 'ssh failed'})")
+            raise BottleError(f"runner {self.runner} is unreachable ({explained(why[-1] if why else 'ssh failed')})")
         return result
 
     def call(self, op: str, request: str) -> str:

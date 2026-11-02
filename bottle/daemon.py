@@ -361,7 +361,7 @@ class Links:
                     await process.wait()
                     break
                 why = (await process.stderr.read()).decode(errors="replace").strip().splitlines()
-                failure.append(why[-1] if why else f"ssh exited {process.returncode}")
+                failure.append(ssh.explained(why[-1]) if why else f"ssh exited {process.returncode}")
                 log.warning("link to runner %s down: %s", runner, failure[-1])
             except BottleError as e:
                 failure.append(str(e))
