@@ -34,6 +34,15 @@ def _run(op: str, args: dict):
     match op:
         case "archive":
             return _path(local.archive(args["tag"]))
+        case "cache_ca":
+            from bottle import ca
+
+            # Its CA here for the bottle: for its cached hosts alone, which bottled here answers.
+            return ca.certificate(args["bottle"], args["hosts"])
+        case "forget_ca":
+            from bottle import ca
+
+            ca.forget(args["bottle"])
         case "memory_mib":
             return local.memory_mib()
         case "mirror":

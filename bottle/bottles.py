@@ -72,6 +72,8 @@ CONTRACT = (
 # Where the egress CA's certificate goes in a bottle: the base image points
 # NODE_EXTRA_CA_CERTS here too, for tools that don't read the system store.
 CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
+# Where a bottle on a runner elsewhere has its runner's CA for its cached hosts, which that runner answers.
+CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"
 
 
 @dataclass(frozen=True)
@@ -366,8 +368,25 @@ def _start_machine(bottle: Bottle) -> None:
     terminates TLS for the hosts that CA covers (see daemon.py), and
     trust_egress_ca installs it once the machine is up.
     """
-    ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
-    runner_of(bottle).start(bottle.machine, bottle.name, served(bottle), bottle.features)
+    runner = runner_of(bottle)
+    ca.certificate(bottle.name, _terminated_here(bottle))
+    if runner.name != runners.LOCAL:
+        runner.cache_certificate(bottle.name, _cached_there(bottle))
+    runner.start(bottle.machine, bottle.name, served(bottle), bottle.features)
+
+
+def _terminated_here(bottle: Bottle) -> list[str]:
+    """The hosts whose TLS the controller terminates for the bottle: its credentials', and here, its cached hosts'."""
+    if runner_of(bottle).name == runners.LOCAL:
+        return auth.intercepted_hosts(bottle.features)
+    return auth.credential_hosts(bottle.features)
+
+
+def _cached_there(bottle: Bottle) -> list[str]:
+    """The hosts a runner elsewhere terminates the bottle's TLS for, to answer from its cache: none for the
+    credential hosts, which the controller does."""
+    credentials = set(auth.credential_hosts(bottle.features))
+    return sorted(h for h in auth.intercepted_hosts(bottle.features) if h not in credentials)
 
 
 def _memory_mib(memory: str | None) -> int:
@@ -632,14 +651,22 @@ def trust_egress_ca(bottle: Bottle) -> None:
     with no credential hosts trusts none. It's what lets bottled attach a
     credential to the bottle's HTTPS (see ca.py); the key stays on the Mac.
     """
-    certificate = ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
+    _trust(bottle, CA_CERTIFICATE, ca.certificate(bottle.name, _terminated_here(bottle)))
+    runner = runner_of(bottle)
+    if runner.name != runners.LOCAL:
+        # And its runner's, for the hosts whose downloads that runner keeps.
+        _trust(bottle, CACHE_CERTIFICATE, runner.cache_certificate(bottle.name, _cached_there(bottle)))
+
+
+def _trust(bottle: Bottle, path: str, certificate: str | None) -> None:
+    """Have the bottle's trust store hold `certificate` at `path`, or nothing there if it's None."""
     if certificate is None:
-        script = f"if [ -e {CA_CERTIFICATE} ]; then rm {CA_CERTIFICATE} && update-ca-certificates --fresh >/dev/null; fi"
+        script = f"if [ -e {path} ]; then rm {path} && update-ca-certificates --fresh >/dev/null; fi"
     else:
         script = (
-            f"cat > {CA_CERTIFICATE}.new && "
-            f"if cmp -s {CA_CERTIFICATE}.new {CA_CERTIFICATE}; then rm {CA_CERTIFICATE}.new; "
-            f"else mv {CA_CERTIFICATE}.new {CA_CERTIFICATE} && update-ca-certificates --fresh >/dev/null; fi"
+            f"cat > {path}.new && "
+            f"if cmp -s {path}.new {path}; then rm {path}.new; "
+            f"else mv {path}.new {path} && update-ca-certificates --fresh >/dev/null; fi"
         )
     try:
         _exec(bottle, ["sh", "-c", script], user="root", input=certificate)
@@ -753,6 +780,7 @@ def delete(name: str) -> None:
         ("egress", lambda: runner.release(bottle.name)),
         ("machine", lambda: runner.delete(bottle.machine)),
         ("egress CA", lambda: ca.forget(bottle.name)),
+        ("runner's CA", lambda: runner.forget_certificates(bottle.name)),
     ):
         try:
             action()

@@ -61,7 +61,9 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_binding_there_makes_the_bottles_side_here_and_learns_only_where_its_credentials_are_for(self):
         injections = [egress.Injection("ci.test", "Authorization", "Bearer the-real-credential", feature="teamcity")]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
+        cached = [daemon.cache.Cached("ci.test", ("*/index.json",)), daemon.cache.Cached("not-covered.test")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=cached):
             server = await self.link_up(self.controller())
             runner = self.runner()
             await runner.bind("b", (), ("teamcity",))
@@ -69,6 +71,8 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         [binding] = runner.decider.bindings.values()
         self.assertEqual([(i.host, i.header, i.value, i.feature) for i in binding.gateway.injections],
                          [("ci.test", "Authorization", "", "teamcity")])
+        # What the features say is cached, from the controller, which has them: kept here.
+        self.assertEqual(binding.gateway.caches, (daemon.cache.Cached("ci.test", ("*/index.json",)),))
         await runner.release("b")
         self.assertFalse(server.bound("b"))
 
@@ -93,7 +97,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         """The bottle's bottle.host as its runner answers it, once bound through the link."""
         with mock.patch.object(daemon.auth, "injections_for", return_value=[]):
             await self.link_up(self.controller())
-            _, services, _ = await link.LinkController(self.socket).egress("b", self.served, ())
+            _, _, services, _ = await link.LinkController(self.socket).egress("b", self.served, ())
         server, env = await serve_bottle_host(services)
         self.addAsyncCleanup(self._close, server)
         self.workspace = self.tmp / "workspace"
@@ -153,11 +157,11 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         controller = mock.Mock()
 
         async def egress_for(bottle, repos, features):
-            return (), host.HostServices(), echoing
+            return (), (), host.HostServices(), echoing
 
         controller.egress = egress_for
         await self.link_up(controller)
-        _, _, gateway = await link.LinkController(self.socket).egress("b", (), ())
+        _, _, _, gateway = await link.LinkController(self.socket).egress("b", (), ())
         answered = asyncio.Queue()
 
         async def bottle_side(reader, writer):

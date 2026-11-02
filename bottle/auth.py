@@ -306,6 +306,11 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
     return injections
 
 
+def credential_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
+    """The host patterns a bottle with these features has credentials attached at, logged in or not."""
+    return sorted({destination(host)[0].lower() for c in credentials_for(specs) for host in c.inject.hosts})
+
+
 def intercepted_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
     """The host patterns a bottle with these features has its tunnels terminated for, without their ports.
 

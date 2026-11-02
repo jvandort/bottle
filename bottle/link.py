@@ -39,7 +39,7 @@ import logging
 import os
 from pathlib import Path
 
-from bottle import egress, host
+from bottle import cache, egress, host
 from bottle.errors import BottleError
 from bottle.host import UPSTREAM, HostServices, HttpRequest, Remote, Served, ServiceError
 
@@ -117,11 +117,12 @@ class LinkController:
 
         injections = tuple(egress.Injection(i["host"], i["header"], "", i["port"], feature=i.get("feature", ""))
                            for i in answer["injections"])
+        caches = tuple(cache.Cached(c["host"], tuple(c.get("exclude", ()))) for c in answer.get("caches", ()))
         # Its repos as this runner has them: their mirrors.
         here = tuple(Served(mirrors.path(mirrors.key(r.git_dir)) if r.git_dir else None, r.remotes, r.at)
                      for r in repos)
         services = HostServices(here, bottle=bottle, deliver=self.deliver, peers=self.peers, git=MirrorGit(self, bottle))
-        return injections, services, _LinkedGateway(self, bottle)
+        return injections, caches, services, _LinkedGateway(self, bottle)
 
     async def deliver(self, sender: str, to: str, text: str) -> None:
         try:
@@ -292,12 +293,13 @@ class LinkServer:
     async def _answer(self, op: str, bottle: str, message: dict, body: bytes) -> tuple[dict, bytes]:
         match op:
             case "bind":
-                where, services, gateway = await self.controller.egress(
+                where, caches, services, gateway = await self.controller.egress(
                     bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())))
                 self.bottles[bottle] = (services, gateway)
                 log.info("%s: bound from runner %s", bottle, self.runner)
                 return {"ok": True, "injections": [{"host": i.host, "header": i.header, "port": i.port,
-                                                    "feature": i.feature} for i in where]}, b""
+                                                    "feature": i.feature} for i in where],
+                        "caches": [{"host": c.host, "exclude": list(c.exclude)} for c in caches]}, b""
             case "release":
                 self.bottles.pop(bottle, None)
                 return {"ok": True}, b""

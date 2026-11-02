@@ -675,6 +675,49 @@ class UnreachableRunnerTest(BottleTestCase):
         self.assertEqual(self.asked, [])
 
 
+class DroneCertificatesTest(BottleTestCase):
+    """A bottle on a runner elsewhere trusts two CAs: the controller's, for its credentials' hosts, and its
+    runner's, for the hosts whose downloads that runner keeps."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_smolvm = self.fake()
+        bottle = self.create(name="there")
+        records = bottles.load()
+        records["there"] = dataclasses.replace(bottle, runner="box")
+        bottles._write(records)
+        self.box = mock.Mock()
+        self.box.name = "box"
+        self.box.cache_certificate.return_value = "the runner's CA's certificate"
+        self.box.exec_.side_effect = lambda machine, argv, user=None, input=None: self.installed.append((argv[-1], input)) or ""
+        self.installed = []
+        real = bottles.runners.get
+        patcher = mock.patch.object(bottles.runners, "get", side_effect=lambda name="local": self.box if name == "box" else real(name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, hosts in (("credential_hosts", ["api.example"]), ("intercepted_hosts", ["api.example", "repo.example"])):
+            patcher = mock.patch.object(bottles.auth, name, return_value=hosts)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_the_controllers_is_for_its_credentials_and_its_runners_for_the_rest(self) -> None:
+        bottle = bottles.get("there")
+        self.assertEqual((bottles._terminated_here(bottle), bottles._cached_there(bottle)), (["api.example"], ["repo.example"]))
+        with mock.patch.object(bottles.ca, "certificate", return_value="the controller's CA's certificate") as certificate:
+            bottles.trust_egress_ca(bottle)
+        certificate.assert_called_once_with("there", ["api.example"])
+        self.box.cache_certificate.assert_called_once_with("there", ["repo.example"])
+        [(script, ours), (cache_script, theirs)] = self.installed
+        self.assertIn(bottles.CA_CERTIFICATE, script)
+        self.assertIn(bottles.CACHE_CERTIFICATE, cache_script)
+        self.assertEqual((ours, theirs), ("the controller's CA's certificate", "the runner's CA's certificate"))
+
+    def test_delete_forgets_its_runners_ca_too(self) -> None:
+        self.box.state.return_value = None
+        bottles.delete("there")
+        self.box.forget_certificates.assert_called_once_with("there")
+
+
 class ExecTest(BottleTestCase):
     def setUp(self) -> None:
         super().setUp()

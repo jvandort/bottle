@@ -193,9 +193,10 @@ class Controller:
 
     async def egress(
         self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...],
-    ) -> tuple[tuple[egress.Injection, ...], HostServices, egress.Gateway]:
-        """What a runner needs to bind `bottle`: where its credentials are for, its bottle.host, and its
-        gateway here, which serves its credentials' flows.
+    ) -> tuple[tuple[egress.Injection, ...], tuple[cache.Cached, ...], HostServices, egress.Gateway]:
+        """What a runner needs to bind `bottle`: where its credentials are for, the hosts whose downloads are
+        kept for it (the features say, and the runner doesn't have them), its bottle.host, and its gateway
+        here, which serves its credentials' flows.
 
         Credentials are read here, each time a bottle is bound, so logging
         in or out reaches a bottle when it next starts. Only for the hosts the
@@ -210,7 +211,8 @@ class Controller:
         services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
         # Where each credential is for, and nothing of the credential itself.
         where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
-        return where, services, gateway
+        caches = tuple(await asyncio.to_thread(cache.cached_for, features))
+        return where, caches, services, gateway
 
     async def deliver(self, sender: str, to: str, text: str) -> None:
         """Hand `text` to the bottle `to` reaches from `sender`, as an event from `sender`; raises ServiceError.
@@ -439,10 +441,11 @@ class Daemon:
     ) -> bytes:
         """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            injections, services, controller_gateway = await self.controller.egress(bottle, repos, features)
+            injections, cached, services, controller_gateway = await self.controller.egress(bottle, repos, features)
+            # Kept only for the hosts this machine's CA for the bottle covers, which bottle made when it started
+            # the bottle: what its cached hosts are answered behind.
             intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
-            caches = tuple(c for c in await asyncio.to_thread(cache.cached_for, features) if c.host in intercepted)
-            # The bottle's own CA, which bottle made when it started the bottle: what its cached hosts are answered behind.
+            caches = tuple(c for c in cached if c.host in intercepted)
             certificates = functools.partial(ca.server_context, bottle, intercepted)
             gateway = egress.Gateway(
                 bottle, self.policy, services=services, injections=injections, certificates=certificates,

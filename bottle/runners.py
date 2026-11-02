@@ -86,6 +86,13 @@ class Runner(Protocol):
     def release(self, bottle: str) -> None:
         """Stop deciding `bottle`'s flows, and forget its token; a no-op if it isn't bound."""
 
+    def cache_certificate(self, bottle: str, hosts: list[str]) -> str | None:
+        """The certificate of the CA the runner answers `bottle`'s cached `hosts` behind, made if missing; None
+        where the controller's CA for the bottle does (here) or there are no hosts."""
+
+    def forget_certificates(self, bottle: str) -> None:
+        """Delete the runner's CA for `bottle`, if it has one."""
+
     def ensure_deciding(self) -> None:
         """The decider up for bottles still running, which it binds again with the tokens they started with."""
 
@@ -153,6 +160,12 @@ class LocalRunner:
 
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
+
+    def cache_certificate(self, bottle: str, hosts: list[str]) -> str | None:
+        return None  # the controller's CA for the bottle covers its cached hosts too
+
+    def forget_certificates(self, bottle: str) -> None:
+        pass
 
     def ensure_deciding(self) -> None:
         daemon.start()
@@ -269,6 +282,12 @@ class RemoteRunner:
 
     def release(self, bottle: str) -> None:
         self._call("release", bottle=bottle)
+
+    def cache_certificate(self, bottle: str, hosts: list[str]) -> str | None:
+        return self._call("cache_ca", bottle=bottle, hosts=hosts)
+
+    def forget_certificates(self, bottle: str) -> None:
+        self._call("forget_ca", bottle=bottle)
 
     def ensure_deciding(self) -> None:
         self.transport.link()
