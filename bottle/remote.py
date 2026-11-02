@@ -17,19 +17,9 @@ import sys
 from pathlib import Path
 
 from bottle import runners
+from bottle.link import SOCKET, served_from_json
+from bottle.store import bottle_home
 from bottle.errors import BottleError
-from bottle.host import Remote, Served
-
-
-def served_from_json(repos: list[dict]) -> tuple[Served, ...]:
-    return tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
-                        tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
-                 for r in repos)
-
-
-def served_to_json(repos: tuple[Served, ...]) -> list[dict]:
-    return [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at,
-             "remotes": [remote.spec for remote in r.remotes]} for r in repos]
 
 
 def _path(value: Path | None) -> str | None:
@@ -81,6 +71,8 @@ def main(argv: list[str]) -> int:
     installed = Path.home() / ".bottle" / "smolvm" / "current" / "smolvm"
     if not os.environ.get("BOTTLE_SMOLVM") and installed.exists():
         os.environ["BOTTLE_SMOLVM"] = str(installed)
+    # The bottled this starts here is the runner's half alone: the controller's is reached over the link.
+    os.environ["BOTTLE_LINK"] = str(bottle_home() / SOCKET)
     if len(argv) != 1:
         print("usage: python3 -m bottle.remote OP < ARGS.json", file=sys.stderr)
         return 2

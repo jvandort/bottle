@@ -141,6 +141,9 @@ class Transport(Protocol):
     def command(self, argv: list[str], tty: bool) -> list[str]:
         """The command line that runs `argv` there, attached to this process's stdin (and a TTY)."""
 
+    def link(self) -> None:
+        """The runner's link to the controller up, so its bottled can reach the controller's."""
+
 
 class RemoteRunner:
     """A runner elsewhere: its own local runner, operated through `transport` (see bottle/remote.py)."""
@@ -150,10 +153,10 @@ class RemoteRunner:
         self.transport = transport
 
     def _call(self, op: str, **args):
-        from bottle import remote
+        from bottle import link
 
         if "served" in args:
-            args["served"] = remote.served_to_json(args["served"])
+            args["served"] = link.served_to_json(args["served"])
         answer = json.loads(self.transport.call(op, json.dumps(args)))
         if not answer.get("ok"):
             raise BottleError(f"runner {self.name}: {answer.get('error', 'failed')}")
@@ -177,12 +180,15 @@ class RemoteRunner:
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
+        # Binding it there asks the controller, over the link.
+        self.transport.link()
         self._call("start", machine=machine, bottle=bottle, served=tuple(served), features=list(features))
 
     def release(self, bottle: str) -> None:
         self._call("release", bottle=bottle)
 
     def ensure_deciding(self) -> None:
+        self.transport.link()
         self._call("ensure_deciding")
 
     def stop(self, machine: str) -> None:

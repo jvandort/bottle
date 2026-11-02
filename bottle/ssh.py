@@ -181,6 +181,11 @@ class SshTransport:
     def command(self, argv: list[str], tty: bool) -> list[str]:
         return [*self._ssh(tty=tty), shlex.join(argv)]
 
+    def link(self) -> None:
+        from bottle import daemon
+
+        daemon.ensure_link(self.runner)
+
     def check(self) -> Check:
         """What the runner has of what it needs."""
         found = dict(line.split("=", 1) for line in self.run(CHECK).stdout.decode().splitlines() if "=" in line)
@@ -194,3 +199,34 @@ class SshTransport:
             raise BottleError(f"installing smolvm on runner {self.runner} failed: "
                               f"{result.stderr.decode(errors='replace').strip()}")
         return result.stdout.decode().strip()
+
+    # --- the link (see link.py) ------------------------------------------------------
+
+    def prepare_link(self) -> str:
+        """Where the runner's link.sock is, as an absolute path, with any left by a link that died removed."""
+        result = self.run('mkdir -p "$HOME/.bottle" && rm -f "$HOME/.bottle/link.sock" && printf %s "$HOME"')
+        if result.returncode != 0:
+            raise BottleError(f"runner {self.runner}: {result.stderr.decode(errors='replace').strip()}")
+        return f"{result.stdout.decode()}/.bottle/link.sock"
+
+    def forward_command(self, there: str, here: Path) -> list[str]:
+        """The ssh that forwards the runner's `there` to the controller's socket `here`, for as long as it can.
+
+        A connection of its own, not the shared one: it lives as long as the
+        link does. It ends if the forward can't be made, or if the runner
+        stops answering for 45 seconds.
+        """
+        return [binary(), "-N", "-T", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no",
+                "-o", "ControlPath=none", "-R", f"{there}:{here}", "--", self.destination]
+
+    def wait_for_link(self, there: str, process, timeout: float = 15) -> bool:
+        """Whether the forwarded socket appeared on the runner before `process`, the forwarding ssh, ended."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and process.returncode is None:
+            if self.run(f"[ -S {shlex.quote(there)} ]").returncode == 0:
+                return True
+            time.sleep(0.2)
+        return False

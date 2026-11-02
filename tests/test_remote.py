@@ -21,6 +21,9 @@ class InProcess:
     def command(self, argv: list[str], tty: bool) -> list[str]:
         return ["there", *(["-t"] if tty else []), *argv]
 
+    def link(self) -> None:
+        self.requests.append(("link", {}))
+
 
 class RemoteRunnerTest(unittest.TestCase):
     """A remote runner is the local runner where it runs, every operation's arguments and answer crossing as JSON."""
