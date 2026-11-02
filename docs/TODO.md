@@ -55,11 +55,6 @@ Things discussed but not built yet, roughly grouped. Not in priority order.
   asks bottled about its connections only when bottle starts it, with the
   decider and a token. `smolvm machine start` by hand starts it with smolvm's
   own network policy instead, and none of bottle's.
-- **bottled after an upgrade** keeps running the old code until
-  `bottle shutdown`. Detect a version mismatch and restart it. Worse than it
-  sounds: an old bottled serving the current hooks/pre-receive passes no
-  `BOTTLE_NAME`, so the hook fails closed and every push from every bottle is
-  refused, with an error that blames the push.
 - **No `bottle daemon restart`.** `bottle daemon stop` and any bottle command
   picks up new bottled code, and running bottles keep their tokens, but their
   connections fail in between. A restart that starts the new one first would

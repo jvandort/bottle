@@ -1,4 +1,4 @@
-"""Mirrors: a remote runner's copy of each hub its bottles are served (see docs/remote-sandbox.md).
+"""Mirrors: a remote runner's copy of each hub its bottles are served.
 
 A mirror is a plain `git clone --mirror` of a hub, in the runner's
 ~/.bottle/git/<key>.git, its one remote, `hub`, reaching the hub on the

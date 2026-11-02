@@ -527,7 +527,8 @@ whether it was a `hit`, `stored`, or `passed` on.
 
 bottled starts automatically when a command needs it, and when it starts it
 picks up the bottles that were running. While it's stopped, running bottles
-can't open connections.
+can't open connections. A command that finds it running other code (another
+checkout's, or this one's before it changed) restarts it first, and says so.
 
 </details>
 

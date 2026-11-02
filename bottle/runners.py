@@ -1,4 +1,4 @@
-"""Runners: the machines bottles run on, behind one interface (see docs/remote-sandbox.md).
+"""Runners: the machines bottles run on, behind one interface (see the README's `bottle runner`).
 
 A runner holds bottles' machines, the images they boot, and the decider their
 connections are asked about. Everything else -- the registry, credentials,

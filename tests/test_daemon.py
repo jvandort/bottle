@@ -63,7 +63,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         return reply
 
     async def test_ping(self) -> None:
-        self.assertEqual(await self.request({"op": "ping"}), {"ok": True})
+        self.assertEqual(await self.request({"op": "ping"}), {"ok": True, "code": daemon.ssh.code_hash()})
 
     async def test_socket_is_owner_only(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
@@ -287,3 +287,54 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(d.controller, "egress", side_effect=egress), self.assertLogs("bottle.daemon", "WARNING"):
             await d.restore([("bad", (), ()), ("good", (), ())])
         self.assertEqual([binding.bottle for binding in d.decider.bindings.values()], ["good"])
+
+
+class CurrentCodeTest(unittest.TestCase):
+    """A command finds bottled running its own code, or restarts it first: once a command."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.object(daemon, "_current", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls: list[str] = []
+        self.running = {"code": "old"}
+
+        def send(message, timeout=30):
+            self.calls.append(message["op"])
+            if self.running is None:
+                raise FileNotFoundError
+            if message["op"] == "shutdown":
+                self.running = None
+                return {"ok": True}
+            return {"ok": True, **self.running, **({"decider": "d", "token": "t"} if message["op"] == "bind" else {})}
+
+        def start_daemon():
+            self.calls.append("start")
+            self.running = {"code": daemon.ssh.code_hash()}
+
+        for patcher in (mock.patch.object(daemon, "_send", side_effect=send),
+                        mock.patch.object(daemon, "_start_daemon", side_effect=start_daemon),
+                        mock.patch("sys.stderr")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_one_on_other_code_is_restarted_before_its_asked_anything(self) -> None:
+        daemon.bind_decider("b")
+        self.assertEqual(self.calls, ["ping", "shutdown", "ping", "start", "bind"])
+        daemon.release_egress("b")
+        self.assertEqual(self.calls[-1:], ["release"])   # asked once a command, not once a request
+
+    def test_one_from_before_it_said_its_code_is_restarted(self) -> None:
+        self.running = {}
+        self.assertTrue(daemon.start())   # started: the one that was running is gone
+        self.assertEqual(self.calls, ["ping", "ping", "shutdown", "ping", "start"])
+
+    def test_one_on_this_code_is_left_alone(self) -> None:
+        self.running = {"code": daemon.ssh.code_hash()}
+        daemon.bind_decider("b")
+        self.assertEqual(self.calls, ["ping", "bind"])
+
+    def test_none_running_is_started_by_what_needs_it(self) -> None:
+        self.running = None
+        daemon.bind_decider("b")
+        self.assertEqual(self.calls, ["ping", "bind", "start", "bind"])

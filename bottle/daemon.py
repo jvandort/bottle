@@ -101,13 +101,13 @@ def release_egress(bottle: str) -> None:
 
 
 def start() -> bool:
-    """Start the daemon in the background. False if it was already running."""
+    """Start the daemon in the background. False if it was already running, on this code."""
     try:
         _send({"op": "ping"})
-        return False
     except (FileNotFoundError, ConnectionRefusedError):
         _start_daemon()
         return True
+    return _ensure_current()
 
 
 def stop() -> bool:
@@ -122,7 +122,50 @@ def stop() -> bool:
     return True
 
 
+# Whether this process has seen bottled running its own code: asked once a command.
+_current = False
+
+
+def _ensure_current() -> bool:
+    """bottled running this code, if it's running: one running other code is restarted first.
+
+    Other code is another checkout's, or this one's before it changed: one that
+    may not know what this asks of it, or answer it as this would. Running
+    bottles keep their tokens, and the new bottled binds them again as it
+    starts, so they lose only the connections they open in between. Returns
+    whether it restarted it.
+    """
+    global _current
+    if _current:
+        return False
+    try:
+        reply = _send({"op": "ping"})
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False  # not running: whoever starts it starts this code
+    _current = True
+    if reply.get("code") == ssh.code_hash():
+        return False
+    log.info("bottled is running other code (%s); restarting it", reply.get("code", "from before it said"))
+    print("bottle: bottled was running other code; restarting it", file=sys.stderr)
+    _restart()
+    return True
+
+
+def _restart() -> None:
+    stop()
+    # The old one answers until it's gone: wait for that, or the new one would find it and leave.
+    deadline = time.monotonic() + START_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            _send({"op": "ping"})
+        except (FileNotFoundError, ConnectionRefusedError):
+            break
+        time.sleep(0.05)
+    _start_daemon()
+
+
 def _request(message: dict, start: bool, timeout: float = 30) -> dict:
+    _ensure_current()
     try:
         reply = _send(message, timeout)
     except (FileNotFoundError, ConnectionRefusedError):
@@ -412,6 +455,8 @@ class Daemon:
         self.locks: dict[str, asyncio.Lock] = {}
         # Every bottle's cached downloads, in one place: what one fetched, the next is answered with.
         self.store = cache.Store()
+        # The code it runs, by its hash, as it was when it started: what a command checks it against.
+        self.code = ssh.code_hash()
         # The controller's half: here, in this process, unless the controller is elsewhere.
         self.controller = controller or Controller(self.policy, self.decider.bound)
         # With the controller elsewhere, this runner has no registry of bottles to restore them from: what each
@@ -427,7 +472,7 @@ class Daemon:
             message = json.loads(line)
             match message.get("op"):
                 case "ping":
-                    reply = {"ok": True}
+                    reply = {"ok": True, "code": self.code}
                 case "bind":
                     repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
                                          tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
