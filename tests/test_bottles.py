@@ -939,7 +939,6 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
     """A spec bottle's setup script, run for real against bottle.host serving its remotes."""
 
     async def asyncSetUp(self) -> None:
-        host._last_pull.clear()
         self.fake_smolvm = self.fake()
         run("git", "-C", self.repo_path, "branch", "feature")
         self.bottle = bottles.create(

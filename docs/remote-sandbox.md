@@ -134,10 +134,11 @@ drone doesn't start with a full clone. A drone's mount is the mirror's
 objects at the same `/mnt/objects<path>`, and a snapshot from one runner
 resumes on another: folio repoints a checkout's objects and remotes on resume.
 
-`git fetch origin` before an upstream fetch isn't throttled: concurrent
-fetches of one hub share the one in flight. If origin can't be reached, the
-fetch is served what the hub has, as today; that's origin being down, not
-the link.
+`git fetch origin` before an upstream fetch isn't throttled. Fetches of one
+hub share: one asked for while another runs waits for the next, which all
+those asked meanwhile share, so each sees origin as it was when it asked. If
+origin can't be reached, the fetch is served what the hub has, as today;
+that's origin being down, not the link.
 
 A runner's mirror is identified by the hub's key, `<name>-<hash>`, the name
 and a hash of the hub's path, as folio keys repos (`folio/folio/repos.py`).
@@ -224,7 +225,7 @@ Each step is pushed as it lands; up to the hardware, it's tested with a
 fake ssh (which runs the command locally) and the fake smolvm the tests
 already have.
 
-1. Drop the pull-through throttle; concurrent fetches share one.
+1. Drop the pull-through throttle; concurrent fetches share the next one.
 2. The `Runner` interface and `LocalRunner`: `bottles.py`, `images.py`,
    bottled's message delivery and `prereqs.py` go through it. No change in
    behaviour.

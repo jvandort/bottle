@@ -323,9 +323,8 @@ Each `--git-remote PATH:REMOTE` serves the mount at PATH one remote,
 sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
-  Fetching first fetches your repo's `origin` on the host (at most once a
-  minute), so the bottle gets the upstream's latest even if you haven't
-  fetched.
+  Fetching first fetches your repo's `origin` on the host, so the bottle gets
+  the upstream's latest even if you haven't fetched.
 - `heads`: your repo's own branches: how the agent sees what you've integrated.
 - `ns/NAMESPACE`: the refs in one [git namespace](https://git-scm.com/docs/gitnamespaces)
   of your repo, and nothing else.

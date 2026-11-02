@@ -10,8 +10,8 @@ sees is one of three views:
       The repo's upstream: the host repo's refs/remotes/origin/*, served as
       branches (so `git checkout release` works in the bottle), plus tags.
       Pull-through: before serving, the host runs `git fetch origin` in the
-      repo (throttled, never prompting), so the bottle gets the real upstream's
-      latest even if nobody fetched on the host.
+      repo (never prompting), so the bottle gets the real upstream's latest
+      even if nobody fetched on the host.
 
   heads
       The host repo's own refs, as they are: what the bottle reads to build on
@@ -69,7 +69,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import zlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -148,8 +147,6 @@ class Remote:
 def _namespace_view(view: str) -> bool:
     return view.startswith(NS) and NAME.fullmatch(view.removeprefix(NS)) is not None
 
-# At most one pull-through fetch per repo per this many seconds.
-PULL_THROUGH_INTERVAL = 60
 PULL_THROUGH_TIMEOUT = 120
 
 
@@ -334,8 +331,9 @@ class HostServices:
         return "pushed" if push else "ok"
 
 
-_last_pull: dict[Path, float] = {}
+# Per repo: held while its pull-through fetch runs, and the fetch waiting to run next.
 _pull_locks: dict[Path, asyncio.Lock] = {}
+_next_pull: dict[Path, asyncio.Future] = {}
 
 
 def _message_problem(body: bytes) -> str | None:
@@ -359,26 +357,42 @@ def _message_problem(body: bytes) -> str | None:
 
 
 async def pull_through(git_dir: Path) -> None:
-    """`git fetch origin` in the host repo, at most every PULL_THROUGH_INTERVAL seconds.
+    """`git fetch origin` in the host repo, one that starts after this was asked for.
 
-    Uses the host's network and credentials, never prompts, and never fails the
+    Fetches of one repo share: asked while one is running, this waits for the
+    next, which everything asked in the meantime shares. So each sees origin
+    as it was when it asked, and a repo has at most one fetch running and one
+    waiting, however many bottles fetch at once.
+    """
+    pull = _next_pull.get(git_dir)
+    if pull is None:
+        pull = _next_pull[git_dir] = asyncio.ensure_future(_pull_next(git_dir))
+    # A request given up on (its bottle hung up) leaves the fetch to those sharing it.
+    await asyncio.shield(pull)
+
+
+async def _pull_next(git_dir: Path) -> None:
+    async with _pull_locks.setdefault(git_dir, asyncio.Lock()):
+        # Starting now: anything asked from here on waits for the one after.
+        del _next_pull[git_dir]
+        await _fetch_origin(git_dir)
+
+
+async def _fetch_origin(git_dir: Path) -> None:
+    """Uses the host's network and credentials, never prompts, and never fails the
     bottle's request: if it can't fetch, the bottle gets what the repo has.
     """
-    async with _pull_locks.setdefault(git_dir, asyncio.Lock()):
-        if time.monotonic() - _last_pull.get(git_dir, float("-inf")) < PULL_THROUGH_INTERVAL:
-            return
-        _last_pull[git_dir] = time.monotonic()
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run, ["git", "--git-dir", str(git_dir), "fetch", "--quiet", "origin"],
-                env=env, capture_output=True, text=True, timeout=PULL_THROUGH_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning("pull-through: git fetch origin in %s timed out", git_dir)
-            return
-        if result.returncode != 0:
-            log.warning("pull-through: git fetch origin in %s failed: %s", git_dir, result.stderr.strip())
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run, ["git", "--git-dir", str(git_dir), "fetch", "--quiet", "origin"],
+            env=env, capture_output=True, text=True, timeout=PULL_THROUGH_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("pull-through: git fetch origin in %s timed out", git_dir)
+        return
+    if result.returncode != 0:
+        log.warning("pull-through: git fetch origin in %s failed: %s", git_dir, result.stderr.strip())
 
 
 def _config_env(config: dict[str, str]) -> dict[str, str]:

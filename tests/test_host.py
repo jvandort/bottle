@@ -6,6 +6,7 @@ import os
 import subprocess
 import zlib
 import unittest
+from unittest import mock
 
 from bottle import egress, host
 from bottle.errors import BottleError
@@ -41,7 +42,6 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     IN = "refs/namespaces/bottle-b-in"    # the lane the host writes and this bottle reads
 
     async def asyncSetUp(self) -> None:
-        host._last_pull.clear()
         self.upstream = self.make_repo("upstream")
         run("git", "-C", self.upstream, "branch", "release")
         run("git", "-C", self.upstream, "tag", "v1")
@@ -100,12 +100,9 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "origin/main"), new)
         self.assertEqual(run("git", "-C", self.repo, "rev-parse", "origin/main"), new)  # the host repo was fetched
 
-    async def test_pull_through_is_throttled(self) -> None:
+    async def test_every_fetch_pulls_through(self) -> None:
         await self.fetch()
-        later = self.commit(self.upstream, "within the interval")
-        await self.fetch()
-        self.assertNotEqual(run("git", "-C", self.workspace, "rev-parse", "origin/main"), later)
-        host._last_pull.clear()  # the interval passes
+        later = self.commit(self.upstream, "just after")
         await self.fetch()
         self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "origin/main"), later)
 
@@ -402,6 +399,62 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
             host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main")
 
 
+class PullThroughTest(unittest.IsolatedAsyncioTestCase):
+    """Fetches of origin for one repo, asked for at once: shared, and never older than the asking."""
+
+    async def asyncSetUp(self) -> None:
+        self.started: list[asyncio.Event] = []
+        self.release: list[asyncio.Event] = []
+
+        async def fetch(git_dir: Path) -> None:
+            started, release = asyncio.Event(), asyncio.Event()
+            self.started.append(started)
+            self.release.append(release)
+            started.set()
+            await release.wait()
+
+        patcher = mock.patch.object(host, "_fetch_origin", fetch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def finish(self, *pulls: asyncio.Task) -> None:
+        while not all(p.done() for p in pulls):
+            for release in self.release:
+                release.set()
+            await asyncio.sleep(0)
+
+    async def test_asked_at_once_one_fetch(self) -> None:
+        pulls = [asyncio.create_task(host.pull_through(Path("/repo"))) for _ in range(5)]
+        await self.finish(*pulls)
+        self.assertEqual(len(self.started), 1)
+
+    async def test_asked_while_one_runs_the_next_is_shared(self) -> None:
+        first = asyncio.create_task(host.pull_through(Path("/repo")))
+        while not self.started:
+            await asyncio.sleep(0)
+        later = [asyncio.create_task(host.pull_through(Path("/repo"))) for _ in range(3)]
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.started), 1)  # the next waits for the running one
+        self.assertFalse(any(p.done() for p in later))
+        await self.finish(first, *later)
+        self.assertEqual(len(self.started), 2)
+
+    async def test_each_repo_its_own(self) -> None:
+        pulls = [asyncio.create_task(host.pull_through(Path(f"/repo{i}"))) for i in range(2)]
+        await self.finish(*pulls)
+        self.assertEqual(len(self.started), 2)
+
+    async def test_a_request_given_up_on_leaves_the_fetch_to_the_rest(self) -> None:
+        given_up = asyncio.create_task(host.pull_through(Path("/repo")))
+        kept = asyncio.create_task(host.pull_through(Path("/repo")))
+        while not self.started:
+            await asyncio.sleep(0)
+        given_up.cancel()
+        await self.finish(kept)
+        self.assertTrue(kept.done() and not kept.cancelled())
+        self.assertEqual(len(self.started), 1)
+
+
 class RoutingTest(unittest.TestCase):
     """Which mount's repo a /git/... request is for: each mount's remotes are under its path."""
 
@@ -688,7 +741,6 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     """Remotes a caller named itself: the same views and the same rules as the defaults, under its names."""
 
     async def asyncSetUp(self) -> None:
-        host._last_pull.clear()
         self.upstream = self.make_repo("upstream")
         run("git", "-C", self.upstream, "branch", "release")
         self.repo = self.tmp / "repo"
