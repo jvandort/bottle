@@ -38,7 +38,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NoReturn
 
-from bottle import auth, ca, daemon, features as features_, host, images, prereqs, repos, smolvm, specs
+from bottle import auth, ca, daemon, features as features_, host, images, repos, runners, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -188,6 +188,11 @@ def get(name: str) -> Bottle:
     return bottles[name]
 
 
+def runner_of(bottle: Bottle) -> runners.Runner:
+    """The runner the bottle's machine is on."""
+    return runners.get()
+
+
 def _save(bottle: Bottle) -> None:
     bottles = load()
     bottles[bottle.name] = bottle
@@ -224,7 +229,7 @@ def create(
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
     planned = _plan_mounts(mounts or [], existing.values())
-    prereqs.ensure_smolvm()
+    runners.get().ensure_ready()
     tag = features_.ensure_built(image, installed)
     auth.ensure_logged_in(installed)
 
@@ -262,7 +267,7 @@ def _plan_mounts(requests: list[MountRequest], others) -> list[tuple[Mount, repo
 def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     """Create the bottle's machine from `tag`, and set it up; roll it all back on failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
-    if smolvm.state(bottle.machine) is not None:
+    if runner_of(bottle).state(bottle.machine) is not None:
         raise BottleError(f"a machine named {bottle.machine} already exists; choose another name with --name")
     _save(bottle)
     try:
@@ -327,16 +332,17 @@ def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], 
 
 def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     """Create and start a fresh machine for the bottle from `tag`'s archive, and set it up from scratch."""
-    archive = images.archive_of(tag)
+    runner = runner_of(bottle)
+    archive = runner.archive(tag)
     if archive is None:
         raise BottleError(f"{tag} isn't built")
     # Recorded first, so the archive is kept from the moment a machine could have been made from it.
     bottle = replace(bottle, archive=archive.name)
     _save(bottle)
     # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open.
-    smolvm.create(
-        bottle.machine, str(archive),
-        mounts=[smolvm.Mount(repos.objects_dir(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
+    runner.create(
+        bottle.machine, archive,
+        mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
     )
@@ -356,8 +362,7 @@ def _start_machine(bottle: Bottle) -> None:
     trust_egress_ca installs it once the machine is up.
     """
     ca.certificate(bottle.name, auth.intercepted_hosts(bottle.features))
-    decider, token = daemon.bind_decider(bottle.name, served(bottle), bottle.features)
-    smolvm.start(bottle.machine, decider, token)
+    runner_of(bottle).start(bottle.machine, bottle.name, served(bottle), bottle.features)
 
 
 def _memory_mib(memory: str | None) -> int:
@@ -380,7 +385,7 @@ def point_at_host(bottle: Bottle) -> None:
 
 def _exec(bottle: Bottle, argv: list[str], user: str | None = None, input: str | None = None) -> str:
     """Run a command in the bottle's running machine and return its output."""
-    return smolvm.exec_(bottle.machine, argv, user=user, input=input)
+    return runner_of(bottle).exec_(bottle.machine, argv, user=user, input=input)
 
 
 @contextmanager
@@ -393,19 +398,19 @@ def throwaway(feature_specs: list[str]):
     tag = features_.ensure_built(images.BASE, feature_specs)
     name = f"bottle-throwaway-{uuid.uuid4().hex[:12]}"
     log.info("%s: throwaway bottle with %s", name, ", ".join(feature_specs) or "no features")
+    runner = runners.get()
     try:
-        archive = images.archive_of(tag)
+        archive = runner.archive(tag)
         if archive is None:
             raise BottleError(f"{tag} isn't built")
         # No spec to say how much memory: smolvm's own default, for a login command.
-        smolvm.create(name, str(archive), mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
+        runner.create(name, archive, mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
         # Bound with no features, so no credentials and no egress CA: a login starts from
         # nothing, and mustn't find its own credential attached to what it sends.
-        decider, secret = daemon.bind_decider(name)
-        smolvm.start(name, decider, secret)
-        yield lambda argv: smolvm.exec_command(name, argv, user=USER, tty=True)
+        runner.start(name, name)
+        yield lambda argv: runner.exec_command(name, argv, user=USER, tty=True)
     finally:
-        for cleanup in (lambda: daemon.release_egress(name), lambda: smolvm.delete(name)):
+        for cleanup in (lambda: runner.release(name), lambda: runner.delete(name)):
             try:
                 cleanup()
             except Exception as e:
@@ -552,19 +557,21 @@ def start(name: str) -> Bottle:
 def stop(name: str) -> None:
     """Stop the bottle's machine, and its token at the decider. Its checkout and changes are kept."""
     bottle = get(name)
-    if smolvm.state(bottle.machine) == "running":
-        smolvm.stop(bottle.machine)
+    runner = runner_of(bottle)
+    if runner.state(bottle.machine) == "running":
+        runner.stop(bottle.machine)
         log.info("%s: stopped", name)
-    daemon.release_egress(bottle.name)
+    runner.release(bottle.name)
 
 
 def shutdown() -> tuple[list[str], bool]:
     """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running."""
     stopped = []
     for bottle in load().values():
-        if smolvm.state(bottle.machine) == "running":
-            smolvm.stop(bottle.machine)
-            daemon.release_egress(bottle.name)
+        runner = runner_of(bottle)
+        if runner.state(bottle.machine) == "running":
+            runner.stop(bottle.machine)
+            runner.release(bottle.name)
             log.info("%s: stopped (shutdown)", bottle.name)
             stopped.append(bottle.name)
     return stopped, daemon.stop()
@@ -575,19 +582,20 @@ def ensure_running(name: str) -> Bottle:
     bottle = get(name)
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
-    state = smolvm.state(bottle.machine)
+    runner = runner_of(bottle)
+    state = runner.state(bottle.machine)
     if state is None:
         raise BottleError(f"{bottle.name}'s machine is gone; `bottle delete {bottle.name}`, then `bottle new` again")
     if state != "running":
-        prereqs.ensure_smolvm()
+        runner.ensure_ready()
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
         verify_contract(bottle)
         trust_egress_ca(bottle)
         point_at_host(bottle)
     else:
-        # Running, so its token is kept: bottled, if it had stopped, binds it again as it starts.
-        daemon.start()
+        # Running, so its token is kept: the decider, if it had stopped, binds it again as it starts.
+        runner.ensure_deciding()
     return bottle
 
 
@@ -646,7 +654,7 @@ def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
     """Replace this process with `argv` running in the bottle, starting it if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    command = smolvm.exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
+    command = runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
     os.execvp(command[0], command)
 
 
@@ -658,7 +666,7 @@ def list_all() -> list[tuple[Bottle, str]]:
     """Every bottle with its current state: its machine's, unless setup never finished."""
     result = []
     for bottle in sorted(load().values(), key=lambda b: b.created):
-        state = bottle.status if bottle.status != "ready" else (smolvm.state(bottle.machine) or "missing")
+        state = bottle.status if bottle.status != "ready" else (runner_of(bottle).state(bottle.machine) or "missing")
         result.append((bottle, state))
     return result
 
@@ -697,9 +705,10 @@ def delete(name: str) -> None:
     bottle = get(name)
     failures = []
     # The registry says the machine is the bottle's: smolvm has no labels to ask.
+    runner = runner_of(bottle)
     for step, action in (
-        ("egress", lambda: daemon.release_egress(bottle.name)),
-        ("machine", lambda: smolvm.delete(bottle.machine)),
+        ("egress", lambda: runner.release(bottle.name)),
+        ("machine", lambda: runner.delete(bottle.machine)),
         ("egress CA", lambda: ca.forget(bottle.name)),
     ):
         try:

@@ -232,7 +232,7 @@ class Daemon:
         recipient, queues the event and waits until the session takes it, so
         this returns once it has.
         """
-        from bottle import bottles, smolvm  # bottles imports this module
+        from bottle import bottles  # bottles imports this module
 
         registry = await asyncio.to_thread(bottles.load)
         if messages.is_address(to):
@@ -246,7 +246,7 @@ class Daemon:
             # The same whether there's no such bottle or the sender may not reach it: a refusal gives nothing away.
             raise ServiceError(404, "Not Found", f"no running bottle you can reach as {to}")
         reply_to = await asyncio.to_thread(messages.address, sender, target)
-        command = smolvm.exec_command(
+        command = bottles.runner_of(bottle).exec_command(
             bottle.machine, [BOTTLE_EVENT, "send", "-t", str(DELIVERY_TIMEOUT), "-f", reply_to], user=bottles.USER)
         process = await asyncio.create_subprocess_exec(
             *command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

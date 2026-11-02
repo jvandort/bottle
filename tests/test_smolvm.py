@@ -129,13 +129,13 @@ class SmolvmBottleTest(GitTestCase):
 
         bind = lambda bottle, *args: (self.calls.append(f"bind {bottle}"), ("127.0.0.1:47329", "token"))[1]
         for target, name, value in (
-            (bottles.smolvm, "create", create), (bottles.smolvm, "start", start), (bottles.smolvm, "stop", stop),
-            (bottles.smolvm, "delete", delete), (bottles.smolvm, "exec_", exec_),
-            (bottles.smolvm, "state", lambda name: self.machines.get(name)),
+            (bottles.runners.smolvm, "create", create), (bottles.runners.smolvm, "start", start), (bottles.runners.smolvm, "stop", stop),
+            (bottles.runners.smolvm, "delete", delete), (bottles.runners.smolvm, "exec_", exec_),
+            (bottles.runners.smolvm, "state", lambda name: self.machines.get(name)),
             (bottles.images, "archive_of", lambda tag: archive),
             (bottles.daemon, "bind_decider", bind),
             (bottles.daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
-            (bottles.prereqs, "ensure_smolvm", lambda: None),
+            (bottles.runners.prereqs, "ensure_smolvm", lambda: None),
             (bottles.features_, "ensure_built", lambda image, specs: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda: []),
             (bottles.auth, "ensure_logged_in", lambda specs: None),
@@ -208,7 +208,7 @@ class SmolvmBottleTest(GitTestCase):
         self.assertNotIn("b", bottles.load())
 
     def test_a_failed_start_rolls_the_bottle_back(self) -> None:
-        with mock.patch.object(bottles.smolvm, "start", side_effect=BottleError("no hypervisor")):
+        with mock.patch.object(bottles.runners.smolvm, "start", side_effect=BottleError("no hypervisor")):
             with self.assertRaisesRegex(BottleError, "no hypervisor"):
                 self.create()
         self.assertEqual(self.machines, {})
