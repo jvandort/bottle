@@ -16,6 +16,7 @@ features.ensure_built, and goes through the runner once runners can be remote.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +24,7 @@ from typing import Protocol
 from bottle import daemon, images, prereqs, repos, smolvm
 from bottle.errors import BottleError
 from bottle.host import Served
+from bottle.store import bottle_home, read_json, write_json
 
 LOCAL = "local"
 
@@ -203,10 +205,112 @@ class RemoteRunner:
 
 
 _LOCAL = LocalRunner()
+# A runner's name: like a bottle's, so it's safe in a path and a shell.
+NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def registry_path() -> Path:
+    return bottle_home() / "runners.json"
+
+
+def registered() -> dict[str, dict]:
+    """Every remote runner added, by name: each one's {"ssh": destination}."""
+    return (read_json(registry_path()) or {}).get("runners", {})
+
+
+def register(name: str, destination: str) -> None:
+    if name == LOCAL or not NAME_PATTERN.fullmatch(name):
+        raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
+    runners = registered()
+    runners[name] = {"ssh": destination}
+    write_json(registry_path(), {"version": 1, "runners": runners})
+
+
+def forget(name: str) -> None:
+    runners = registered()
+    if runners.pop(name, None) is not None:
+        write_json(registry_path(), {"version": 1, "runners": runners})
 
 
 def get(name: str = LOCAL) -> Runner:
-    """The runner named `name`."""
-    if name != LOCAL:
+    """The runner named `name`: this machine, or one added with `bottle runner add`."""
+    if name == LOCAL:
+        return _LOCAL
+    entry = registered().get(name)
+    if entry is None:
+        raise BottleError(f"no runner named {name!r}; add one with `bottle runner add {name} --ssh DESTINATION`")
+    from bottle import ssh
+
+    return RemoteRunner(name, ssh.SshTransport(name, entry["ssh"]))
+
+
+def add(name: str, destination: str, ask=None) -> "ssh.Check":
+    """Add a remote runner: check it over ssh, set up what bottle can (asking first), and record it.
+
+    `ask` is asked whether to install smolvm there, given what it's about to
+    do; without it, a runner missing smolvm is refused. What bottle can't set
+    up itself refuses it, saying what's missing.
+    """
+    from bottle import ssh
+
+    if name == LOCAL or not NAME_PATTERN.fullmatch(name):
+        raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
+    known = registered().get(name)
+    if known is not None and known["ssh"] != destination:
+        raise BottleError(f"runner {name} is already {known['ssh']}; `bottle runner remove {name}` first")
+    transport = ssh.SshTransport(name, destination)
+    check = transport.check()
+    missing = check.missing()
+    if missing:
+        raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(missing)}")
+    if not check.smolvm:
+        question = f"{destination} has no smolvm. Install its latest release into ~/.bottle/smolvm there?"
+        if ask is None or not ask(question):
+            raise BottleError(f"{destination} needs smolvm")
+        transport.install_smolvm()
+        check = transport.check()
+    transport.ship()
+    register(name, destination)
+    return check
+
+
+def status(names: list[str] = ()) -> list[dict]:
+    """Each runner, or those named: where it is, whether it can be reached and run bottles, and its bottles."""
+    from bottle import bottles, ssh
+
+    on: dict[str, list[str]] = {}
+    for bottle in bottles.load().values():
+        on.setdefault(bottle.runner, []).append(bottle.name)
+    remotes = registered()
+    rows = []
+    for name in names or [LOCAL, *sorted(remotes)]:
+        row: dict = {"name": name, "bottles": sorted(on.get(name, []))}
+        if name == LOCAL:
+            rows.append(row | {"ssh": None, "reachable": True})
+            continue
+        if name not in remotes:
+            rows.append(row | {"state": "missing"})
+            continue
+        row["ssh"] = remotes[name]["ssh"]
+        try:
+            check = ssh.SshTransport(name, row["ssh"]).check()
+        except BottleError as e:
+            rows.append(row | {"reachable": False, "error": str(e)})
+            continue
+        rows.append(row | {"reachable": True, "os": check.os, "arch": check.arch, "smolvm": check.smolvm,
+                           "missing": check.missing() + ([] if check.smolvm else ["smolvm"])})
+    return rows
+
+
+def remove(name: str) -> None:
+    """Forget a remote runner with no bottles. Nothing on it is touched."""
+    from bottle import bottles
+
+    if name == LOCAL:
+        raise BottleError("the local runner is this machine; it can't be removed")
+    if name not in registered():
         raise BottleError(f"no runner named {name!r}")
-    return _LOCAL
+    on = sorted(b.name for b in bottles.load().values() if b.runner == name)
+    if on:
+        raise BottleError(f"runner {name} has bottles: {', '.join(on)}; delete them first")
+    forget(name)

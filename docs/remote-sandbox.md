@@ -188,7 +188,7 @@ agent built and kept in its checkout is its own to rebuild.
 
 | Command | |
 | --- | --- |
-| `bottle runner add NAME --ssh DESTINATION` | Register a runner: the ssh destination (an `~/.ssh/config` host, or `user@host`) `--runner NAME` means. Checks it as `status` does, and prepares it: the runner code, and smolvm if missing (asking first) |
+| `bottle runner add NAME --ssh DESTINATION` | Register a runner: the ssh destination (an `~/.ssh/config` host, or `user@host`) `--runner NAME` means. Checks it as `status` does, and prepares it: the runner code, and smolvm if missing (asking first: smolvm's latest Linux release, checksum checked, into `~/.bottle/smolvm`) |
 | `bottle runner status [NAME]` | Each runner: reachable or not, its OS and architecture, what it's missing (kvm, Python 3.11+, git, smolvm), and its bottles |
 | `bottle runner stop NAME` | Stop every bottle on the runner, to shut the machine down. Their disks stay on the runner |
 | `bottle runner remove NAME` | Forget a runner with no bottles |

@@ -136,6 +136,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     shutdown.set_defaults(run=_shutdown, parser=shutdown)
 
+    runner = commands.add_parser("runner", help="the machines bottles run on: this one, and others over ssh")
+    runner_commands = runner.add_subparsers(required=True)
+    runner_add = runner_commands.add_parser(
+        "add", help="add a machine to run bottles on, over ssh",
+        description="Add a Linux machine to run bottles on, reached over ssh as you reach it. Checks what it has, "
+        "installs smolvm there if it's missing (asking first), and copies bottle's code over.",
+    )
+    runner_add.add_argument("name", metavar="RUNNER", help="its name, as `bottle new --runner` takes it")
+    runner_add.add_argument("--ssh", required=True, metavar="DESTINATION",
+                            help="where ssh reaches it: a Host from ~/.ssh/config, or user@host")
+    runner_add.set_defaults(run=_runner_add, parser=runner_add)
+    runner_status = runner_commands.add_parser(
+        "status", help="show runners: reachable or not, what they're missing, their bottles")
+    runner_status.add_argument("names", nargs="*", metavar="RUNNER", help="the runners to show (default: all)")
+    runner_status.add_argument("--json", action="store_true", help="print JSON: one object per runner")
+    runner_status.set_defaults(run=_runner_status, parser=runner_status)
+    runner_remove = runner_commands.add_parser(
+        "remove", help="forget a runner with no bottles", description="Forget a runner with no bottles on it. "
+        "Nothing on the machine is touched.")
+    runner_remove.add_argument("name", metavar="RUNNER", help="the runner to forget")
+    runner_remove.set_defaults(run=_runner_remove, parser=runner_remove)
+
     daemon = commands.add_parser(
         "daemon",
         help="control bottled, which decides bottles' connections (started automatically when needed)",
@@ -335,6 +357,8 @@ def _status(args: argparse.Namespace) -> int:
         print(("\n" if n else "") + f"{row['name']}  {row['state']}")
         if row["state"] == "missing":
             continue
+        if row.get("runner", "local") != "local":
+            print(f"  runner    {row['runner']}")
         print(f"  memory    {row['memory']}")
         print(f"  features  {', '.join(row['features']) or '-'}")
         for mount in row["mounts"]:
@@ -344,6 +368,52 @@ def _status(args: argparse.Namespace) -> int:
                 print(f"    {remote}")
         if not row["mounts"]:
             print("  no repo")
+    return 0
+
+
+def _runner_add(args: argparse.Namespace) -> int:
+    from bottle import runners
+
+    def ask(question: str) -> bool:
+        if not sys.stdin.isatty():
+            return False
+        return input(f"{question} [Y/n] ").strip().lower() in ("", "y", "yes")
+
+    check = runners.add(args.name, args.ssh, ask)
+    print(f"Added runner {args.name} ({args.ssh}): {check.os} {check.arch}")
+    print(f"Make a bottle there with: bottle new --runner {args.name} ...")
+    return 0
+
+
+def _runner_status(args: argparse.Namespace) -> int:
+    import json
+
+    from bottle import runners
+
+    rows = runners.status(args.names)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    table = [("NAME", "SSH", "STATE", "BOTTLES")]
+    for row in rows:
+        if row.get("state") == "missing":
+            state = "missing"
+        elif not row["reachable"]:
+            state = "unreachable"
+        elif row.get("missing"):
+            state = "needs " + ", ".join(row["missing"])
+        else:
+            state = f"ready{' ' + row['os'] + ' ' + row['arch'] if row.get('os') else ''}"
+        table.append((row["name"], row.get("ssh") or "-", state, ", ".join(row["bottles"]) or "-"))
+    _table(table)
+    return 0
+
+
+def _runner_remove(args: argparse.Namespace) -> int:
+    from bottle import runners
+
+    runners.remove(args.name)
+    print(f"Removed runner {args.name}")
     return 0
 
 

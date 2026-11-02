@@ -12,6 +12,7 @@ would ask before setting up, the controller asks its user first.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -76,6 +77,10 @@ def answer(op: str, request: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    # The smolvm bottle installed here, unless one's named: one on PATH is used only without it.
+    installed = Path.home() / ".bottle" / "smolvm" / "current" / "smolvm"
+    if not os.environ.get("BOTTLE_SMOLVM") and installed.exists():
+        os.environ["BOTTLE_SMOLVM"] = str(installed)
     if len(argv) != 1:
         print("usage: python3 -m bottle.remote OP < ARGS.json", file=sys.stderr)
         return 2
