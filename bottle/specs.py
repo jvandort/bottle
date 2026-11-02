@@ -19,6 +19,7 @@ and resolved again whenever a bottle is created.
 
 import json
 import re
+import platform
 import subprocess
 from pathlib import Path
 
@@ -54,8 +55,12 @@ def read(path: Path) -> dict:
         raise BottleError(f"spec {path}: {e}") from None
 
 
-def canonical(data: object) -> dict:
-    """Validate a spec and put it in canonical form, as `bottle new` would accept it."""
+def canonical(data: object, memory_mib: int | None = None, where: str = "this machine") -> dict:
+    """Validate a spec and put it in canonical form, as `bottle new` would accept it.
+
+    Its memory must fit `memory_mib`, the memory of the machine it's for,
+    `where`: by default this one.
+    """
     from bottle import features  # imports images, which loading a spec doesn't otherwise need
 
     if not isinstance(data, dict):
@@ -74,7 +79,7 @@ def canonical(data: object) -> dict:
         raise BottleError('a spec needs its memory, a size in M or G, e.g. {"memory": "8G"}')
     if not isinstance(memory, str):
         raise BottleError('memory is a string: a size in M or G, e.g. "8G"')
-    spec = {"features": canonical, "memory": canonical_memory(memory)}
+    spec = {"features": canonical, "memory": canonical_memory(memory, memory_mib, where)}
     permissions = data.get("permissions", [])
     if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
         raise BottleError(f'permissions is a list of permissions, e.g. ["message-any"]; there are {", ".join(PERMISSIONS)}')
@@ -106,20 +111,26 @@ def canonical_features(specs: list[str]) -> tuple[str, ...]:
     return tuple(result.values())
 
 
-def canonical_memory(value: str) -> str:
-    """Validate a memory setting: a size in M or G (e.g. 8G) no bigger than the machine's."""
+def canonical_memory(value: str, memory_mib: int | None = None, where: str = "this machine") -> str:
+    """Validate a memory setting: a size in M or G (e.g. 8G) no bigger than the machine's (`memory_mib`, `where`)."""
     match = MEMORY_PATTERN.fullmatch(value)
     if not match:
         raise BottleError(f"invalid memory {value!r}: give a size in M or G, e.g. 8G")
     amount, unit = int(match[1]), match[2].upper()
-    host = host_memory_mib()
+    host = host_memory_mib() if memory_mib is None else memory_mib
     if amount * (1024 if unit == "G" else 1) > host:
-        raise BottleError(f"memory {value} is more than this machine has ({host}M)")
+        raise BottleError(f"memory {value} is more than {where} has ({host}M)")
     return f"{amount}{unit}"
 
 
 def host_memory_mib() -> int:
-    """This machine's memory, in MiB."""
+    """This machine's memory, in MiB: a Mac's from sysctl, Linux's from /proc/meminfo."""
+    if platform.system() == "Linux":
+        with open("/proc/meminfo") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+        raise BottleError("/proc/meminfo has no MemTotal")
     memsize = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True).stdout)
     return memsize // (1024 * 1024)
 

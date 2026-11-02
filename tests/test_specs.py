@@ -1,3 +1,4 @@
+import io
 import json
 import unittest
 from pathlib import Path
@@ -96,3 +97,16 @@ class ReadTest(unittest.TestCase):
     def test_a_missing_file(self) -> None:
         with self.assertRaisesRegex(BottleError, f"can't read spec {self.path}"):
             specs.read(self.path)
+
+
+class RunnerMemoryTest(unittest.TestCase):
+    def test_a_spec_for_a_runner_fits_the_runners_memory(self) -> None:
+        self.assertEqual(specs.canonical({"memory": "8G"}, 16384, "runner box")["memory"], "8G")
+        with self.assertRaisesRegex(BottleError, r"memory 32G is more than runner box has \(16384M\)"):
+            specs.canonical({"memory": "32G"}, 16384, "runner box")
+
+    def test_linux_says_its_memory_in_proc_meminfo(self) -> None:
+        meminfo = io.StringIO("MemFree:  1000 kB\nMemTotal:       16384000 kB\n")
+        with mock.patch.object(specs.platform, "system", return_value="Linux"), \
+                mock.patch("builtins.open", return_value=meminfo):
+            self.assertEqual(specs.host_memory_mib(), 16000)

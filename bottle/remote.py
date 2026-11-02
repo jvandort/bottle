@@ -34,6 +34,8 @@ def _run(op: str, args: dict):
     match op:
         case "archive":
             return _path(local.archive(args["tag"]))
+        case "memory_mib":
+            return local.memory_mib()
         case "mirror":
             from bottle import mirrors
 

@@ -226,7 +226,7 @@ def create(
     on `runner`.
     """
     on = runners.get(runner)
-    spec = specs.canonical(spec)
+    spec = specs.canonical(spec, on.memory_mib(), "this machine" if runner == runners.LOCAL else f"runner {runner}")
     installed = [f.spec for f in features_.resolve(list(spec["features"]))]
     existing = load()
     if not NAME_PATTERN.fullmatch(name):

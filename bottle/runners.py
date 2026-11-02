@@ -46,6 +46,9 @@ class Runner(Protocol):
     def ensure_ready(self) -> None:
         """Everything the runner needs to run machines, set up (asking first) or refused."""
 
+    def memory_mib(self) -> int:
+        """How much memory the runner has, in MiB: what a bottle's spec there must fit."""
+
     def archive(self, tag: str) -> Path | None:
         """The archive `tag` was last built into, in the runner's image store; None if it isn't built there."""
 
@@ -110,6 +113,11 @@ class LocalRunner:
 
     def ensure_ready(self) -> None:
         prereqs.ensure_smolvm()
+
+    def memory_mib(self) -> int:
+        from bottle import specs
+
+        return specs.host_memory_mib()
 
     def archive(self, tag: str) -> Path | None:
         return images.archive_of(tag)
@@ -203,6 +211,9 @@ class RemoteRunner:
 
     def ensure_ready(self) -> None:
         pass  # what it's missing is the controller's to ask about, and set up when the runner's added
+
+    def memory_mib(self) -> int:
+        return self._call("memory_mib")
 
     def archive(self, tag: str) -> Path | None:
         found = self._call("archive", tag=tag)

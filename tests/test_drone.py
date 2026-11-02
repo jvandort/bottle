@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, daemon, decider, host, mirrors, repos, runners
+from bottle import bottles, daemon, decider, host, images, mirrors, repos, runners
 from bottle.host import Remote, Served
 from tests.support import GitTestCase, run
 
@@ -39,6 +39,27 @@ if [ "$1 $2 $3 $4" = "--error-format json machine start" ]; then
   printf '{"args": "%s", "token": "%s"}' "$*" "$SMOLVM_INTERCEPTOR_TOKEN" > "$HOME/started.json"
 fi
 echo '{"state": "running"}'
+"""
+
+
+# smolvm there with machines: made, started, stopped, deleted and asked about, each a file; exec runs nothing.
+STATEFUL_SMOLVM = r"""#!/usr/bin/env bash
+shift 2  # --error-format json
+op="$1 $2"; shift 2
+while [ $# -gt 0 ]; do [ "$1" = --name ] && name=$2; [ "$1" = -- ] && break; shift; done
+machines="$HOME/machines"; mkdir -p "$machines"
+case "$op" in
+  "machine create") echo created > "$machines/$name" ;;
+  "machine start")
+    echo running > "$machines/$name"
+    printf '{"args": "%s", "token": "%s"}' "$*" "$SMOLVM_INTERCEPTOR_TOKEN" > "$HOME/started.json" ;;
+  "machine stop") echo stopped > "$machines/$name" ;;
+  "machine delete") rm -f "$machines/$name" ;;
+  "machine status")
+    if [ -f "$machines/$name" ]; then printf '{"state": "%s"}' "$(cat "$machines/$name")"
+    else echo '{"error": {"code": "NOT_FOUND", "message": "machine not found"}}' >&2; exit 1; fi ;;
+  "machine exec") cat > /dev/null; echo "$*" >> "$HOME/execs" ;;
+esac
 """
 
 
@@ -111,6 +132,36 @@ class DroneTest(GitTestCase):
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/remotes/origin/main"), new)
         # The runner kept what the bottle was bound with, to bind it again if its bottled restarts.
         self.assertIn('"b"', (self.remote / ".bottle" / "bindings.json").read_text())
+
+    def test_bottle_new_on_a_runner_makes_a_drone_there(self) -> None:
+        (self.remote / ".bottle" / "smolvm" / "current" / "smolvm").write_text(STATEFUL_SMOLVM)
+        # Its base image built there already, from what it's built from now.
+        store = self.remote / ".bottle" / "images"
+        store.mkdir(parents=True)
+        (store / "base.tar").write_text("an archive")
+        (store / "index.json").write_text(json.dumps({images.tag("base"): {
+            "archive": "base.tar", "labels": {images.INPUTS_LABEL: images.inputs_hash("base")}}}))
+        repo = self.make_repo("app")
+
+        bottle = bottles.create({"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],
+                                runner="box")
+
+        self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.tar"))
+        machine = self.remote / "machines" / bottle.machine
+        self.assertEqual(machine.read_text().strip(), "running")
+        mirror = self.remote / ".bottle" / "git" / f"{mirrors.key(repo / '.git')}.git"
+        self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
+                         run("git", "-C", repo, "rev-parse", "main"))
+        execs = (self.remote / "execs").read_text()
+        self.assertIn("bottle contract", execs)
+        self.assertIn("/mnt/objects/workspace", execs)   # its checkout borrows the mirror's objects, mounted there
+        self.assertEqual(bottles.status(["drone"])[0]["state"], "running")
+
+        bottles.stop("drone")
+        self.assertEqual(machine.read_text().strip(), "stopped")
+        bottles.delete("drone")
+        self.assertFalse(machine.exists())
+        self.assertEqual(bottles.load(), {})
 
     def test_a_drones_flows_elsewhere_are_decided_there(self) -> None:
         runners.get("box").start("bottle-b", "b", (), ())
