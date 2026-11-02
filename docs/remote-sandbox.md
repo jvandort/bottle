@@ -1,146 +1,282 @@
-# Remote sandboxes
+# Remote runners
 
-Where bottle (and folio, which drives it) would split to run sandboxes on
-another machine: give it a Linux host reachable over ssh, and a thread's
-sandbox runs there while it's live and is kept on the Mac while it's paused.
-Nothing here is built. This is the seam to keep when changing the code, so
-that building it later moves one boundary instead of untangling many.
+Where bottle would split to run bottles on another machine: register a Linux
+host reachable over ssh as a runner, and `bottle new --runner NAME` makes a
+bottle there, a drone, while everything that's the user's stays on their own
+machine. Nothing here is built yet; this is the design, and the order it's
+built in.
 
-## The seam: control plane and runner
+## Terms
 
-Some things belong to the user and stay on their Mac; some have to sit next
-to the VM. The seam runs between them:
+- **Driver**: the user's machine, where the bottle commands and bottled run.
+  The source of truth: the registry, credentials, the repos.
+- **Runner**: a machine that runs bottles. `local`, the driver itself, is
+  one, and the default; a remote runner is reached over ssh.
+- **Drone**: a bottle on a remote runner.
+- **Hub**: the repo a bottle's git meets in, whose objects it borrows and
+  whose remotes it's served: the user's own repo, or one folio owns (a
+  thread's notes). Bottle never creates a hub.
+- **Mirror**: a remote runner's `git clone --mirror` of a hub. Its one
+  remote is named `hub`.
+- **Link**: the one ssh connection between the driver and a remote runner.
 
-| Control plane (the user's Mac) | Runner (next to the VM: the Mac today, a Linux host later) |
+## What lives where
+
+| The driver | Every runner |
 | --- | --- |
-| folio's threads, lanes and paused snapshots | the machines (smolvm, which runs on Linux over KVM too) |
-| the user's repo, and the git service that reads and writes it | image builds and the image store |
-| credentials (the Keychain), the egress CAs' keys, logins | the decider: smolvm asks it on host loopback, so it has to be on the same host |
-| specs, features, the registry of bottles | deciding direct and deny, judged against the runner's own network |
+| the registry of bottles and runners | smolvm's machines |
+| the catalog: features, specs | images, built and kept on the runner (its own CPU architecture) |
+| credentials, and each bottle's credential CA | the decider: a bottle's public connections are decided where it runs |
+| hubs, and every push into them | serving a bottle's fetches at `bottle.host`: from the hub locally, from the runner's mirror remotely |
+| `git fetch origin` in a hub before an upstream fetch | the HTTP cache, and each bottle's cache CA |
+| messages between bottles | (remote) the mirrors, and a runner daemon |
 
-Everything bottle does today falls on one side:
+Locally both columns are the same machine, and the code is the same as
+remotely wherever it can be. What differs is where a fetch is served from:
+the hub itself, which is on the same disk, or a mirror of it.
 
-- **Driver** (`smolvm.py`, `prereqs.py`): machine lifecycle and exec. *Runner.*
-- **Image builder** (`images.py`): builds the base and feature images with
-  buildah in a throwaway machine, using only the driver's machines and exec
-  (inputs in as a tar on stdin, the archive out on stdout), and keeps them as
-  OCI archives. *Runner*, unchanged: exec is what crosses ssh.
-- **Catalog** (`features.py`, `specs.py`, `containers/`): what features
-  exist, how specs compose them. *Control plane*; the runner is handed what
-  to build.
-- **Gateway** (`egress.py`, `decider.py`, `daemon.py`): split down the
-  middle; see below.
-- **Credential broker** (`auth.py`, `ca.py`, `Injection`): *control plane*,
-  so a credential never leaves the Mac.
-- **Git exchange** (`host.py`, `hooks/pre-receive`, the checkout in
-  `bottles.py`): *control plane*, since it writes the user's repo.
-- **Orchestrator** (`bottles.py`, and folio): *control plane*. It asks the
-  runner for machines and execs, and sets the guest up through them.
+## The runner interface
 
-## The gateway splits between decide and serve
+Bottle's code reaches machines through one Python interface, `Runner`, and
+never runs smolvm itself (only `smolvm.py` does, under the local runner):
+
+- `ensure_ready()`: smolvm installed, `/dev/kvm` usable, and the rest a
+  runner needs (see `bottle runner status`).
+- Images: look one up by tag, build one from a context the driver sends,
+  forget one, remove unused archives.
+- Machines: create (from an image, with mounts, env, memory and CPUs),
+  start (always bound to the decider), stop, delete, state.
+- Exec: run a command and return its output, or the command line that runs
+  it attached to a terminal.
+- Egress: bind a bottle at the decider (token, policy, which flows to
+  redirect), release it.
+- `objects(hub)`: the path on the runner whose objects a machine mounts for
+  that hub.
+
+`LocalRunner` is today's code, run in-process. `SshRunner` does the same over
+the link. `bottles.py` can't tell which it has. Folio still drives bottle
+through its CLI and isn't changed: a drone is a bottle like any other.
+
+## The link
+
+bottled holds one ssh connection to each remote runner it needs, using the
+user's own ssh setup (`~/.ssh/config`, their keys and agent), as an ssh
+ControlMaster. Everything between the two machines goes over it, as channels
+inside the one connection, so none of them logs in again:
+
+- **Driver to runner**: runner operations (create, start, build, ...), and
+  exec, a shell included, byte-transparent with a TTY when attached.
+  smolvm's `exec` always gets `-i`: without it, output is cut at 11 MiB.
+- **Runner to driver**: `ssh -R` forwards a Unix socket on the runner,
+  `~/.bottle/link.sock` (owner-only, sshd's default), to bottled's. Each
+  connection to it is a channel back: a bottle's push, a mirror's refresh,
+  a credentialed request, a message. Either side opens channels whenever it
+  needs to.
+
+On the runner, a small daemon holds the decider and its tokens, as bottled
+does locally. It runs detached, not as a child of the ssh session, so a
+dropped link doesn't take it down, and its tokens are on disk. Its code is
+this repo's Python, copied over on connect into `~/.bottle/runner/<hash>/`,
+named by its content's hash, so a runner never runs code older than the
+driver's. Everything bottle keeps on a runner is under `~/.bottle`; smolvm
+keeps its own state where it does.
+
+### When the link is down
+
+A runner being off is normal, not an error: it's registered, and unreachable.
+
+- bottled connects when a command needs the runner or a drone there is
+  running, backs off to about a minute between attempts, and stops trying
+  once no drone there is running.
+- A command for an unreachable runner fails at once, saying so and what ssh
+  said. `bottle status` shows its drones as `unreachable` and everything
+  else as usual. Local bottles never wait on a remote.
+- A running drone keeps its public network: the decider is on the runner.
+  Whatever needs the driver fails, and the guest sees it fail: fetches,
+  pushes, credentialed requests, messages.
+- On reconnecting, bottled starts the runner daemon if it's gone (the runner
+  rebooted), forwards the socket again, and reads the machines' states again.
+
+## Git
+
+A bottle's git is as it is today (see `bottle/host.py`): its checkout at each
+mount's path borrows the hub's objects from a read-only mount at
+`/mnt/objects<path>`, and its remotes are at `http://bottle.host/git/...`,
+each a view (`upstream`, `heads`, `ns/N`) of the hub, with pushes confined to
+a namespace, fast-forward only, no deletes, bottle's hooks, and follow after.
+
+What a runner adds is where fetches are served from.
+
+- **Locally**, from the hub, as today. Before an `upstream` fetch, bottled
+  runs `git fetch origin` in the hub.
+- **On a remote runner**, from its mirror of the hub. Before serving any
+  fetch, the runner brings the mirror up to date: `git fetch --prune hub`,
+  every ref, over the link, through git's `ext::` transport and a relay to
+  the link's socket, where bottled runs `git upload-pack` in the hub. For an
+  `upstream` fetch, the relay asks bottled to run `git fetch origin` in the
+  hub first. If the refresh fails, so does the fetch: a drone only ever sees
+  the hub's refs as they are when it fetches. The runner then serves the
+  view from the mirror, with the same code bottled serves the hub with, and
+  the guest, borrowing the mirror's objects, receives little but refs.
+- **Pushes** always go to the driver, into the hub, through bottled, with
+  every rule above. The mirror catches up at the next fetch.
+
+So the runner is a caching proxy for the hub, never a second source of
+truth. Which remotes a bottle may use is checked where the bottle runs, from
+what it was bound with. The driver serves a runner's refresh of any hub
+with a bottle on that runner, on nobody's behalf.
+
+A mirror is a plain one: refs exactly the hub's, and git's own gc. So a
+drone is exposed to gc exactly as a local bottle is (docs/TODO.md: objects a
+bottle borrows aren't protected from gc), and its disk stays bounded. A
+mirror is kept after its last drone is deleted, as an image is, so the next
+drone doesn't start with a full clone. A drone's mount is the mirror's
+objects at the same `/mnt/objects<path>`, and a snapshot from one runner
+resumes on another: folio repoints a checkout's objects and remotes on resume.
+
+`git fetch origin` before an upstream fetch isn't throttled: concurrent
+fetches of one hub share the one in flight. If origin can't be reached, the
+fetch is served what the hub has, as today; that's origin being down, not
+the link.
+
+A runner's mirror is identified by the hub's key, `<name>-<hash>`, the name
+and a hash of the hub's path, as folio keys repos (`folio/folio/repos.py`).
+
+## Egress, credentials and the cache
 
 bottled answers each guest connection in two parts, already two methods:
 
-- **`Gateway.decide(flow)`**: from the destination and the flow's first bytes
-  (a TLS ClientHello's name, an HTTP Host), allow direct, deny, or redirect.
-  It needs only policy. This runs on the runner.
+- **`Gateway.decide(flow)`**: from the destination and the flow's first
+  bytes, allow direct, deny, or redirect. It needs only policy, and runs on
+  the runner. "Private" addresses are the runner's: a drone can't reach the
+  driver's VPN routes or local network, only the runner's, and only as the
+  decider allows.
 - **`Gateway.serve(flow, decision, ...)`**: be the far end of a redirected
-  flow. Either it serves `bottle.host`'s git remotes, or it terminates TLS for
-  a credential's host, attaches the credential and connects to the real server.
-  This needs the repo and the secrets, so it stays on the Mac.
+  flow. Serving `bottle.host`'s fetches, and the HTTP cache, run on the
+  runner. Pushes, messages, and terminating TLS for a credential's host run
+  on the driver: a drone's are carried over the link.
 
-A remote decider answers direct and deny itself, and carries each redirected
-flow over the ssh connection to the Mac, where `serve` handles it as today.
-Credentialed requests then leave from the Mac. That costs a round trip, and
-it keeps the broker's promise.
+The decider protocol between smolvm and the decider is in `decider.py`'s
+docstring. A flow smolvm sends before its ClientHello is complete is
+redirected (`OPENING`) wherever it's terminated, which reads the rest.
 
-The decider protocol between smolvm and bottled is in `decider.py`'s
-docstring: a token per bottle, the machine's identity, the destination and up
-to 8192 first bytes, and one byte back. smolvm sends at most what arrived in
-its first 100 ms, so `decide` can be shown an incomplete ClientHello; for a
-credential's port it then redirects (`OPENING`) and `serve` reads the rest.
-That case goes to the Mac too.
+Each bottle has its own credential CA, as today, made and kept on the
+driver, its key never leaving it, constrained to the hosts the bottle's
+credentials name. A drone's cached hosts are terminated on its runner, so
+each bottle also gets a cache CA, made and kept on its runner, constrained
+to its cached hosts less its credential hosts: a host that's both is
+terminated on the driver, so the credential is attached. The bottle trusts
+both. On a local bottle the two can stay one CA, as today.
 
-## What crosses the connection
+## Images
 
-Everything between the two sides goes over one ssh connection:
+Built as today (`images.py`): buildah in a throwaway builder machine, the
+inputs sent in as a tar over exec's stdin and the archive read out over its
+stdout. On every runner the driver works out what to build (the tag, its
+inputs' hash, the context), and the runner builds it and keeps the archive
+in its own store, from images in that store. A remote runner's archives
+never come back. The inputs' hash includes the runner's CPU architecture, so
+an image is never taken for another architecture's. Feature installs choose
+their downloads by `dpkg --print-architecture`.
 
-- **Runner operations**: build an image (from a context the control plane
-  sends), create, start, stop and delete a machine, report its state, and
-  bind or release a bottle at the decider (token, policy, which flows to
-  redirect). The runner keeps its own state: images, machines, tokens.
-- **Exec**, byte-transparent both ways, with a TTY when attached: `ssh -t
-  host smolvm machine exec -i ...`. Folio's pause snapshots (`/workspace` and
-  `~/.claude`, as tar streams) come back to the Mac this way, and go out
-  again on resume. smolvm's `exec` must always get `-i`: without it, output
-  is held back and cut at 11 MiB without warning.
-- **Redirected flows**: git and credentialed TLS, back to the Mac's `serve`.
-- **The repo's objects**: a bottle's checkout borrows the repo's objects
-  from a read-only mount at `/mnt/repo/objects` (an alternates file). The
-  remote can't mount the Mac's repo, so it keeps a bare mirror of the
-  objects, brought up to date over ssh before a machine starts, and mounts
-  that at the same path. The path must stay the same: a snapshot restored
-  into a new bottle finds its objects there. Pushes still go through the git
-  service on the Mac, so they land in the user's repo.
+A paused thread resumes on any runner, whatever its architecture: what an
+agent built and kept in its checkout is its own to rebuild.
+
+## Commands
+
+| Command | |
+| --- | --- |
+| `bottle runner add NAME --ssh DESTINATION` | Register a runner: the ssh destination (an `~/.ssh/config` host, or `user@host`) `--runner NAME` means. Checks it as `status` does, and prepares it: the runner code, and smolvm if missing (asking first) |
+| `bottle runner status [NAME]` | Each runner: reachable or not, its OS and architecture, what it's missing (kvm, Python 3.11+, git, smolvm), and its bottles |
+| `bottle runner stop NAME` | Stop every bottle on the runner, to shut the machine down. Their disks stay on the runner |
+| `bottle runner remove NAME` | Forget a runner with no bottles |
+| `bottle new --runner NAME ...` | Make the bottle on that runner; default `local` |
+
+The registry records each bottle's runner. Every other command takes a
+bottle's name as today and finds its runner from the registry.
 
 ## What has to keep holding
 
-Wherever the runner is:
+Wherever a bottle runs:
 
 1. Nothing in the guest, root included, reaches the network except as the
    decider allows.
 2. The runner's own loopback and link-local addresses are never reachable,
    and private addresses (RFC 1918, ULA, CGNAT) only for an allowed name or
-   a credential's host. On a remote runner, "private" means the remote's
+   a credential's host. On a remote runner, "private" means the runner's
    network.
 3. Which bottle a connection belongs to comes from the token smolvm was
    started with and the first machine ID seen with it, never from the guest.
    Names from first bytes are the guest's claims: a private address is
    allowed by name only if the name resolves there.
-4. A credential never enters the guest, a log, or the runner. It's sent only
-   over TLS that bottled verified, to the host it belongs to.
+4. A credential never enters the guest, a log, or a remote runner. It's sent
+   only over TLS bottled verified, to the host it belongs to, from the driver.
 5. Git through `bottle.host` stays as folio's lanes need it, on disk in the
-   user's repo (gitnamespaces(7)):
-   - **Views**: `upstream` serves `refs/remotes/origin/*` as branches, plus
-     tags, after fetching origin at most once a minute. `heads` serves the
-     repo's own refs. `ns/N` serves only `refs/namespaces/N/`.
-   - **Pushes** (`push=ns/N`) are confined to `refs/namespaces/N/`,
-     append-only (no force-pushes or deletes), with one writer per
-     namespace, the repo's own hooks off, and the objects in the repo's own
-     store.
-   - **Folio** reads `refs/namespaces/T-out/` as the agent's branches,
-     writes `refs/namespaces/T-in/` for the bottle to read, and deletes both
-     with the thread.
+   hub (gitnamespaces(7)): the views, and pushes confined to
+   `refs/namespaces/N/`, append-only, one writer per namespace, the hub's
+   own hooks off, objects in the hub's own store. A remote runner serves a
+   fetch only once its mirror has the hub's refs as they are.
+6. The link being down never opens anything: what needs the driver fails.
 
-## What it means for the code now
+## Order of work
 
-- **One boundary, not two.** folio drives bottle through its CLI today
-  (`folio/folio/engine.py`), but nobody uses bottle without folio, and that
-  boundary puts the driver, broker and git exchange all on the same side. The
-  boundary remote sandboxes need is control plane vs runner. So folio can
-  call bottle's Python directly. The runner interface should be the one that
-  stays narrow: the operations above, with a local implementation (today's
-  code) and, later, an ssh one.
-- **Runner work goes on the runner side.** Watching the host's memory
-  pressure and having guests give memory back (docs/TODO.md) acts on
-  machines, so it belongs to the runner, not to the gateway's serving half.
-- **Keep `smolvm.py` the only module that runs smolvm**, and `decide` free
-  of anything that needs the repo or the Keychain.
+Each step is pushed as it lands; up to the hardware, it's tested with a
+fake ssh (which runs the command locally) and the fake smolvm the tests
+already have.
+
+1. Drop the pull-through throttle; concurrent fetches share one.
+2. The `Runner` interface and `LocalRunner`: `bottles.py`, `images.py`,
+   bottled's message delivery and `prereqs.py` go through it. No change in
+   behaviour.
+3. The registry records each bottle's runner; `bottle runner add`, `status`,
+   `remove`, and `bottle new --runner`; prerequisites checked per runner.
+4. Serving split: `bottle.host` fetches served runner-side from a given git
+   dir, with the step before an upstream fetch; pushes and messages handed
+   to the driver. Local behaviour unchanged.
+5. `SshRunner` and the link: the connection and reconnecting, the runner
+   daemon, the decider on the runner, the forwarded socket, exec and shells.
+6. Images built and kept on remote runners, the architecture in their hash.
+7. Mirrors: cloned and refreshed over the link, with `git fetch origin`
+   first for upstream; drones mount the mirror's objects.
+8. Across runners: stop, delete, `bottle shutdown`, `bottle runner stop`,
+   status, messages to drones, the link going down.
+9. The HTTP cache on the runner, and the cache CA.
+10. On a real x86_64 runner: the smolvm contract test, then a bottle end to
+    end. The README after.
+
+## Rejected
+
+- **A copy of the hub on the local runner too**, for one code path and gc
+  protection: hard-linking it is free at first, but it grows as the hub
+  repacks, and a copy that never removes objects grows forever.
+- **Filling a mirror by `git push` over ssh**: a second git path, outside
+  bottled. A runner already reaches bottled's git over the link.
+- **A guest's fetch writing the mirror**: it's shared by every drone of that
+  hub on the runner, and an agent is root in its machine.
+- **Bottle owning the hubs** (a bare repo per project, the user's checkout
+  a client of it): follow fast-forwards the user's checked-out branches in
+  the hub, so the hub is the repo they have open. A hub with a separate
+  checkout means two origins fetched separately and two places a branch
+  can be ahead. Worth revisiting for a drone of a repo with no checkout on
+  the driver.
+- **A drone fetching origin itself**: two views of upstream, and a private
+  repo's credential would have to reach the runner.
+- **A cache CA per runner**: one key would vouch for every bottle's cached
+  hosts there.
 
 ## Open questions
 
-- **Where the runner gets its code**: the runner side (the decider and
-  machine operations) is Python from this repo, so the remote needs it
-  installed. Copy it over ssh on connect, or require it installed.
-- **DNS**: smolvm answers guest DNS itself, from the first nameserver in the
-  host's `/etc/resolv.conf`, fixed when a machine starts. On a remote runner
-  that's the remote's resolver, which may not resolve names the Mac does
-  (a VPN's internal names).
-- **Losing the connection**: a running machine's redirected flows have
-  nowhere to go. Deny them and recover when ssh is back, or stop the machine.
-- **Images**: build on each runner, or build once and copy the archives.
-- **Several runners**, or the Mac and a remote at once: the registry would
-  record where each bottle lives.
-- **smolvm on Linux** reclaims guest memory with `MADV_DONTNEED`, so the
-  macOS accounting problem (smolvm#1944) doesn't apply there. Its other
-  limits (TCP relay table, DAX) are the same; see docs/TODO.md.
+- **New packs in a running drone**: whether objects a mirror's refresh adds
+  show up through smolvm's read-only mount while the machine runs. Git looks
+  for new packs when an object is missing, so they should, if the mount
+  shows new files. Matters for a mirror's gc and refreshes while drones run.
+- **DNS**: smolvm answers guest DNS from the first nameserver in the
+  runner's `/etc/resolv.conf`, fixed when a machine starts: the runner's
+  resolver, not the driver's.
+- **Pausing a runner's bottles**: `bottle runner stop` keeps their disks on
+  the runner. Folio's pause, which brings a thread's state back to the
+  driver, would be folio's, for a runner that's going away.
+- **Watching memory**: having guests give memory back under pressure
+  (docs/TODO.md) acts on machines, so it's the runner's. smolvm on Linux
+  reclaims guest memory with `MADV_DONTNEED`, so the macOS accounting
+  problem (smolvm#1944) doesn't apply there.
