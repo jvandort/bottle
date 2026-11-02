@@ -69,8 +69,8 @@ CONTRACT = (
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
-# Where the egress CA's certificate goes in a bottle: the base image points
-# NODE_EXTRA_CA_CERTS here too, for tools that don't read the system store.
+# Where the egress CA's certificate goes in a bottle's trust store, whose bundle
+# the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
 CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
 # Where a bottle on a runner elsewhere has its runner's CA for its cached hosts, which that runner answers.
 CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"

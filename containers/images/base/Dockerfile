@@ -7,8 +7,8 @@
 #     `bottle delete`'s check for unpushed work
 #   - sshd, for IDEs
 #   - ca-certificates, so bottle can install the egress CA (bottle/ca.py) in
-#     the trust store when the bottle starts; NODE_EXTRA_CA_CERTS points at it
-#     too, for Node tools (Claude Code among them)
+#     the trust store when the bottle starts; NODE_EXTRA_CA_CERTS points at
+#     the store's bundle, so Node tools (Claude Code among them) trust it too
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.
 
@@ -52,9 +52,11 @@ COPY entrypoint.sh /usr/local/bin/bottle-entrypoint
 COPY profile.sh /etc/profile.d/bottle.sh
 
 # ENV reaches `smolvm machine exec`; SSH sessions only see /etc/environment (via PAM).
-# The egress CA's certificate is installed at NODE_EXTRA_CA_CERTS when a
-# bottle starts (CA_CERTIFICATE in bottle/bottles.py); keep the two in sync.
-ENV LANG=C.UTF-8 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bottle-egress.crt
+# Node trusts its own roots, and NODE_EXTRA_CA_CERTS: the system bundle, which
+# update-ca-certificates rebuilds with every CA bottle installs when a bottle
+# starts (CA_CERTIFICATE and CACHE_CERTIFICATE in bottle/bottles.py), however
+# many there are.
+ENV LANG=C.UTF-8 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 RUN printf '%s\n' "LANG=$LANG" "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS" > /etc/environment
 
 LABEL org.opencontainers.image.title="bottle/base"

@@ -130,7 +130,7 @@ what naming it means; nothing else about that host opens up.
 
 Each bottle has an egress CA of its own, made with `openssl` in
 `~/.bottle/ca/<bottle>` when the bottle starts, and installed in that bottle's
-trust store (and at `NODE_EXTRA_CA_CERTS`, for Node tools); a bottle whose
+trust store (whose bundle `NODE_EXTRA_CA_CERTS` names, for Node tools); a bottle whose
 features name no credential or cached hosts has none. The CA carries a name constraint
 permitting only the hosts the bottle's credentials and cache name, which the bottle's own
 TLS clients enforce: a certificate for any other site is refused, whoever signs

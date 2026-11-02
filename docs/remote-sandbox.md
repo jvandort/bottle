@@ -172,7 +172,9 @@ credentials name. A drone's cached hosts are terminated on its runner, so
 each bottle also gets a cache CA, made and kept on its runner, constrained
 to its cached hosts less its credential hosts: a host that's both is
 terminated on the controller, so the credential is attached. The bottle trusts
-both. On a local bottle the two can stay one CA, as today.
+both, Node tools included: the base image points `NODE_EXTRA_CA_CERTS` at the
+trust store's bundle, which holds every CA bottle installs. On a local bottle
+the two can stay one CA, as today.
 
 ## Images
 
@@ -280,12 +282,6 @@ already have.
 
 ## Open questions
 
-- **Node and a drone's cache CA**: the base image points
-  `NODE_EXTRA_CA_CERTS` at the credential CA's certificate alone
-  (`bottle-egress.crt`), so Node tools on a drone don't trust its runner's
-  cache CA (`bottle-egress-cache.crt`), which the system trust store holds.
-  No feature caches a host Node tools fetch from yet. Pointing it at the
-  system bundle instead would cover both, and rebuild every image once.
 - **New packs in a running drone**: whether objects a mirror's refresh adds
   show up through smolvm's read-only mount while the machine runs. Git looks
   for new packs when an object is missing, so they should, if the mount
