@@ -34,7 +34,10 @@ with one writer, so neither side's push is ever rejected for what the other
 did: the bottle writes one lane, and whoever created it writes the other,
 directly in its own repo. bottled never serves that direction.
 
-Nothing is mirrored or watched: every request sees the repo as it is right now.
+Fetches are served from the host repo itself, or from a mirror of it that
+a bottle's runner keeps, brought up to date as each fetch starts (see Git):
+either way, a fetch sees the repo as it is right now. Pushes always go into
+the host repo, with every rule here.
 
 After a push, the host's checked-out branches follow it (hooks/follow.py):
 one whose upstream is a remote reading the push's namespace (folio's
@@ -71,7 +74,8 @@ import sys
 import tempfile
 import zlib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from typing import Protocol
+from dataclasses import dataclass, field
 from http.client import parse_headers
 from pathlib import Path
 
@@ -192,6 +196,8 @@ class HostServices:
     deliver: Callable[[str, str, str], Awaitable[None]] | None = None
     # The running bottles the asker may see: (asker) -> [{name, repo, thread}]; raises ServiceError.
     peers: Callable[[str], Awaitable[list[dict]]] | None = None
+    # Where its git is served from and goes to: the host repo, unless its runner says otherwise.
+    git: "Git" = field(default_factory=lambda: HostGit())
 
     def route(self, path: str) -> tuple[Served, Remote, str] | None:
         """The repo, remote and rest of path a /git/... request is for; None if none is served there."""
@@ -252,83 +258,137 @@ class HostServices:
 
     async def _git(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest,
                    writer: asyncio.StreamWriter) -> str:
-        git_dir = repo.git_dir
-        assert git_dir is not None                  # route() serves no repo without one
+        assert repo.git_dir is not None                  # route() serves no repo without one
         push = "git-receive-pack" in path_info or "service=git-receive-pack" in request.query
         if push and remote.push is None:
             writable = [r.name for r in repo.remotes if r.push is not None]
             hint = f"; push to {' or '.join(writable)} instead" if writable else ""
             await _respond(writer, 403, "Forbidden", f"read-only{hint}\n".encode())
             return "denied"
-        config: dict[str, str] = {}
-        namespace = None
-        if not push and remote.fetch == UPSTREAM:
-            if "info/refs" in path_info:  # once per fetch, at its start
-                await pull_through(git_dir)
-            root = await asyncio.to_thread(write_view, git_dir, repo.view_dir or default_view_dir(git_dir))
+        if push:
+            out = await self.git.push(repo, remote, path_info, request)
         else:
-            root = git_dir
-            # A fetch reads its namespace, if it has one; a push writes its own.
-            namespace = remote.push_namespace if push else remote.fetch_namespace
-            if push:
-                config = {
-                    "http.receivepack": "true",
-                    "core.hooksPath": str(HOOKS),  # bottle's rules; the repo's own hooks never run
-                    "receive.fsckObjects": "true",
-                    # Nothing a reviewer has read may change underneath them, so
-                    # the out lane is append-only. A bottle with a stream to
-                    # abandon pushes a new branch; rewriting is the host's, in
-                    # its own repo, where every git command is available.
-                    "receive.denyNonFastForwards": "true",
-                    "receive.denyDeletes": "true",
-                    "core.logAllRefUpdates": "always",  # refs outside refs/heads get no reflog by default
-                    # A bottle pushing `main` writes its lane's main, but git
-                    # compares the unnamespaced name against the host's
-                    # checked-out branch and would refuse it.
-                    "receive.denyCurrentBranch": "ignore",
-                }
-        # What hooks/post-receive needs to make the host's branches follow a push, and where it says what it did.
-        hook_log = None
-        if push and request.method == "POST":
-            hook_log = Path(tempfile.mkstemp(prefix="bottle-follow-", suffix=".log")[1])
-        body = request.body
-        if request.headers.get("content-encoding") == "gzip":
-            body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", "/"),
-            "GIT_PROJECT_ROOT": str(root),
-            "GIT_HTTP_EXPORT_ALL": "1",
-            "PATH_INFO": path_info,
-            "REQUEST_METHOD": request.method,
-            "QUERY_STRING": request.query,
-            "CONTENT_TYPE": request.headers.get("content-type", ""),
-            "CONTENT_LENGTH": str(len(body)),
-            "REMOTE_ADDR": "bottle",
-            "REMOTE_USER": "bottle",
-            # What confines a push: every ref receive-pack resolves is under
-            # refs/namespaces/<this>/. hooks/pre-receive refuses a push without
-            # one, so never pass an empty one.
-            **({"GIT_NAMESPACE": namespace} if namespace else {}),
-            **({"GIT_PROTOCOL": request.headers["git-protocol"]} if "git-protocol" in request.headers else {}),
-            **_config_env(config),
-            **({"BOTTLE_PYTHON": sys.executable, "BOTTLE_HOOK_LOG": str(hook_log)} if hook_log is not None else {}),
-        }
-        process = await asyncio.create_subprocess_exec(
-            "git", "http-backend", env=env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await process.communicate(body)
-        if process.returncode != 0 and not out:
-            log.warning("git http-backend failed: %s", err.decode(errors="replace").strip())
+            if "info/refs" in path_info:  # once per fetch, at its start
+                await self.git.before_fetch(repo, remote)
+            out = await fetch(self.git.fetch_dir(repo), repo, remote, path_info, request)
+        if out is None:
             await _respond(writer, 500, "Internal Server Error", b"git http-backend failed\n")
             return "failed"
+        await _relay_cgi(out, writer)
+        return "pushed" if push else "ok"
+
+
+class Git(Protocol):
+    """Where a bottle's git goes: fetches served from a repo its runner has, and pushes into the host repo.
+
+    The host repo is the only one pushes go into, with every rule; fetches
+    can be served from a mirror of it, kept current before each.
+    """
+
+    def fetch_dir(self, repo: Served) -> Path:
+        """The git dir `repo`'s fetches are served from."""
+
+    async def before_fetch(self, repo: Served, remote: Remote) -> None:
+        """Bring what `fetch_dir` serves `remote` up to date, as a fetch starts."""
+
+    async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+        """A push to `remote`, into the host repo; git http-backend's output, or None if it failed."""
+
+
+class HostGit:
+    """A bottle on the host itself: everything is the host repo's, served and written in place."""
+
+    def fetch_dir(self, repo: Served) -> Path:
+        assert repo.git_dir is not None
+        return repo.git_dir
+
+    async def before_fetch(self, repo: Served, remote: Remote) -> None:
+        if remote.fetch == UPSTREAM:
+            assert repo.git_dir is not None
+            await pull_through(repo.git_dir)
+
+    async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+        assert repo.git_dir is not None
+        return await receive(repo.git_dir, remote, path_info, request)
+
+
+async def fetch(git_dir: Path, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+    """A fetch of `remote`'s view, served from `git_dir`; git http-backend's output, or None if it failed."""
+    if remote.fetch == UPSTREAM:
+        root = await asyncio.to_thread(write_view, git_dir, repo.view_dir or default_view_dir(git_dir))
+        return await _http_backend(root, path_info, request)
+    # A fetch reads its namespace, if it has one.
+    return await _http_backend(git_dir, path_info, request, remote.fetch_namespace)
+
+
+async def receive(git_dir: Path, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+    """A push into `remote`'s namespace of the host repo at `git_dir`, under bottle's rules, its branches following."""
+    config = {
+        "http.receivepack": "true",
+        "core.hooksPath": str(HOOKS),  # bottle's rules; the repo's own hooks never run
+        "receive.fsckObjects": "true",
+        # Nothing a reviewer has read may change underneath them, so
+        # the out lane is append-only. A bottle with a stream to
+        # abandon pushes a new branch; rewriting is the host's, in
+        # its own repo, where every git command is available.
+        "receive.denyNonFastForwards": "true",
+        "receive.denyDeletes": "true",
+        "core.logAllRefUpdates": "always",  # refs outside refs/heads get no reflog by default
+        # A bottle pushing `main` writes its lane's main, but git
+        # compares the unnamespaced name against the host's
+        # checked-out branch and would refuse it.
+        "receive.denyCurrentBranch": "ignore",
+    }
+    # What hooks/post-receive needs to make the host's branches follow a push, and where it says what it did.
+    hook_log = None
+    if request.method == "POST":
+        hook_log = Path(tempfile.mkstemp(prefix="bottle-follow-", suffix=".log")[1])
+    try:
+        return await _http_backend(
+            git_dir, path_info, request, remote.push_namespace, config,
+            {"BOTTLE_PYTHON": sys.executable, "BOTTLE_HOOK_LOG": str(hook_log)} if hook_log is not None else {})
+    finally:
         if hook_log is not None:
             for line in hook_log.read_text().splitlines() if hook_log.exists() else ():
                 log.info("%s: %s", git_dir, line)
             hook_log.unlink(missing_ok=True)
-        await _relay_cgi(out, writer)
-        return "pushed" if push else "ok"
+
+
+async def _http_backend(root: Path, path_info: str, request: HttpRequest, namespace: str | None = None,
+                        config: dict[str, str] | None = None, extra: dict[str, str] | None = None) -> bytes | None:
+    """Run git http-backend on `request` against `root`; its output, or None if it failed without any."""
+    body = request.body
+    if request.headers.get("content-encoding") == "gzip":
+        body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/"),
+        "GIT_PROJECT_ROOT": str(root),
+        "GIT_HTTP_EXPORT_ALL": "1",
+        "PATH_INFO": path_info,
+        "REQUEST_METHOD": request.method,
+        "QUERY_STRING": request.query,
+        "CONTENT_TYPE": request.headers.get("content-type", ""),
+        "CONTENT_LENGTH": str(len(body)),
+        "REMOTE_ADDR": "bottle",
+        "REMOTE_USER": "bottle",
+        # What confines a push: every ref receive-pack resolves is under
+        # refs/namespaces/<this>/. hooks/pre-receive refuses a push without
+        # one, so never pass an empty one.
+        **({"GIT_NAMESPACE": namespace} if namespace else {}),
+        **({"GIT_PROTOCOL": request.headers["git-protocol"]} if "git-protocol" in request.headers else {}),
+        **_config_env(config or {}),
+        **(extra or {}),
+    }
+    process = await asyncio.create_subprocess_exec(
+        "git", "http-backend", env=env,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await process.communicate(body)
+    if process.returncode != 0 and not out:
+        log.warning("git http-backend failed: %s", err.decode(errors="replace").strip())
+        return None
+    return out
 
 
 # Per repo: held while its pull-through fetch runs, and the fetch waiting to run next.

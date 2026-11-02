@@ -399,6 +399,65 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
             host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main")
 
 
+class MirroredGitTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
+    """bottle.host with fetches served from a mirror of the host repo, as a runner elsewhere would: kept current
+    before each fetch, while pushes still go into the host repo."""
+
+    async def asyncSetUp(self) -> None:
+        self.upstream = self.make_repo("upstream")
+        self.repo = self.tmp / "repo"
+        run("git", "clone", "-q", self.upstream, self.repo)
+        self.mirror = self.tmp / "mirror.git"
+        run("git", "clone", "-q", "--mirror", self.repo, self.mirror)
+        self.calls: list[str] = []
+        test = self
+
+        class Mirrored(host.HostGit):
+            def fetch_dir(self, repo):
+                return test.mirror
+
+            async def before_fetch(self, repo, remote):
+                test.calls.append(f"refresh for {remote.name}")
+                await super().before_fetch(repo, remote)   # the host repo pulls through, then the mirror follows it
+                run("git", "-C", test.mirror, "fetch", "-q", "--prune")
+
+            async def push(self, repo, remote, path_info, request):
+                test.calls.append(f"push to {remote.name}")
+                return await super().push(repo, remote, path_info, request)
+
+        remotes = tuple(host.Remote.parse(spec) for spec in ("origin:fetch=upstream", "work:fetch=ns/w,push=ns/w"))
+        served = host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git")
+        server, self.env = await serve_bottle_host(host.HostServices((served,), git=Mirrored()))
+        self.addAsyncCleanup(RemotesTest._close, server)
+        self.workspace = self.tmp / "workspace"
+        run("git", "init", "-q", "-b", "main", self.workspace)
+        for remote in ("origin", "work"):
+            run("git", "-C", self.workspace, "remote", "add", remote, f"http://bottle.host/git/{remote}")
+
+    async def git(self, *args) -> subprocess.CompletedProcess:
+        return await asyncio.to_thread(subprocess.run, ["git", *args], cwd=self.workspace, env=self.env,
+                                       capture_output=True, text=True)
+
+    async def test_a_fetch_is_served_from_the_mirror_once_its_current(self) -> None:
+        new = self.commit(self.upstream, "upstream moved")
+        result = await self.git("fetch", "-q", "origin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "origin/main"), new)
+        self.assertEqual(self.calls, ["refresh for origin"])
+        # Served from the mirror's view, not the host repo's.
+        self.assertEqual(run("git", "-C", self.tmp / "view.git", "config", "--get", "core.bare"), "true")
+        self.assertIn(str(self.mirror), (self.tmp / "view.git" / "objects" / "info" / "alternates").read_text())
+
+    async def test_a_push_goes_into_the_host_repo(self) -> None:
+        await self.git("fetch", "-q", "origin")
+        await self.git("checkout", "-q", "-b", "w", "origin/main")
+        commit = self.commit(self.workspace, "agent work")
+        result = await self.git("push", "work", "w")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.repo, "rev-parse", "refs/namespaces/w/refs/heads/w"), commit)
+        self.assertIn("push to work", self.calls)
+
+
 class PullThroughTest(unittest.IsolatedAsyncioTestCase):
     """Fetches of origin for one repo, asked for at once: shared, and never older than the asking."""
 
