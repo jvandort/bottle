@@ -371,6 +371,7 @@ class Gateway:
         certificates: Certificates | None = None,
         caches: tuple[cache.Cached, ...] = (),
         store: cache.Store | None = None,
+        hand_off: "Callable[[Flow, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]] | None" = None,
     ) -> None:
         self.name = name
         self.policy = policy
@@ -379,7 +380,12 @@ class Gateway:
         self.services = services
         # Credentials bottled attaches for the bottle, by destination, and
         # the certificates that let it: without them, nothing is attached.
-        self.injections = tuple(injections) if certificates else ()
+        # Where bottled here doesn't hold them, `hand_off` takes the flows a
+        # credential's host and port are redirected for: the controller's own
+        # gateway for the bottle (serve_credential), and `injections` are only
+        # where they're for, their secrets left out.
+        self.hand_off = hand_off
+        self.injections = tuple(injections) if certificates or hand_off else ()
         self.certificates = certificates
         # Hosts whose downloads are kept, in `store`: also only with certificates to read them by.
         self.caches = tuple(caches) if certificates and store else ()
@@ -462,6 +468,10 @@ class Gateway:
                 ip = "host"
                 outcome = await self._serve_git(flow.first, reader, writer)
                 return
+            if decision.service == CREDENTIAL and self.hand_off is not None:
+                ip, outcome = "controller", "handed-off"
+                await self.hand_off(flow, reader, writer)
+                return
             context = await self._certificate(name)
             reader, tls = await self._accept_tls(context, flow.first, reader, writer)
             writer = tls
@@ -494,6 +504,25 @@ class Gateway:
                 if w is not None:
                     w.close()
             self.log_flow(target, ip, outcome, status, up, down, started)
+
+    async def serve_credential(self, flow: "Flow", reader, writer) -> None:
+        """Decide and serve a flow another gateway for this bottle redirected for a credential, its opening all read.
+
+        Decided again here, where the credential is: the destination is
+        judged from this machine, which is where the request is sent from.
+        Anything that isn't a credential's flow after all is refused.
+        """
+        try:
+            decision = await self.decide(flow, opening_read=True)
+        except Refused as e:
+            writer.close()
+            self.log_flow(f"{flow.address}:{flow.port}", None, e.outcome, None, [0], [0], time.monotonic())
+            return
+        if not isinstance(decision, Redirect) or decision.service != CREDENTIAL:
+            writer.close()
+            self.log_flow(f"{flow.address}:{flow.port}", None, "denied", None, [0], [0], time.monotonic())
+            return
+        await self.serve(flow, decision, reader, writer)
 
     async def _serve_git(self, first: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
         """Answer an origin-form request to bottle.host, its head in `first` (perhaps not all of it)."""

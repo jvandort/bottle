@@ -68,14 +68,16 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
     async def test_socket_is_owner_only(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
-    async def test_a_bottles_credentials_reach_its_gateway_and_go_no_further(self) -> None:
+    async def test_a_bottles_credentials_reach_the_controllers_gateway_and_go_no_further(self) -> None:
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections) as looked_up:
             reply = await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
         looked_up.assert_called_once_with(("teamcity:server=ci.test",))
         self.assertNotIn("the-real-credential", json.dumps(reply))
         [binding] = self.daemon.decider.bindings.values()
-        self.assertEqual(binding.gateway.injections, tuple(injections))
+        # The runner's gateway knows where the credential is for, and hands those flows to the controller's.
+        self.assertEqual([(i.host, i.port, i.value) for i in binding.gateway.injections], [("ci.test", 443, "")])
+        self.assertEqual(binding.gateway.hand_off.__self__.injections, tuple(injections))
 
     async def test_a_bottles_gateway_mints_from_that_bottles_ca(self) -> None:
         with mock.patch.object(daemon.ca, "server_context") as server_context:
@@ -101,7 +103,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
                 await self.request({"op": "bind", "bottle": "b", "features": ["teamcity"]})
         [binding] = self.daemon.decider.bindings.values()
-        self.assertEqual(binding.gateway.injections[0].value, "Bearer new")
+        self.assertEqual(binding.gateway.hand_off.__self__.injections[0].value, "Bearer new")
 
     async def test_shutdown_removes_the_socket_and_keeps_the_tokens(self) -> None:
         await self.request({"op": "bind", "bottle": "b"})
@@ -181,11 +183,11 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
 
     async def refused(self, sender: str, to: str) -> daemon.ServiceError:
         with self.assertRaises(daemon.ServiceError) as raised:
-            await self.daemon.deliver(sender, to, "hi")
+            await self.daemon.controller.deliver(sender, to, "hi")
         return raised.exception
 
     async def test_a_bottle_with_message_any_sends_by_name_from_an_address_issued_to_the_recipient(self) -> None:
-        await self.daemon.deliver("broker", "app-1a2b3c4d-foo", "status?\nall of it")
+        await self.daemon.controller.deliver("broker", "app-1a2b3c4d-foo", "status?\nall of it")
         machine, argv, stdin = self.ran()
         self.assertEqual("bottle-app-1a2b3c4d-foo", machine)
         reply_to = messages.address("broker", holder="app-1a2b3c4d-foo")
@@ -193,7 +195,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("status?\nall of it", stdin)
 
     async def test_the_recipient_answers_by_the_address_it_was_given(self) -> None:
-        await self.daemon.deliver("app-1a2b3c4d-foo", messages.address("broker", holder="app-1a2b3c4d-foo"), "done")
+        await self.daemon.controller.deliver("app-1a2b3c4d-foo", messages.address("broker", holder="app-1a2b3c4d-foo"), "done")
         machine, argv, _ = self.ran()
         self.assertEqual("bottle-broker", machine)
         self.assertEqual(messages.address("app-1a2b3c4d-foo", holder="broker"), argv[-1])
@@ -241,11 +243,11 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
     async def test_list_bottles_shows_the_other_running_bottles_without_host_paths(self) -> None:
         self.assertEqual([{"name": "app-1a2b3c4d-bar", "repo": "app", "thread": "bar"},
                           {"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}],
-                         await self.daemon.peers("broker"))
+                         await self.daemon.controller.peers("broker"))
 
     async def test_listing_bottles_needs_list_bottles(self) -> None:
         with self.assertRaises(daemon.ServiceError) as raised:
-            await self.daemon.peers("app-1a2b3c4d-foo")
+            await self.daemon.controller.peers("app-1a2b3c4d-foo")
         self.assertEqual(403, raised.exception.status)
 
 
@@ -275,13 +277,13 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         saved.bind("bad", gateway=None)
         saved.bind("good", gateway=None)
         d = Daemon(decider=Decider(self.tmp / "tokens.json"))
-        real = d._gateway
+        real = d.controller.egress
 
-        def gateway(bottle, *args):
+        async def egress(bottle, *args):
             if bottle == "bad":
                 raise OSError("its repo is gone")
-            return real(bottle, *args)
+            return await real(bottle, *args)
 
-        with mock.patch.object(d, "_gateway", side_effect=gateway), self.assertLogs("bottle.daemon", "WARNING"):
+        with mock.patch.object(d.controller, "egress", side_effect=egress), self.assertLogs("bottle.daemon", "WARNING"):
             await d.restore([("bad", (), ()), ("good", (), ())])
         self.assertEqual([binding.bottle for binding in d.decider.bindings.values()], ["good"])

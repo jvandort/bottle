@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import ssl
 import subprocess
 import tempfile
@@ -224,6 +225,43 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self.connect("203.0.113.5", self.upstream_port)
         writer.write(client_hello("upstream.test"))
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+
+    def handing_off(self) -> None:
+        """Decide and serve as a runner's gateway does: knowing where the credential is for, not the credential,
+        and handing its flows to the controller's gateway, self.proxy, which has it."""
+        where = tuple(dataclasses.replace(i, value="", credential="", standin="") for i in self.proxy.injections)
+        controller = self.proxy
+        self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=where,
+                             hand_off=controller.serve_credential)
+
+    async def test_a_credentials_flow_handed_to_the_controller_gets_the_credential_there(self) -> None:
+        self.handing_off()
+        reader, writer = await self.connect("203.0.113.5", self.upstream_port, tls=True)
+        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        response = await asyncio.wait_for(reader.read(), 5)
+        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
+        self.assertTrue(response.endswith(b"hello"))
+        self.assertIn("Authorization: Bearer real-token", head)
+        self.assertEqual(self.decisions[0].service, CREDENTIAL)
+
+    async def test_a_credentials_flow_whose_opening_came_late_is_handed_off_once_read(self) -> None:
+        self.handing_off()
+        reader, writer = await self.connect("203.0.113.5", self.upstream_port, first_size=10, tls=True)
+        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        self.assertTrue((await asyncio.wait_for(reader.read(), 5)).endswith(b"hello"))
+        self.assertIn("Authorization: Bearer real-token", (await asyncio.wait_for(self.received.get(), 5)).decode())
+        self.assertEqual(self.decisions[0].service, OPENING)
+
+    async def test_the_controller_refuses_a_flow_handed_it_for_no_credential(self) -> None:
+        async def handed(r, w) -> None:
+            await self.proxy.serve_credential(Flow("203.0.113.5", 443, client_hello("elsewhere.test")), r, w)
+
+        server = await asyncio.start_server(handed, "127.0.0.1", 0)
+        self.addAsyncCleanup(Upstream.close, server)
+        with self.assertLogs("bottle.egress", "WARNING"):
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+            self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+        writer.close()
 
     async def test_git_is_served_from_a_head_in_the_first_bytes(self) -> None:
         reader, writer = await self.connect(host.ADDRESS, 80)

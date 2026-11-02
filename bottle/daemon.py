@@ -1,5 +1,12 @@
 """bottled: the daemon that decides every bottle's connections.
 
+It's two halves in one process. The runner's (Daemon) is what has to sit
+next to the machines: the decider, each bottle's gateway, and the HTTP cache.
+The controller's (Controller) is what stays with the user: credentials,
+pushes into hubs, and messages between bottles. A runner elsewhere runs the
+first half alone, and reaches the controller's over its link; here the two
+call each other in-process.
+
 It runs the decider (see decider.py) on the runner's loopback, which smolvm asks
 about each of a bottle's connections before making it. Commands don't manage
 it directly: bind_decider() gives a bottle its token there, starting bottled
@@ -17,10 +24,11 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from bottle import auth, ca, cache, decider as decider_, egress, messages
-from bottle.host import HostServices, Remote, Served, ServiceError
+from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log
 
@@ -145,10 +153,97 @@ def _start_daemon() -> None:
 # --- server -------------------------------------------------------------------
 
 
+class Controller:
+    """bottled's controller half: what a bottle's gateway hands to the controller, wherever the bottle runs.
+
+    Credentials and the certificates they're attached behind, pushes into
+    the hub (HubGit), and messages between bottles. `running` says whether a
+    bottle's machine is running: its runner's to know.
+    """
+
+    def __init__(self, policy: egress.Policy, running: Callable[[str], bool]) -> None:
+        self.policy = policy
+        self.running = running
+
+    async def egress(
+        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...],
+    ) -> tuple[tuple[egress.Injection, ...], HostServices, egress.Gateway]:
+        """What a runner needs to bind `bottle`: where its credentials are for, its bottle.host, and its
+        gateway here, which serves its credentials' flows.
+
+        Credentials are read here, each time a bottle is bound, so logging
+        in or out reaches a bottle when it next starts. Only for the hosts the
+        bottle's CA covers, which it was made for when the bottle started:
+        those its features name since then can't be terminated, and go
+        direct until it starts again.
+        """
+        intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
+        injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features) if i.host.lower() in intercepted)
+        certificates = functools.partial(ca.server_context, bottle, intercepted)
+        gateway = egress.Gateway(bottle, self.policy, injections=injections, certificates=certificates)
+        services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
+        # Where each credential is for, and nothing of the credential itself.
+        where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
+        return where, services, gateway
+
+    async def deliver(self, sender: str, to: str, text: str) -> None:
+        """Hand `text` to the bottle `to` reaches from `sender`, as an event from `sender`; raises ServiceError.
+
+        `to` is an address issued to `sender` (see messages.py), or a bottle's
+        name if `sender` may message any. The event's from is `sender`'s address,
+        issued to the recipient, so it can answer. bottle-event send, run in the
+        recipient, queues the event and waits until the session takes it, so
+        this returns once it has.
+        """
+        from bottle import bottles  # bottles imports this module
+
+        registry = await asyncio.to_thread(bottles.load)
+        if messages.is_address(to):
+            target = await asyncio.to_thread(messages.target, to, sender)
+        else:
+            target = to if "message-any" in _permissions(registry.get(sender)) else None
+        if target == sender:
+            raise ServiceError(400, "Bad Request", "a bottle can't send a message to itself")
+        bottle = registry.get(target) if target else None
+        if bottle is None or not self.running(target):
+            # The same whether there's no such bottle or the sender may not reach it: a refusal gives nothing away.
+            raise ServiceError(404, "Not Found", f"no running bottle you can reach as {to}")
+        reply_to = await asyncio.to_thread(messages.address, sender, target)
+        command = bottles.runner_of(bottle).exec_command(
+            bottle.machine, [BOTTLE_EVENT, "send", "-t", str(DELIVERY_TIMEOUT), "-f", reply_to], user=bottles.USER)
+        process = await asyncio.create_subprocess_exec(
+            *command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            _, err = await asyncio.wait_for(process.communicate(text.encode()), DELIVERY_TIMEOUT + DELIVERY_GRACE)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ServiceError(504, "Gateway Timeout", f"couldn't reach {to} to deliver the message") from None
+        if process.returncode == NOT_TAKEN:
+            raise ServiceError(504, "Gateway Timeout", f"{to} has no session that took the message within {DELIVERY_TIMEOUT}s")
+        if process.returncode != 0:
+            why = err.decode(errors="replace").strip() or f"exit {process.returncode}"
+            raise ServiceError(502, "Bad Gateway", f"couldn't deliver to {to}: {why}")
+        log.info("%s: delivered a message from %s", target, sender)
+
+    async def peers(self, asker: str) -> list[dict]:
+        """The running bottles but `asker`, for a bottle with list-bottles: each one's name, repo and thread."""
+        from bottle import bottles  # bottles imports this module
+
+        registry = await asyncio.to_thread(bottles.load)
+        if "list-bottles" not in _permissions(registry.get(asker)):
+            raise ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
+        return [{"name": name, "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
+                 "thread": bottle.spec.get("thread")}
+                for name, bottle in sorted(registry.items()) if name != asker and self.running(name)]
+
+
 class Daemon:
+    """bottled's runner half: the decider, and each bottle's gateway, which hands the controller what's its."""
+
     def __init__(
         self, policy: egress.Policy | None = None, decider: decider_.Decider | None = None,
-        decider_port: int | None = None,
+        decider_port: int | None = None, controller: Controller | None = None,
     ) -> None:
         self.policy = policy or egress.Policy()
         self.decider = decider or decider_.Decider()
@@ -160,6 +255,8 @@ class Daemon:
         self.locks: dict[str, asyncio.Lock] = {}
         # Every bottle's cached downloads, in one place: what one fetched, the next is answered with.
         self.store = cache.Store()
+        # The controller's half: here, in this process.
+        self.controller = controller or Controller(self.policy, self.decider.bound)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = await reader.readline()
@@ -195,84 +292,22 @@ class Daemon:
         await writer.drain()
         writer.close()
 
-    def _gateway(
-        self, bottle: str, repos: tuple[Served, ...], injections: tuple[egress.Injection, ...],
-        intercepted: tuple[str, ...], caches: tuple[cache.Cached, ...] = (),
-    ) -> egress.Gateway:
-        """What decides and serves `bottle`'s flows."""
-        # The bottle's own CA, which bottle made when it started the bottle.
-        certificates = functools.partial(ca.server_context, bottle, intercepted)
-        return egress.Gateway(
-            bottle, self.policy, services=HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers), injections=injections,
-            certificates=certificates, caches=caches, store=self.store,
-        )
-
     async def bind(
         self, bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = (),
         token: bytes | None = None,
     ) -> bytes:
         """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            # Credentials are read here, each time a bottle is bound, so logging
-            # in or out reaches a bottle when it next starts.
-            # Only the hosts the bottle's CA covers, which it was made for when the bottle started:
-            # those its features name since then can't be terminated, and go direct until it starts again.
+            injections, services, controller_gateway = await self.controller.egress(bottle, repos, features)
             intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
-            injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features) if i.host.lower() in intercepted)
             caches = tuple(c for c in await asyncio.to_thread(cache.cached_for, features) if c.host in intercepted)
-            gateway = self._gateway(bottle, repos, injections, intercepted, caches)
+            # The bottle's own CA, which bottle made when it started the bottle: what its cached hosts are answered behind.
+            certificates = functools.partial(ca.server_context, bottle, intercepted)
+            gateway = egress.Gateway(
+                bottle, self.policy, services=services, injections=injections, certificates=certificates,
+                caches=caches, store=self.store, hand_off=controller_gateway.serve_credential,
+            )
             return self.decider.bind(bottle, gateway, token)
-
-    async def deliver(self, sender: str, to: str, text: str) -> None:
-        """Hand `text` to the bottle `to` reaches from `sender`, as an event from `sender`; raises ServiceError.
-
-        `to` is an address issued to `sender` (see messages.py), or a bottle's
-        name if `sender` may message any. The event's from is `sender`'s address,
-        issued to the recipient, so it can answer. bottle-event send, run in the
-        recipient, queues the event and waits until the session takes it, so
-        this returns once it has.
-        """
-        from bottle import bottles  # bottles imports this module
-
-        registry = await asyncio.to_thread(bottles.load)
-        if messages.is_address(to):
-            target = await asyncio.to_thread(messages.target, to, sender)
-        else:
-            target = to if "message-any" in _permissions(registry.get(sender)) else None
-        if target == sender:
-            raise ServiceError(400, "Bad Request", "a bottle can't send a message to itself")
-        bottle = registry.get(target) if target else None
-        if bottle is None or not self.decider.bound(target):
-            # The same whether there's no such bottle or the sender may not reach it: a refusal gives nothing away.
-            raise ServiceError(404, "Not Found", f"no running bottle you can reach as {to}")
-        reply_to = await asyncio.to_thread(messages.address, sender, target)
-        command = bottles.runner_of(bottle).exec_command(
-            bottle.machine, [BOTTLE_EVENT, "send", "-t", str(DELIVERY_TIMEOUT), "-f", reply_to], user=bottles.USER)
-        process = await asyncio.create_subprocess_exec(
-            *command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        try:
-            _, err = await asyncio.wait_for(process.communicate(text.encode()), DELIVERY_TIMEOUT + DELIVERY_GRACE)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise ServiceError(504, "Gateway Timeout", f"couldn't reach {to} to deliver the message") from None
-        if process.returncode == NOT_TAKEN:
-            raise ServiceError(504, "Gateway Timeout", f"{to} has no session that took the message within {DELIVERY_TIMEOUT}s")
-        if process.returncode != 0:
-            why = err.decode(errors="replace").strip() or f"exit {process.returncode}"
-            raise ServiceError(502, "Bad Gateway", f"couldn't deliver to {to}: {why}")
-        log.info("%s: delivered a message from %s", target, sender)
-
-    async def peers(self, asker: str) -> list[dict]:
-        """The running bottles but `asker`, for a bottle with list-bottles: each one's name, repo and thread."""
-        from bottle import bottles  # bottles imports this module
-
-        registry = await asyncio.to_thread(bottles.load)
-        if "list-bottles" not in _permissions(registry.get(asker)):
-            raise ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
-        return [{"name": name, "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
-                 "thread": bottle.spec.get("thread")}
-                for name, bottle in sorted(registry.items()) if name != asker and self.decider.bound(name)]
 
     async def release(self, bottle: str) -> None:
         """Stop answering `bottle`'s flows, and forget its token: its machine has stopped."""
