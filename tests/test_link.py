@@ -198,3 +198,25 @@ exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
             await asyncio.sleep(0.05)
         await controller.links.ensure("box")   # up again, after its backoff
         self.assertTrue(controller.links.up["box"].is_set())
+
+    async def test_a_link_no_bottle_is_bound_through_is_let_go(self):
+        runners.register("box", "box")
+        controller = daemon.Controller(egress.Policy(), running=lambda b: False)
+        self.addAsyncCleanup(controller.links.close)
+        with mock.patch.multiple(daemon, LINK_IDLE=0.2, LINK_IDLE_CHECK=0.1):
+            await controller.links.ensure("box")
+            process = controller.links.processes["box"]
+            await asyncio.wait_for(controller.links.keeping["box"], 5)
+        self.assertIsNotNone(process.returncode)
+        self.assertFalse(controller.links.up["box"].is_set())
+
+    async def test_a_link_bottles_are_bound_through_is_kept(self):
+        runners.register("box", "box")
+        controller = daemon.Controller(egress.Policy(), running=lambda b: False)
+        self.addAsyncCleanup(controller.links.close)
+        with mock.patch.multiple(daemon, LINK_IDLE=0.2, LINK_IDLE_CHECK=0.1):
+            await controller.links.ensure("box")
+            controller.links.servers["box"].bottles["b"] = (None, None)
+            await asyncio.sleep(0.5)
+        self.assertFalse(controller.links.keeping["box"].done())
+        self.assertTrue(controller.links.up["box"].is_set())

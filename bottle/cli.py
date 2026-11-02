@@ -152,6 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     runner_status.add_argument("names", nargs="*", metavar="RUNNER", help="the runners to show (default: all)")
     runner_status.add_argument("--json", action="store_true", help="print JSON: one object per runner")
     runner_status.set_defaults(run=_runner_status, parser=runner_status)
+    runner_stop = runner_commands.add_parser(
+        "stop", help="stop every bottle on a runner, to shut the machine down",
+        description="Stop every bottle on a runner, so the machine can be shut down. Their disks stay on it, "
+        "and each starts again with `bottle start`.")
+    runner_stop.add_argument("name", metavar="RUNNER", help="the runner whose bottles to stop")
+    runner_stop.set_defaults(run=_runner_stop, parser=runner_stop)
     runner_remove = runner_commands.add_parser(
         "remove", help="forget a runner with no bottles", description="Forget a runner with no bottles on it. "
         "Nothing on the machine is touched.")
@@ -409,6 +415,20 @@ def _runner_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runner_stop(args: argparse.Namespace) -> int:
+    from bottle import bottles, runners
+
+    runners.get(args.name)  # one there is
+    stopped, unreachable = bottles.stop_all(args.name)
+    for name in stopped:
+        print(f"Stopped {name}")
+    if unreachable:
+        raise BottleError(unreachable[args.name])
+    if not stopped:
+        print(f"Nothing was running on {args.name}")
+    return 0
+
+
 def _runner_remove(args: argparse.Namespace) -> int:
     from bottle import runners
 
@@ -457,9 +477,14 @@ def _stop(args: argparse.Namespace) -> int:
 def _shutdown(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    stopped, daemon_was_running = bottles.shutdown()
+    stopped, unreachable = bottles.stop_all()
+    from bottle import daemon
+
+    daemon_was_running = daemon.stop()
     for name in stopped:
         print(f"Stopped {name}")
+    for runner, why in unreachable.items():
+        print(f"Left the bottles on runner {runner} as they are: {why}", file=sys.stderr)
     if daemon_was_running:
         print("Stopped bottled")
     if not stopped and not daemon_was_running:

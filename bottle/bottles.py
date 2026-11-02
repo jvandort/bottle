@@ -570,16 +570,36 @@ def stop(name: str) -> None:
 
 
 def shutdown() -> tuple[list[str], bool]:
-    """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running."""
-    stopped = []
-    for bottle in load().values():
-        runner = runner_of(bottle)
-        if runner.state(bottle.machine) == "running":
-            runner.stop(bottle.machine)
-            runner.release(bottle.name)
-            log.info("%s: stopped (shutdown)", bottle.name)
-            stopped.append(bottle.name)
+    """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running.
+
+    Bottles on a runner that can't be reached are left as they are: see stop_all.
+    """
+    stopped, _ = stop_all()
     return stopped, daemon.stop()
+
+
+def stop_all(runner: str | None = None) -> tuple[list[str], dict[str, str]]:
+    """Stop every running bottle, or every one on `runner`. Returns those stopped, and the runners that
+    couldn't be reached, with why: their bottles are left as they are."""
+    stopped: list[str] = []
+    unreachable: dict[str, str] = {}
+    for bottle in load().values():
+        if runner is not None and bottle.runner != runner:
+            continue
+        if bottle.runner in unreachable:
+            continue
+        on = runner_of(bottle)
+        try:
+            if on.state(bottle.machine) == "running":
+                on.stop(bottle.machine)
+                on.release(bottle.name)
+                log.info("%s: stopped", bottle.name)
+                stopped.append(bottle.name)
+        except BottleError as e:
+            if bottle.runner == runners.LOCAL:
+                raise
+            unreachable[bottle.runner] = str(e)
+    return stopped, unreachable
 
 
 def ensure_running(name: str) -> Bottle:
@@ -667,11 +687,29 @@ def _in_bottle(bottle: Bottle, argv: list[str]) -> str:
     return _exec(bottle, argv, user=USER).strip()
 
 
+# The state of a bottle on a runner that can't be reached.
+UNREACHABLE = "unreachable"
+
+
 def list_all() -> list[tuple[Bottle, str]]:
-    """Every bottle with its current state: its machine's, unless setup never finished."""
+    """Every bottle with its current state: its machine's, unless setup never finished, or its runner can't be
+    reached."""
     result = []
+    # A runner that couldn't be reached is asked once, not once a bottle.
+    unreachable: set[str] = set()
     for bottle in sorted(load().values(), key=lambda b: b.created):
-        state = bottle.status if bottle.status != "ready" else (runner_of(bottle).state(bottle.machine) or "missing")
+        if bottle.status != "ready":
+            state = bottle.status
+        elif bottle.runner in unreachable:
+            state = UNREACHABLE
+        else:
+            try:
+                state = runner_of(bottle).state(bottle.machine) or "missing"
+            except BottleError:
+                if bottle.runner == runners.LOCAL:
+                    raise
+                unreachable.add(bottle.runner)
+                state = UNREACHABLE
         result.append((bottle, state))
     return result
 

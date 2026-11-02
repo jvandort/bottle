@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import unittest
 from pathlib import Path
@@ -629,6 +630,49 @@ class StartStopTest(BottleTestCase):
         self.assertEqual(fake.machines, {a.machine: "stopped", b.machine: "stopped"})
         self.assertEqual(fake.calls, ["stop", "daemon_stop"])
         self.assertEqual(fake.bound, set())
+
+
+class UnreachableRunnerTest(BottleTestCase):
+    """Bottles on a runner that's off: listed as unreachable, left alone by what stops bottles, everything else as usual."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_smolvm = self.fake()
+        self.here = self.create(name="here")
+        there = self.create(name="there")
+        also = self.create(name="also-there")
+        records = bottles.load()
+        for bottle in (there, also):
+            records[bottle.name] = dataclasses.replace(bottle, runner="box")
+        bottles._write(records)
+        self.asked = []
+        off = mock.Mock()
+
+        def state(machine):
+            self.asked.append(machine)
+            raise BottleError("runner box is unreachable (ssh: connect to host box port 22: Operation timed out)")
+
+        off.state.side_effect = state
+        real = bottles.runners.get
+        patcher = mock.patch.object(bottles.runners, "get", side_effect=lambda name="local": off if name == "box" else real(name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_listed_as_unreachable_asking_the_runner_once(self) -> None:
+        self.assertEqual([(b.name, state) for b, state in bottles.list_all()],
+                         [("here", "running"), ("there", "unreachable"), ("also-there", "unreachable")])
+        self.assertEqual(len(self.asked), 1)
+
+    def test_stopping_everything_stops_what_it_can_and_says_what_it_couldnt(self) -> None:
+        stopped, unreachable = bottles.stop_all()
+        self.assertEqual(stopped, ["here"])
+        self.assertEqual(list(unreachable), ["box"])
+        self.assertIn("Operation timed out", unreachable["box"])
+        self.assertEqual(bottles.shutdown(), ([], True))
+
+    def test_stopping_one_runners_bottles_leaves_the_rest(self) -> None:
+        self.assertEqual(bottles.stop_all("local"), (["here"], {}))
+        self.assertEqual(self.asked, [])
 
 
 class ExecTest(BottleTestCase):

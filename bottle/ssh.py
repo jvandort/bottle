@@ -32,6 +32,8 @@ SSH_FAILED = 255
 NOT_SHIPPED = 75
 # How long a runner's shared connection outlives its last use, in seconds.
 PERSIST = 600
+# How long to wait for a runner to answer at all, in seconds: one that's off is said to be, soon.
+CONNECT_TIMEOUT = 10
 # macOS caps Unix socket paths at 104 bytes; a control socket's is ssh's to extend, by up to 17.
 MAX_CONTROL_PATH = 80
 
@@ -139,7 +141,8 @@ class SshTransport:
     def _ssh(self, tty: bool | None = None) -> list[str]:
         control = self._control_path()
         control.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return [binary(), "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", f"ControlPath={control}",
+        return [binary(), "-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT}",
+                "-o", "ControlMaster=auto", "-o", f"ControlPath={control}",
                 "-o", f"ControlPersist={PERSIST}", *({True: ["-t"], False: ["-T"], None: []}[tty]),
                 "--", self.destination]
 
@@ -216,7 +219,8 @@ class SshTransport:
         link does. It ends if the forward can't be made, or if the runner
         stops answering for 45 seconds.
         """
-        return [binary(), "-N", "-T", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+        return [binary(), "-N", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT}",
+                "-o", "ExitOnForwardFailure=yes",
                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no",
                 "-o", "ControlPath=none", "-R", f"{there}:{here}", "--", self.destination]
 

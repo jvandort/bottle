@@ -54,6 +54,9 @@ MAX_SOCKET_PATH = 100
 # How long a link to a remote runner may take to come up, in seconds; and the longest wait before trying again.
 LINK_TIMEOUT = 20
 LINK_BACKOFF = 60
+# A link no bottle is bound through for this long is let go, checked this often, in seconds.
+LINK_IDLE = 120
+LINK_IDLE_CHECK = 15
 # How often a runner retries binding the bottles it couldn't when its link was down.
 RESTORE_INTERVAL = 5
 
@@ -309,10 +312,11 @@ class Links:
                               f"{' (' + failure[-1] + ')' if failure else ''}") from None
 
     async def _keep(self, runner: str, destination: str, failure: list[str]) -> None:
+        """Keep the link to `runner` up while any bottle there is bound through it; then let it go."""
         transport = ssh.SshTransport(runner, destination)
         here = socket_path(f"links/{runner}.sock")
-        backoff = 1
-        while True:
+        backoff, idle = 1, 0.0
+        while idle < LINK_IDLE:
             try:
                 there = await asyncio.to_thread(transport.prepare_link)
                 process = self.processes[runner] = await asyncio.create_subprocess_exec(
@@ -322,8 +326,17 @@ class Links:
                     log.info("link to runner %s up", runner)
                     self.up[runner].set()
                     backoff = 1
-                _, err = await process.communicate()
-                why = err.decode(errors="replace").strip().splitlines()
+                while process.returncode is None and idle < LINK_IDLE:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(process.wait()), LINK_IDLE_CHECK)
+                    except TimeoutError:
+                        idle = 0.0 if self.servers[runner].bottles else idle + LINK_IDLE_CHECK
+                if process.returncode is None:
+                    log.info("link to runner %s let go: no bottle there is bound through it", runner)
+                    process.terminate()
+                    await process.wait()
+                    break
+                why = (await process.stderr.read()).decode(errors="replace").strip().splitlines()
                 failure.append(why[-1] if why else f"ssh exited {process.returncode}")
                 log.warning("link to runner %s down: %s", runner, failure[-1])
             except BottleError as e:
@@ -331,7 +344,22 @@ class Links:
                 log.warning("link to runner %s: %s", runner, e)
             self.up[runner].clear()
             await asyncio.sleep(backoff)
+            # Not tried for ever for nothing: with no bottle bound through it, the waiting counts as idle.
+            idle = idle + backoff if not self.servers[runner].bottles else 0.0
             backoff = min(backoff * 2, LINK_BACKOFF)
+        self.up[runner].clear()
+
+    async def bring_up(self) -> None:
+        """The links to runners with bottles: theirs may be running, and need the controller to be decided."""
+        from bottle import bottles
+
+        wanted = {b.runner for b in await asyncio.to_thread(lambda: list(bottles.load().values()))
+                  if b.status == "ready" and b.runner != "local"}
+        for runner in sorted(wanted):
+            try:
+                await self.ensure(runner)
+            except BottleError as e:
+                log.warning("%s", e)
 
     async def close(self) -> None:
         for task in self.keeping.values():
@@ -525,7 +553,8 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     # still holds its token, and its flows must find it bound.
     if daemon.remembered is None:
         await daemon.restore(await asyncio.to_thread(bound_bottles))
-        retrying = None
+        # In the background: a runner that's off mustn't keep bottled from answering.
+        retrying = asyncio.create_task(daemon.controller.links.bring_up())
     else:
         # The link may not be up yet: those that can't be bound now are tried again until they are.
         retrying = asyncio.create_task(_keep_restoring(daemon, await daemon.restore(daemon.remembered_bindings())))
