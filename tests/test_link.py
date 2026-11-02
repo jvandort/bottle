@@ -273,3 +273,32 @@ exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
             await asyncio.sleep(0.5)
         self.assertFalse(controller.links.keeping["box"].done())
         self.assertTrue(controller.links.up["box"].is_set())
+
+    async def test_a_restarted_controller_knows_the_bottles_bound_through_it_before(self):
+        from bottle import bottles
+
+        repo = self.make_repo("app")
+        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+            bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD")),)),
+            "elsewhere": bottles.Bottle("elsewhere", "j", "base", 0.0, status="ready", runner="other")})
+        runners.register("box", "box")
+        controller = daemon.Controller(egress.Policy(), running=lambda b: False)
+        self.addAsyncCleanup(controller.links.close)
+        with mock.patch.object(daemon.auth, "injections_for", return_value=[]), \
+                mock.patch.object(daemon.ca, "hosts", return_value=[]), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=[]):
+            await controller.links.ensure("box")
+        self.assertEqual(list(controller.links.servers["box"].bottles), ["b"])
+        self.assertTrue(controller.running("b"))
+
+
+class MirrorWhyTest(unittest.TestCase):
+    def test_what_bottle_said_rather_than_gits_last_line(self) -> None:
+        from bottle import mirrors
+
+        result = subprocess.CompletedProcess([], 128, "", "bottle: the controller can't be reached: its link isn't up\n"
+                                             "fatal: Could not read from remote repository.\n\nPlease make sure you have "
+                                             "the correct access rights\nand the repository exists.\n")
+        self.assertEqual(mirrors._why(result), "the controller can't be reached: its link isn't up")
+        result.stderr = "fatal: Could not read from remote repository.\n\nand the repository exists.\n"
+        self.assertEqual(mirrors._why(result), "fatal: Could not read from remote repository.")

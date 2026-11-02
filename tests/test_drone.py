@@ -163,6 +163,37 @@ class DroneTest(GitTestCase):
         self.assertFalse(machine.exists())
         self.assertEqual(bottles.load(), {})
 
+    def test_a_drone_fetches_again_once_its_controllers_bottled_is_back(self) -> None:
+        upstream = self.make_repo("upstream")
+        repo = self.tmp / "repo"
+        run("git", "clone", "-q", upstream, repo)
+        remotes = (Remote("origin", "upstream"), Remote("work", "ns/w", "ns/w"))
+        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+            bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
+        box = runners.get("box")
+        box.objects(repos.Repo("repo", repo))
+        box.start("bottle-b", "b", bottles.served(bottles.get("b")), ())
+        started = json.loads((self.remote / "started.json").read_text())
+        fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
+        self.assertIn(b"HTTP/1.1 200", self.guest_connects(started, host.ADDRESS, 80, fetch))
+
+        daemon.stop()
+        down = self.guest_connects(started, host.ADDRESS, 80, fetch)
+        self.assertIn(b"HTTP/1.1 503", down)
+        self.assertIn(b"the controller can't be reached", down)
+
+        daemon.start()
+        for _ in range(100):   # the link comes back in the background
+            answer = self.guest_connects(started, host.ADDRESS, 80, fetch)
+            if b"HTTP/1.1 200" in answer:
+                break
+            time.sleep(0.2)
+        self.assertIn(b"HTTP/1.1 200", answer)
+        # And what needs the bottle's side on the controller, a push, finds it, though the controller's bottled
+        # is new and the bottle was bound through the one before.
+        push = b"GET /git/workspace/work/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
+        self.assertIn(b"HTTP/1.1 200", self.guest_connects(started, host.ADDRESS, 80, push))
+
     def test_a_drones_flows_elsewhere_are_decided_there(self) -> None:
         runners.get("box").start("bottle-b", "b", (), ())
         started = json.loads((self.remote / "started.json").read_text())

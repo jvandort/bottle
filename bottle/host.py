@@ -266,7 +266,11 @@ class HostServices:
             await _respond(writer, 403, "Forbidden", f"read-only{hint}\n".encode())
             return "denied"
         if push:
-            out = await self.git.push(repo, remote, path_info, request)
+            try:
+                out = await self.git.push(repo, remote, path_info, request)
+            except BottleError as e:  # the hub is elsewhere, and couldn't be reached
+                await _respond(writer, 503, "Service Unavailable", f"{e}\n".encode())
+                return "unavailable"
         else:
             if "info/refs" in path_info:  # once per fetch, at its start
                 try:

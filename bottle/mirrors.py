@@ -98,5 +98,10 @@ def ensure(key: str, pull_through: bool = False) -> Path:
 
 
 def _why(result: subprocess.CompletedProcess) -> str:
-    lines = [line for line in result.stderr.strip().splitlines() if line.strip()]
+    """Why git failed: what bottle's relay said, if it said anything; else git's own fatal line."""
+    lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+    for prefix in ("bottle:", "fatal:"):
+        said = [line for line in lines if line.startswith(prefix)]
+        if said:
+            return said[0].removeprefix("bottle: ")
     return lines[-1] if lines else f"git exited {result.returncode}"

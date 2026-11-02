@@ -302,6 +302,7 @@ class Links:
             path.unlink(missing_ok=True)
             self.sockets[runner] = await asyncio.start_unix_server(server.handle, str(path))
             os.chmod(path, 0o600)
+            await self._restore(runner, server)
         up = self.up.setdefault(runner, asyncio.Event())
         failure: list[str] = []
         task = self.keeping.get(runner)
@@ -312,6 +313,27 @@ class Links:
         except TimeoutError:
             raise BottleError(f"runner {runner} is unreachable: its link didn't come up"
                               f"{' (' + failure[-1] + ')' if failure else ''}") from None
+
+    async def _restore(self, runner: str, server: link.LinkServer) -> None:
+        """Make the controller's side again for the bottles on `runner`, from the registry.
+
+        A runner's bottled binds a bottle through the link when its machine
+        starts, and keeps it bound however often bottled here restarts; this
+        one, restarted, would otherwise not know it until the bottle's next
+        start. Every bottle there that's ready is taken to be running: one
+        that isn't asks nothing of it.
+        """
+        from bottle import bottles
+
+        for bottle in await asyncio.to_thread(lambda: list(bottles.load().values())):
+            if bottle.runner != runner or bottle.status != "ready":
+                continue
+            try:
+                _, _, services, gateway = await self.controller.egress(bottle.name, bottles.served(bottle), bottle.features)
+            except Exception as e:  # one bad bottle mustn't stop the rest
+                log.warning("%s: couldn't restore its side of runner %s's link: %s", bottle.name, runner, e)
+                continue
+            server.bottles[bottle.name] = (services, gateway)
 
     async def _keep(self, runner: str, destination: str, failure: list[str]) -> None:
         """Keep the link to `runner` up while any bottle there is bound through it; then let it go."""
