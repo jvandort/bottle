@@ -141,8 +141,12 @@ those asked meanwhile share, so each sees origin as it was when it asked. If
 origin can't be reached, the fetch is served what the hub has, as today;
 that's origin being down, not the link.
 
-A runner's mirror is identified by the hub's key, `<name>-<hash>`, the name
-and a hash of the hub's path, as folio keys repos (`folio/folio/repos.py`).
+A runner's mirror is `~/.bottle/git/<name>-<hash>.git` there: the hub's
+name and a hash of its git dir on the controller (`mirrors.key`). The git
+dir, not the checkout folio keys repos by (`folio/folio/repos.py`): a hub's
+worktrees share its objects, so they share a mirror. The controller serves
+a runner's mirrors only the hubs of the bottles on that runner, by its
+registry.
 
 ## Egress, credentials and the cache
 

@@ -238,7 +238,11 @@ class RemoteRunner:
         self._call("remove_unused", in_use=sorted(in_use))
 
     def objects(self, repo: repos.Repo) -> Path:
-        raise BottleError(f"runner {self.name} has no mirrors yet, so no repo can be mounted there")
+        from bottle import mirrors
+
+        # Its mirror there, made if it's the first bottle of that hub there, and fetched through the link.
+        self.transport.link()
+        return Path(self._call("mirror", key=mirrors.key(repos.objects_dir(repo).parent)))
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, cpus: int) -> None:

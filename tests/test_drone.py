@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import daemon, decider, host, runners
+from bottle import bottles, daemon, decider, host, mirrors, repos, runners
 from bottle.host import Remote, Served
 from tests.support import GitTestCase, run
 
@@ -85,14 +85,19 @@ class DroneTest(GitTestCase):
                 answer += chunk
         return answer
 
-    def test_a_drones_bottle_host_is_answered_by_its_controller(self) -> None:
+    def test_a_drones_fetch_is_served_from_its_runners_mirror_of_the_hub(self) -> None:
         upstream = self.make_repo("upstream")
         repo = self.tmp / "repo"
         run("git", "clone", "-q", upstream, repo)
-        new = self.commit(upstream, "since the controller last fetched")
-        served = (Served(repo / ".git", (Remote("origin", "upstream"),), "workspace"),)
+        remotes = (Remote("origin", "upstream"),)
+        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+            bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
+        box = runners.get("box")
 
-        runners.get("box").start("bottle-b", "b", served, ())
+        objects = box.objects(repos.Repo("repo", repo))   # what its machine mounts: the mirror there, made now
+        self.assertEqual(objects, self.remote / ".bottle" / "git" / f"{mirrors.key(repo / '.git')}.git" / "objects")
+        new = self.commit(upstream, "since the controller last fetched")
+        box.start("bottle-b", "b", (Served(repo / ".git", remotes, "workspace"),), ())
 
         started = json.loads((self.remote / "started.json").read_text())
         self.assertIn("--mediated-egress", started["args"])
@@ -100,8 +105,10 @@ class DroneTest(GitTestCase):
         answer = self.guest_connects(started, host.ADDRESS, 80, request)
         self.assertEqual(answer[:1], decider.REDIRECT)
         self.assertIn(b"HTTP/1.1 200", answer)
-        # Served by the controller, which pulled through first: the upstream's latest is advertised.
+        # The controller fetched origin into the hub, the mirror the hub, and the runner served it.
         self.assertIn(f"{new} refs/heads/main".encode(), answer)
+        mirror = objects.parent
+        self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/remotes/origin/main"), new)
         # The runner kept what the bottle was bound with, to bind it again if its bottled restarts.
         self.assertIn('"b"', (self.remote / ".bottle" / "bindings.json").read_text())
 

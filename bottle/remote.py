@@ -34,6 +34,10 @@ def _run(op: str, args: dict):
     match op:
         case "archive":
             return _path(local.archive(args["tag"]))
+        case "mirror":
+            from bottle import mirrors
+
+            return str(mirrors.ensure(args["key"]) / "objects")
         case "image_labels":
             return local.image_labels(args["tag"])
         case "built":
@@ -99,13 +103,47 @@ def build(request: str, sent: BinaryIO) -> str:
         os.close(answer_to)
 
 
+def relay(service: str, key: str) -> int:
+    """Be git's end of `service` for hub `key`, through the link: what ext:: runs for a mirror (see mirrors.py)."""
+    import socket
+    import threading
+
+    from bottle import mirrors
+
+    if service != "git-upload-pack":
+        print(f"bottle: a mirror only fetches ({service})", file=sys.stderr)
+        return 1
+    path = os.environ.get("BOTTLE_LINK") or str(bottle_home() / SOCKET)
+    with socket.socket(socket.AF_UNIX) as link:
+        try:
+            link.connect(path)
+        except OSError as e:
+            print(f"bottle: the controller can't be reached: its link isn't up ({e.strerror or e})", file=sys.stderr)
+            return 1
+        request = {"op": "upload-pack", "repo": key, "pull_through": bool(os.environ.get(mirrors.PULL_THROUGH)),
+                   "length": 0}
+        link.sendall(json.dumps(request).encode() + b"\n")
+
+        def up() -> None:
+            while data := os.read(0, 65536):
+                link.sendall(data)
+            link.shutdown(socket.SHUT_WR)
+
+        threading.Thread(target=up, daemon=True).start()
+        while data := link.recv(65536):
+            os.write(1, data)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     # The smolvm bottle installed here, unless one's named: one on PATH is used only without it.
     installed = Path.home() / ".bottle" / "smolvm" / "current" / "smolvm"
     if not os.environ.get("BOTTLE_SMOLVM") and installed.exists():
         os.environ["BOTTLE_SMOLVM"] = str(installed)
     # The bottled this starts here is the runner's half alone: the controller's is reached over the link.
-    os.environ["BOTTLE_LINK"] = str(bottle_home() / SOCKET)
+    os.environ.setdefault("BOTTLE_LINK", str(bottle_home() / SOCKET))
+    if argv[:1] == ["relay"] and len(argv) == 3:
+        return relay(argv[1], argv[2])
     if argv[:1] == ["build"] and len(argv) == 2:
         # Its request is its argument: stdin is what's built.
         print(build(argv[1], sys.stdin.buffer))

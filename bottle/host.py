@@ -269,8 +269,13 @@ class HostServices:
             out = await self.git.push(repo, remote, path_info, request)
         else:
             if "info/refs" in path_info:  # once per fetch, at its start
-                await self.git.before_fetch(repo, remote)
-            out = await fetch(self.git.fetch_dir(repo), repo, remote, path_info, request)
+                try:
+                    await self.git.before_fetch(repo, remote)
+                except BottleError as e:
+                    # Never served stale: a fetch sees the hub as it is, or fails saying why.
+                    await _respond(writer, 503, "Service Unavailable", f"{e}\n".encode())
+                    return "unavailable"
+            out = await self.git.fetch(repo, remote, path_info, request)
         if out is None:
             await _respond(writer, 500, "Internal Server Error", b"git http-backend failed\n")
             return "failed"
@@ -285,11 +290,11 @@ class Git(Protocol):
     can be served from a mirror of it, kept current before each.
     """
 
-    def fetch_dir(self, repo: Served) -> Path:
-        """The git dir `repo`'s fetches are served from."""
-
     async def before_fetch(self, repo: Served, remote: Remote) -> None:
-        """Bring what `fetch_dir` serves `remote` up to date, as a fetch starts."""
+        """Bring what fetches of `remote` are served from up to date, as a fetch starts; BottleError if it can't be."""
+
+    async def fetch(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+        """A fetch of `remote`'s view; git http-backend's output, or None if it failed."""
 
     async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
         """A push to `remote`, into the hub; git http-backend's output, or None if it failed."""
@@ -306,6 +311,9 @@ class HubGit:
         if remote.fetch == UPSTREAM:
             assert repo.git_dir is not None
             await pull_through(repo.git_dir)
+
+    async def fetch(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
+        return await fetch(self.fetch_dir(repo), repo, remote, path_info, request)
 
     async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
         assert repo.git_dir is not None

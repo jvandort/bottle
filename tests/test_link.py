@@ -43,8 +43,8 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def link_up(self, controller) -> link.LinkServer:
         server = link.LinkServer("box", controller)
-        listening = await asyncio.start_unix_server(server.handle, str(self.socket))
-        self.addAsyncCleanup(self._close, listening)
+        self.listening = await asyncio.start_unix_server(server.handle, str(self.socket))
+        self.addAsyncCleanup(self._close, self.listening)
         return server
 
     @staticmethod
@@ -72,32 +72,81 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         await runner.release("b")
         self.assertFalse(server.bound("b"))
 
-    async def test_bottle_host_there_is_answered_here(self):
-        upstream = self.make_repo("upstream")
+    def a_bottle_there(self) -> Path:
+        """A hub, and a bottle on runner box served it: the hub its mirrors there may fetch."""
+        self.upstream = self.make_repo("upstream")
         repo = self.tmp / "repo"
-        run("git", "clone", "-q", upstream, repo)
+        run("git", "clone", "-q", self.upstream, repo)
+        remotes = (host.Remote("origin", "upstream"), host.Remote("work", "ns/w", "ns/w"))
+        commit = run("git", "-C", repo, "rev-parse", "HEAD")
+        from bottle import bottles
+        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box",
+                                            mounts=(bottles.Mount("/workspace", str(repo), "main", commit, remotes),))})
+        # The relay a mirror's fetch runs finds the link where this runner has it.
+        env = mock.patch.dict(os.environ, {"BOTTLE_LINK": str(self.socket)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.served = (host.Served(repo / ".git", remotes, "workspace"),)
+        return repo
+
+    async def bottle_host_there(self):
+        """The bottle's bottle.host as its runner answers it, once bound through the link."""
         with mock.patch.object(daemon.auth, "injections_for", return_value=[]):
             await self.link_up(self.controller())
-            served = (host.Served(repo / ".git", (host.Remote("origin", "upstream"),), view_dir=self.tmp / "view.git"),)
-            _, services, _ = await link.LinkController(self.socket).egress("b", served, ())
+            _, services, _ = await link.LinkController(self.socket).egress("b", self.served, ())
         server, env = await serve_bottle_host(services)
         self.addAsyncCleanup(self._close, server)
-        workspace = self.tmp / "workspace"
-        run("git", "init", "-q", workspace)
-        new = self.commit(upstream, "upstream moved")   # pulled through, on the controller
-        result = await asyncio.to_thread(subprocess.run, ["git", "-C", workspace, "fetch", "-q", "http://bottle.host/git/origin",
-                                                          "main:origin-main"], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(run("git", "-C", workspace, "rev-parse", "origin-main"), new)
+        self.workspace = self.tmp / "workspace"
+        run("git", "init", "-q", "-b", "main", self.workspace)
+        for remote in ("origin", "work"):
+            run("git", "-C", self.workspace, "remote", "add", remote, f"http://bottle.host/git/workspace/{remote}")
+        return env
 
-    async def test_bottle_host_with_the_link_down_says_so(self):
-        services = link._LinkedServices(link.LinkController(self.socket), "b")
-        server, env = await serve_bottle_host(services)
-        self.addAsyncCleanup(self._close, server)
-        result = await asyncio.to_thread(subprocess.run, ["git", "ls-remote", "http://bottle.host/git/origin"], env=env,
-                                         capture_output=True, text=True)
+    async def git(self, env, *args) -> subprocess.CompletedProcess:
+        return await asyncio.to_thread(subprocess.run, ["git", "-C", self.workspace, *args], env=env,
+                                       capture_output=True, text=True)
+
+    async def test_a_fetch_there_is_served_from_its_mirror_once_its_current(self):
+        from bottle import mirrors
+
+        self.a_bottle_there()
+        env = await self.bottle_host_there()
+        new = self.commit(self.upstream, "upstream moved")   # the hub fetches origin, then the mirror the hub
+        result = await self.git(env, "fetch", "-q", "origin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", self.workspace, "rev-parse", "origin/main"), new)
+        mirror = mirrors.path(mirrors.key(self.served[0].git_dir))
+        self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/remotes/origin/main"), new)
+
+    async def test_a_push_there_goes_into_the_hub(self):
+        repo = self.a_bottle_there()
+        env = await self.bottle_host_there()
+        await self.git(env, "fetch", "-q", "origin")
+        await self.git(env, "checkout", "-q", "-b", "w", "origin/main")
+        commit = self.commit(self.workspace, "agent work")
+        result = await self.git(env, "push", "work", "w")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run("git", "-C", repo, "rev-parse", "refs/namespaces/w/refs/heads/w"), commit)
+        result = await self.git(env, "push", "origin", "w")
+        self.assertIn("403", result.stderr)   # read-only, as anywhere
+
+    async def test_a_fetch_there_with_the_link_down_fails_saying_so(self):
+        self.a_bottle_there()
+        env = await self.bottle_host_there()
+        await self._close(self.listening)
+        result = await self.git(env, "fetch", "-q", "origin")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("503", result.stderr)
+
+    async def test_a_mirror_fetches_only_the_hubs_of_bottles_there(self):
+        from bottle import mirrors
+
+        self.a_bottle_there()
+        await self.link_up(self.controller())
+        other = self.make_repo("other")
+        with self.assertRaisesRegex(BottleError, "mirroring"):
+            await asyncio.to_thread(mirrors.ensure, mirrors.key(other / ".git"))
+        self.assertTrue((await asyncio.to_thread(mirrors.ensure, mirrors.key(self.served[0].git_dir))).exists())
 
     async def test_a_credentials_flow_there_is_served_here(self):
         echoing = Echoing()
@@ -125,7 +174,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_a_bottle_bound_from_no_runner_is_served_nothing(self):
         await self.link_up(self.controller())
         with self.assertRaisesRegex(BottleError, "no bottle 'b' bound from runner box"):
-            await link.LinkController(self.socket)._ask({"op": "host", "bottle": "b", "method": "GET", "path": "/"})
+            await link.LinkController(self.socket)._ask({"op": "push", "bottle": "b", "method": "POST", "path": "/"})
 
     async def test_with_the_link_down_a_bottle_cant_be_bound_until_it_comes_up(self):
         Decider(self.tmp / "tokens.json").bind("b", None)   # its machine holds the token from before

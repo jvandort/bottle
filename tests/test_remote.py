@@ -94,9 +94,14 @@ class RemoteRunnerTest(unittest.TestCase):
                 self.assertRaisesRegex(BottleError, "runner box: no such machine"):
             self.runner.stop("bottle-b")
 
-    def test_no_repo_can_be_mounted_until_it_has_mirrors(self) -> None:
-        with self.assertRaisesRegex(BottleError, "no mirrors"):
-            self.runner.objects(mock.Mock())
+    def test_a_repo_is_mounted_from_its_mirror_there(self) -> None:
+        repo = mock.Mock()
+        with mock.patch.object(runners.repos, "objects_dir", return_value=Path("/src/app/.git/objects")), \
+                mock.patch("bottle.mirrors.ensure", return_value=Path("/there/git/app-1234.git")) as ensure:
+            self.assertEqual(self.runner.objects(repo), Path("/there/git/app-1234.git/objects"))
+        from bottle import mirrors
+        ensure.assert_called_once_with(mirrors.key(Path("/src/app/.git")))
+        self.assertEqual(self.transport.requests[0], ("link", {}))
 
 
 class RemoteBuildTest(unittest.TestCase):
