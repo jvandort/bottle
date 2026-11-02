@@ -156,9 +156,7 @@ class SshTransport:
 
     def call(self, op: str, request: str) -> str:
         # Its own code, if it has it; else it's sent, and asked again.
-        launcher = "import sys; sys.path.insert(0, sys.argv.pop(1)); from bottle import remote; sys.exit(remote.main(sys.argv[1:]))"
-        script = (f"[ -f {_code_dir()}/.complete ] || exit {NOT_SHIPPED}; "
-                  f"exec python3 -I -c {shlex.quote(launcher)} {_code_dir()} {shlex.quote(op)}")
+        script = self._launch(op)
         result = self.run(script, request.encode())
         if result.returncode == NOT_SHIPPED:
             self.ship()
@@ -167,6 +165,27 @@ class SshTransport:
             why = result.stderr.decode(errors="replace").strip()
             raise BottleError(f"runner {self.runner}: {op} failed (exit {result.returncode}){': ' + why if why else ''}")
         return result.stdout.decode()
+
+    def stream(self, op: str, request: str, data) -> str:
+        """Run `op` there, `request` its argument and `data` (a file) its stdin, its stderr this process's."""
+        script = self._launch(op, request)
+        for attempt in range(2):
+            data.seek(0)
+            result = subprocess.run([*self._ssh(tty=False), script], stdin=data, stdout=subprocess.PIPE)
+            if result.returncode == SSH_FAILED:
+                raise BottleError(f"runner {self.runner} is unreachable (see ssh's message above)")
+            if result.returncode != NOT_SHIPPED or attempt:
+                break
+            self.ship()
+        if result.returncode != 0:
+            raise BottleError(f"runner {self.runner}: {op} failed (exit {result.returncode})")
+        return result.stdout.decode()
+
+    def _launch(self, op: str, *args: str) -> str:
+        """The script that runs bottle.remote's `op` there, with its own code if it has it (else exit NOT_SHIPPED)."""
+        launcher = "import sys; sys.path.insert(0, sys.argv.pop(1)); from bottle import remote; sys.exit(remote.main(sys.argv[1:]))"
+        return (f"[ -f {_code_dir()}/.complete ] || exit {NOT_SHIPPED}; exec python3 -I -c {shlex.quote(launcher)} "
+                f"{_code_dir()} {shlex.join([op, *args])}")
 
     def ship(self) -> None:
         """Copy this code to the runner, complete or not at all."""

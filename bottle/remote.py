@@ -14,7 +14,10 @@ would ask before setting up, the controller asks its user first.
 import json
 import os
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
+from typing import BinaryIO
 
 from bottle import runners
 from bottle.link import SOCKET, served_from_json
@@ -31,6 +34,14 @@ def _run(op: str, args: dict):
     match op:
         case "archive":
             return _path(local.archive(args["tag"]))
+        case "image_labels":
+            return local.image_labels(args["tag"])
+        case "built":
+            return local.built()
+        case "forget":
+            local.forget(args["tag"])
+        case "remove_unused":
+            local.remove_unused(set(args["in_use"]))
         case "create":
             local.create(args["machine"], Path(args["archive"]),
                          [runners.Mount(Path(m["source"]), m["target"]) for m in args["mounts"]],
@@ -66,6 +77,28 @@ def answer(op: str, request: str) -> str:
         return json.dumps({"ok": False, "error": str(e)})
 
 
+def build(request: str, sent: BinaryIO) -> str:
+    """Build what's on stdin, a tar of a context and perhaps its Dockerfile, as `request` says; the answer."""
+    args = json.loads(request)
+    # What the build prints is for the user, on stderr: stdout is only the answer.
+    answer_to = os.dup(1)
+    os.dup2(2, 1)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            with tarfile.open(fileobj=sent, mode="r|") as tar:
+                tar.extractall(tmp, filter="data")
+            dockerfile = Path(tmp) / "Dockerfile" if args["dockerfile"] else None
+            runners.get(runners.LOCAL).build(Path(tmp) / "context", args["tag"], args["inputs"], args["no_cache"],
+                                             dockerfile, args["labels"])
+        return json.dumps({"ok": True, "result": None})
+    except BottleError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    finally:
+        sys.stdout.flush()
+        os.dup2(answer_to, 1)
+        os.close(answer_to)
+
+
 def main(argv: list[str]) -> int:
     # The smolvm bottle installed here, unless one's named: one on PATH is used only without it.
     installed = Path.home() / ".bottle" / "smolvm" / "current" / "smolvm"
@@ -73,8 +106,12 @@ def main(argv: list[str]) -> int:
         os.environ["BOTTLE_SMOLVM"] = str(installed)
     # The bottled this starts here is the runner's half alone: the controller's is reached over the link.
     os.environ["BOTTLE_LINK"] = str(bottle_home() / SOCKET)
+    if argv[:1] == ["build"] and len(argv) == 2:
+        # Its request is its argument: stdin is what's built.
+        print(build(argv[1], sys.stdin.buffer))
+        return 0
     if len(argv) != 1:
-        print("usage: python3 -m bottle.remote OP < ARGS.json", file=sys.stderr)
+        print("usage: python3 -m bottle.remote OP < ARGS.json, or build ARGS.json < CONTEXT.tar", file=sys.stderr)
         return 2
     print(answer(argv[0], sys.stdin.read()))
     return 0

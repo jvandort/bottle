@@ -81,6 +81,15 @@ class EnsureSmolvmTest(unittest.TestCase):
         with FakeHost(tools=()).active():
             prereqs.ensure_smolvm()  # would fail if it checked again
 
+    def test_on_linux_a_runner_has_it_or_is_told_where_it_comes_from(self) -> None:
+        with FakeHost().active(), mock.patch.object(prereqs.platform, "system", return_value="Linux"):
+            prereqs.ensure_smolvm()
+        prereqs.ensure_smolvm.cache_clear()
+        with FakeHost(tools=()).active() as host, mock.patch.object(prereqs.platform, "system", return_value="Linux"), \
+                self.assertRaisesRegex(BottleError, "`bottle runner add` on the controller installs it"):
+            prereqs.ensure_smolvm()
+        self.assertEqual(host.commands, [])   # nothing installed, nothing asked
+
     def test_rejects_intel(self) -> None:
         with FakeHost(machine="x86_64").active(), self.assertRaisesRegex(BottleError, "Apple silicon"):
             prereqs.ensure_smolvm()

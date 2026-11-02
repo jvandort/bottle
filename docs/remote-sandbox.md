@@ -177,9 +177,15 @@ inputs sent in as a tar over exec's stdin and the archive read out over its
 stdout. On every runner the controller works out what to build (the tag, its
 inputs' hash, the context), and the runner builds it and keeps the archive
 in its own store, from images in that store. A remote runner's archives
-never come back. The inputs' hash includes the runner's CPU architecture, so
-an image is never taken for another architecture's. Feature installs choose
-their downloads by `dpkg --print-architecture`.
+never come back. A build's context goes over ssh as a tar, and its progress
+comes back on the user's terminal. Feature installs choose their downloads by
+`dpkg --print-architecture`.
+
+The inputs' hash doesn't include the CPU architecture: a store is one
+runner's, of its own architecture, and an archive never moves between
+runners, so it can't be taken for another's. Putting it in the hash would
+only rebuild every image there is, once, for nothing. If archives ever move
+between runners, it goes in then. `bottle build --runner NAME` builds on one.
 
 A paused thread resumes on any runner, whatever its architecture: what an
 agent built and kept in its checkout is its own to rebuild.
@@ -239,7 +245,7 @@ already have.
    daemon, the decider on the runner, the forwarded socket, exec and shells;
    `bottle runner add`, `status` and `remove`, prerequisites checked per
    runner.
-6. Images built and kept on remote runners, the architecture in their hash.
+6. Images built and kept on remote runners.
 7. Mirrors: cloned and refreshed over the link, with `git fetch origin`
    first for upstream; drones mount the mirror's objects.
 8. Across runners: stop, delete, `bottle shutdown`, `bottle runner stop`,

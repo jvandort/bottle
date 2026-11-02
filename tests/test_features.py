@@ -672,9 +672,9 @@ class BuildTest(FeatureTestCase):
         self.feature("jvm", dependsOn={"tools": {}})
         self.built: list[str] = []
         for patcher in (
-            mock.patch.object(features.images, "ensure_built", side_effect=lambda i: self.built.append(f"image {i}")),
-            mock.patch.object(features, "_build", side_effect=lambda i, fs, tag, no_cache=False: self.built.append(tag)),
-            mock.patch.object(features, "remove_stale", side_effect=lambda: self.built.append("remove stale") or []),
+            mock.patch.object(features.images, "ensure_built", side_effect=lambda i, runner=None: self.built.append(f"image {i}")),
+            mock.patch.object(features, "_build", side_effect=lambda i, fs, tag, no_cache=False, runner=None: self.built.append(tag)),
+            mock.patch.object(features, "remove_stale", side_effect=lambda runner=None: self.built.append("remove stale") or []),
             mock.patch("sys.stderr"),
         ):
             patcher.start()
@@ -729,7 +729,8 @@ class RemoveStaleTest(FeatureTestCase):
             "localhost/bottle/base:with-old": {"bottle.features": "tools", "bottle.inputs": "outdated"},
             "localhost/bottle/base:with-gone": {"bottle.features": "no-such-feature", "bottle.inputs": "x"},
             "localhost/bottle/base:with-unlabeled": {"bottle.features": "tools"},
-        }, bottles={"a": mock.Mock(archive="old.tar"), "b": mock.Mock(archive=None)})
+        }, bottles={"a": mock.Mock(archive="old.tar", runner="local"), "b": mock.Mock(archive=None, runner="local"),
+                    "elsewhere": mock.Mock(archive="theirs.tar", runner="box")})
         self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
                                    "localhost/bottle/base:with-unlabeled"])
         self.assertEqual(self.deleted, removed)

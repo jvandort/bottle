@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         help="a feature to add, optionally with options, e.g. jvm:version=17 (repeatable)",
     )
     build.add_argument("--no-cache", action="store_true", help="rebuild every step")
+    build.add_argument("--runner", default="local", metavar="RUNNER",
+                       help="build it there, for the bottles it runs (default: local, this machine)")
     build.set_defaults(run=_build, parser=build)
 
     spec = commands.add_parser("spec", help="check a spec: a bottle's features and memory, as a file")
@@ -446,9 +448,11 @@ def _delete(args: argparse.Namespace) -> int:
 
 
 def _build(args: argparse.Namespace) -> int:
-    from bottle import features, images
+    from bottle import features, images, runners
 
-    print(f"Built {features.build(images.BASE, args.feature, args.no_cache)}")
+    runner = runners.get(args.runner)
+    where = "" if runner.name == runners.LOCAL else f" on runner {runner.name}"
+    print(f"Built {features.build(images.BASE, args.feature, args.no_cache, runner)}{where}")
     return 0
 
 

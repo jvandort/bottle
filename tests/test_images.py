@@ -68,8 +68,8 @@ class DependencyTest(unittest.TestCase):
                                  ({"localhost/bottle/base:latest", "localhost/bottle/tools:latest"}, [])):
             built.clear()
             with self.subTest(exists=exists), \
-                    mock.patch.object(images, "is_current", side_effect=lambda t, inputs: t in exists), \
-                    mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append(n)), \
+                    mock.patch.object(images, "is_current", side_effect=lambda t, inputs, runner=None: t in exists), \
+                    mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False, runner=None: built.append(n)), \
                     mock.patch("sys.stderr"):
                 images.ensure_built("tools")
                 self.assertEqual(built, expected)
@@ -79,7 +79,7 @@ class DependencyTest(unittest.TestCase):
         self.image("tools", "FROM localhost/bottle/base:latest\n")
         built = []
         with mock.patch.object(images, "is_current", return_value=True), \
-                mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False: built.append((n, no_cache))):
+                mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False, runner=None: built.append((n, no_cache))):
             self.assertEqual(images.build("tools", no_cache=True), "localhost/bottle/tools:latest")
         self.assertEqual(built, [("tools", True)])
 

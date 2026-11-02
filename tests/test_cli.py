@@ -81,7 +81,19 @@ class BuildCommandTest(unittest.TestCase):
         with mock.patch("bottle.features.build", return_value="bottle/base:latest") as build, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["build", "--feature", "tools"]), 0)
-        build.assert_called_once_with("base", ["tools"], False)
+        from bottle import runners
+        build.assert_called_once_with("base", ["tools"], False, runners.get("local"))
+
+    def test_on_a_runner(self) -> None:
+        box = mock.Mock()
+        box.name = "box"
+        with mock.patch("bottle.features.build", return_value="bottle/base:latest") as build, \
+                mock.patch("bottle.runners.get", return_value=box) as get, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["build", "--runner", "box"]), 0)
+        get.assert_called_once_with("box")
+        build.assert_called_once_with("base", [], False, box)
+        self.assertIn("on runner box", out.getvalue())
 
 
 class SpecCommandsTest(CliTestCase):

@@ -69,9 +69,19 @@ def inputs_hash(name: str) -> str:
     return digest.hexdigest()
 
 
-def is_current(image: str, expected: str) -> bool:
-    labels = built_labels(image)
+def is_current(image: str, expected: str, runner=None) -> bool:
+    """Whether `image` is built on `runner` (default: this machine) from what it's built from now."""
+    labels = _on(runner).image_labels(image)
     return labels is not None and labels.get(INPUTS_LABEL) == expected
+
+
+def _on(runner):
+    """`runner`, or the local one: where images are kept and built."""
+    if runner is not None:
+        return runner
+    from bottle import runners  # runners imports this module
+
+    return runners.get()
 
 
 def dependencies(name: str) -> list[str]:
@@ -101,23 +111,27 @@ def build_order(name: str) -> list[str]:
     return order
 
 
-def ensure_built(name: str) -> bool:
-    """Build `name`, and whatever it's built from, if missing or stale. True if anything was built."""
+def ensure_built(name: str, runner=None) -> bool:
+    """Build `name`, and whatever it's built from, on `runner` if missing or stale there. True if anything was built."""
     built = False
     for image in build_order(name):
-        if not is_current(tag(image), inputs_hash(image)):
-            print(f"Building {tag(image)}...", file=sys.stderr)
-            _build_one(image)
+        if not is_current(tag(image), inputs_hash(image), runner):
+            print(f"Building {tag(image)}{_where(runner)}...", file=sys.stderr)
+            _build_one(image, runner=runner)
             built = True
     return built
 
 
-def build(name: str, no_cache: bool = False) -> str:
-    """Build the named image, first building anything it's built from that isn't built yet."""
+def build(name: str, no_cache: bool = False, runner=None) -> str:
+    """Build the named image on `runner`, first building anything it's built from that isn't built there yet."""
     for dependency in build_order(name)[:-1]:
-        ensure_built(dependency)
-    _build_one(name, no_cache)
+        ensure_built(dependency, runner)
+    _build_one(name, no_cache, runner)
     return tag(name)
+
+
+def _where(runner) -> str:
+    return f" on runner {runner.name}" if runner is not None and runner.name != "local" else ""
 
 
 def _require(name: str) -> None:
@@ -125,9 +139,9 @@ def _require(name: str) -> None:
         raise BottleError(f"no image named {name!r}; available: {', '.join(available())}")
 
 
-def _build_one(name: str, no_cache: bool = False) -> None:
+def _build_one(name: str, no_cache: bool = False, runner=None) -> None:
     _require(name)
-    build_context(IMAGES / name, tag(name), inputs_hash(name), no_cache)
+    _on(runner).build(IMAGES / name, tag(name), inputs_hash(name), no_cache)
 
 
 def build_context(

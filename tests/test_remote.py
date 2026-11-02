@@ -24,6 +24,10 @@ class InProcess:
     def link(self) -> None:
         self.requests.append(("link", {}))
 
+    def stream(self, op: str, request: str, data) -> str:
+        self.requests.append((op, json.loads(request)))
+        return remote.build(request, data)
+
 
 class RemoteRunnerTest(unittest.TestCase):
     """A remote runner is the local runner where it runs, every operation's arguments and answer crossing as JSON."""
@@ -93,6 +97,41 @@ class RemoteRunnerTest(unittest.TestCase):
     def test_no_repo_can_be_mounted_until_it_has_mirrors(self) -> None:
         with self.assertRaisesRegex(BottleError, "no mirrors"):
             self.runner.objects(mock.Mock())
+
+
+class RemoteBuildTest(unittest.TestCase):
+    """A build on a runner: the controller works out what, the runner builds it from what it's sent."""
+
+    def test_the_context_and_dockerfile_are_sent_and_built_there(self) -> None:
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp)
+        (tmp / "context").mkdir()
+        (tmp / "context" / "install.sh").write_text("echo hi")
+        (tmp / "Dockerfile").write_text("FROM localhost/bottle/base:latest")
+        seen = {}
+
+        def build(context, tag, inputs, no_cache, dockerfile, labels):
+            seen.update(files=sorted(p.name for p in context.iterdir()), dockerfile=dockerfile.read_text(),
+                        args=(tag, inputs, no_cache, labels))
+
+        transport = InProcess()
+        with mock.patch.object(runners.LocalRunner, "build", side_effect=lambda *a: build(*a)):
+            runners.RemoteRunner("box", transport).build(tmp / "context", "localhost/bottle/base:with-x", "abc",
+                                                         dockerfile=tmp / "Dockerfile", labels={"bottle.features": "x"})
+        self.assertEqual(seen, {"files": ["install.sh"], "dockerfile": "FROM localhost/bottle/base:latest",
+                                "args": ("localhost/bottle/base:with-x", "abc", False, {"bottle.features": "x"})})
+        self.assertEqual([op for op, _ in transport.requests], ["link", "build"])  # its builder's flows need the link
+
+    def test_a_build_that_fails_there_is_the_controllers_error(self) -> None:
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp)
+        with mock.patch.object(runners.LocalRunner, "build", side_effect=BottleError("building x failed")), \
+                self.assertRaisesRegex(BottleError, "runner box: building x failed"):
+            runners.RemoteRunner("box", InProcess()).build(tmp, "t", "i")
 
 
 class AnswerTest(unittest.TestCase):

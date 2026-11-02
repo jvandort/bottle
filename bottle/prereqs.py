@@ -15,9 +15,18 @@ from bottle.errors import BottleError
 
 @functools.cache
 def ensure_smolvm() -> None:
-    """smolvm installed (see smolvm.py), or the one $BOTTLE_SMOLVM names."""
+    """smolvm installed (see smolvm.py), or the one $BOTTLE_SMOLVM names.
+
+    On a Mac it's installed with Homebrew, asking first. On Linux, bottle runs
+    machines only as a remote runner, where `bottle runner add` installs it.
+    """
+    if platform.system() == "Linux":
+        if shutil.which(smolvm.binary()) is None:
+            raise BottleError(f"smolvm isn't installed here ({smolvm.binary()}); "
+                              "`bottle runner add` on the controller installs it")
+        return
     if platform.system() != "Darwin" or platform.machine() != "arm64":
-        raise BottleError("bottle runs on macOS on Apple silicon")
+        raise BottleError("bottle runs on macOS on Apple silicon, and its remote runners on Linux")
     binary = smolvm.binary()
     if shutil.which(binary) is None:
         if binary != "smolvm":

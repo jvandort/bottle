@@ -74,6 +74,16 @@ class TransportTest(SshTestCase):
         runner.state("bottle-b")
         self.assertEqual(len(self.logged()), 4)  # just asked
 
+    def test_a_build_streams_its_context_there_and_its_answer_back(self) -> None:
+        context = self.tmp / "context"
+        context.mkdir()
+        (context / "Dockerfile").write_text("FROM scratch")
+        runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
+        # No smolvm there: the build fails there, before any machine, and says why, here.
+        with mock.patch.object(ssh.SshTransport, "link"), mock.patch.dict(os.environ, {"BOTTLE_SMOLVM": "/no/smolvm"}), \
+                self.assertRaisesRegex(BottleError, r"runner box: smolvm isn't installed here \(/no/smolvm\)"):
+            runner.build(context, "localhost/bottle/x:latest", "abc")
+
     def test_a_runner_it_cant_reach_is_unreachable(self) -> None:
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "down"))
         with self.assertRaisesRegex(BottleError, r"runner box is unreachable \(ssh: connect to host down"):

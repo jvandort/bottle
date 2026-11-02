@@ -290,7 +290,7 @@ class CreateTest(BottleTestCase):
     def test_builds_the_image_first(self) -> None:
         fake = self.fake()
 
-        def ensure_built(image, feature_ids):
+        def ensure_built(image, feature_ids, runner=None):
             fake.calls.append(f"ensure_built {image} {feature_ids}")
             return "localhost/bottle/base:with-tools"
 
@@ -581,7 +581,7 @@ class DeleteImageTest(BottleTestCase):
         self.create()
         with mock.patch.object(bottles.features_, "remove_stale", return_value=[]) as remove_stale:
             bottles.delete("example")
-        remove_stale.assert_called_once_with()
+        remove_stale.assert_called_once_with(bottles.runners.get("local"))
 
     def test_a_failure_removing_them_doesnt_fail_the_delete(self) -> None:
         self.fake()

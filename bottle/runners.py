@@ -11,15 +11,18 @@ bottled, called in-process. Its decider is bottled's.
 
 Code on the runner's side (smolvm.py, images.py's store and builds, the
 decider) uses its neighbours directly: a builder machine is the runner's own
-business. Building the images a bottle boots still starts on the driver, in
-features.ensure_built, and goes through the runner once runners can be remote.
+business. What to build (an image's tag, its inputs and their hash) is the
+controller's to work out, in images.py and features.py; the runner keeps the
+images it's built and builds those it's sent.
 """
 
 import json
 import re
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from bottle import daemon, images, prereqs, repos, smolvm
 from bottle.errors import BottleError
@@ -45,6 +48,22 @@ class Runner(Protocol):
 
     def archive(self, tag: str) -> Path | None:
         """The archive `tag` was last built into, in the runner's image store; None if it isn't built there."""
+
+    def image_labels(self, tag: str) -> dict[str, str] | None:
+        """The labels `tag` was last built with there; None if it isn't built there."""
+
+    def built(self) -> dict[str, dict[str, str]]:
+        """Every tag built there, with its labels."""
+
+    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
+              labels: dict[str, str] | None = None) -> None:
+        """Build `context` into `tag` there (see images.build_context), its progress on this process's stderr."""
+
+    def forget(self, tag: str) -> None:
+        """Drop `tag` from the runner's index of images; its archive goes once nothing uses it."""
+
+    def remove_unused(self, in_use: set[str]) -> None:
+        """Delete the runner's archives no tag points to and no machine (`in_use`, archive names) was made from."""
 
     def objects(self, repo: repos.Repo) -> Path:
         """Where on the runner a machine mounts `repo`'s objects from."""
@@ -95,6 +114,22 @@ class LocalRunner:
     def archive(self, tag: str) -> Path | None:
         return images.archive_of(tag)
 
+    def image_labels(self, tag: str) -> dict[str, str] | None:
+        return images.built_labels(tag)
+
+    def built(self) -> dict[str, dict[str, str]]:
+        return images.built()
+
+    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
+              labels: dict[str, str] | None = None) -> None:
+        images.build_context(context, tag, inputs, no_cache, dockerfile, labels)
+
+    def forget(self, tag: str) -> None:
+        images.forget(tag)
+
+    def remove_unused(self, in_use: set[str]) -> None:
+        images.remove_unused(in_use)
+
     def objects(self, repo: repos.Repo) -> Path:
         # The repo's own: it's on this machine's disk, so nothing is copied.
         return repos.objects_dir(repo)
@@ -144,6 +179,10 @@ class Transport(Protocol):
     def link(self) -> None:
         """The runner's link to the controller up, so its bottled can reach the controller's."""
 
+    def stream(self, op: str, request: str, data: BinaryIO) -> str:
+        """Run `op` there with `request` as its argument and `data` on its stdin, its stderr on this process's:
+        for what's long and worth watching, a build."""
+
 
 class RemoteRunner:
     """A runner elsewhere: its own local runner, operated through `transport` (see bottle/remote.py)."""
@@ -168,6 +207,35 @@ class RemoteRunner:
     def archive(self, tag: str) -> Path | None:
         found = self._call("archive", tag=tag)
         return Path(found) if found is not None else None
+
+    def image_labels(self, tag: str) -> dict[str, str] | None:
+        return self._call("image_labels", tag=tag)
+
+    def built(self) -> dict[str, dict[str, str]]:
+        return self._call("built")
+
+    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
+              labels: dict[str, str] | None = None) -> None:
+        # Sent as a tar: the context, and the Dockerfile. Built FROM images there, by a builder machine there,
+        # whose connections are decided there and so through the controller.
+        with tempfile.TemporaryFile() as sent:
+            with tarfile.open(fileobj=sent, mode="w") as tar:
+                tar.add(context, "context")
+                if dockerfile is not None:
+                    tar.add(dockerfile, "Dockerfile")
+            sent.seek(0)
+            self.transport.link()
+            request = {"tag": tag, "inputs": inputs, "no_cache": no_cache, "dockerfile": dockerfile is not None,
+                       "labels": labels or {}}
+            answer = json.loads(self.transport.stream("build", json.dumps(request), sent))
+        if not answer.get("ok"):
+            raise BottleError(f"runner {self.name}: {answer.get('error', 'build failed')}")
+
+    def forget(self, tag: str) -> None:
+        self._call("forget", tag=tag)
+
+    def remove_unused(self, in_use: set[str]) -> None:
+        self._call("remove_unused", in_use=sorted(in_use))
 
     def objects(self, repo: repos.Repo) -> Path:
         raise BottleError(f"runner {self.name} has no mirrors yet, so no repo can be mounted there")

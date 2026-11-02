@@ -709,34 +709,37 @@ def inputs_hash(image: str, features: list[Feature]) -> str:
     return digest.hexdigest()
 
 
-def ensure_built(image: str, specs: list[str]) -> str:
-    """Build `image` with the features in `specs` if missing or stale; return its tag."""
+def ensure_built(image: str, specs: list[str], runner=None) -> str:
+    """Build `image` with the features in `specs` on `runner` (default: this machine) if missing or stale there;
+    return its tag."""
     features = resolve(specs)
     tag = image_tag(image, features)
-    built = images.ensure_built(image)
-    if features and not images.is_current(tag, inputs_hash(image, features)):
-        print(f"Building {tag}...", file=sys.stderr)
-        _build(image, features, tag)
+    built = images.ensure_built(image, runner)
+    if features and not images.is_current(tag, inputs_hash(image, features), runner):
+        print(f"Building {tag}{images._where(runner)}...", file=sys.stderr)
+        _build(image, features, tag, runner=runner)
         built = True
     if built:
-        _report_removed(remove_stale())
+        _report_removed(remove_stale(runner))
     return tag
 
 
-def remove_stale() -> list[str]:
-    """Forget bottle's images whose inputs have changed since they were built; delete archives nothing uses.
+def remove_stale(runner=None) -> list[str]:
+    """Forget bottle's images on `runner` (default: this machine) whose inputs have changed since they were
+    built; delete archives nothing there uses.
 
-    An archive goes once no tag points to it and no bottle was made from it:
-    smolvm reads a machine's archive again on every start. Returns the images forgotten.
+    An archive goes once no tag points to it and no bottle there was made from
+    it: smolvm reads a machine's archive again on every start. Returns the images forgotten.
     """
     from bottle import bottles  # bottles imports this module
 
+    on = images._on(runner)
     removed = []
-    for tag, labels in images.built().items():
+    for tag, labels in on.built().items():
         if labels.get(images.INPUTS_LABEL) != _expected_inputs(tag, labels):
-            images.forget(tag)
+            on.forget(tag)
             removed.append(tag)
-    images.remove_unused({b.archive for b in bottles.load().values() if b.archive})
+    on.remove_unused({b.archive for b in bottles.load().values() if b.archive and b.runner == on.name})
     return removed
 
 
@@ -752,16 +755,16 @@ def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
         return None
 
 
-def build(image: str, specs: list[str], no_cache: bool = False) -> str:
-    """Build `image` with the features in `specs`, first building anything missing underneath."""
+def build(image: str, specs: list[str], no_cache: bool = False, runner=None) -> str:
+    """Build `image` with the features in `specs` on `runner`, first building anything missing underneath."""
     if not specs:
-        tag = images.build(image, no_cache)
+        tag = images.build(image, no_cache, runner)
     else:
         features = resolve(specs)
         tag = image_tag(image, features)
-        images.ensure_built(image)
-        _build(image, features, tag, no_cache)
-    _report_removed(remove_stale())
+        images.ensure_built(image, runner)
+        _build(image, features, tag, no_cache, runner)
+    _report_removed(remove_stale(runner))
     return tag
 
 
@@ -770,12 +773,12 @@ def _report_removed(removed: list[str]) -> None:
         print(f"Removed stale image {name}", file=sys.stderr)
 
 
-def _build(image: str, features: list[Feature], tag: str, no_cache: bool = False) -> None:
+def _build(image: str, features: list[Feature], tag: str, no_cache: bool = False, runner=None) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp) / "Dockerfile"
         generated.write_text(dockerfile(image, features))
-        images.build_context(FEATURES, tag, inputs_hash(image, features), no_cache, dockerfile=generated,
-                             labels={FEATURES_LABEL: " ".join(sorted(f.spec for f in features))})
+        images._on(runner).build(FEATURES, tag, inputs_hash(image, features), no_cache, dockerfile=generated,
+                                 labels={FEATURES_LABEL: " ".join(sorted(f.spec for f in features))})
 
 
 def _option_env_name(option: str) -> str:

@@ -235,7 +235,7 @@ def create(
         raise BottleError(f"a bottle named {name!r} already exists")
     planned = _plan_mounts(mounts or [], existing.values())
     on.ensure_ready()
-    tag = features_.ensure_built(image, installed)
+    tag = features_.ensure_built(image, installed, on)
     auth.ensure_logged_in(installed)
 
     bottle = Bottle(
@@ -764,10 +764,10 @@ def delete(name: str) -> None:
         raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `bottle delete {name}`")
     _forget(name)
     log.info("%s: deleted", name)
-    _remove_stale_images()
+    _remove_stale_images(runner)
 
 
-def _remove_stale_images() -> None:
+def _remove_stale_images(runner: runners.Runner) -> None:
     """Delete images whose features or base have changed since they were built, if no bottle uses one.
 
     An image that's still current is kept, even with nothing using it: it's a
@@ -775,7 +775,7 @@ def _remove_stale_images() -> None:
     Best effort: the bottle is already gone.
     """
     try:
-        features_.remove_stale()
+        features_.remove_stale(runner)
     except BottleError as e:
         print(f"bottle: couldn't remove stale images: {e}", file=sys.stderr)
 
