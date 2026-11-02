@@ -1,6 +1,6 @@
-"""bottled: the host process that decides every bottle's connections.
+"""bottled: the daemon that decides every bottle's connections.
 
-It runs the decider (see decider.py) on host loopback, which smolvm asks
+It runs the decider (see decider.py) on the runner's loopback, which smolvm asks
 about each of a bottle's connections before making it. Commands don't manage
 it directly: bind_decider() gives a bottle its token there, starting bottled
 if it isn't running, and release_egress() takes it back. It listens on a Unix

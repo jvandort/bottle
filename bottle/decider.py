@@ -1,8 +1,8 @@
 """The decider: where a driver that carries the guest's sockets asks about each connection before making it.
 
 smolvm's mediated egress (version 2 of its decider protocol) connects here
-once per guest TCP flow, from host loopback, and writes a prelude: a token
-the host gave it for the machine, the machine's identity, the destination,
+once per guest TCP flow, from the runner's loopback, and writes a prelude: a token
+bottle gave it for the machine, the machine's identity, the destination,
 and the flow's first bytes. bottled answers one byte: allow direct (smolvm
 connects it), deny, or redirect, after which the same connection carries the
 flow and bottled is its far end (see Gateway.decide and .serve in
@@ -49,7 +49,7 @@ ID_BYTES = 16
 MAX_FIRST_BYTES = 8192
 PRELUDE_TIMEOUT = 10
 ALLOW_DIRECT, DENY, REDIRECT = b"\x00", b"\x01", b"\x02"
-# On host loopback, at a port that stays put: smolvm keeps the address it was
+# On the runner's loopback, at a port that stays put: smolvm keeps the address it was
 # given for a launch's life, through any restart of bottled.
 DEFAULT_PORT = 47329
 

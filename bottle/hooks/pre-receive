@@ -1,15 +1,15 @@
 #!/bin/sh
-# Bottle's one rule for pushes from a bottle to the host repo (see bottle/host.py).
-# Runs on the host, never in the bottle: `git receive-pack`, serving the push in
-# the host repo, runs it after the pushed objects arrive and before any ref
+# Bottle's one rule for pushes from a bottle to the hub (see bottle/host.py).
+# Runs on the controller, never in the bottle: `git receive-pack`, serving the push in
+# the hub, runs it after the pushed objects arrive and before any ref
 # moves. A non-zero exit refuses the whole push. The bottle can't skip it.
 #
 # What confines a push is GIT_NAMESPACE, not this hook: receive-pack reads and
-# writes only refs/namespaces/<it>/, so the host's own refs are neither
+# writes only refs/namespaces/<it>/, so the hub's own refs are neither
 # advertised to the bottle nor reachable by it, and git's ordinary rules
 # (fast-forward only, no deletes -- see the config in host.py) apply within the
 # lane. All that's left to check is that a namespace arrived at all, since a
-# push without one would write the host's own refs.
+# push without one would write the hub's own refs.
 if [ -z "${GIT_NAMESPACE:-}" ]; then
   echo "bottle: this push has no namespace; refusing it" >&2
   exit 1

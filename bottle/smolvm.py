@@ -7,8 +7,8 @@ as a container. Bottle relies on, and tests/test_smolvm_contract.py checks:
   - mediated egress: started with --egress-interceptor and --mediated-egress,
     a machine asks bottled's decider about each TCP flow before connecting it (see
     decider.py), and denies other UDP than DNS. Needs --net-backend virtio-net.
-  - DNS, which smolvm answers itself, from the host's resolver as it was when
-    the machine started, so the Mac's resolver mustn't change under it.
+  - DNS, which smolvm answers itself, from the runner's resolver as it was when
+    the machine started, so the runner's resolver mustn't change under it.
   - exec, always with -i: a plain exec collects output in the guest and cuts
     it at 11 MiB with nothing on stderr, and snapshots go through exec.
   - read-only mounts, -e reaching every exec, and a disk kept across stops.

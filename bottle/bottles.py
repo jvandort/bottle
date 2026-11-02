@@ -20,8 +20,8 @@ specs.py). Its remotes are the ones it was created with, and nothing is
 registered in the repo: what the bottle pushes is for its creator to read.
 What's worth keeping before a bottle is deleted is its creator's call too.
 
-Objects the bottle uses from the repo aren't protected from `git gc` on the
-host: if the host deletes a branch a bottle checked out and gc later prunes
+Objects the bottle uses from the repo aren't protected from `git gc` in the
+hub: if the user deletes a branch a bottle checked out and gc later prunes
 its commits (after git's grace periods, weeks to months), that checkout
 breaks, and the bottle has to be made again.
 """
@@ -80,7 +80,7 @@ class Mount:
     borrowing them, and served the remotes it was given."""
 
     path: str  # where it's checked out, absolute
-    repo: str  # its toplevel on the host, whose objects are mounted
+    repo: str  # its toplevel on the controller: the hub, whose objects are mounted
     branch: str | None  # None: a detached commit
     commit: str
     remotes: tuple[host.Remote, ...] = ()

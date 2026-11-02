@@ -68,7 +68,7 @@ class _Log(logging.handlers.WatchedFileHandler):
 
 
 def namespace() -> str:
-    """A prefix for names that are global on the host (containers), per BOTTLE_HOME.
+    """A prefix for names that are global on a runner (machines), per BOTTLE_HOME.
 
     Empty for the default home; otherwise a short hash, so bottles in another
     home (e.g. tests) can never collide with the default home's.

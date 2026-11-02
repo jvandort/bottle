@@ -1,5 +1,5 @@
 #!/bin/sh
-# After a push from a bottle, on the host: bring the host's checked-out
+# After a push from a bottle, on the controller: bring the hub's checked-out
 # branches up to what it pushed, where that's safe, and tell the bottle (see
 # follow.py). bottled names its own Python; without it, nothing follows.
 [ -n "${BOTTLE_PYTHON:-}" ] || exit 0

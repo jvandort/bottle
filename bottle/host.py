@@ -1,28 +1,28 @@
-"""Host services: what a bottle can ask of the host, at bottle.host.
+"""bottle.host's services: what a bottle can ask of bottle, at http://bottle.host/.
 
-Requests to http://bottle.host/ never leave the host: the decider hands them
+Requests to http://bottle.host/ never leave bottle: the decider hands them
 to bottled, which answers them itself, serving the bottle's repo over git's
 smart HTTP protocol with `git http-backend`. A bottle is served the remotes it
 was created with, each a Remote at http://bottle.host/git/<name>. What a fetch
 sees is one of three views:
 
   upstream
-      The repo's upstream: the host repo's refs/remotes/origin/*, served as
+      The repo's upstream: the hub's refs/remotes/origin/*, served as
       branches (so `git checkout release` works in the bottle), plus tags.
-      Pull-through: before serving, the host runs `git fetch origin` in the
-      repo (never prompting), so the bottle gets the real upstream's latest
-      even if nobody fetched on the host.
+      Pull-through: before serving, the controller runs `git fetch origin` in
+      the hub (never prompting), so the bottle gets the real upstream's latest
+      even if nobody fetched there.
 
   heads
-      The host repo's own refs, as they are: what the bottle reads to build on
+      The hub's own refs, as they are: what the bottle reads to build on
       what the user has (`git rebase host/main`).
 
   ns/<namespace>
-      The refs in one git namespace (gitnamespaces(7)) of the host repo, and
-      nothing else.
+      The refs in one git namespace (gitnamespaces(7)) of the hub, and nothing
+      else.
 
 A remote that takes pushes writes one namespace. A namespace is what confines
-the push -- every ref receive-pack resolves is inside it, and the host's own
+the push -- every ref receive-pack resolves is inside it, and the hub's own
 refs aren't advertised -- so git behaves like git in the bottle while being
 unable to name anything else. Pushes are also append-only, refusing
 force-pushes and deletes, so what someone has already read never changes
@@ -34,17 +34,17 @@ with one writer, so neither side's push is ever rejected for what the other
 did: the bottle writes one lane, and whoever created it writes the other,
 directly in its own repo. bottled never serves that direction.
 
-Fetches are served from the host repo itself, or from a mirror of it that
+Fetches are served from the hub itself, or from a mirror of it that
 a bottle's runner keeps, brought up to date as each fetch starts (see Git):
 either way, a fetch sees the repo as it is right now. Pushes always go into
-the host repo, with every rule here.
+the hub, on the controller, with every rule here.
 
-After a push, the host's checked-out branches follow it (hooks/follow.py):
+After a push, the hub's checked-out branches follow it (hooks/follow.py):
 one whose upstream is a remote reading the push's namespace (folio's
 bottle/<thread>) is fast-forwarded to the bottle's branch of the same name,
 files and all, in whichever worktree has it, unless the repo says
 `git config bottle.follow false`. Only ever a fast-forward, and only when it can't lose anything: a branch with commits of
-the host's own, a change in the way, or a worktree mid-merge, -rebase and the
+the hub's own, a change in the way, or a worktree mid-merge, -rebase and the
 like is left alone. The push succeeds either way, and its output tells the
 bottle what moved and what didn't; bottled logs it too.
 
@@ -188,7 +188,7 @@ class Served:
 
 @dataclass
 class HostServices:
-    """What one bottle may ask of the host."""
+    """What one bottle may ask of bottle.host."""
 
     repos: tuple[Served, ...] = ()  # the repos it's served, each a mount's
     bottle: str | None = None  # who's asking: the sender of its messages
@@ -196,8 +196,8 @@ class HostServices:
     deliver: Callable[[str, str, str], Awaitable[None]] | None = None
     # The running bottles the asker may see: (asker) -> [{name, repo, thread}]; raises ServiceError.
     peers: Callable[[str], Awaitable[list[dict]]] | None = None
-    # Where its git is served from and goes to: the host repo, unless its runner says otherwise.
-    git: "Git" = field(default_factory=lambda: HostGit())
+    # Where its git is served from and goes to: the hub, unless its runner says otherwise.
+    git: "Git" = field(default_factory=lambda: HubGit())
 
     def route(self, path: str) -> tuple[Served, Remote, str] | None:
         """The repo, remote and rest of path a /git/... request is for; None if none is served there."""
@@ -279,9 +279,9 @@ class HostServices:
 
 
 class Git(Protocol):
-    """Where a bottle's git goes: fetches served from a repo its runner has, and pushes into the host repo.
+    """Where a bottle's git goes: fetches served from a repo its runner has, and pushes into the hub.
 
-    The host repo is the only one pushes go into, with every rule; fetches
+    The hub, on the controller, is the only repo pushes go into, with every rule; fetches
     can be served from a mirror of it, kept current before each.
     """
 
@@ -292,11 +292,11 @@ class Git(Protocol):
         """Bring what `fetch_dir` serves `remote` up to date, as a fetch starts."""
 
     async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-        """A push to `remote`, into the host repo; git http-backend's output, or None if it failed."""
+        """A push to `remote`, into the hub; git http-backend's output, or None if it failed."""
 
 
-class HostGit:
-    """A bottle on the host itself: everything is the host repo's, served and written in place."""
+class HubGit:
+    """A bottle on the controller itself: everything is the hub's, served and written in place."""
 
     def fetch_dir(self, repo: Served) -> Path:
         assert repo.git_dir is not None
@@ -322,24 +322,24 @@ async def fetch(git_dir: Path, repo: Served, remote: Remote, path_info: str, req
 
 
 async def receive(git_dir: Path, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-    """A push into `remote`'s namespace of the host repo at `git_dir`, under bottle's rules, its branches following."""
+    """A push into `remote`'s namespace of the hub at `git_dir`, under bottle's rules, its branches following."""
     config = {
         "http.receivepack": "true",
         "core.hooksPath": str(HOOKS),  # bottle's rules; the repo's own hooks never run
         "receive.fsckObjects": "true",
         # Nothing a reviewer has read may change underneath them, so
         # the out lane is append-only. A bottle with a stream to
-        # abandon pushes a new branch; rewriting is the host's, in
-        # its own repo, where every git command is available.
+        # abandon pushes a new branch; rewriting is the user's, in
+        # their own repo, where every git command is available.
         "receive.denyNonFastForwards": "true",
         "receive.denyDeletes": "true",
         "core.logAllRefUpdates": "always",  # refs outside refs/heads get no reflog by default
         # A bottle pushing `main` writes its lane's main, but git
-        # compares the unnamespaced name against the host's
+        # compares the unnamespaced name against the hub's
         # checked-out branch and would refuse it.
         "receive.denyCurrentBranch": "ignore",
     }
-    # What hooks/post-receive needs to make the host's branches follow a push, and where it says what it did.
+    # What hooks/post-receive needs to make the hub's branches follow a push, and where it says what it did.
     hook_log = None
     if request.method == "POST":
         hook_log = Path(tempfile.mkstemp(prefix="bottle-follow-", suffix=".log")[1])
@@ -417,7 +417,7 @@ def _message_problem(body: bytes) -> str | None:
 
 
 async def pull_through(git_dir: Path) -> None:
-    """`git fetch origin` in the host repo, one that starts after this was asked for.
+    """`git fetch origin` in the hub, one that starts after this was asked for.
 
     Fetches of one repo share: asked while one is running, this waits for the
     next, which everything asked in the meantime shares. So each sees origin
@@ -439,7 +439,7 @@ async def _pull_next(git_dir: Path) -> None:
 
 
 async def _fetch_origin(git_dir: Path) -> None:
-    """Uses the host's network and credentials, never prompts, and never fails the
+    """Uses the controller's network and credentials, never prompts, and never fails the
     bottle's request: if it can't fetch, the bottle gets what the repo has.
     """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}

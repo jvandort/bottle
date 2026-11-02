@@ -18,7 +18,7 @@ customizations.bottle declares what a feature needs from bottle itself:
 credentials, downloads to cache, options a user has to set, and what to tell
 the agent.
 
-A credential is a secret bottle keeps on the host and a bottle's tools need
+A credential is a secret bottle keeps on the controller and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
 it belongs to, and bottled attaches it to the bottle's requests to
 those hosts (see bottle/egress.py).

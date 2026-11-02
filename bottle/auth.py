@@ -1,4 +1,4 @@
-"""Credentials: logged in to once on the host, and used by the bottles that need them.
+"""Credentials: logged in to once on the controller, and used by the bottles that need them.
 
 Features declare the credentials they need (customizations.bottle.credentials
 in their devcontainer-feature.json): a name, how to log in, and where the

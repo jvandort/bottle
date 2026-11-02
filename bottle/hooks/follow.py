@@ -1,19 +1,19 @@
-"""After a bottle's push: bring the host's checked-out branches up to what it pushed (see bottle/host.py).
+"""After a bottle's push: bring the hub's checked-out branches up to what it pushed (see bottle/host.py).
 
-Run by hooks/post-receive, on the host, in the host repo's git dir, once the
+Run by hooks/post-receive, on the controller, in the hub's git dir, once the
 push's refs have moved. Stdin is receive-pack's `<old> <new> <ref>` lines, the
 refs as the bottle named them, inside its namespace (GIT_NAMESPACE). What it
 says on stdout reaches the bottle as `remote:` lines in its push's output,
 and goes to $BOTTLE_HOOK_LOG for bottled's log.
 
-A branch of the host's follows a push when its upstream is a remote reading
+A branch of the hub's follows a push when its upstream is a remote reading
 the push's namespace -- folio's `bottle/<thread>`, whose uploadpack is `git
 --namespace=<thread>-out upload-pack` -- and the bottle pushed the branch of
 that name. That remote is fetched first, so its tracking refs are current too.
 On unless the repo says `git config bottle.follow false`.
 
 Following is `git merge --ff-only`, in whichever worktree has the branch
-checked out, and nothing else: a branch with commits of the host's own, a
+checked out, and nothing else: a branch with commits of the hub's own, a
 change in the way, or a worktree in the middle of a merge, rebase,
 cherry-pick, revert or bisect is left as it is, and the bottle is told why.
 A branch checked out nowhere -- in curate's read mode, say, where HEAD is
@@ -41,7 +41,7 @@ IN_PROGRESS = {
     "BISECT_LOG": "a bisect", "rebase-merge": "a rebase", "rebase-apply": "a rebase", "index.lock": "another git command",
 }
 
-# The host's own git: none of receive-pack's environment (its namespace, its git dir, bottle's
+# The hub's own git: none of receive-pack's environment (its namespace, its git dir, bottle's
 # config for the push), and none of the repo's hooks.
 ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | {"GIT_TERMINAL_PROMPT": "0"}
 
@@ -143,7 +143,7 @@ def main() -> int:
 
 
 def _readers(git_dir: Path, namespace: str) -> list[str]:
-    """The host's remotes that read `namespace`: their uploadpack runs upload-pack in it."""
+    """The hub's remotes that read `namespace`: their uploadpack runs upload-pack in it."""
     out = git("config", "--get-regexp", r"^remote\..*\.uploadpack$", cwd=git_dir).stdout
     readers = []
     for line in out.splitlines():

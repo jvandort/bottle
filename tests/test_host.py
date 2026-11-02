@@ -412,7 +412,7 @@ class MirroredGitTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.calls: list[str] = []
         test = self
 
-        class Mirrored(host.HostGit):
+        class Mirrored(host.HubGit):
             def fetch_dir(self, repo):
                 return test.mirror
 

@@ -4,7 +4,7 @@ A bottle's driver (smolvm, see smolvm.py) carries the guest's sockets and asks
 bottled about each TCP connection before it connects anywhere (see decider.py).
 Every connection is a flow (Flow): the address the bottle connected to, and the
 first bytes it sent. Gateway.decide says whether it may go there directly
-(the driver makes the connection from the host, with the host's routes and VPN), whether
+(the driver makes the connection from the runner, with its routes and VPN), whether
 bottled takes it, or neither; Gateway.serve is the far end of one bottled
 takes. The policy (Policy) is enforced where root in the bottle can't reach it.
 
@@ -88,7 +88,7 @@ class Policy:
     Public addresses are allowed. Private addresses (RFC 1918, ULA, CGNAT) are
     reachable only via hostnames matching `allow_private`, e.g. "*.corp.example.com".
     Loopback, link-local, multicast and unspecified addresses are never
-    reachable: they are the host itself or its local network.
+    reachable: they are the runner itself or its local network.
     """
 
     allow_private: tuple[str, ...] = ()
@@ -98,7 +98,7 @@ class Policy:
 
         `private` is for a destination a credential names (see Injection): the
         host was configured on the machine, so a private address is expected. The
-        host's own addresses are still refused.
+        runner's own addresses are still refused.
         """
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
@@ -191,7 +191,7 @@ class Rewrite:
 
 @dataclass(frozen=True)
 class Injection:
-    """A credential the host attaches on the bottle's behalf, for one host.
+    """A credential bottled attaches on the bottle's behalf, for one host.
 
     A feature declares which hosts its credential belongs to (see
     features.py); bottled looks the credential up on the machine and builds these
@@ -377,7 +377,7 @@ class Gateway:
         self.resolve = resolve or _resolve
         # bottle.host's git service: flows to host.ADDRESS are answered here, never forwarded.
         self.services = services
-        # Credentials the host attaches for the bottle, by destination, and
+        # Credentials bottled attaches for the bottle, by destination, and
         # the certificates that let it: without them, nothing is attached.
         self.injections = tuple(injections) if certificates else ()
         self.certificates = certificates
