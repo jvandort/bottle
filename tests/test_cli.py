@@ -149,9 +149,10 @@ class SpecCommandsTest(CliTestCase):
         self.assertIn(f"Created bottle 'project', with {repo} at main on /workspace", out)
         with mock.patch("bottle.bottles.create", return_value=bottle) as create:
             self.run_cli("new", "--spec", spec, "--name", "project", "--runner", "box", "--ssh", "sidecar.host=big",
-                         "--ssh", "b=c")
-        self.assertEqual(create.call_args.kwargs, {"runner": "box", "ssh": {"sidecar.host": "big", "b": "c"}})
-        for bad in (["--ssh", "big"], ["--ssh", "=big"], ["--ssh", "a=b", "--ssh", "a=c"]):
+                         "--ssh", "b=c", "--ssh", "build")
+        self.assertEqual(create.call_args.kwargs,
+                         {"runner": "box", "ssh": {"sidecar.host": "big", "b": "c", "build": "build"}})
+        for bad in (["--ssh", "big="], ["--ssh", "=big"], ["--ssh", "a=b", "--ssh", "a=c"], ["--ssh", "a", "--ssh", "a"]):
             with self.subTest(bad), mock.patch("bottle.bottles.create") as create:
                 code, _, err = self.run_cli("new", "--spec", spec, "--name", "project", *bad)
                 self.assertNotEqual(code, 0)
