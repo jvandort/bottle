@@ -119,13 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     exec_.set_defaults(run=_exec, parser=exec_)
 
     cp = commands.add_parser(
-        "cp", help="copy a file or a directory out of a bottle",
-        description="Copy SRC, a file or a directory in the bottle (a relative one from /workspace), to DST here: "
-        "into DST if it's a directory, else as DST. Starts the bottle if it's stopped.",
+        "cp", help="copy a file or a directory into, out of, or between bottles",
+        description="Copy SRC, a file or a directory, to DST: into DST if it's a directory, else as DST. "
+        "BOTTLE:PATH is a path in that bottle (a relative one from /workspace), started if it's stopped; "
+        "any other is a path here, and one side at least is in a bottle. Between bottles, it goes by way "
+        "of this machine.",
     )
-    cp.add_argument("name", metavar="BOTTLE", help="the bottle to copy out of")
-    cp.add_argument("src", metavar="SRC", help="what to copy, in the bottle")
-    cp.add_argument("dst", metavar="DST", help="where to, here")
+    cp.add_argument("src", metavar="SRC", help="what to copy: BOTTLE:PATH, or a path here")
+    cp.add_argument("dst", metavar="DST", help="where to: BOTTLE:PATH, or a path here")
     cp.set_defaults(run=_cp, parser=cp)
 
     start = commands.add_parser("start", help="start a bottle", description="Start a stopped bottle and its network access.")
@@ -496,7 +497,7 @@ def _exec(args: argparse.Namespace) -> int:
 def _cp(args: argparse.Namespace) -> int:
     from bottle import bottles
 
-    target, left_out = bottles.copy_out(args.name, args.src, Path(args.dst))
+    target, left_out = bottles.copy(bottles.CopySide.parse(args.src), bottles.CopySide.parse(args.dst))
     for why in left_out:
         print(f"bottle: left out {why}", file=sys.stderr)
     print(f"Copied to {target}")

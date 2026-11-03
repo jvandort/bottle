@@ -796,32 +796,99 @@ def exec_(name: str, argv: list[str]) -> NoReturn:
     _attach(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
 
 
-# Whatever SRC names, as a tar of it alone: its last name, and what's under it.
+# In a bottle, whatever $1 names, as a tar of it alone: its last name, and what's under it.
 _PACK = 'p=$(realpath -e -- "$1") && exec tar -C "$(dirname -- "$p")" -cf - -- "$(basename -- "$p")"'
+# In a bottle, the tar on stdin, of one thing, as cp -r would put it: into $1 if it's a directory, else as $1;
+# unpacked beside it first, so a copy that fails changes nothing. Says where it went.
+_UNPACK = r"""umask 022
+d=$1
+if [ -d "$d" ]; then into=$d; else into=$(dirname -- "$d"); fi
+s=$(mktemp -d -- "$into/.bottle-cp-XXXXXX") || exit 1
+trap 'rm -rf -- "$s"' EXIT
+tar -xf - -C "$s" --no-same-owner || exit 1
+n=$(ls -A -- "$s")
+if [ -z "$n" ] || [ "$(printf '%s\n' "$n" | wc -l)" -ne 1 ]; then echo "it sent nothing" >&2; exit 1; fi
+if [ -d "$d" ]; then t=${d%/}/$n; else t=$d; fi
+if [ -d "$t" ] && [ ! -L "$t" ]; then echo "$t is a directory already: copy into it, or somewhere new" >&2; exit 1; fi
+if [ -d "$s/$n" ] && [ ! -L "$s/$n" ] && { [ -e "$t" ] || [ -L "$t" ]; }; then
+  echo "$t exists, and what's copied is a directory" >&2; exit 1
+fi
+mv -fT -- "$s/$n" "$t" && printf '%s\n' "$t"
+"""
 
 
-def copy_out(name: str, src: str, dst: Path) -> tuple[Path, list[str]]:
-    """Copy `src`, a file or a directory in the bottle (relative to its first mount), to `dst` here, as cp
-    -r would: into `dst` if it's a directory, else as it. Starts the bottle if stopped. Returns where it went,
-    and what was left out, saying why.
+@dataclass(frozen=True)
+class CopySide:
+    """One side of a copy: a path in a bottle (relative to its first mount), or, with no bottle, here."""
 
-    It comes as a tar, unpacked as data: nothing in it lands outside what it
-    names, and a link out of it, or a device, is left out. Nothing is there
-    until all of it is: a copy that fails leaves `dst` as it was.
+    bottle: str | None
+    path: str
+
+    @classmethod
+    def parse(cls, arg: str) -> "CopySide":
+        """BOTTLE:PATH, or a path here: as scp has it, a colon before any '/' names a bottle (./a:b doesn't)."""
+        name, colon, path = arg.partition(":")
+        if colon and NAME_PATTERN.fullmatch(name):
+            return cls(name, path or ".")
+        return cls(None, arg)
+
+    def __str__(self) -> str:
+        return f"{self.bottle}:{self.path}" if self.bottle else self.path
+
+
+def copy(src: CopySide, dst: CopySide) -> tuple[str, list[str]]:
+    """Copy `src`, a file or a directory, to `dst`, as cp -r would: into `dst` if it's a directory, else as
+    it. Either side, or both, in a bottle, which is started if stopped. Returns where it went, and what was
+    left out of it, saying why.
+
+    It goes as a tar, by way of this machine. Unpacked here, it's data: nothing
+    in it lands outside what it names, and a link out of it, or a device, is
+    left out. Unpacked in a bottle, it's tar's, as `genie` there. Either way
+    nothing is there until all of it is: a copy that fails leaves `dst` as it was.
     """
-    if src.rstrip("/") == "":
+    if src.bottle is None and dst.bottle is None:
+        raise BottleError("bottle cp copies into or out of a bottle: name one, BOTTLE:PATH")
+    if src.bottle is not None and src.path.rstrip("/") == "":
         raise BottleError("bottle cp copies a file or a directory, not /")
+    if src.bottle is None:
+        return _copy_in(Path(src.path), dst), []
+    pack = _copy_command(src.bottle, ["sh", "-c", _PACK, "sh", src.path])
+    if dst.bottle is None:
+        return _copy_out(src, pack, Path(dst.path))
+    unpack = _copy_command(dst.bottle, ["sh", "-c", _UNPACK, "sh", dst.path])
+    # stdin stays open until it ends: an exec's stdin closing early may end it early.
+    with subprocess.Popen(pack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as sending:
+        with subprocess.Popen(unpack, stdin=sending.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as taking:
+            sending.stdout.close()
+            out, taken = taking.communicate()
+        sending.stdin.close()
+        sent = sending.stderr.read()
+    if sending.returncode != 0:
+        raise BottleError(f"couldn't copy {src}: {_said(sent) or 'it sent nothing'}")
+    if taking.returncode != 0:
+        raise BottleError(f"couldn't copy {src} to {dst}: {_said(taken) or 'it failed'}")
+    return f"{dst.bottle}:{out.decode().strip()}", []
+
+
+def _copy_command(name: str, argv: list[str]) -> list[str]:
+    """The command line that runs `argv` in the bottle as `genie`, at its first mount, started if stopped."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    command = runner_of(bottle).exec_command(bottle.machine, ["sh", "-c", _PACK, "sh", src], user=USER,
-                                             workdir=bottle.workdir)
+    return runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir)
+
+
+def _said(stderr: bytes) -> str:
+    return stderr.decode(errors="replace").strip()
+
+
+def _copy_out(src: CopySide, pack: list[str], dst: Path) -> tuple[str, list[str]]:
     into = dst.is_dir()
     with tempfile.TemporaryDirectory(dir=dst if into else dst.parent, prefix=".bottle-cp-") as scratch:
-        # stdin stays open until it ends: an exec's stdin closing early may end it early.
-        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        with subprocess.Popen(pack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            names: set[str] = set()
+            left_out: list[str] = []
             try:
                 with tarfile.open(fileobj=process.stdout, mode="r|") as tar:
-                    names, left_out = set(), []
                     for member in tar:
                         names.add(member.name.split("/")[0])
                         try:
@@ -831,9 +898,9 @@ def copy_out(name: str, src: str, dst: Path) -> tuple[Path, list[str]]:
             except tarfile.TarError:
                 names = set()
             process.stdin.close()
-            error = process.stderr.read().decode(errors="replace").strip()
+            error = _said(process.stderr.read())
         if process.returncode != 0 or len(names) != 1:
-            raise BottleError(f"couldn't copy {src} out of {name}: {error or 'it sent nothing'}")
+            raise BottleError(f"couldn't copy {src}: {error or 'it sent nothing'}")
         [base] = names
         target = dst / base if into else dst
         copied = Path(scratch) / base
@@ -842,7 +909,25 @@ def copy_out(name: str, src: str, dst: Path) -> tuple[Path, list[str]]:
         if copied.is_dir() and target.exists():
             raise BottleError(f"{target} exists, and {src} is a directory")
         copied.replace(target)
-    return target, left_out
+    return str(target), left_out
+
+
+def _copy_in(src: Path, dst: CopySide) -> str:
+    if not src.exists() and not src.is_symlink():
+        raise BottleError(f"couldn't copy {src}: there's no such file or directory")
+    base = src.resolve().name if src.name in ("", ".", "..") else src.name
+    unpack = _copy_command(dst.bottle, ["sh", "-c", _UNPACK, "sh", dst.path])
+    with subprocess.Popen(unpack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        try:
+            with tarfile.open(fileobj=process.stdin, mode="w|") as tar:
+                tar.add(src, arcname=base)
+            process.stdin.close()
+        except BrokenPipeError:
+            pass   # it stopped taking it: what it says is why
+        out, error = process.stdout.read(), process.stderr.read()
+    if process.returncode != 0:
+        raise BottleError(f"couldn't copy {src} to {dst}: {_said(error) or 'it failed'}")
+    return f"{dst.bottle}:{out.decode().strip()}"
 
 
 def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:

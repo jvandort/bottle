@@ -769,56 +769,94 @@ class ExecTest(BottleTestCase):
         self.assertIn("start", self.fake_smolvm.calls)
 
 
-class CopyOutTest(BottleTestCase):
-    """bottle cp: the bottle's side run here for real (sh, realpath, tar), at a directory standing in for its
-    first mount."""
+class CopyTest(BottleTestCase):
+    """bottle cp: each bottle's side run here for real (sh, realpath, tar, mv), at a directory standing in
+    for its first mount."""
 
     def setUp(self) -> None:
         super().setUp()
         self.fake_smolvm = self.fake()
-        self.create()
-        self.inside = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.inside = {}
+        for name in ("a", "b"):
+            machine = self.create(name=name).machine
+            self.inside[name] = self.inside[machine] = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.here = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        (self.inside / "build" / "reports").mkdir(parents=True)
-        (self.inside / "build" / "reports" / "index.html").write_bytes(b"<html>\x00\xff</html>")
-        (self.inside / "build" / "reports" / "away").symlink_to("/etc/passwd")
-        inside = self.inside
+        reports = self.inside["a"] / "build" / "reports"
+        reports.mkdir(parents=True)
+        (reports / "index.html").write_bytes(self.HTML)
+        (reports / "away").symlink_to("/etc/passwd")
+        (reports / "near").symlink_to("index.html")
+        self.users = []
 
         def exec_command(name, argv, user=None, workdir=None, tty=False, env=None):
-            self.fake_smolvm.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty)
-            return ["sh", "-c", f"cd {inside} && " + argv[2], *argv[3:]]
+            self.users.append((user, workdir, tty))
+            return ["sh", "-c", f"cd {self.inside[name]} && " + argv[2], *argv[3:]]
 
-        self.fake_smolvm.exec_command = exec_command
         self.enterContext(mock.patch.object(bottles.runners.smolvm, "exec_command", side_effect=exec_command))
 
-    def test_a_file_into_a_directory_and_as_a_name(self) -> None:
-        self.assertEqual(bottles.copy_out("example", "build/reports/index.html", self.here), (self.here / "index.html", []))
-        self.assertEqual((self.here / "index.html").read_bytes(), b"<html>\x00\xff</html>")
-        self.assertEqual(bottles.copy_out("example", "build/reports/index.html", self.here / "r.html")[0],
-                         self.here / "r.html")
-        bottles.copy_out("example", "build/reports/index.html", self.here / "r.html")   # over a file, as cp does
-        self.assertEqual((self.fake_smolvm.attached["user"], self.fake_smolvm.attached["tty"]), ("genie", False))
+    HTML = b"<html>\x00\xff</html>"
+
+    def cp(self, src: str, dst: str) -> tuple[str, list[str]]:
+        return bottles.copy(bottles.CopySide.parse(src), bottles.CopySide.parse(dst))
+
+    def test_sides(self) -> None:
+        self.assertEqual(bottles.CopySide.parse("a:build"), bottles.CopySide("a", "build"))
+        self.assertEqual(bottles.CopySide.parse("a:"), bottles.CopySide("a", "."))
+        for here in ("./a:b", "/tmp/a:b", "build"):
+            self.assertEqual(bottles.CopySide.parse(here), bottles.CopySide(None, here))
+
+    def test_a_file_out_into_a_directory_and_as_a_name(self) -> None:
+        self.assertEqual(self.cp("a:build/reports/index.html", str(self.here)), (str(self.here / "index.html"), []))
+        self.assertEqual((self.here / "index.html").read_bytes(), self.HTML)
+        self.assertEqual(self.cp("a:build/reports/index.html", str(self.here / "r.html"))[0], str(self.here / "r.html"))
+        self.cp("a:build/reports/index.html", str(self.here / "r.html"))   # over a file, as cp does
+        self.assertEqual(self.users[-1], ("genie", "/workspace", False))
         self.assertEqual(sorted(p.name for p in self.here.iterdir()), ["index.html", "r.html"])   # no scratch left
 
-    def test_a_directory_with_what_is_under_it(self) -> None:
-        (self.inside / "build" / "reports" / "near").symlink_to("index.html")
-        _, left_out = bottles.copy_out("example", "build/reports/", self.here / "out")
-        self.assertEqual((self.here / "out" / "index.html").read_bytes(), b"<html>\x00\xff</html>")
+    def test_a_directory_out_with_what_is_under_it(self) -> None:
+        _, left_out = self.cp("a:build/reports/", str(self.here / "out"))
+        self.assertEqual((self.here / "out" / "index.html").read_bytes(), self.HTML)
         self.assertEqual(os.readlink(self.here / "out" / "near"), "index.html")   # a link within comes as one
         self.assertFalse((self.here / "out" / "away").is_symlink())   # one out of it doesn't
         self.assertEqual([why.split(":")[0] for why in left_out], ["reports/away"])
-        with self.assertRaisesRegex(BottleError, "exists, and build/reports is a directory"):
-            (self.here / "file").write_text("")
-            bottles.copy_out("example", "build/reports", self.here / "file")
+        (self.here / "file").write_text("")
+        with self.assertRaisesRegex(BottleError, "exists, and a:build/reports is a directory"):
+            self.cp("a:build/reports", str(self.here / "file"))
+
+    def test_in(self) -> None:
+        (self.here / "fixtures").mkdir()
+        (self.here / "fixtures" / "one").write_bytes(self.HTML)
+        self.assertEqual(self.cp(str(self.here / "fixtures"), "b:"), (f"b:./fixtures", []))
+        self.assertEqual((self.inside["b"] / "fixtures" / "one").read_bytes(), self.HTML)
+        self.assertEqual((self.inside["b"] / "fixtures" / "one").stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.cp(str(self.here / "fixtures" / "one"), "b:two")[0], "b:two")
+        self.assertEqual((self.inside["b"] / "two").read_bytes(), self.HTML)
+        with self.assertRaisesRegex(BottleError, "fixtures is a directory already"):
+            self.cp(str(self.here / "fixtures"), "b:.")
+        self.assertEqual(sorted(p.name for p in self.inside["b"].iterdir()), ["fixtures", "two"])   # no scratch left
+
+    def test_between_bottles(self) -> None:
+        self.assertEqual(self.cp("a:build/reports", "b:."), ("b:./reports", []))
+        self.assertEqual((self.inside["b"] / "reports" / "index.html").read_bytes(), self.HTML)
+        self.assertEqual(os.readlink(self.inside["b"] / "reports" / "near"), "index.html")
+        with self.assertRaisesRegex(BottleError, "couldn't copy a:nope: .*nope"):
+            self.cp("a:nope", "b:.")
 
     def test_what_isnt_there_says_so_and_leaves_nothing(self) -> None:
-        with self.assertRaisesRegex(BottleError, "couldn't copy nope out of example: .*nope"):
-            bottles.copy_out("example", "nope", self.here)
-        self.assertEqual(list(self.here.iterdir()), [])
+        with self.assertRaisesRegex(BottleError, "couldn't copy a:nope: .*nope"):
+            self.cp("a:nope", str(self.here))
+        with self.assertRaisesRegex(BottleError, "no such file or directory"):
+            self.cp(str(self.here / "nope"), "b:.")
+        with self.assertRaisesRegex(BottleError, "couldn't copy .* to b:missing/x: "):
+            (self.here / "f").write_text("")
+            self.cp(str(self.here / "f"), "b:missing/x")
+        self.assertEqual(list(self.inside["b"].iterdir()), [])
 
-    def test_not_root(self) -> None:
+    def test_one_side_in_a_bottle_and_not_root(self) -> None:
+        with self.assertRaisesRegex(BottleError, "name one, BOTTLE:PATH"):
+            self.cp("x", "y")
         with self.assertRaisesRegex(BottleError, "not /"):
-            bottles.copy_out("example", "/", self.here)
+            self.cp("a:/", str(self.here))
 
 
 class ListTest(BottleTestCase):

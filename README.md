@@ -480,17 +480,23 @@ bottle exec reponame -- claude -p 'fix the failing test'
 bottle exec reponame cat /workspace/report.json | jq .failures
 ```
 
-### `bottle cp BOTTLE SRC DST`
+### `bottle cp SRC DST`
 
-Copies SRC, a file or a directory in the bottle (a relative path is from its
-first mount), to DST here, as `cp -r` would: into DST if it's a directory,
-else as DST. Starts the bottle if it's stopped. What the bottle sends is
-unpacked as data: nothing lands outside DST, and a link pointing out of what's
-copied, or a device, is left out and named. A copy that fails leaves DST as it
-was.
+Copies SRC, a file or a directory, to DST, as `cp -r` would: into DST if it's
+a directory, else as DST. `BOTTLE:PATH` is a path in that bottle (a relative
+one is from its first mount), which is started if it's stopped; any other is a
+path here, as scp has it (`./a:b` is a path here). One side at least is in a
+bottle: out of one, into one, or between two, by way of this machine.
+
+What a bottle sends here is unpacked as data: nothing lands outside DST, and a
+link pointing out of what's copied, or a device, is left out and named. In a
+bottle it's unpacked by tar as `genie`, with umask 022. Either way a copy that
+fails leaves DST as it was.
 
 ```sh
-bottle cp reponame build/reports/tests .
+bottle cp reponame:build/reports/tests .
+bottle cp ./fixtures reponame:/workspace/src/test/
+bottle cp reponame:build/libs/app.jar reponame-sidecar:
 ```
 
 ### `bottle status [BOTTLE]... [--json]`
