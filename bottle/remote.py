@@ -60,7 +60,7 @@ def _run(op: str, args: dict):
         case "create":
             local.create(args["machine"], Path(args["archive"]),
                          [runners.Mount(Path(m["source"]), m["target"]) for m in args["mounts"]],
-                         args["env"], args["memory_mib"], args["cpus"])
+                         args["env"], args["memory_mib"])
         case "start":
             local.start(args["machine"], args["bottle"], served_from_json(args["served"]), args["features"])
         case "release":

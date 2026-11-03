@@ -351,7 +351,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         bottle.machine, archive,
         mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
-        memory_mib=_memory_mib(bottle.memory), cpus=os.cpu_count() or 1,
+        memory_mib=_memory_mib(bottle.memory),
     )
     _start_machine(bottle)
     verify_contract(bottle)
@@ -428,7 +428,7 @@ def throwaway(feature_specs: list[str]):
         if archive is None:
             raise BottleError(f"{tag} isn't built")
         # No spec to say how much memory: smolvm's own default, for a login command.
-        runner.create(name, archive, mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
+        runner.create(name, archive, mounts=[], env={}, memory_mib=None)
         # Bound with no features, so no credentials and no egress CA: a login starts from
         # nothing, and mustn't find its own credential attached to what it sends.
         runner.start(name, name)

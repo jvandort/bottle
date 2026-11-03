@@ -32,9 +32,9 @@ class LocalRunnerTest(GitTestCase):
         path = self.make_repo("example")
         self.assertEqual(runners.get().objects(repos.Repo("example", path)), (path / ".git" / "objects").resolve())
 
-    def test_mounts_are_smolvms(self) -> None:
-        with mock.patch.object(runners.smolvm, "create") as create:
+    def test_mounts_are_smolvms_and_a_machine_has_all_the_cores(self) -> None:
+        with mock.patch.object(runners.smolvm, "create") as create, mock.patch.object(runners.os, "cpu_count", return_value=12):
             runners.get().create("m", Path("/images/a.tar"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                 {"A": "1"}, 512, 2)
+                                 {"A": "1"}, 512)
         create.assert_called_once_with("m", "/images/a.tar", [runners.smolvm.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                       {"A": "1"}, 512, 2)
+                                       {"A": "1"}, 512, 12)

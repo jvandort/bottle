@@ -17,6 +17,7 @@ images it's built and builds those it's sent.
 """
 
 import json
+import os
 import re
 import tarfile
 import tempfile
@@ -72,8 +73,9 @@ class Runner(Protocol):
         """Where on the runner a machine mounts `repo`'s objects from."""
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, cpus: int) -> None:
-        """Create a stopped machine from `archive`, its mounts read-only; `memory_mib` None: smolvm's default."""
+               memory_mib: int | None) -> None:
+        """Create a stopped machine from `archive`, its mounts read-only, with all the runner's cores;
+        `memory_mib` None: smolvm's default."""
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
@@ -150,8 +152,9 @@ class LocalRunner:
         return repos.objects_dir(repo)
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, cpus: int) -> None:
-        smolvm.create(machine, str(archive), [smolvm.Mount(m.source, m.target) for m in mounts], env, memory_mib, cpus)
+               memory_mib: int | None) -> None:
+        smolvm.create(machine, str(archive), [smolvm.Mount(m.source, m.target) for m in mounts], env, memory_mib,
+                      os.cpu_count() or 1)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
@@ -269,10 +272,10 @@ class RemoteRunner:
         return Path(self._call("mirror", key=mirrors.key(repos.objects_dir(repo).parent)))
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, cpus: int) -> None:
+               memory_mib: int | None) -> None:
         self._call("create", machine=machine, archive=str(archive),
                    mounts=[{"source": str(m.source), "target": m.target} for m in mounts],
-                   env=env, memory_mib=memory_mib, cpus=cpus)
+                   env=env, memory_mib=memory_mib)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
