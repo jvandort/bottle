@@ -53,6 +53,8 @@ NOT_TAKEN = 75
 MAX_SOCKET_PATH = 100
 # How long a link to a remote runner may take to come up, in seconds; and the longest wait before trying again.
 LINK_TIMEOUT = 20
+# How long the link's socket has to appear on the runner once its ssh is running.
+LINK_APPEAR = 15
 LINK_BACKOFF = 60
 # A link no bottle is bound through for this long is let go, checked this often, in seconds.
 LINK_IDLE = 120
@@ -401,10 +403,19 @@ class Links:
                 process = self.processes[runner] = await asyncio.create_subprocess_exec(
                     *transport.forward_command(there, here), stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-                if await asyncio.to_thread(transport.wait_for_link, there, process):
+                if await asyncio.to_thread(transport.wait_for_link, there, process, LINK_APPEAR):
                     log.info("link to runner %s up", runner)
                     self.up[runner].set()
                     backoff = 1
+                elif process.returncode is None:
+                    # Connected, but its forward never showed: not waited on for ever, and said why.
+                    process.terminate()
+                    await process.wait()
+                    said = (await process.stderr.read()).decode(errors="replace").strip().splitlines()
+                    failure.append(f"its socket didn't appear on the runner within {LINK_APPEAR}s"
+                                   + (f" ({ssh.explained(said[-1])})" if said else ""))
+                    log.warning("link to runner %s: %s", runner, failure[-1])
+                    raise _Retry
                 while process.returncode is None and idle < LINK_IDLE:
                     try:
                         await asyncio.wait_for(asyncio.shield(process.wait()), LINK_IDLE_CHECK)
@@ -421,6 +432,8 @@ class Links:
             except BottleError as e:
                 failure.append(str(e))
                 log.warning("link to runner %s: %s", runner, e)
+            except _Retry:
+                pass
             self.up[runner].clear()
             await asyncio.sleep(backoff)
             # Not tried for ever for nothing: with no bottle bound through it, the waiting counts as idle.
@@ -448,6 +461,10 @@ class Links:
                 process.terminate()
         for server in self.sockets.values():
             server.close()
+
+
+class _Retry(Exception):
+    """The link didn't come up, and why is already said: try again after the backoff."""
 
 
 class Daemon:

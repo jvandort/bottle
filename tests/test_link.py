@@ -212,6 +212,7 @@ forward=
 while [ "$1" != "--" ]; do [ "$1" = -R ] && forward=$2; shift; done
 shift; destination=$1; shift
 [ "$destination" = down ] && { echo "ssh: connect to host down port 22: Connection refused" >&2; exit 255; }
+[ "$destination" = mute ] && [ -n "$forward" ] && { echo "Warning: remote port forwarding failed for listen path" >&2; exec sleep 3600; }
 mkdir -p "$FAKE_REMOTES/$destination"
 if [ -n "$forward" ]; then ln -sfn "${forward#*:}" "${forward%%:*}"; exec sleep 3600; fi
 exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
@@ -238,6 +239,15 @@ exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
         with mock.patch.object(daemon, "LINK_TIMEOUT", 1), \
                 self.assertRaisesRegex(BottleError, r"runner off is unreachable: its link didn't come up \(runner off is unreachable"):
             await controller.links.ensure("off")
+
+    async def test_a_link_whose_socket_never_appears_says_so(self):
+        runners.register("mute", "mute")
+        controller = daemon.Controller(egress.Policy(), running=lambda b: False)
+        self.addAsyncCleanup(controller.links.close)
+        with mock.patch.multiple(daemon, LINK_TIMEOUT=2, LINK_APPEAR=0.5), self.assertLogs("bottle.daemon", "WARNING"), \
+                self.assertRaisesRegex(BottleError, r"its link didn't come up \(its socket didn't appear on the runner "
+                                                    r"within 0.5s \(Warning: remote port forwarding failed"):
+            await controller.links.ensure("mute")
 
     async def test_a_link_that_ends_comes_back(self):
         runners.register("box", "box")

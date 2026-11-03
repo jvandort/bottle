@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                             help="where ssh reaches it: a Host from ~/.ssh/config, or user@host")
     runner_add.set_defaults(run=_runner_add, parser=runner_add)
     runner_status = runner_commands.add_parser(
-        "status", help="show runners: reachable or not, what they're missing, their bottles")
+        "status", aliases=["list"], help="show runners: reachable or not, what they're missing, their bottles")
     runner_status.add_argument("names", nargs="*", metavar="RUNNER", help="the runners to show (default: all)")
     runner_status.add_argument("--json", action="store_true", help="print JSON: one object per runner")
     runner_status.set_defaults(run=_runner_status, parser=runner_status)

@@ -157,7 +157,10 @@ class SshTransport:
         control.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return [binary(), "-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT}",
                 "-o", "ControlMaster=auto", "-o", f"ControlPath={control}",
-                "-o", f"ControlPersist={PERSIST}", *({True: ["-t"], False: ["-T"], None: []}[tty]),
+                "-o", f"ControlPersist={PERSIST}",
+                # A shared connection to a runner that went away (rebooted, say) is given up in 45s, not hung on.
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+                *({True: ["-t"], False: ["-T"], None: []}[tty]),
                 "--", self.destination]
 
     def run(self, script: str, input: bytes | str | None = None) -> subprocess.CompletedProcess:
