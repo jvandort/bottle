@@ -113,9 +113,14 @@ folio sidecar remove fix-it
 folio sidecar shell fix-it     # a shell of your own there, while the thread runs
 ```
 
-It has the thread's repos, fetch-only, as they were when it was made. It's
+It has the thread's repos, as they were when it was made, and their remotes,
+pushes included: what the agent pushes from there lands in the thread's lane,
+beside what it pushes from the thread's bottle. Two writers share the lane as
+two people share a remote: a push that lost a race is refused, never lost, and
+the agent is told to fetch, merge and push again. It's
 scratch: it's made just before the thread's bottle, started with it, and
-deleted with it, a pause included. So a thread that has a bottle gets its new
+deleted with it, a pause included, which keeps nothing of it: what's worth
+keeping there is pushed before. So a thread that has a bottle gets its new
 sidecar, or loses its old one, when it's paused and resumed. `folio list`
 shows each thread's sidecar's runner.
 

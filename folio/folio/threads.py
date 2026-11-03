@@ -244,11 +244,11 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
 
 
 def _make_sidecar(repo: Repo, thread: Thread, repos_: list[engine.Mount]) -> None:
-    """Make the thread's sidecar afresh, from its spec as it is now: the thread's repos, every remote fetch-only."""
+    """Make the thread's sidecar afresh, from its spec as it is now: the thread's repos and remotes, pushes
+    included, which bottle allows as the thread's bottle may ssh to it."""
     _delete_sidecar(thread)   # scratch: whatever's left of one is no use
     spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]))
-    fetch_only = [engine.Mount(m.path, m.repo, m.checkout, [r.split(",push=")[0] for r in m.remotes]) for m in repos_]
-    engine.new(thread.sidecar_bottle, spec, fetch_only, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
+    engine.new(thread.sidecar_bottle, spec, repos_, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
 
 
 def _delete_sidecar(thread: Thread) -> None:

@@ -98,12 +98,18 @@ than this bottle has: builds, test suites, anything long or big. It's you
 there, as `genie`, in a shell or with a command; scp and git over ssh work too.
 
 - It has this bottle's repos at the same paths, as they were when it was made,
-  with the same remotes, fetch-only: pushes are yours to make from here.
+  with the same remotes: a push from there lands in this thread's lane, as one
+  from here does. Two checkouts writing one lane share it as two people share a
+  remote: a push refused as not a fast-forward lost a race, so fetch `agent`,
+  merge, and push again. Work there on a branch of its own (the next
+  `genie/<feature>-N`), so that the two rarely race.
+- `/notes` there is a second checkout of these notes: commit there only what
+  you find there, then `git pull agent main` before you push, there and here.
 - Your work gets there over ssh, committed or not:
   `git push sidecar:/workspace $(git stash create || git rev-parse HEAD):refs/heads/job`,
   then `ssh sidecar 'cd /workspace && git checkout -q --detach job && ...'`.
-- It's scratch: a pause deletes it, and a resume makes a new one. Bring back
-  what's worth keeping before then.
+- It's scratch: a pause deletes it and keeps nothing of it, and a resume makes
+  a new one. Push what's worth keeping before then, from there or from here.
 """
 
 
@@ -119,8 +125,11 @@ SIDECAR_ITSELF = """\
 
 This bottle is the sidecar of thread `{thread}`, in the `{repo}` repo: its agent
 runs in the thread's own bottle and reaches this one over ssh, for jobs that
-want more room. Its repos are as they were when it was made, fetch-only. It's
-scratch: a pause of the thread deletes it.
+want more room. Its repos are as they were when it was made, with the thread's
+remotes: a push from here lands in the thread's lane, which the thread's bottle
+pushes into too, so fetch and merge before you push, and a push refused as not
+a fast-forward lost a race: fetch, merge, push again. It's scratch: a pause of
+the thread deletes it and keeps nothing of it, so push what's worth keeping.
 """
 
 

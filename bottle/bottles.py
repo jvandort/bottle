@@ -25,7 +25,8 @@ and to nothing else that way: NAME, in its /etc/hosts, is an address whose
 port 22 bottled joins to sshd in that bottle, the one that existed when the
 grant was made. Its key is let in there and that bottle's host key is known
 here, when it's made: so that bottle must exist first, and be made again
-with it, or the grant reaches nothing.
+with it, or the grant reaches nothing. The two may push into the same
+namespaces, which no other two bottles may: they work together.
 
 Objects the bottle uses from the repo aren't protected from `git gc` in the
 hub: if the user deletes a branch a bottle checked out and gc later prunes
@@ -279,8 +280,9 @@ def create(
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
-    planned = _plan_mounts(mounts or [], existing.values())
     grants = _plan_ssh(ssh or {}, existing)
+    # A bottle it may ssh to is one it works with: their lanes may be shared.
+    planned = _plan_mounts(mounts or [], [b for b in existing.values() if b.id not in {g.id for g in grants}])
     on.ensure_ready()
     tag = features_.ensure_built(image, installed, on)
     auth.ensure_logged_in(installed)
@@ -382,7 +384,9 @@ def _parse_remotes(specs_: list[str] | None) -> tuple[host.Remote, ...]:
 
 
 def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], others) -> None:
-    """Refuse a namespace another bottle already pushes into, in the same repo: each has one writer."""
+    """Refuse a namespace another bottle already pushes into, in the same repo: each has one writer, but
+    for the bottles a new one may ssh to, which `others` leaves out: they work together, and as pushes
+    can't rewrite, a racing one is refused rather than lost."""
     ours = {r.push_namespace for r in remotes if r.push}
     if not ours:
         return

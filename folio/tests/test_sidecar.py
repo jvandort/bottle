@@ -40,10 +40,11 @@ class SidecarTest(FolioTestCase):
         made = [c[c.index("--name") + 1] for c in self.calls("new")]
         self.assertLess(made.index(self.sidecar), len(made) - 1)   # before the thread's last bottle
         self.assertEqual(made[-1], self.bottle)
-        # The thread's repos, every remote fetch-only.
+        # The thread's repos and remotes, pushes included: its lane is the thread's.
         self.assertEqual([m["path"] for m in sidecar["mounts"]], ["/workspace", "/notes"])
-        self.assertEqual([r for m in sidecar["mounts"] for r in m["remotes"] if "push=" in r], [])
-        self.assertIn("agent:fetch=ns/fix-it-out", sidecar["mounts"][0]["remotes"])
+        self.assertEqual([m["remotes"] for m in sidecar["mounts"]], [m["remotes"] for m in bottle["mounts"]])
+        self.assertIn("agent:fetch=ns/fix-it-out,push=ns/fix-it-out", sidecar["mounts"][0]["remotes"])
+        self.assertIn("a push from there lands in this thread's lane", bottle["context"])
         self.assertIn("`ssh sidecar` reaches this thread's sidecar", bottle["context"])
         self.assertIn("32G of memory and features `jvm:version=21`", bottle["context"])
         self.assertIn("This bottle is the sidecar of thread `fix-it`", sidecar["context"])

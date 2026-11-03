@@ -910,6 +910,16 @@ class SpecBottleTest(BottleTestCase):
         other = self.make_repo("other")
         self.create("d", git_repo=other, remotes=["work:fetch=ns/t-in,push=ns/t-out"])
 
+    def test_a_bottle_shares_its_namespaces_with_one_it_may_ssh_to(self) -> None:
+        self.fake()
+        self.create("side", git_repo=self.repo_path, remotes=["agent:fetch=ns/t-out,push=ns/t-out"])
+        self.create("main", git_repo=self.repo_path, remotes=["agent:fetch=ns/t-out,push=ns/t-out"],
+                    ssh={"sidecar": "side"})
+        # Only with the one it names: a third writer is refused, even one that may ssh to the other.
+        with self.assertRaisesRegex(BottleError, "bottle main already pushes into namespace t-out"):
+            self.create("third", git_repo=self.repo_path, remotes=["agent:fetch=ns/t-out,push=ns/t-out"],
+                        ssh={"sidecar": "side"})
+
     def test_a_taken_name_is_refused_not_numbered(self) -> None:
         self.fake()
         self.create("a")

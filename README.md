@@ -366,7 +366,7 @@ off. A namespace is what confines the
 bottle: every ref its `receive-pack` resolves is inside it, and your own refs
 aren't advertised to it at all. Pushes are append-only, refusing force-pushes
 and deletes, so nothing you've already read changes underneath you; no other
-bottle may push into the same namespace; and your repo's own hooks don't run.
+bottle may push into the same namespace, but one it may `--ssh` to; and your repo's own hooks don't run.
 Reading one namespace and writing another makes a two-lane exchange, where
 neither side's push is ever refused for what the other did: that's how
 [folio](folio/README.md) gives each thread its lane. A mount given no
@@ -394,7 +394,9 @@ login there, as `genie`, and so are scp and git over ssh. That's all it
 reaches: NAME's address goes to that bottle's sshd and nowhere else, never to
 a machine on your network. It's the bottle as it was when the grant was made:
 one made again under the same name isn't reached until this one is made again
-too. Bottle doesn't start it: start both. Repeatable.
+too. Bottle doesn't start it: start both. The two may push into the same
+namespaces, as two people share a branch: a push that lost a race is refused,
+not lost. Repeatable.
 
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.
