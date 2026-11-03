@@ -52,7 +52,6 @@ class CanonicalTest(unittest.TestCase):
             ({}, "a spec needs its memory"),
             ({"memory": 8}, "memory is a string"),
             ({"memory": "lots"}, "invalid memory"),
-            ({"memory": "64G"}, "more than this machine has"),
             ({"memory": "2G", "permissions": "message-any"}, "permissions is a list"),
             ({"memory": "2G", "permissions": ["root"]}, "unknown permission root; there are list-bottles, message-any"),
             ({"memory": "2G", "thread": "Fix It"}, "invalid thread"),
@@ -100,6 +99,10 @@ class ReadTest(unittest.TestCase):
 
 
 class RunnerMemoryTest(unittest.TestCase):
+    def test_a_spec_alone_can_ask_for_any_memory(self) -> None:
+        # Which machine it's for is bottle new's to know, and to check it against.
+        self.assertEqual(specs.canonical({"memory": "512G"})["memory"], "512G")
+
     def test_a_spec_for_a_runner_fits_the_runners_memory(self) -> None:
         self.assertEqual(specs.canonical({"memory": "8G"}, 16384, "runner box")["memory"], "8G")
         with self.assertRaisesRegex(BottleError, r"memory 32G is more than runner box has \(16384M\)"):

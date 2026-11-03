@@ -54,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         "validate",
         help="check a spec as `bottle new --spec` would, and print it in canonical form",
         description="Check a spec file as `bottle new --spec` would: its features exist, their options are "
-        "valid and every required one is set, and the memory fits this machine. Prints it in canonical form.",
+        "valid and every required one is set, and the memory is a size. Prints it in canonical form. Whether the "
+        "memory fits a machine is `bottle new`'s to check, against the runner the bottle is for.",
     )
     spec_validate.add_argument("file", metavar="FILE", help='the spec, e.g. {"features": ["tools"], "memory": "8G"}')
     spec_validate.add_argument("--json", action="store_true", help="print the canonical spec as JSON")

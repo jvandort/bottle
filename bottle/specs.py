@@ -58,8 +58,9 @@ def read(path: Path) -> dict:
 def canonical(data: object, memory_mib: int | None = None, where: str = "this machine") -> dict:
     """Validate a spec and put it in canonical form, as `bottle new` would accept it.
 
-    Its memory must fit `memory_mib`, the memory of the machine it's for,
-    `where`: by default this one.
+    Given `memory_mib`, the memory of the machine it's for (`where`), its
+    memory must fit it too: what a spec is for, `bottle new` knows and a spec
+    doesn't, since the same spec makes bottles on any runner.
     """
     from bottle import features  # imports images, which loading a spec doesn't otherwise need
 
@@ -112,14 +113,13 @@ def canonical_features(specs: list[str]) -> tuple[str, ...]:
 
 
 def canonical_memory(value: str, memory_mib: int | None = None, where: str = "this machine") -> str:
-    """Validate a memory setting: a size in M or G (e.g. 8G) no bigger than the machine's (`memory_mib`, `where`)."""
+    """Validate a memory setting: a size in M or G (e.g. 8G), and no bigger than `memory_mib` if it's given."""
     match = MEMORY_PATTERN.fullmatch(value)
     if not match:
         raise BottleError(f"invalid memory {value!r}: give a size in M or G, e.g. 8G")
     amount, unit = int(match[1]), match[2].upper()
-    host = host_memory_mib() if memory_mib is None else memory_mib
-    if amount * (1024 if unit == "G" else 1) > host:
-        raise BottleError(f"memory {value} is more than {where} has ({host}M)")
+    if memory_mib is not None and amount * (1024 if unit == "G" else 1) > memory_mib:
+        raise BottleError(f"memory {value} is more than {where} has ({memory_mib}M)")
     return f"{amount}{unit}"
 
 

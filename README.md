@@ -444,8 +444,9 @@ Security > Local Network). bottled has the permission of whatever started it.
 ### `bottle spec validate FILE [--json]`
 
 Checks a spec as `bottle new --spec` would: its features exist, their options
-are valid and every required one is set, and the memory fits this machine.
-Prints it in canonical form, with `--json` as JSON: features sorted, each
+are valid and every required one is set, and the memory is a size. Whether
+the memory fits is `bottle new`'s to check, against the runner it makes the
+bottle on: the same spec makes bottles anywhere. Prints it in canonical form, with `--json` as JSON: features sorted, each
 one's options sorted and its defaults left out, and the memory as a size.
 Every spec gives its memory.
 
