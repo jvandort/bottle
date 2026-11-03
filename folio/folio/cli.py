@@ -123,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
                              help="the runner it's made on (`bottle runner status` lists them)")
         command.set_defaults(run=_sidecar, replace=name == "set", parser=command, command=f"sidecar {name}")
     for name, help_, run in (("show", "the thread's sidecar", _sidecar_show),
-                             ("remove", "take the thread's sidecar away", _sidecar_remove)):
+                             ("remove", "take the thread's sidecar away", _sidecar_remove),
+                             ("shell", "a shell in the running thread's sidecar, at /workspace, for as long as you're "
+                              "in it", _sidecar_shell)):
         command = sidecar_commands.add_parser(name, help=help_)
         command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
         command.set_defaults(run=run, command=f"sidecar {name}")
@@ -404,6 +406,14 @@ def _sidecar_remove(args: argparse.Namespace) -> int:
     thread = threads.set_sidecar(repo, thread, None)
     print(f"Took thread {thread.name}'s sidecar away{_when(repo, thread)}")
     return 0
+
+
+def _sidecar_shell(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
+    threads.sidecar_shell(repo, thread)
 
 
 def _sidecar_text(sidecar: dict) -> str:

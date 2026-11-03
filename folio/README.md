@@ -110,6 +110,7 @@ folio sidecar set fix-it --runner desktop --feature jvm:version=21 --memory 32G
 folio sidecar update fix-it --memory 64G --disk 100G
 folio sidecar show fix-it
 folio sidecar remove fix-it
+folio sidecar shell fix-it     # a shell of your own there, while the thread runs
 ```
 
 It has the thread's repos, fetch-only, as they were when it was made. It's

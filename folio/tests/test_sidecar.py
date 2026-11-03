@@ -114,3 +114,19 @@ class SidecarTest(FolioTestCase):
         self.resume_failing(self.bottle)   # the sidecar made, then the thread's bottle not
         self.ok("claude", "fix-it")
         self.assertEqual(sorted(self.bottles()), [self.bottle, self.sidecar])
+
+    def test_shell_only_while_the_thread_runs(self) -> None:
+        self.assertIn("has no sidecar", self.folio("sidecar", "shell", "fix-it").stderr)
+        self.give_it_one()
+        self.assertIn("comes with its next bottle", self.folio("sidecar", "shell", "fix-it").stderr)
+        self.ok("pause", "fix-it")
+        self.assertIn("thread fix-it is paused", self.folio("sidecar", "shell", "fix-it").stderr)
+        self.assertNotIn(self.sidecar, self.bottles())   # nothing made or started for it
+        self.ok("claude", "fix-it")
+        state = self.fake()
+        state["bottles"][self.bottle]["state"] = "stopped"
+        self.state.write_text(json.dumps(state))
+        self.assertIn("thread fix-it is stopped", self.folio("sidecar", "shell", "fix-it").stderr)
+        self.ok("shell", "fix-it")
+        self.ok("sidecar", "shell", "fix-it")
+        self.assertEqual(self.calls("exec")[-1], ["exec", self.sidecar, "--", "bash", "-l"])

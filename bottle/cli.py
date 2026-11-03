@@ -376,8 +376,8 @@ def _status(args: argparse.Namespace) -> int:
         print(json.dumps(rows, indent=2))
         return 0
     if not args.names:
-        table = [("NAME", "STATE", "MEMORY")]
-        table += [(row["name"], row["state"], row.get("memory") or "-") for row in rows]
+        table = [("NAME", "STATE", "RUNNER", "MEMORY")]
+        table += [(row["name"], row["state"], row.get("runner", "local"), row.get("memory") or "-") for row in rows]
         _table(table)
         return 0
     for n, row in enumerate(rows):

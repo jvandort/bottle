@@ -275,6 +275,22 @@ def _start_sidecar(thread: Thread) -> None:
                   file=sys.stderr)
 
 
+def sidecar_shell(repo: Repo, thread: Thread) -> NoReturn:
+    """Replace folio with a login shell in the thread's sidecar, at its first mount: only while the thread is
+    running, which is what the sidecar is for. Nothing keeps it: closing the terminal ends it."""
+    if thread.sidecar is None:
+        raise FolioError(f"thread {thread.name} has no sidecar; give it one with "
+                         f"`folio sidecar set {thread.name} --runner RUNNER ...`")
+    state = states(repo, [thread])[thread.name]["state"]
+    if state != "running":
+        raise FolioError(f"thread {thread.name} is {state}: its sidecar is there while it runs "
+                         f"(`folio claude {thread.name}` or `folio shell {thread.name}`)")
+    if engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"] == "missing":
+        raise FolioError(f"thread {thread.name}'s sidecar comes with its next bottle: pause and resume it "
+                         f"(`folio pause {thread.name}`, then `folio claude {thread.name}`)")
+    engine.attach(thread.sidecar_bottle, ["bash", "-l"])
+
+
 def set_sidecar(repo: Repo, thread: Thread, sidecar: dict | None) -> Thread:
     """The thread, with `sidecar` (None: none) from its next bottle on; its spec checked first."""
     if thread.broker:

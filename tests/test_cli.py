@@ -174,7 +174,7 @@ class SpecCommandsTest(CliTestCase):
         with mock.patch("bottle.bottles.status", return_value=rows):
             _, brief, _ = self.run_cli("status")
             _, full, _ = self.run_cli("status", "app-fix")
-        self.assertEqual([line.split() for line in brief.splitlines()], [["NAME", "STATE", "MEMORY"], ["app-fix", "running", "4G"]])
+        self.assertEqual([line.split() for line in brief.splitlines()], [["NAME", "STATE", "RUNNER", "MEMORY"], ["app-fix", "running", "local", "4G"]])
         self.assertEqual(full.splitlines(), [
             "app-fix  running", "  memory    4G", "  features  claude, tools",
             "  /workspace  /src/app at main", "    agent:fetch=ns/a,push=ns/a",
