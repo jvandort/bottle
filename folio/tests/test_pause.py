@@ -125,8 +125,8 @@ class PauseAndResumeTest(PauseTestCase):
         self.ok("pause", "fix-it")
         size = sum((self.slot() / name).stat().st_size for name in threads.SNAPSHOT)
         rows = {line.split()[0]: line.split() for line in self.ok("list").splitlines()[1:]}
-        self.assertEqual(rows["fix-it"][1:4], ["paused", "local", cli._size(size)])
-        self.assertEqual(rows["other"][1:4], ["running", "local", "-"])
+        self.assertEqual(rows["fix-it"][1:5], ["paused", "local", "-", cli._size(size)])
+        self.assertEqual(rows["other"][1:5], ["running", "local", "-", "-"])
         self.assertEqual((cli._size(512), cli._size(2048), cli._size(5 << 20)), ("512B", "2.0K", "5.0M"))
 
     def test_pausing_twice_or_with_no_bottle(self) -> None:

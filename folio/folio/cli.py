@@ -100,6 +100,31 @@ def main(argv: list[str] | None = None) -> int:
     show = configure_commands.add_parser("show", help="the repo's spec")
     show.set_defaults(run=_configure_show)
 
+    sidecar = commands.add_parser(
+        "sidecar", help="a thread's sidecar: a bottle of its own on another runner, which the thread ssh-es to",
+        description="A thread's sidecar: a bottle with a spec and runner of its own (a bigger machine, say), the "
+        "thread's repos fetch-only, which the thread's bottle reaches as `ssh sidecar`. It's scratch: made and "
+        "started with the thread's bottle, and deleted with it, a pause included. A change reaches a thread "
+        "with a bottle when it's paused and resumed.",
+    )
+    sidecar_commands = sidecar.add_subparsers(required=True)
+    for name, help_ in (("set", "give the thread a sidecar: exactly these features, memory and runner"),
+                        ("update", "change the thread's sidecar: add features (one given again replaces its options), "
+                         "or its memory or runner")):
+        command = sidecar_commands.add_parser(name, help=help_, description=f"{help_[0].upper()}{help_[1:]}. "
+                                              "Bottle checks its spec before it's saved.")
+        command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
+        command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
+        command.add_argument("--memory", help=f"its memory, in M or G, e.g. 32G (default: {repos.DEFAULT_MEMORY})")
+        command.add_argument("--runner", metavar="RUNNER", required=name == "set",
+                             help="the runner it's made on (`bottle runner status` lists them)")
+        command.set_defaults(run=_sidecar, replace=name == "set", parser=command, command=f"sidecar {name}")
+    for name, help_, run in (("show", "the thread's sidecar", _sidecar_show),
+                             ("remove", "take the thread's sidecar away", _sidecar_remove)):
+        command = sidecar_commands.add_parser(name, help=help_)
+        command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
+        command.set_defaults(run=run, command=f"sidecar {name}")
+
     broker_ = commands.add_parser(
         "broker", help="the broker: the thread that talks to the others, and keeps the notes",
         description="The broker: one thread outside your repos, whose agent talks to the others' and keeps "
@@ -254,13 +279,14 @@ def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
     states = threads.states(repo, all_)
-    rows = [("THREAD", "STATE", "RUNNER", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
+    rows = [("THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
     for thread in all_:
         row = states[thread.name]
         size = threads.snapshot_size(repo, thread) if row["state"] == "paused" else None
         # Where its bottle is; for one without, where its next is made.
         runner = row.get("runner") or threads.runner_of(repo, thread) or "local"
-        rows.append((thread.name, row["state"], runner, _size(size) if size is not None else "-", _ago(thread.last_active),
+        rows.append((thread.name, row["state"], runner, thread.sidecar["runner"] if thread.sidecar else "-",
+                     _size(size) if size is not None else "-", _ago(thread.last_active),
                      " ".join(row.get("features", ())) or "-",
                      " ".join(sorted(lanes.branches(repo.path, thread.name))) or "-"))
     _table(rows)
@@ -315,6 +341,67 @@ def _configure(args: argparse.Namespace) -> int:
     repo.save_spec(spec)
     print(f"Set {repo.name}'s spec: {_spec(spec)}{_runner(repo)}")
     return 0
+
+
+def _sidecar(args: argparse.Namespace) -> int:
+    if not args.replace and not args.feature and args.memory is None and args.runner is None:
+        args.parser.error("give --feature, --memory or --runner")
+    repo = repos.current()
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
+    if args.replace:
+        sidecar = {"runner": args.runner,
+                   "spec": {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY}}
+    elif thread.sidecar is None:
+        raise FolioError(f"thread {thread.name} has no sidecar to update; give it one with "
+                         f"`folio sidecar set {thread.name} --runner RUNNER ...`")
+    else:
+        spec = dict(thread.sidecar["spec"])
+        spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
+        if args.memory is not None:
+            spec["memory"] = args.memory
+        sidecar = {"runner": args.runner or thread.sidecar["runner"], "spec": spec}
+    thread = threads.set_sidecar(repo, thread, sidecar)
+    print(f"Set thread {thread.name}'s sidecar: {_sidecar_text(thread.sidecar)}{_when(repo, thread)}")
+    return 0
+
+
+def _sidecar_show(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
+    if thread.sidecar is None:
+        print(f"Thread {thread.name} has no sidecar")
+        return 0
+    state = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"]
+    print(f"{_sidecar_text(thread.sidecar)}; bottle {thread.sidecar_bottle}, {state}")
+    return 0
+
+
+def _sidecar_remove(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    thread = _thread(args, repo)
+    if thread is None:
+        return 0
+    if thread.sidecar is None:
+        print(f"Thread {thread.name} has no sidecar")
+        return 0
+    thread = threads.set_sidecar(repo, thread, None)
+    print(f"Took thread {thread.name}'s sidecar away{_when(repo, thread)}")
+    return 0
+
+
+def _sidecar_text(sidecar: dict) -> str:
+    return f"{_spec(sidecar['spec'])}, runner {sidecar['runner']}"
+
+
+def _when(repo: repos.Repo, thread: threads.Thread) -> str:
+    """When a change to its sidecar reaches the thread: at once, for one with no bottle."""
+    if threads.states(repo, [thread])[thread.name]["state"] in ("paused", "missing"):
+        return ""
+    return f". It comes with the thread's next bottle: `folio pause {thread.name}`, then `folio claude {thread.name}`"
 
 
 def _configure_show(args: argparse.Namespace) -> int:

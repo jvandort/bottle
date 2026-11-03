@@ -157,8 +157,9 @@ class AttachTest(FolioTestCase):
     def test_list(self) -> None:
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", "HEAD")
         lines = self.ok("list").splitlines()
-        self.assertEqual(lines[0].split(), ["THREAD", "STATE", "RUNNER", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES"])
-        self.assertEqual(lines[1].split(), ["fix-it", "running", "local", "-", "just", "now", "tools", "genie/fix-it-1"])
+        self.assertEqual(lines[0].split(), ["THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES",
+                                            "BRANCHES"])
+        self.assertEqual(lines[1].split(), ["fix-it", "running", "local", "-", "-", "just", "now", "tools", "genie/fix-it-1"])
 
 
 class DeleteTest(FolioTestCase):

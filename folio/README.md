@@ -98,6 +98,26 @@ first. `folio list` shows where each thread runs, or will.
 A drone's Claude gets its credential through this machine, so it can't reach
 Claude while this machine is asleep or can't reach the runner.
 
+## Sidecars
+
+A thread can have a sidecar: a second bottle, on a runner of its own (a bigger
+machine, say), with a spec of its own, for the jobs that want more than the
+thread's bottle has. The thread's agent reaches it as `ssh sidecar` -- a shell,
+a command, scp, git over ssh -- and is told so.
+
+```sh
+folio sidecar set fix-it --runner desktop --feature jvm:version=21 --memory 32G
+folio sidecar update fix-it --memory 64G
+folio sidecar show fix-it
+folio sidecar remove fix-it
+```
+
+It has the thread's repos, fetch-only, as they were when it was made. It's
+scratch: it's made just before the thread's bottle, started with it, and
+deleted with it, a pause included. So a thread that has a bottle gets its new
+sidecar, or loses its old one, when it's paused and resumed. `folio list`
+shows each thread's sidecar's runner.
+
 ## The broker
 
 `folio broker` attaches to the broker: one thread outside your repos, whose

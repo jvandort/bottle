@@ -17,6 +17,13 @@ record:
 A thread has a snapshot only while it has no bottle: attaching to one drops
 it, since the bottle is where the work is from then on.
 
+A thread can have a sidecar (`folio sidecar set`): a bottle of a spec of its
+own, on a runner of its own, `<thread's bottle>-sidecar`, with the thread's
+repos, fetch-only, which the thread's bottle reaches as `ssh sidecar`. It's
+scratch: made just before the thread's bottle is, started with it, and deleted
+with it, a pause included. So a sidecar given to a thread with a bottle comes
+with the next one: pause and resume it.
+
 Inside the bottle, Claude and a shell each run in a shpool session of their
 own, started by one exec and attached to by another, so closing a terminal only
 detaches it, and whatever the session started keeps running. shpool passes the
@@ -35,7 +42,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import broker, engine, lanes, notes, snapshots, store
-from .advice import advice, durable
+from .advice import advice, durable, sidecar as sidecar_advice, sidecar_itself
 from .errors import FolioError
 from .repos import DEFAULT_SPEC, Repo, check_repo_spec
 
@@ -43,6 +50,8 @@ NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 RECORD = "thread.json"
 WORKSPACE = "/workspace"
 CLAUDE, SHELL = "claude", "shell"
+# The name a thread's bottle has its sidecar by.
+SIDECAR_HOST = "sidecar"
 # What each session runs. Claude carries on with the thread's conversation if
 # it has one, and runs the claude feature's channel, bottle-event, if the bottle
 # has it, so events and other bottles' messages reach its session; both checked
@@ -111,6 +120,12 @@ class Thread:
     base: str | None = None  # the branch it started from, if one was asked for; None: the repo's default
     broker: bool = False  # the broker (see broker.py), whose bottle is made folio's way, not the repo's
     runner: str | None = None  # the runner its bottles are made on, if it was given one; None: the repo's
+    # Its sidecar, if it has one: {"runner": ..., "spec": {"features": [...], "memory": ...}}.
+    sidecar: dict | None = None
+
+    @property
+    def sidecar_bottle(self) -> str:
+        return f"{self.bottle}-sidecar"
 
 
 def directory(repo: Repo, name: str) -> Path:
@@ -212,11 +227,63 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     if repo.spec() != spec:
         repo.save_spec(spec)
     notes_path = notes.ensure(notes_dir(repo, thread.name), f"Notes of thread {thread.name}")
-    # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
-    engine.new(thread.bottle, spec | {"thread": thread.name},
-               [engine.Mount(WORKSPACE, repo.path, thread.base, lanes.bottle_remotes(thread.name)),
-                engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)],
-               advice(thread.name, repo.name, mounts(thread)), runner_of(repo, thread))
+    repos_ = [engine.Mount(WORKSPACE, repo.path, thread.base, lanes.bottle_remotes(thread.name)),
+              engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)]
+    told, ssh = "", {}
+    if thread.sidecar is not None:
+        _make_sidecar(repo, thread, repos_)
+        told, ssh = sidecar_advice(thread.sidecar["runner"], thread.sidecar["spec"]), {SIDECAR_HOST: thread.sidecar_bottle}
+    try:
+        # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
+        engine.new(thread.bottle, spec | {"thread": thread.name}, repos_,
+                   advice(thread.name, repo.name, mounts(thread), told), runner_of(repo, thread), ssh)
+    except BaseException:
+        if thread.sidecar is not None:
+            _delete_sidecar(thread)
+        raise
+
+
+def _make_sidecar(repo: Repo, thread: Thread, repos_: list[engine.Mount]) -> None:
+    """Make the thread's sidecar afresh, from its spec as it is now: the thread's repos, every remote fetch-only."""
+    _delete_sidecar(thread)   # scratch: whatever's left of one is no use
+    spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]))
+    fetch_only = [engine.Mount(m.path, m.repo, m.checkout, [r.split(",push=")[0] for r in m.remotes]) for m in repos_]
+    engine.new(thread.sidecar_bottle, spec, fetch_only, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
+
+
+def _delete_sidecar(thread: Thread) -> None:
+    """Delete the thread's sidecar, if it has one."""
+    if thread.broker:
+        return
+    if engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"] != "missing":
+        engine.delete(thread.sidecar_bottle)
+
+
+def _start_sidecar(thread: Thread) -> None:
+    """Start the thread's sidecar with its bottle, if it has one that's stopped: bottle starts only the one asked."""
+    if thread.sidecar is None:
+        return
+    state = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"]
+    if state == "missing":
+        print(f"folio: thread {thread.name}'s sidecar comes with its next bottle: pause and resume it "
+              f"(`folio pause {thread.name}`, then `folio claude {thread.name}`)", file=sys.stderr)
+    elif state != "running":
+        try:
+            engine.start(thread.sidecar_bottle)
+        except FolioError as e:
+            print(f"folio: thread {thread.name}'s sidecar didn't start ({e}); the thread goes on without it",
+                  file=sys.stderr)
+
+
+def set_sidecar(repo: Repo, thread: Thread, sidecar: dict | None) -> Thread:
+    """The thread, with `sidecar` (None: none) from its next bottle on; its spec checked first."""
+    if thread.broker:
+        raise FolioError("the broker has no sidecar")
+    if sidecar is not None:
+        sidecar = {**sidecar, "spec": check_repo_spec(engine.validate_spec(sidecar["spec"]))}
+    changed = Thread(**{**asdict(thread), "sidecar": sidecar})
+    _save(repo, changed)
+    return changed
 
 
 def runner_of(repo: Repo, thread: Thread) -> str | None:
@@ -292,6 +359,7 @@ def _ensure_running(repo: Repo, thread: Thread) -> None:
                          f"`folio delete {thread.name}` removes what's left of the thread")
     elif state != "running":
         engine.start(thread.bottle)
+    _start_sidecar(thread)
 
 
 def pause(repo: Repo, thread: Thread) -> None:
@@ -325,6 +393,7 @@ def pause(repo: Repo, thread: Thread) -> None:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     engine.delete(thread.bottle)
+    _delete_sidecar(thread)
 
 
 def _stop_sessions(thread: Thread) -> None:
@@ -362,10 +431,11 @@ def _resume(repo: Repo, thread: Thread) -> None:
             engine.run(thread.bottle, ["sh", "-c", 'cd "$HOME/.claude/projects" 2>/dev/null && [ -d -workspace ] '
                                                    '&& [ ! -e -notes ] && mv -- -workspace -notes || true'])
     except BaseException:
-        try:
-            engine.delete(thread.bottle)
-        except Exception:
-            pass
+        for undo in (lambda: engine.delete(thread.bottle), lambda: _delete_sidecar(thread)):
+            try:
+                undo()
+            except Exception:
+                pass
         raise
 
 
@@ -457,6 +527,7 @@ def delete(repo: Repo, thread: Thread) -> None:
     if states(repo, [thread])[thread.name]["state"] not in ("missing", "paused"):
         engine.delete(thread.bottle)
     if not thread.broker:
+        _delete_sidecar(thread)
         lanes.forget(repo.path, thread.name)
     kept = notes_dir(repo, thread.name)
     for entry in directory(repo, thread.name).iterdir():

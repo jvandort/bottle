@@ -88,5 +88,46 @@ other, or it's lost.
 """
 
 
-def advice(thread: str, repo: str, paths: list[str]) -> str:
-    return ADVICE.format(thread=thread, repo=repo) + NOTES + durable(paths)
+SIDECAR = """\
+
+## Your sidecar
+
+`ssh sidecar` reaches this thread's sidecar: a bottle of its own on {where},
+with {memory} of memory and features {features}, for the jobs that want more
+than this bottle has: builds, test suites, anything long or big. It's you
+there, as `genie`, in a shell or with a command; scp and git over ssh work too.
+
+- It has this bottle's repos at the same paths, as they were when it was made,
+  with the same remotes, fetch-only: pushes are yours to make from here.
+- Your work gets there over ssh, committed or not:
+  `git push sidecar:/workspace $(git stash create || git rev-parse HEAD):refs/heads/job`,
+  then `ssh sidecar 'cd /workspace && git checkout -q --detach job && ...'`.
+- It's scratch: a pause deletes it, and a resume makes a new one. Bring back
+  what's worth keeping before then.
+"""
+
+
+def sidecar(runner: str, spec: dict) -> str:
+    """What a thread's agent is told about its sidecar."""
+    features = ", ".join(f"`{f}`" for f in spec.get("features", [])) or "none"
+    return SIDECAR.format(where=f"runner `{runner}`", memory=spec["memory"], features=features)
+
+
+SIDECAR_ITSELF = """\
+
+# Thread `{thread}`'s sidecar
+
+This bottle is the sidecar of thread `{thread}`, in the `{repo}` repo: its agent
+runs in the thread's own bottle and reaches this one over ssh, for jobs that
+want more room. Its repos are as they were when it was made, fetch-only. It's
+scratch: a pause of the thread deletes it.
+"""
+
+
+def sidecar_itself(thread: str, repo: str) -> str:
+    """What a sidecar says about itself, to whoever is in it."""
+    return SIDECAR_ITSELF.format(thread=thread, repo=repo)
+
+
+def advice(thread: str, repo: str, paths: list[str], sidecar_: str = "") -> str:
+    return ADVICE.format(thread=thread, repo=repo) + NOTES + durable(paths) + sidecar_

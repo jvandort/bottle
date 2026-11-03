@@ -62,8 +62,12 @@ def main(argv: list[str]) -> int:
             name = option(rest, "--name")
             if name in bottles:
                 fail(f"a bottle named {name!r} already exists")
-            if os.environ.get("FAKE_BOTTLE_FAIL_NEW"):
+            if os.environ.get("FAKE_BOTTLE_FAIL_NEW") in ("1", name):   # every bottle, or the one named
                 fail("creating failed")
+            ssh = dict(g.partition("=")[::2] for g in option(rest, "--ssh", many=True))
+            for host, target in ssh.items():
+                if target not in bottles:
+                    fail(f"--ssh {host}={target}: no bottle named {target!r}")
             root = STATE.parent / "bottles" / name
             (root / "home" / ".claude").mkdir(parents=True)
             (root / "home" / ".claude" / "settings.json").write_text('{"from": "the image"}')
@@ -82,7 +86,7 @@ def main(argv: list[str]) -> int:
                 "state": "running", "spec": json.loads(Path(option(rest, "--spec")).read_text()),
                 "mounts": mounts, "context": Path(option(rest, "--context")).read_text(),
                 "workspace": mounts[0]["dir"] if mounts else str(root / "home"), "home": str(root / "home"),
-                "sessions": {}, "runner": option(rest, "--runner") or "local",
+                "sessions": {}, "runner": option(rest, "--runner") or "local", "ssh": ssh,
             }
             save(state)
             print(f"Created bottle '{name}'")

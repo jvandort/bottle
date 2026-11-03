@@ -305,7 +305,7 @@ has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER]`
+### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER] [--ssh [NAME=]BOTTLE]...`
 
 Creates a bottle from a **spec**: a file giving its features and memory, owned
 by whoever creates the bottle. `NAME` is required, and is the bottle's identity:
@@ -383,6 +383,14 @@ to work in it.
 `--runner RUNNER` says which machine the bottle's VM runs on: `local`, this
 machine, by default, or one added with `bottle runner add`. The image is built
 there if it isn't yet, and the spec's memory must fit that machine.
+
+`--ssh [NAME=]BOTTLE` lets the bottle ssh to another, which must exist
+already: `ssh NAME` (by default, the other bottle's own name) in this one is a
+login there, as `genie`, and so are scp and git over ssh. That's all it
+reaches: NAME's address goes to that bottle's sshd and nowhere else, never to
+a machine on your network. It's the bottle as it was when the grant was made:
+one made again under the same name isn't reached until this one is made again
+too. Bottle doesn't start it: start both. Repeatable.
 
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.
