@@ -20,6 +20,11 @@ specs.py). Its remotes are the ones it was created with, and nothing is
 registered in the repo: what the bottle pushes is for its creator to read.
 What's worth keeping before a bottle is deleted is its creator's call too.
 
+A bottle can have a sidecar: a bottle of its own spec, on a runner of its
+own (a bigger machine, say), with the parent's repos at the parent's paths,
+fetch-only. It's scratch, for its parent's jobs: stopped and deleted with
+its parent, one to a parent.
+
 Objects the bottle uses from the repo aren't protected from `git gc` in the
 hub: if the user deletes a branch a bottle checked out and gc later prunes
 its commits (after git's grace periods, weeks to months), that checkout
@@ -140,6 +145,8 @@ class Bottle:
     archive: str | None = None
     # The runner its machine is on (see runners.py); records from before runners were the local one's.
     runner: str = runners.LOCAL
+    # The bottle it's the sidecar of; None: it's no one's.
+    parent: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -213,9 +220,14 @@ def _write(bottles: dict[str, Bottle]) -> None:
     write_json(registry_path(), {"version": 1, "bottles": {b.name: asdict(b) for b in bottles.values()}})
 
 
+def sidecar_of(name: str) -> Bottle | None:
+    """The bottle's sidecar, if it has one."""
+    return next((b for b in load().values() if b.parent == name), None)
+
+
 def create(
     spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "", image: str = images.BASE,
-    runner: str = runners.LOCAL,
+    runner: str = runners.LOCAL, parent: str | None = None,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
@@ -226,6 +238,8 @@ def create(
     any, the bottle has no repo. Nothing is registered in a repo: the bottle's
     creator reads what it pushes, from the namespaces it chose. Its machine is
     on `runner`.
+
+    Given `parent`, it's that bottle's sidecar, and its mounts are the parent's.
     """
     on = runners.get(runner)
     spec = specs.canonical(spec, on.memory_mib(), "this machine" if runner == runners.LOCAL else f"runner {runner}")
@@ -235,7 +249,12 @@ def create(
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
-    planned = _plan_mounts(mounts or [], existing.values())
+    if parent is None:
+        planned = _plan_mounts(mounts or [], existing.values())
+    elif mounts:
+        raise BottleError("a sidecar's mounts are its parent's: it takes no others")
+    else:
+        planned = _sidecar_mounts(parent, existing)
     on.ensure_ready()
     tag = features_.ensure_built(image, installed, on)
     auth.ensure_logged_in(installed)
@@ -243,7 +262,7 @@ def create(
     bottle = Bottle(
         name, uuid.uuid4().hex, image, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
-        mounts=tuple(m for m, _ in planned), context=context, runner=runner,
+        mounts=tuple(m for m, _ in planned), context=context, runner=runner, parent=parent,
     )
     bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
     log.info("%s: created, %s, features %s", name,
@@ -268,6 +287,24 @@ def _plan_mounts(requests: list[MountRequest], others) -> list[tuple[Mount, repo
         served = _parse_remotes(request.remotes)
         _refuse_a_second_writer(repo, served, others)
         planned.append((Mount(path, str(repo.path), start.branch, start.commit, served), repo))
+    return planned
+
+
+def _sidecar_mounts(parent: str, existing: dict[str, Bottle]) -> list[tuple[Mount, repos.Repo]]:
+    """A sidecar's mounts: its parent's repos at its parent's paths and commits, every remote fetch-only."""
+    if parent not in existing:
+        raise BottleError(f"no bottle named {parent!r} to be the sidecar of")
+    of = existing[parent]
+    if of.parent is not None:
+        raise BottleError(f"{parent} is itself a sidecar, of {of.parent}")
+    taken = next((b.name for b in existing.values() if b.parent == parent), None)
+    if taken is not None:
+        raise BottleError(f"{parent} already has a sidecar, {taken}")
+    planned = []
+    for mount in of.mounts:
+        remotes = tuple(replace(r, push=None) for r in mount.remotes)
+        repo = repos.Repo(repos.derive_name(Path(mount.repo)), Path(mount.repo))
+        planned.append((replace(mount, remotes=remotes), repo))
     return planned
 
 
@@ -494,6 +531,9 @@ def context(bottle: Bottle) -> str:
             lines.append("  It has no remotes.")
     if not bottle.mounts:
         lines.append("- This bottle has no repo.")
+    if bottle.parent is not None:
+        lines.append(f"- This bottle is the sidecar of bottle `{bottle.parent}`, for its jobs: scratch, deleted with it.\n"
+                     "  Its remotes are fetch-only.")
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     resolved = features_.resolve(list(bottle.features))
@@ -579,8 +619,12 @@ def start(name: str) -> Bottle:
 
 
 def stop(name: str) -> None:
-    """Stop the bottle's machine, and its token at the decider. Its checkout and changes are kept."""
+    """Stop the bottle's machine, and its token at the decider, and its sidecar's. Its checkout and changes are
+    kept."""
     bottle = get(name)
+    sidecar = sidecar_of(name)
+    if sidecar is not None:
+        stop(sidecar.name)
     runner = runner_of(bottle)
     if runner.state(bottle.machine) == "running":
         runner.stop(bottle.machine)
@@ -757,6 +801,7 @@ def status(names: list[str] = ()) -> list[dict]:
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
+            "parent": bottle.parent,
             # Where its objects and remotes are, as a checkout restored into it has to point.
             "mounts": [{"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,
                         "remotes": [r.spec for r in m.remotes], "objects": m.objects,
@@ -773,6 +818,9 @@ def delete(name: str) -> None:
     (marked broken) so the next delete can retry.
     """
     bottle = get(name)
+    sidecar = sidecar_of(name)
+    if sidecar is not None:
+        delete(sidecar.name)   # first: a sidecar's never left without its parent
     failures = []
     # The registry says the machine is the bottle's: smolvm has no labels to ask.
     runner = runner_of(bottle)

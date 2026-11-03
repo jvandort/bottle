@@ -1015,6 +1015,63 @@ class MountsTest(BottleTestCase):
         self.assertEqual((bottles.load(), fake.calls), ({}, []))
 
 
+class SidecarTest(BottleTestCase):
+    """A bottle's sidecar: its parent's repos, fetch-only, on a spec of its own; stopped and deleted with it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake_smolvm = self.fake()
+        self.notes = self.make_repo("notes")
+        self.parent = bottles.create({"features": [], "memory": "2G"}, "main", [
+            bottles.MountRequest("/workspace", self.repo_path, remotes=["origin:fetch=upstream",
+                                                                       "agent:fetch=ns/w-out,push=ns/w-out"]),
+            bottles.MountRequest("/notes", self.notes, remotes=["agent:fetch=ns/n-out,push=ns/n-out"]),
+        ])
+
+    def sidecar(self, name: str = "big", of: str = "main", memory: str = "8G") -> bottles.Bottle:
+        return bottles.create({"features": ["tools"], "memory": memory}, name, parent=of)
+
+    def test_has_its_parents_repos_at_its_paths_fetch_only(self) -> None:
+        sidecar = self.sidecar()
+        self.assertEqual((sidecar.parent, sidecar.memory, sidecar.features), ("main", "8G", ("tools",)))
+        self.assertEqual([(m.path, m.repo, m.branch, m.commit, m.objects) for m in sidecar.mounts],
+                         [(m.path, m.repo, m.branch, m.commit, m.objects) for m in self.parent.mounts])
+        self.assertEqual([[r.spec for r in m.remotes] for m in sidecar.mounts],
+                         [["origin:fetch=upstream", "agent:fetch=ns/w-out"], ["agent:fetch=ns/n-out"]])
+        # Served those, read-only, though another bottle pushes into the same namespaces.
+        self.assertEqual([[r.push for r in repo.remotes] for repo in self.fake_smolvm.egress_repos], [[None, None], [None]])
+        self.assertIn("remote add agent http://bottle.host/git/notes/agent", self.fake_smolvm.workspace_script)
+        self.assertIn("the sidecar of bottle `main`", bottles.context(sidecar))
+        self.assertEqual(bottles.sidecar_of("main"), sidecar)
+        self.assertEqual(bottles.status(["big"])[0]["parent"], "main")
+
+    def test_one_to_a_parent_and_none_of_a_sidecar(self) -> None:
+        self.sidecar()
+        for name, of, why in (("big2", "main", "main already has a sidecar, big"),
+                              ("big2", "big", "big is itself a sidecar, of main"),
+                              ("big2", "nope", "no bottle named 'nope' to be the sidecar of")):
+            with self.subTest(of), self.assertRaisesRegex(BottleError, why):
+                self.sidecar(name, of)
+        with self.assertRaisesRegex(BottleError, "a sidecar's mounts are its parent's"):
+            bottles.create({"features": [], "memory": "2G"}, "big2",
+                           [bottles.MountRequest("/workspace", self.repo_path)], parent="main")
+        self.assertEqual(sorted(bottles.load()), ["big", "main"])
+
+    def test_is_stopped_and_deleted_with_its_parent(self) -> None:
+        sidecar = self.sidecar()
+        bottles.stop("main")
+        self.assertEqual(self.fake_smolvm.machines, {self.parent.machine: "stopped", sidecar.machine: "stopped"})
+        self.assertEqual(self.fake_smolvm.bound, set())
+        bottles.delete("main")
+        self.assertEqual((bottles.load(), self.fake_smolvm.machines), ({}, {}))
+
+    def test_deleting_it_leaves_its_parent(self) -> None:
+        self.sidecar()
+        bottles.delete("big")
+        self.assertEqual(sorted(bottles.load()), ["main"])
+        self.assertIsNone(bottles.sidecar_of("main"))
+
+
 class StatusTest(BottleTestCase):
     def test_every_bottle_or_those_named(self) -> None:
         fake = self.fake()
@@ -1026,7 +1083,7 @@ class StatusTest(BottleTestCase):
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
         self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G",
+            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G", "parent": None,
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
                         "remotes": ["work:fetch=ns/t-in,push=ns/t-out"], "objects": "/mnt/objects/workspace",

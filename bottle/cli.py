@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         "new",
         help="create a bottle from a spec",
         usage="bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] "
-        "[--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER]",
+        "[--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER] [--sidecar-of BOTTLE]",
         description="Create a bottle, in its own VM, with the spec's features and memory, and each --mount's repo "
         "checked out at its path. The first mount is where a shell or a command starts. NAME is required, "
         "and a name that's taken is refused.",
@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     new.add_argument("--context", metavar="FILE", help="add this file to what the bottle tells its agent (~/BOTTLE.md)")
     new.add_argument("--runner", default="local", metavar="RUNNER",
                      help="the machine its VM runs on (default: local, this one)")
+    new.add_argument("--sidecar-of", metavar="BOTTLE",
+                     help="make it BOTTLE's sidecar: BOTTLE's repos, fetch-only, stopped and deleted with BOTTLE "
+                     "(no --mount)")
     new.set_defaults(run=_new, parser=new)
 
     status = commands.add_parser(
@@ -294,7 +297,8 @@ def _new(args: argparse.Namespace) -> int:
     context = _read_context(args.context)
     spec = specs.read(Path(args.spec).expanduser())
     print("Creating a bottle...", file=sys.stderr)
-    bottle = bottles.create(spec, args.name, _mount_requests(args), context, runner=args.runner)
+    bottle = bottles.create(spec, args.name, _mount_requests(args), context, runner=args.runner,
+                            parent=args.sidecar_of)
     print(f"Created {_describe(bottle)}")
     print(f"Open a shell with: bottle shell {bottle.name}")
     return 0
@@ -368,6 +372,8 @@ def _status(args: argparse.Namespace) -> int:
             continue
         if row.get("runner", "local") != "local":
             print(f"  runner    {row['runner']}")
+        if row.get("parent"):
+            print(f"  sidecar of {row['parent']}")
         print(f"  memory    {row['memory']}")
         print(f"  features  {', '.join(row['features']) or '-'}")
         for mount in row["mounts"]:
