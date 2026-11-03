@@ -27,3 +27,14 @@
   directions, because the loop has two.
 - `--git-repo` with a URL, and folio on a different machine from its sandboxes.
   The design keeps both possible: no writable mounts, and everything over exec.
+- **Build a thread's and its sidecar's images in parallel.** Folio makes the
+  sidecar (`bottle new`, building its image on its runner) and only then the
+  thread's bottle (building its own), since `--ssh` needs the sidecar to exist.
+  The builds don't depend on each other: check logins first (they can ask),
+  then run `bottle build --runner R --feature ...` for each at once, then the
+  two `bottle new`s, which find their images built. Builder machines are named
+  uniquely and runners have stores of their own, so one build on each is safe;
+  two on the same runner would share the image's `.partial` in its store and
+  race `remove_stale`, so bottle needs a build lock per runner first. Two builds
+  stream to one terminal: prefix each line (`sidecar: `, `thread: `), or show
+  one and log the other.
