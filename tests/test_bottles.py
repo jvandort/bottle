@@ -229,6 +229,7 @@ class CreateTest(BottleTestCase):
         self.assertIn("You're `genie`, running in a bottle", context)
         self.assertIn("passwordless sudo", context)
         self.assertIn("The network works as usual", context)
+        self.assertIn(f"`bottle cp {bottle.name}:<path> .`", context)
 
     def test_context_for_a_detached_commit(self) -> None:
         bottle = bottles.Bottle("b", "id", "base", 0.0, mounts=(bottles.Mount("/workspace", "/src/r", None, "c" * 40),))
