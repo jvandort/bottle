@@ -107,7 +107,7 @@ a command, scp, git over ssh -- and is told so.
 
 ```sh
 folio sidecar set fix-it --runner desktop --feature jvm:version=21 --memory 32G
-folio sidecar update fix-it --memory 64G
+folio sidecar update fix-it --memory 64G --disk 100G
 folio sidecar show fix-it
 folio sidecar remove fix-it
 ```
@@ -164,7 +164,7 @@ its reach until you resume it.
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` | The repo's threads, most recently active first, where each runs, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
-| `folio configure set` / `update` / `show` | The repo's spec, its threads' features and memory, and its runner |
+| `folio configure set` / `update` / `show` | The repo's spec, its threads' features, memory and disk, and its runner |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` | Every repo folio has state for |
 
@@ -193,7 +193,7 @@ gives it permissions. A repo with no spec gets `tools`, which has the
 shpool every thread runs in, and 2G of memory; add `claude` for Claude.
 
 ```sh
-folio configure set --feature tools --feature claude --feature jvm:version=21 --memory 8G
+folio configure set --feature tools --feature claude --feature jvm:version=21 --memory 8G --disk 50G
 ```
 
 ## Development

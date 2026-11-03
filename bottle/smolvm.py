@@ -32,7 +32,9 @@ def binary() -> str:
 
 
 # A machine's caps. vCPUs cost nothing idle; memory is committed as the guest touches it.
-MAX_CPUS = 255
+# smolvm runs no machine with more than 16 vCPUs, on any host, and says so only
+# in a warning: asked for more, it's 16 all the same.
+MAX_CPUS = 16
 # The most guest TCP connections a machine holds at once, counting those still
 # closing: smolvm frees a slot only once its side is Closed, so one the far end
 # closed first holds it through smoltcp's 10s TIME_WAIT. smolvm's default, 512,
@@ -52,10 +54,13 @@ class Mount:
     target: str
 
 
-def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int) -> None:
-    """Create a stopped machine from `image` (an archive path), its mounts read-only; `memory_mib` None: smolvm's default."""
+def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
+           disk_gib: int | None = None) -> None:
+    """Create a stopped machine from `image` (an archive path), its mounts read-only; `memory_mib` and `disk_gib`
+    None: smolvm's defaults. The disk is its storage disk, sparse, where what the machine writes goes."""
     args = ["machine", "create", "--name", name, "--image", image, "--net", "--net-backend", "virtio-net",
-            "--cpus", str(min(cpus, MAX_CPUS)), *(["--mem", str(memory_mib)] if memory_mib else [])]
+            "--cpus", str(min(cpus, MAX_CPUS)), *(["--mem", str(memory_mib)] if memory_mib else []),
+            *(["--storage", str(disk_gib)] if disk_gib else [])]
     for m in mounts:
         args += ["-v", f"{m.source}:{m.target}:ro"]
     for key, value in env.items():

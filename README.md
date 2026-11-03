@@ -316,6 +316,10 @@ is built first if it isn't built yet.
 {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
 ```
 
+A spec can give the bottle's `disk`, in G (`"disk": "50G"`): the disk what
+it writes goes to, sparse, so it costs what it holds; 20G if it doesn't say.
+Its VM gets every core of the machine it runs on, up to smolvm's 16.
+
 A spec can also give the bottle `permissions`, what bottled lets it do beyond
 what every bottle may: `message-any`, to send messages to a running bottle by
 its name rather than only answer one; and `list-bottles`, to list the other

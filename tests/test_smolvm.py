@@ -24,10 +24,10 @@ class CommandTest(unittest.TestCase):
     def test_create_makes_a_mediated_machine_with_read_only_mounts(self) -> None:
         run = self.run_with()
         smolvm.create("bottle-b", "/images/b.tar", [smolvm.Mount(Path("/repo/.git/objects"), "/mnt/repo/objects")],
-                      {"TOKEN": "stand-in"}, memory_mib=8192, cpus=1000)
+                      {"TOKEN": "stand-in"}, memory_mib=8192, cpus=1000, disk_gib=50)
         self.assertEqual(run.call_args.args[0], [
             "smolvm", "--error-format", "json", "machine", "create", "--name", "bottle-b", "--image", "/images/b.tar",
-            "--net", "--net-backend", "virtio-net", "--cpus", "255", "--mem", "8192",
+            "--net", "--net-backend", "virtio-net", "--cpus", "16", "--mem", "8192", "--storage", "50",
             "-v", "/repo/.git/objects:/mnt/repo/objects:ro", "-e", "TOKEN=stand-in",
         ])
 
@@ -110,7 +110,7 @@ class SmolvmBottleTest(GitTestCase):
             self.calls.append(f"{what} as {user}")
             return ""
 
-        def create(name, image, mounts, env, memory_mib, cpus):
+        def create(name, image, mounts, env, memory_mib, cpus, disk_gib=None):
             self.calls.append("create")
             self.machines[name] = "created"
             self.created = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib)

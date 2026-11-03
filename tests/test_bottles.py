@@ -36,11 +36,12 @@ class FakeSmolvm:
     def archive(self, tag):
         return Path("/images") / f"{tag.rsplit('/', 1)[-1].replace(':', '-')}.tar"
 
-    def create(self, name, image, mounts, env, memory_mib, cpus):
+    def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None):
         if bottles.load():
             self.statuses_seen.append(bottles.load()[next(iter(bottles.load()))].status)
         self._step("create")
-        self.create_args = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib, cpus=cpus)
+        self.create_args = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib, cpus=cpus,
+                                disk_gib=disk_gib)
         self.machines[name] = "created"
 
     def start(self, name, decider, token):
@@ -145,11 +146,11 @@ class BottleTestCase(GitTestCase):
         self.head = run("git", "-C", self.repo_path, "rev-parse", "HEAD")
 
     def create(self, image: str = "base", branch: str | None = None, name: str | None = None,
-               features=(), memory: str = "2G", context: str = "", remotes=None) -> bottles.Bottle:
+               features=(), memory: str = "2G", context: str = "", remotes=None, disk=None) -> bottles.Bottle:
         """A bottle with the example repo checked out: named example, then example-2, ..., unless named."""
         taken = set(bottles.load())
         name = name or next(n for n in ("example", *(f"example-{i}" for i in range(2, 100))) if n not in taken)
-        spec = {"features": list(features), "memory": memory}
+        spec = {"features": list(features), "memory": memory, **({"disk": disk} if disk else {})}
         return bottles.create(spec, name, [bottles.MountRequest("/workspace", self.repo_path, branch, remotes)],
                               context, image)
 
@@ -196,7 +197,9 @@ class CreateTest(BottleTestCase):
         bottle = self.create(memory="3G")
         self.assertEqual(fake.create_args["image"], "/images/base-latest.tar")
         self.assertEqual(bottle.archive, "base-latest.tar")  # kept while the bottle exists
-        self.assertEqual(fake.create_args["memory_mib"], 3072)
+        self.assertEqual((fake.create_args["memory_mib"], fake.create_args["disk_gib"]), (3072, None))
+        self.create(memory="2G", name="big", disk="50G")
+        self.assertEqual(fake.create_args["disk_gib"], 50)
         # No proxy, and no stand-ins without features asking: only where a login starts.
         self.assertEqual(fake.create_args["env"], {"BOTTLE_WORKDIR": "/workspace", "BOTTLE_MIRROR_ENV": "BOTTLE_WORKDIR"})
         [mount] = fake.create_args["mounts"]

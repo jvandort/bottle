@@ -72,9 +72,10 @@ class SidecarTest(FolioTestCase):
     def test_update_show_and_remove(self) -> None:
         self.assertIn("no sidecar to update", self.folio("sidecar", "update", "fix-it", "--memory", "8G").stderr)
         self.give_it_one()
-        self.ok("sidecar", "update", "fix-it", "--feature", "tools", "--memory", "64G")
+        self.ok("sidecar", "update", "fix-it", "--feature", "tools", "--memory", "64G", "--disk", "100G")
         self.assertEqual(self.ok("sidecar", "show", "fix-it").strip(),
-                         f"features [jvm:version=21, tools], memory 64G, runner desktop; bottle {self.sidecar}, missing")
+                         f"features [jvm:version=21, tools], memory 64G, disk 100G, runner desktop; "
+                         f"bottle {self.sidecar}, missing")
         self.assertEqual(self.ok("list").splitlines()[1].split()[3], "desktop")
         self.ok("sidecar", "remove", "fix-it")
         self.assertIsNone(threads.load(self.repo_, "fix-it").sidecar)

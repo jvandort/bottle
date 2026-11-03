@@ -412,7 +412,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         bottle.machine, archive,
         mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
-        memory_mib=_memory_mib(bottle.memory),
+        memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),
     )
     _start_machine(bottle)
     verify_contract(bottle)

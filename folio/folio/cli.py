@@ -11,6 +11,7 @@ from .errors import FolioError
 PICK = "choose one from a list"
 
 
+DISK_HELP = "the disk it writes to, in G, e.g. 50G (default: 20G)"
 RUNNER_HELP = "the runner to make its bottle on (default: the repo's, from `folio configure`, else this machine)"
 
 
@@ -93,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
         command.add_argument("--memory", help=memory_help)
+        command.add_argument("--disk", help=DISK_HELP)
         command.add_argument("--runner", metavar="RUNNER",
                              help="the runner the repo's threads' bottles are made on, unless a thread is given its "
                              "own (`bottle runner status` lists them; local: this machine)")
@@ -116,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
         command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
         command.add_argument("--memory", help=f"its memory, in M or G, e.g. 32G (default: {repos.DEFAULT_MEMORY})")
+        command.add_argument("--disk", help=DISK_HELP)
         command.add_argument("--runner", metavar="RUNNER", required=name == "set",
                              help="the runner it's made on (`bottle runner status` lists them)")
         command.set_defaults(run=_sidecar, replace=name == "set", parser=command, command=f"sidecar {name}")
@@ -322,21 +325,19 @@ def _delete(args: argparse.Namespace) -> int:
 
 
 def _configure(args: argparse.Namespace) -> int:
-    if not args.feature and args.memory is None and args.runner is None and not args.replace:
-        args.parser.error("give --feature, --memory or --runner")
+    if not args.feature and args.memory is None and args.disk is None and args.runner is None and not args.replace:
+        args.parser.error("give --feature, --memory, --disk or --runner")
     repo = repos.current()
     if args.runner is not None or args.replace:
         repo.save_runner(args.runner)
-    if not args.feature and args.memory is None and not args.replace:
+    if not args.feature and args.memory is None and args.disk is None and not args.replace:
         print(f"Set {repo.name}'s runner: {args.runner}")
         return 0
     spec = dict(repo.spec() or repos.DEFAULT_SPEC)
     if args.replace:
-        spec = {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY}
+        spec = _given(args)
     else:
-        spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
-        if args.memory is not None:
-            spec["memory"] = args.memory
+        spec = _updated(spec, args)
     spec = repos.check_repo_spec(engine.validate_spec(spec))
     repo.save_spec(spec)
     print(f"Set {repo.name}'s spec: {_spec(spec)}{_runner(repo)}")
@@ -344,27 +345,39 @@ def _configure(args: argparse.Namespace) -> int:
 
 
 def _sidecar(args: argparse.Namespace) -> int:
-    if not args.replace and not args.feature and args.memory is None and args.runner is None:
-        args.parser.error("give --feature, --memory or --runner")
+    if not args.replace and not args.feature and args.memory is None and args.disk is None and args.runner is None:
+        args.parser.error("give --feature, --memory, --disk or --runner")
     repo = repos.current()
     thread = _thread(args, repo)
     if thread is None:
         return 0
     if args.replace:
-        sidecar = {"runner": args.runner,
-                   "spec": {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY}}
+        sidecar = {"runner": args.runner, "spec": _given(args)}
     elif thread.sidecar is None:
         raise FolioError(f"thread {thread.name} has no sidecar to update; give it one with "
                          f"`folio sidecar set {thread.name} --runner RUNNER ...`")
     else:
-        spec = dict(thread.sidecar["spec"])
-        spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
-        if args.memory is not None:
-            spec["memory"] = args.memory
-        sidecar = {"runner": args.runner or thread.sidecar["runner"], "spec": spec}
+        sidecar = {"runner": args.runner or thread.sidecar["runner"], "spec": _updated(thread.sidecar["spec"], args)}
     thread = threads.set_sidecar(repo, thread, sidecar)
     print(f"Set thread {thread.name}'s sidecar: {_sidecar_text(thread.sidecar)}{_when(repo, thread)}")
     return 0
+
+
+def _given(args: argparse.Namespace) -> dict:
+    """The spec `set` gives: exactly what's given."""
+    return {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY,
+            **({"disk": args.disk} if args.disk else {})}
+
+
+def _updated(spec: dict, args: argparse.Namespace) -> dict:
+    """`spec` as `update` changes it: features added (one given again replaces its options), memory or disk set."""
+    spec = dict(spec)
+    spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
+    if args.memory is not None:
+        spec["memory"] = args.memory
+    if args.disk is not None:
+        spec["disk"] = args.disk
+    return spec
 
 
 def _sidecar_show(args: argparse.Namespace) -> int:
@@ -426,7 +439,8 @@ def _repo_list(args: argparse.Namespace) -> int:
 
 
 def _spec(spec: dict) -> str:
-    return f"features [{', '.join(spec.get('features', []))}], memory {spec['memory']}"
+    return f"features [{', '.join(spec.get('features', []))}], memory {spec['memory']}" + (
+        f", disk {spec['disk']}" if "disk" in spec else "")
 
 
 def _size(size: int) -> str:

@@ -70,6 +70,15 @@ class CanonicalTest(unittest.TestCase):
         self.assertEqual(specs.canonical({"memory": "2G", "thread": "fix-it"})["thread"], "fix-it")
         self.assertNotIn("thread", specs.canonical({"memory": "2G"}))
 
+    def test_a_disk_in_whole_g_or_none(self) -> None:
+        spec = specs.canonical({"memory": "2G", "disk": "50g"})
+        self.assertEqual((spec["disk"], specs.disk_gib(spec)), ("50G", 50))
+        self.assertEqual(specs.canonical(spec), spec)
+        self.assertIsNone(specs.disk_gib(specs.canonical({"memory": "2G"})))   # smolvm's default, 20G
+        for disk in ("50", "512M", "0G", 50, "1.5G"):
+            with self.subTest(disk), self.assertRaisesRegex(BottleError, "invalid disk"):
+                specs.canonical({"memory": "2G", "disk": disk})
+
     def test_memory_limit(self) -> None:
         self.assertEqual(specs.memory_limit({"features": [], "memory": "8G"}), "8G")
 

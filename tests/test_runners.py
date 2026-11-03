@@ -35,6 +35,6 @@ class LocalRunnerTest(GitTestCase):
     def test_mounts_are_smolvms_and_a_machine_has_all_the_cores(self) -> None:
         with mock.patch.object(runners.smolvm, "create") as create, mock.patch.object(runners.os, "cpu_count", return_value=12):
             runners.get().create("m", Path("/images/a.tar"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                 {"A": "1"}, 512)
+                                 {"A": "1"}, 512, 50)
         create.assert_called_once_with("m", "/images/a.tar", [runners.smolvm.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                       {"A": "1"}, 512, 12)
+                                       {"A": "1"}, 512, 12, 50)

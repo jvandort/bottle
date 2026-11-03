@@ -260,6 +260,10 @@ class ConfigureTest(FolioTestCase):
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
         self.ok("configure", "set", "--feature", "python")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["python"], "memory": "2G"})
+        self.assertEqual(self.ok("configure", "update", "--disk", "50G"),
+                         "Set project's spec: features [python], memory 2G, disk 50G\n")
+        self.ok("configure", "set", "--feature", "python")
+        self.assertNotIn("disk", repos.current(self.repo).spec())
 
     def test_bottle_checks_it_before_its_saved(self) -> None:
         self.ok("configure", "set", "--feature", "tools")

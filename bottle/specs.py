@@ -25,7 +25,7 @@ from pathlib import Path
 
 from bottle.errors import BottleError
 
-KEYS = ("features", "memory", "permissions", "thread")
+KEYS = ("features", "memory", "disk", "permissions", "thread")
 # What a bottle may be allowed beyond answering messages (see messages.py), and
 # what its agent is told it can do with each (bottles.context).
 PERMISSIONS = {
@@ -37,6 +37,8 @@ PERMISSIONS = {
 }
 THREAD_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
+# The disk a bottle writes to, in whole G: smolvm sizes it in GiB.
+DISK_PATTERN = re.compile(r"([1-9][0-9]*)G", re.IGNORECASE)
 
 
 def read(path: Path) -> dict:
@@ -81,6 +83,11 @@ def canonical(data: object, memory_mib: int | None = None, where: str = "this ma
     if not isinstance(memory, str):
         raise BottleError('memory is a string: a size in M or G, e.g. "8G"')
     spec = {"features": canonical, "memory": canonical_memory(memory, memory_mib, where)}
+    disk = data.get("disk")
+    if disk is not None:
+        if not isinstance(disk, str) or not DISK_PATTERN.fullmatch(disk):
+            raise BottleError(f'invalid disk {disk!r}: give a size in G, e.g. "50G"')
+        spec["disk"] = disk.upper()
     permissions = data.get("permissions", [])
     if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
         raise BottleError(f'permissions is a list of permissions, e.g. ["message-any"]; there are {", ".join(PERMISSIONS)}')
@@ -133,6 +140,11 @@ def host_memory_mib() -> int:
         raise BottleError("/proc/meminfo has no MemTotal")
     memsize = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True).stdout)
     return memsize // (1024 * 1024)
+
+
+def disk_gib(spec: dict) -> int | None:
+    """The spec's disk in GiB; None: smolvm's default (20G)."""
+    return int(spec["disk"][:-1]) if "disk" in spec else None
 
 
 def memory_limit(spec: dict) -> str:
