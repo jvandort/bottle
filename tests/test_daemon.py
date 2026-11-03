@@ -299,9 +299,14 @@ class CurrentCodeTest(unittest.TestCase):
         self.calls: list[str] = []
         self.running = {"code": "old"}
 
+        self.closing = 0   # pings a stopping one takes and closes unanswered
+
         def send(message, timeout=30):
             self.calls.append(message["op"])
             if self.running is None:
+                if self.closing:
+                    self.closing -= 1
+                    raise daemon._Closed
                 raise FileNotFoundError
             if message["op"] == "shutdown":
                 self.running = None
@@ -323,6 +328,12 @@ class CurrentCodeTest(unittest.TestCase):
         self.assertEqual(self.calls, ["ping", "shutdown", "ping", "start", "bind"])
         daemon.release_egress("b")
         self.assertEqual(self.calls[-1:], ["release"])   # asked once a command, not once a request
+
+    def test_one_that_closes_connections_as_it_stops_is_waited_out(self) -> None:
+        self.closing = 2
+        with mock.patch("time.sleep"):
+            daemon.bind_decider("b")
+        self.assertEqual(self.calls, ["ping", "shutdown", "ping", "ping", "ping", "start", "bind"])
 
     def test_one_from_before_it_said_its_code_is_restarted(self) -> None:
         self.running = {}

@@ -144,6 +144,9 @@ def _ensure_current() -> bool:
         reply = _send({"op": "ping"})
     except (FileNotFoundError, ConnectionRefusedError):
         return False  # not running: whoever starts it starts this code
+    except _Closed:
+        _wait_gone()  # on its way out: whoever starts it next starts this code
+        return False
     _current = True
     if reply.get("code") == ssh.code_hash():
         return False
@@ -155,37 +158,58 @@ def _ensure_current() -> bool:
 
 def _restart() -> None:
     stop()
-    # The old one answers until it's gone: wait for that, or the new one would find it and leave.
+    _wait_gone()
+    _start_daemon()
+
+
+def _wait_gone() -> None:
+    """Until the bottled that's stopping is gone, or would the new one find it and leave. Until then it
+    answers, or, shutting down, takes a connection and closes it unanswered."""
     deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:
         try:
             _send({"op": "ping"})
         except (FileNotFoundError, ConnectionRefusedError):
-            break
+            return
+        except _Closed:
+            pass
         time.sleep(0.05)
-    _start_daemon()
 
 
 def _request(message: dict, start: bool, timeout: float = 30) -> dict:
     _ensure_current()
     try:
-        reply = _send(message, timeout)
-    except (FileNotFoundError, ConnectionRefusedError):
-        if not start:
-            return {"ok": True}
-        _start_daemon()
-        reply = _send(message, timeout)
+        try:
+            reply = _send(message, timeout)
+        except (FileNotFoundError, ConnectionRefusedError):
+            if not start:
+                return {"ok": True}
+            _start_daemon()
+            reply = _send(message, timeout)
+    except _Closed:
+        raise BottleError(f"bottled closed the connection without answering {message['op']}: "
+                          f"is it stopping? See {log_path('bottled')}") from None
     if not reply.get("ok"):
         raise BottleError(f"bottled: {reply.get('error', 'request failed')}")
     return reply
+
+
+class _Closed(ConnectionError):
+    """bottled took the connection and closed it unanswered: what one shutting down does."""
 
 
 def _send(message: dict, timeout: float = 30) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
         s.connect(str(socket_path()))
-        s.sendall(json.dumps(message).encode() + b"\n")
-        return json.loads(s.makefile().readline())
+        try:
+            s.sendall(json.dumps(message).encode() + b"\n")
+            line = s.makefile().readline()
+        except (BrokenPipeError, ConnectionResetError):
+            raise _Closed from None
+        if not line:
+            raise _Closed
+        return json.loads(line)
 
 
 def _start_daemon() -> None:
