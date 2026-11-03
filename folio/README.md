@@ -82,6 +82,22 @@ like build output) and Claude's conversation and memory. `folio claude` or
 `folio shell` resumes it, in a new bottle made from the repo's spec as it is
 then, so a resume is also how a thread gets features added since.
 
+## Runners
+
+A thread's bottle can run on another machine of yours, a runner added with
+`bottle runner add` (see bottle's README): its sessions, lane, notes and
+pause work as here, over ssh. A repo's threads are made on the repo's runner
+(`folio configure update --runner desktop`), else here; a thread can have its
+own (`folio new fix-it --runner desktop`). It applies whenever the thread's
+bottle is made, so moving a thread is pausing it and resuming it where it's
+to go: `folio pause fix-it`, then `folio claude fix-it --runner desktop`. Its
+snapshot comes back here and goes out again, so it resumes whatever the
+runner's CPU. A thread with a bottle can't be given another runner: pause it
+first. `folio list` shows where each thread runs, or will.
+
+A drone's Claude gets its credential through this machine, so it can't reach
+Claude while this machine is asleep or can't reach the runner.
+
 ## The broker
 
 `folio broker` attaches to the broker: one thread outside your repos, whose
@@ -120,15 +136,15 @@ its reach until you resume it.
 
 | Command | |
 | --- | --- |
-| `folio new THREAD [--from BRANCH]` | Start a thread: its bottle and its lane |
-| `folio claude [THREAD]` | Attach to the thread's Claude, starting the thread if it's new |
-| `folio shell [THREAD]` | Attach to the thread's shell, starting the thread if it's new |
+| `folio new THREAD [--from BRANCH] [--runner RUNNER]` | Start a thread: its bottle and its lane |
+| `folio claude [THREAD] [--runner RUNNER]` | Attach to the thread's Claude, starting the thread if it's new |
+| `folio shell [THREAD] [--runner RUNNER]` | Attach to the thread's shell, starting the thread if it's new |
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
-| `folio list` | The repo's threads, most recently active first, and the space a paused one's snapshot takes up |
+| `folio list` | The repo's threads, most recently active first, where each runs, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
-| `folio configure set` / `update` / `show` | The repo's spec: its threads' features and memory |
+| `folio configure set` / `update` / `show` | The repo's spec, its threads' features and memory, and its runner |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` | Every repo folio has state for |
 
@@ -148,8 +164,10 @@ terminal it needs `--yes`.
 
 **`folio configure`** edits the repo's spec, which every new bottle of its
 threads is made from: `set` replaces it, `update` adds features (a feature
-given again replaces its options) or changes the memory. Bottle checks the
-spec before folio saves it. A repo's spec can't give `permissions`
+given again replaces its options), changes the memory, or sets `--runner`,
+where its threads' bottles are made (see Runners). Bottle checks the spec
+before folio saves it: that it's valid, while whether its memory fits is
+checked against the runner each bottle is made on. A repo's spec can't give `permissions`
 or a `thread`: folio names each thread's bottle's thread itself, and never
 gives it permissions. A repo with no spec gets `tools`, which has the
 shpool every thread runs in, and 2G of memory; add `claude` for Claude.

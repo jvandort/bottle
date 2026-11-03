@@ -75,6 +75,16 @@ class Repo:
         if not (self.directory / "repo.json").exists():
             store.write_json(self.directory / "repo.json", {"name": self.name, "path": str(self.path)})
 
+    def runner(self) -> str | None:
+        """The runner its threads' bottles are made on, unless a thread says otherwise; None: bottle's default."""
+        return (store.read_json(self.directory / "repo.json") or {}).get("runner")
+
+    def save_runner(self, runner: str | None) -> None:
+        self.remember()
+        record = store.read_json(self.directory / "repo.json") or {}
+        record.pop("runner", None)
+        store.write_json(self.directory / "repo.json", record | ({"runner": runner} if runner else {}))
+
 
 def path_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode()).hexdigest()[:8]

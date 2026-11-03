@@ -11,6 +11,9 @@ from .errors import FolioError
 PICK = "choose one from a list"
 
 
+RUNNER_HELP = "the runner to make its bottle on (default: the repo's, from `folio configure`, else this machine)"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="folio", description="Threads of work in bottles: each one a bottle, a lane for its commits, and Claude.",
@@ -25,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     new.add_argument("thread", metavar="THREAD", help="its name: lowercase words joined by '-', e.g. fix-flaky-test")
     new.add_argument("--from", dest="base", metavar="BRANCH",
                      help="the branch to start from (default: origin's default branch)")
+    new.add_argument("--runner", metavar="RUNNER", help=RUNNER_HELP)
     new.set_defaults(run=_new)
 
     for name, session, what in (("claude", threads.CLAUDE, "Claude"), ("shell", threads.SHELL, "shell")):
@@ -35,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
             "Closing the terminal only detaches: what's running in it carries on.",
         )
         attach.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
+        attach.add_argument("--runner", metavar="RUNNER", help=RUNNER_HELP + "; a paused thread resumes there")
         attach.set_defaults(run=_attach, command=name, session=session)
 
     pause = commands.add_parser(
@@ -88,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
         command.add_argument("--memory", help=memory_help)
+        command.add_argument("--runner", metavar="RUNNER",
+                             help="the runner the repo's threads' bottles are made on, unless a thread is given its "
+                             "own (`bottle runner status` lists them; local: this machine)")
         command.set_defaults(run=_configure, replace=name == "set", parser=command)
     show = configure_commands.add_parser("show", help="the repo's spec")
     show.set_defaults(run=_configure_show)
@@ -117,14 +125,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _new(args: argparse.Namespace) -> int:
-    thread = _start(repos.current(), args.thread, args.base)
+    thread = _start(repos.current(), args.thread, args.base, args.runner)
     print(f"Work in it with: folio claude {thread.name}  (or folio shell {thread.name})")
     return 0
 
 
-def _start(repo: repos.Repo, name: str, base: str | None = None) -> threads.Thread:
+def _start(repo: repos.Repo, name: str, base: str | None = None, runner: str | None = None) -> threads.Thread:
     print(f"Starting thread {name} in {repo.path}...", file=sys.stderr)
-    thread = threads.create(repo, name, base)
+    thread = threads.create(repo, name, base, runner=runner)
     # Flushed: attaching next replaces this process, and with it anything still buffered.
     print(f"Started thread {thread.name} in bottle {thread.bottle}. Its branches: git fetch bottle/{thread.name}",
           flush=True)
@@ -136,7 +144,7 @@ def _thread(args: argparse.Namespace, repo: repos.Repo, new: bool = False) -> th
     chosen in the picker; None if none was."""
     if args.thread is not None:
         if new and not threads.exists(repo, args.thread):
-            return _start(repo, args.thread)
+            return _start(repo, args.thread, runner=getattr(args, "runner", None))
         return threads.load(repo, args.thread)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise FolioError(f"give the thread: `folio {args.command} THREAD` (choosing one needs a terminal)")
@@ -166,6 +174,8 @@ def _attach(args: argparse.Namespace) -> int:
     thread = _thread(args, repo, new=True)
     if thread is None:
         return 0
+    if args.runner is not None:
+        thread = threads.place(repo, thread, args.runner)
     threads.attach(repo, thread, args.session)
 
 
@@ -244,11 +254,13 @@ def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
     states = threads.states(repo, all_)
-    rows = [("THREAD", "STATE", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
+    rows = [("THREAD", "STATE", "RUNNER", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
     for thread in all_:
         row = states[thread.name]
         size = threads.snapshot_size(repo, thread) if row["state"] == "paused" else None
-        rows.append((thread.name, row["state"], _size(size) if size is not None else "-", _ago(thread.last_active),
+        # Where its bottle is; for one without, where its next is made.
+        runner = row.get("runner") or threads.runner_of(repo, thread) or "local"
+        rows.append((thread.name, row["state"], runner, _size(size) if size is not None else "-", _ago(thread.last_active),
                      " ".join(row.get("features", ())) or "-",
                      " ".join(sorted(lanes.branches(repo.path, thread.name))) or "-"))
     _table(rows)
@@ -284,9 +296,14 @@ def _delete(args: argparse.Namespace) -> int:
 
 
 def _configure(args: argparse.Namespace) -> int:
-    if not args.feature and args.memory is None and not args.replace:
-        args.parser.error("give --feature or --memory")
+    if not args.feature and args.memory is None and args.runner is None and not args.replace:
+        args.parser.error("give --feature, --memory or --runner")
     repo = repos.current()
+    if args.runner is not None or args.replace:
+        repo.save_runner(args.runner)
+    if not args.feature and args.memory is None and not args.replace:
+        print(f"Set {repo.name}'s runner: {args.runner}")
+        return 0
     spec = dict(repo.spec() or repos.DEFAULT_SPEC)
     if args.replace:
         spec = {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY}
@@ -296,15 +313,19 @@ def _configure(args: argparse.Namespace) -> int:
             spec["memory"] = args.memory
     spec = repos.check_repo_spec(engine.validate_spec(spec))
     repo.save_spec(spec)
-    print(f"Set {repo.name}'s spec: {_spec(spec)}")
+    print(f"Set {repo.name}'s spec: {_spec(spec)}{_runner(repo)}")
     return 0
 
 
 def _configure_show(args: argparse.Namespace) -> int:
     repo = repos.current()
     spec = repo.spec()
-    print(_spec(spec) if spec else f"{_spec(repos.DEFAULT_SPEC)} (the default; nothing set yet)")
+    print((_spec(spec) if spec else f"{_spec(repos.DEFAULT_SPEC)} (the default; nothing set yet)") + _runner(repo))
     return 0
+
+
+def _runner(repo: repos.Repo) -> str:
+    return f", runner {repo.runner()}" if repo.runner() else ""
 
 
 def _repo_list(args: argparse.Namespace) -> int:

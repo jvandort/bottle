@@ -74,10 +74,11 @@ class Mount:
     remotes: list[str]
 
 
-def new(name: str, spec: dict, mounts: list[Mount], context: str) -> None:
-    """Create a bottle. Attached to this terminal: an image build shows, and a login can ask."""
+def new(name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None) -> None:
+    """Create a bottle, on `runner` (None: bottle's default, this machine). Attached to this terminal: an
+    image build shows, and a login can ask."""
     with _file(json.dumps(spec)) as spec_path, _file(context) as context_path:
-        argv = [*command(), "new", "--spec", spec_path, "--name", name]
+        argv = [*command(), "new", "--spec", spec_path, "--name", name, *(["--runner", runner] if runner else [])]
         for m in mounts:
             argv += ["--mount", f"{m.path}={m.repo}", *(["--checkout", f"{m.path}={m.checkout}"] if m.checkout else []),
                      *[arg for remote in m.remotes for arg in ("--git-remote", f"{m.path}:{remote}")]]

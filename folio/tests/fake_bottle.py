@@ -82,7 +82,7 @@ def main(argv: list[str]) -> int:
                 "state": "running", "spec": json.loads(Path(option(rest, "--spec")).read_text()),
                 "mounts": mounts, "context": Path(option(rest, "--context")).read_text(),
                 "workspace": mounts[0]["dir"] if mounts else str(root / "home"), "home": str(root / "home"),
-                "sessions": {},
+                "sessions": {}, "runner": option(rest, "--runner") or "local",
             }
             save(state)
             print(f"Created bottle '{name}'")
@@ -90,6 +90,7 @@ def main(argv: list[str]) -> int:
             print(json.dumps([
                 # Each mount's objects as its clone has them (--shared: the repo's own), and its remotes' URLs.
                 {"name": n, "state": bottles[n]["state"], "features": bottles[n]["spec"]["features"],
+                 "runner": bottles[n].get("runner", "local"),
                  "mounts": [{"path": m["path"], "objects": str(Path(m["repo"]) / ".git" / "objects"),
                              "urls": {r.partition(":")[0]: f"http://bottle.host/git{m['path']}/{r.partition(':')[0]}"
                                       for r in m["remotes"]}} for m in bottles[n]["mounts"]]}

@@ -110,6 +110,7 @@ class Thread:
     last_active: float
     base: str | None = None  # the branch it started from, if one was asked for; None: the repo's default
     broker: bool = False  # the broker (see broker.py), whose bottle is made folio's way, not the repo's
+    runner: str | None = None  # the runner its bottles are made on, if it was given one; None: the repo's
 
 
 def directory(repo: Repo, name: str) -> Path:
@@ -177,14 +178,15 @@ def workdir(thread: Thread) -> str:
     return bottle_mounts(thread)[0]
 
 
-def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False) -> Thread:
-    """A new thread: its bottle and its lane. Nothing runs in it until something attaches."""
+def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False, runner: str | None = None) -> Thread:
+    """A new thread: its bottle (on `runner`, else the repo's) and its lane. Nothing runs in it until something
+    attaches."""
     if not NAME.fullmatch(name):
         raise FolioError(f"invalid thread name {name!r}: use lowercase letters and digits, in words joined by '-'")
     if store.current_slot(directory(repo, name)) is not None:
         raise FolioError(f"thread {name} already exists; attach with `folio claude {name}`")
     now = time.time()
-    thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", now, now, base, broker_)
+    thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", now, now, base, broker_, runner)
     _make_bottle(repo, thread)
     try:
         if not broker_:
@@ -214,7 +216,33 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     engine.new(thread.bottle, spec | {"thread": thread.name},
                [engine.Mount(WORKSPACE, repo.path, thread.base, lanes.bottle_remotes(thread.name)),
                 engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)],
-               advice(thread.name, repo.name, mounts(thread)))
+               advice(thread.name, repo.name, mounts(thread)), runner_of(repo, thread))
+
+
+def runner_of(repo: Repo, thread: Thread) -> str | None:
+    """Where the thread's next bottle is made: its own runner, else the repo's; None for bottle's default.
+    The broker's is always here."""
+    return None if thread.broker else thread.runner or repo.runner()
+
+
+def place(repo: Repo, thread: Thread, runner: str) -> Thread:
+    """The thread, its bottles made on `runner` from now on.
+
+    A paused thread resumes there. One with a bottle elsewhere is refused: its
+    work is in that bottle, and pausing it is what brings it back here, to go on.
+    """
+    if thread.broker:
+        raise FolioError("the broker runs on this machine")
+    row = states(repo, [thread])[thread.name]
+    where = row.get("runner", "local")
+    if row["state"] not in ("paused", "missing") and where != runner:
+        raise FolioError(f"thread {thread.name}'s bottle is on {where}; pause it first (`folio pause {thread.name}`), "
+                         f"and it resumes on {runner}")
+    if thread.runner == runner:
+        return thread
+    placed = Thread(**{**asdict(thread), "runner": runner})
+    _save(repo, placed)
+    return placed
 
 
 def _undo(repo: Repo, thread: Thread) -> None:

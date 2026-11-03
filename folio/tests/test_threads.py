@@ -157,8 +157,8 @@ class AttachTest(FolioTestCase):
     def test_list(self) -> None:
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", "HEAD")
         lines = self.ok("list").splitlines()
-        self.assertEqual(lines[0].split(), ["THREAD", "STATE", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES"])
-        self.assertEqual(lines[1].split(), ["fix-it", "running", "-", "just", "now", "tools", "genie/fix-it-1"])
+        self.assertEqual(lines[0].split(), ["THREAD", "STATE", "RUNNER", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES"])
+        self.assertEqual(lines[1].split(), ["fix-it", "running", "local", "-", "just", "now", "tools", "genie/fix-it-1"])
 
 
 class DeleteTest(FolioTestCase):
@@ -312,3 +312,53 @@ class RepoListTest(FolioTestCase):
         self.ok("configure", "set", "--feature", "tools", cwd=other)
         lines = self.ok("repo", "list", cwd=self.tmp).splitlines()
         self.assertEqual(sorted(line.split()[1:] for line in lines[1:]), [[str(other), "0"], [str(self.repo), "1"]])
+
+
+class RunnerTest(FolioTestCase):
+    """Where a thread's bottles are made: the repo's runner, else the thread's own, applied as each is made."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.key = repos.current(self.repo).key
+
+    def runner(self, thread: str) -> str:
+        return self.fake()["bottles"][f"{self.key}-{thread}"]["runner"]
+
+    def test_a_thread_is_made_here_by_default(self) -> None:
+        self.ok("new", "fix-it")
+        self.assertEqual(self.runner("fix-it"), "local")
+        self.assertNotIn("--runner", self.calls("new")[0])
+
+    def test_a_thread_can_be_made_on_a_runner(self) -> None:
+        self.ok("new", "fix-it", "--runner", "desktop")
+        self.assertEqual(self.runner("fix-it"), "desktop")
+        self.assertIn("desktop", self.ok("list").splitlines()[1].split())
+
+    def test_the_repos_runner_is_its_threads_unless_one_has_its_own(self) -> None:
+        self.assertEqual(self.ok("configure", "update", "--runner", "desktop"), f"Set {repos.current(self.repo).name}'s runner: desktop\n")
+        self.assertIn("runner desktop", self.ok("configure", "show"))
+        self.ok("new", "one")
+        self.ok("new", "two", "--runner", "local")
+        self.assertEqual((self.runner("one"), self.runner("two")), ("desktop", "local"))
+
+    def test_set_replaces_the_runner_too(self) -> None:
+        self.ok("configure", "update", "--runner", "desktop")
+        self.ok("configure", "set", "--feature", "tools")
+        self.assertNotIn("runner", self.ok("configure", "show"))
+
+    def test_a_paused_thread_resumes_on_the_runner_its_given(self) -> None:
+        self.ok("new", "fix-it")
+        self.ok("pause", "fix-it")
+        self.ok("claude", "fix-it", "--runner", "desktop")
+        self.assertEqual(self.runner("fix-it"), "desktop")
+        # And stays there: its next bottle is made there too.
+        self.ok("pause", "fix-it")
+        self.ok("shell", "fix-it")
+        self.assertEqual(self.runner("fix-it"), "desktop")
+
+    def test_a_thread_with_a_bottle_elsewhere_is_paused_first(self) -> None:
+        self.ok("new", "fix-it")
+        result = self.folio("claude", "fix-it", "--runner", "desktop")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("thread fix-it's bottle is on local; pause it first (`folio pause fix-it`)", result.stderr)
+        self.assertEqual(self.runner("fix-it"), "local")
