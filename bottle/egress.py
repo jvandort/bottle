@@ -9,9 +9,10 @@ bottled takes it, or neither; Gateway.serve is the far end of one bottled
 takes. The policy (Policy) is enforced where root in the bottle can't reach it.
 
 bottled takes two kinds of flow. Those to bottle.host (host.ADDRESS) it
-answers itself, as the git service (see host.py); those to sidecar.host's ssh
-(host.SIDECAR_ADDRESS) it joins to sshd in the bottle's sidecar, if it has
-one, which the controller does. And it holds credentials the
+answers itself, as the git service (see host.py); those to port 22 of the
+rest of host.SSH_NETWORK it joins to sshd in the bottle the address was
+granted for (`bottle new --ssh`), if any, which the controller does. And it
+holds credentials the
 bottle never sees (Injection): for the hosts a feature names, it terminates
 the bottle's TLS with a certificate from the egress CA (see ca.py), puts the
 real token in place of the stand-in on the requests that present one, and
@@ -332,7 +333,7 @@ class Flow:
 
 
 # What a redirected flow is for.
-GIT, CREDENTIAL, CACHE, SIDECAR = "git", "credential", "cache", "sidecar"
+GIT, CREDENTIAL, CACHE, SSH = "git", "credential", "cache", "ssh"
 # bottled reads the rest of a TLS flow's opening itself, then decides it: the
 # driver showed too little of it to tell whether a credential's host is its name.
 OPENING = "opening"
@@ -374,7 +375,7 @@ class Gateway:
         caches: tuple[cache.Cached, ...] = (),
         store: cache.Store | None = None,
         hand_off: "Callable[[Flow, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]] | None" = None,
-        sidecar: "Callable[[], Awaitable[list[str]]] | None" = None,
+        ssh: "Callable[[str], Awaitable[list[str]]] | None" = None,
     ) -> None:
         self.name = name
         self.policy = policy
@@ -386,12 +387,12 @@ class Gateway:
         # Where bottled here doesn't hold them, `hand_off` takes the flows a
         # credential's host and port are redirected for: the controller's own
         # gateway for the bottle (serve_handed_off), and `injections` are only
-        # where they're for, their secrets left out. It takes sidecar.host's
+        # where they're for, their secrets left out. It takes ssh's
         # flows too.
         self.hand_off = hand_off
-        # The command line that runs sshd -i in the bottle's sidecar, which a
-        # flow to sidecar.host is joined to; raises Refused if it has none.
-        self.sidecar = sidecar
+        # The command line that runs sshd -i in the bottle granted at an
+        # address, which a flow to it is joined to; raises Refused if none is.
+        self.ssh = ssh
         self.injections = tuple(injections) if certificates or hand_off else ()
         self.certificates = certificates
         # Hosts whose downloads are kept, in `store`: also only with certificates to read them by.
@@ -423,10 +424,12 @@ class Gateway:
             if flow.port == 80 and self.services is not None:
                 return Redirect(GIT)
             raise Refused(403, "Forbidden: no such host service", "denied")
-        if address == ipaddress.ip_address(host.SIDECAR_ADDRESS):
-            if flow.port == host.SIDECAR_PORT and (self.sidecar or self.hand_off):
-                return Redirect(SIDECAR)
-            raise Refused(403, "Forbidden: no such sidecar service", "denied")
+        if address in ipaddress.ip_network(host.SSH_NETWORK):
+            # Never anywhere on the network: only ever to sshd in the bottle granted there, which the controller
+            # (self.ssh) looks up.
+            if flow.port == host.SSH_PORT and (self.ssh or self.hand_off):
+                return Redirect(SSH)
+            raise Refused(403, "Forbidden: no such bottle service", "denied")
         terminated_here = any(i.port == flow.port for i in self.injections) or (self.caches and flow.port == CACHE_PORT)
         if name is None and not opening_read and _opening_unread(flow.first) and terminated_here:
             # smolvm asks with what arrived in its first 100ms, and a busy guest's
@@ -479,11 +482,11 @@ class Gateway:
                 ip = "host"
                 outcome = await self._serve_git(flow.first, reader, writer)
                 return
-            if decision.service == SIDECAR and self.hand_off is None:
-                ip = "sidecar"
-                await self._serve_sidecar(flow.first, reader, writer, up, down)
+            if decision.service == SSH and self.hand_off is None:
+                ip = "ssh"
+                await self._serve_ssh(flow, reader, writer, up, down)
                 return
-            if decision.service in (CREDENTIAL, SIDECAR) and self.hand_off is not None:
+            if decision.service in (CREDENTIAL, SSH) and self.hand_off is not None:
                 ip, outcome = "controller", "handed-off"
                 await self.hand_off(flow, reader, writer)
                 return
@@ -522,11 +525,11 @@ class Gateway:
 
     async def serve_handed_off(self, flow: "Flow", reader, writer) -> None:
         """Decide and serve a flow another gateway for this bottle redirected for a credential, its opening all
-        read, or for its sidecar.
+        read, or for a bottle it may ssh to.
 
         Decided again here, where the credential is: the destination is
         judged from this machine, which is where the request is sent from.
-        Anything that isn't a credential's or a sidecar's flow after all is refused.
+        Anything that isn't a credential's or ssh's flow after all is refused.
         """
         try:
             decision = await self.decide(flow, opening_read=True)
@@ -534,15 +537,16 @@ class Gateway:
             writer.close()
             self.log_flow(f"{flow.address}:{flow.port}", None, e.outcome, None, [0], [0], time.monotonic())
             return
-        if not isinstance(decision, Redirect) or decision.service not in (CREDENTIAL, SIDECAR):
+        if not isinstance(decision, Redirect) or decision.service not in (CREDENTIAL, SSH):
             writer.close()
             self.log_flow(f"{flow.address}:{flow.port}", None, "denied", None, [0], [0], time.monotonic())
             return
         await self.serve(flow, decision, reader, writer)
 
-    async def _serve_sidecar(self, first: bytes, reader, writer, up: list[int], down: list[int]) -> None:
-        """Join the flow to sshd in the bottle's sidecar, until sshd is done."""
-        command = await self.sidecar()
+    async def _serve_ssh(self, flow: Flow, reader, writer, up: list[int], down: list[int]) -> None:
+        """Join the flow to sshd in the bottle granted at its address, until sshd is done."""
+        first = flow.first
+        command = await self.ssh(flow.address)
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         said = asyncio.create_task(process.stderr.read())
@@ -556,7 +560,7 @@ class Gateway:
             await process.wait()
             errors = (await said).decode(errors="replace").strip()
             if process.returncode and errors:
-                log.warning("%s: its sidecar's sshd: %s", self.name, errors.splitlines()[-1])
+                log.warning("%s: sshd at %s: %s", self.name, flow.address, errors.splitlines()[-1])
 
     async def _serve_git(self, first: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
         """Answer an origin-form request to bottle.host, its head in `first` (perhaps not all of it)."""

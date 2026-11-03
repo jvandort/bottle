@@ -88,10 +88,16 @@ HOST = "bottle.host"
 # /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
 # uses, which smolvm hands to the decider like any other.
 ADDRESS = "192.0.2.1"
-# Where a bottle with a sidecar reaches it, over ssh: the next address in TEST-NET-1.
-SIDECAR_HOST = "sidecar.host"
-SIDECAR_ADDRESS = "192.0.2.2"
-SIDECAR_PORT = 22
+# Where a bottle reaches the bottles it may ssh to (`bottle new --ssh`): the rest
+# of TEST-NET-1, an address for each, under the name its creator gave it.
+SSH_NETWORK = "192.0.2.0/24"
+SSH_PORT = 22
+MAX_SSH = 250
+
+
+def ssh_address(index: int) -> str:
+    """The address of a bottle's `index`th ssh grant: 192.0.2.2 onwards."""
+    return f"192.0.2.{2 + index}"
 GIT_PATH = "/git"
 MESSAGES_PATH = "/messages"
 BOTTLES_PATH = "/bottles"

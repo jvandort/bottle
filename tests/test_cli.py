@@ -145,11 +145,18 @@ class SpecCommandsTest(CliTestCase):
         self.assertEqual(code, 0)
         create.assert_called_once_with({"features": ["tools"], "memory": "2G"}, "project",
                                        [bottles.MountRequest("/workspace", repo, "main", ["origin:fetch=upstream"])],
-                                       "More.\n", runner="local", parent=None)
+                                       "More.\n", runner="local", ssh={})
         self.assertIn(f"Created bottle 'project', with {repo} at main on /workspace", out)
         with mock.patch("bottle.bottles.create", return_value=bottle) as create:
-            self.run_cli("new", "--spec", spec, "--name", "project", "--runner", "box", "--sidecar-of", "main")
-        self.assertEqual(create.call_args.kwargs, {"runner": "box", "parent": "main"})
+            self.run_cli("new", "--spec", spec, "--name", "project", "--runner", "box", "--ssh", "sidecar.host=big",
+                         "--ssh", "b=c")
+        self.assertEqual(create.call_args.kwargs, {"runner": "box", "ssh": {"sidecar.host": "big", "b": "c"}})
+        for bad in (["--ssh", "big"], ["--ssh", "=big"], ["--ssh", "a=b", "--ssh", "a=c"]):
+            with self.subTest(bad), mock.patch("bottle.bottles.create") as create:
+                code, _, err = self.run_cli("new", "--spec", spec, "--name", "project", *bad)
+                self.assertNotEqual(code, 0)
+                self.assertIn("--ssh", err)
+                create.assert_not_called()
 
     def test_new_refuses_a_checkout_or_remote_for_no_mount(self) -> None:
         spec = self.spec('{"features": [], "memory": "2G"}')

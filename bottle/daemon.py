@@ -251,23 +251,23 @@ class Controller:
         injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features) if i.host.lower() in intercepted)
         certificates = functools.partial(ca.server_context, bottle, intercepted)
         gateway = egress.Gateway(bottle, self.policy, injections=injections, certificates=certificates,
-                                 sidecar=functools.partial(self.sidecar, bottle))
+                                 ssh=functools.partial(self.ssh, bottle))
         services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
         # Where each credential is for, and nothing of the credential itself.
         where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
         caches = tuple(await asyncio.to_thread(cache.cached_for, features))
         return where, caches, services, gateway
 
-    async def sidecar(self, bottle: str) -> list[str]:
-        """The command line that runs sshd -i in `bottle`'s sidecar, wherever that runs; refused if it has none,
-        or it isn't running."""
+    async def ssh(self, bottle: str, address: str) -> list[str]:
+        """The command line that runs sshd -i in the bottle `bottle` may ssh to at `address`, wherever that runs;
+        refused if it may ssh to none there, or that one isn't running."""
         from bottle import bottles  # bottles imports this module
 
         try:
-            return await asyncio.to_thread(bottles.sshd_command, bottle)
+            return await asyncio.to_thread(bottles.sshd_command, bottle, address)
         except BottleError as e:
-            log.warning("%s: no ssh to its sidecar: %s", bottle, e)
-            raise egress.Refused(None, str(e), "no-sidecar") from None
+            log.warning("%s: no ssh at %s: %s", bottle, address, e)
+            raise egress.Refused(None, str(e), "no-ssh") from None
 
     async def deliver(self, sender: str, to: str, text: str) -> None:
         """Hand `text` to the bottle `to` reaches from `sender`, as an event from `sender`; raises ServiceError.

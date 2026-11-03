@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import ca, egress, host
-from bottle.egress import CREDENTIAL, GIT, OPENING, SIDECAR, Direct, Flow, Gateway, Policy, Redirect, Refused
+from bottle.egress import CREDENTIAL, GIT, OPENING, SSH, Direct, Flow, Gateway, Policy, Redirect, Refused
 from tests.support import client_hello
 from tests.test_egress import LoopbackPolicy, Upstream, fake_resolve
 
@@ -115,11 +115,13 @@ class DecideTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.decide(host.ADDRESS, 80), Redirect(GIT))
         await self.refused(host.ADDRESS, 22)
 
-    async def test_sidecar_host_is_its_ssh_on_port_22_only(self) -> None:
-        await self.refused(host.SIDECAR_ADDRESS, 22)   # no sidecar to join it to, and no controller to ask
-        self.proxy.sidecar = lambda: None
-        self.assertEqual(await self.decide(host.SIDECAR_ADDRESS, 22), Redirect(SIDECAR))
-        await self.refused(host.SIDECAR_ADDRESS, 80)
+    async def test_the_rest_of_test_net_1_is_ssh_to_bottles_on_port_22_only(self) -> None:
+        await self.refused("192.0.2.2", 22)   # nothing to look up the grant, and no controller to ask
+        self.proxy.ssh = lambda address: None
+        for address in ("192.0.2.2", "192.0.2.200"):
+            self.assertEqual(await self.decide(address, 22), Redirect(SSH))
+            await self.refused(address, 80)
+        self.assertEqual(await self.decide(host.ADDRESS, 80), Redirect(GIT))
 
     async def test_bottle_host_without_services_is_refused(self) -> None:
         self.proxy.services = None
@@ -258,34 +260,38 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Authorization: Bearer real-token", (await asyncio.wait_for(self.received.get(), 5)).decode())
         self.assertEqual(self.decisions[0].service, OPENING)
 
-    async def sidecar_says_hello_and_echoes(self) -> None:
-        async def command():
-            return ["sh", "-c", "echo SSH-2.0-sidecar; cat"]
+    async def sshd_says_hello_and_echoes(self) -> None:
+        self.asked = []
 
-        self.proxy.sidecar = command
+        async def command(address):
+            self.asked.append(address)
+            return ["sh", "-c", "echo SSH-2.0-there; cat"]
 
-    async def test_a_flow_to_sidecar_host_is_joined_to_its_sshd(self) -> None:
-        await self.sidecar_says_hello_and_echoes()
-        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        self.proxy.ssh = command
+
+    async def test_a_flow_to_a_granted_address_is_joined_to_sshd_there(self) -> None:
+        await self.sshd_says_hello_and_echoes()
+        reader, writer = await self.connect("192.0.2.3", 22)
         writer.write(b"SSH-2.0-client\r\n")
         writer.write_eof()
-        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-sidecar\nSSH-2.0-client\r\n")
-        self.assertEqual(self.decisions[0].service, SIDECAR)
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-there\nSSH-2.0-client\r\n")
+        self.assertEqual((self.decisions[0].service, self.asked), (SSH, ["192.0.2.3"]))
 
-    async def test_a_flow_to_sidecar_host_is_handed_to_the_controller(self) -> None:
-        await self.sidecar_says_hello_and_echoes()
+    async def test_a_flow_to_a_granted_address_is_handed_to_the_controller(self) -> None:
+        await self.sshd_says_hello_and_echoes()
         self.handing_off()
-        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        reader, writer = await self.connect("192.0.2.3", 22)
         writer.write(b"SSH-2.0-client\r\n")
         writer.write_eof()
-        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-sidecar\nSSH-2.0-client\r\n")
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-there\nSSH-2.0-client\r\n")
+        self.assertEqual(self.asked, ["192.0.2.3"])
 
-    async def test_a_flow_to_sidecar_host_with_no_sidecar_is_closed(self) -> None:
-        async def none():
-            raise Refused(None, "test has no sidecar", "no-sidecar")
+    async def test_a_flow_to_an_address_granted_nothing_is_closed(self) -> None:
+        async def none(address):
+            raise Refused(None, f"test may ssh to nothing at {address}", "no-ssh")
 
-        self.proxy.sidecar = none
-        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        self.proxy.ssh = none
+        reader, writer = await self.connect("192.0.2.3", 22)
         writer.write(b"SSH-2.0-client\r\n")
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
 

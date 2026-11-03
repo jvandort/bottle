@@ -20,10 +20,12 @@ specs.py). Its remotes are the ones it was created with, and nothing is
 registered in the repo: what the bottle pushes is for its creator to read.
 What's worth keeping before a bottle is deleted is its creator's call too.
 
-A bottle can have a sidecar: a bottle of its own spec, on a runner of its
-own (a bigger machine, say), with the parent's repos at the parent's paths,
-fetch-only. It's scratch, for its parent's jobs: stopped and deleted with
-its parent, one to a parent.
+A bottle may ssh to other bottles its creator names (`--ssh NAME=BOTTLE`),
+and to nothing else that way: NAME, in its /etc/hosts, is an address whose
+port 22 bottled joins to sshd in that bottle, the one that existed when the
+grant was made. Its key is let in there and that bottle's host key is known
+here, when it's made: so that bottle must exist first, and be made again
+with it, or the grant reaches nothing.
 
 Objects the bottle uses from the repo aren't protected from `git gc` in the
 hub: if the user deletes a branch a bottle checked out and gc later prunes
@@ -114,6 +116,20 @@ class Mount:
 
 
 @dataclass(frozen=True)
+class SshGrant:
+    """A bottle this one may ssh to: as `name`, at `address`, which is bottle `bottle` with id `id` and no other."""
+
+    name: str
+    bottle: str
+    id: str
+    address: str
+
+
+# A name a grant gives: a host name, lower case.
+SSH_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
+
+
+@dataclass(frozen=True)
 class MountRequest:
     """A mount as `bottle new` is asked for one: the repo, where, from what, served what."""
 
@@ -145,13 +161,14 @@ class Bottle:
     archive: str | None = None
     # The runner its machine is on (see runners.py); records from before runners were the local one's.
     runner: str = runners.LOCAL
-    # The bottle it's the sidecar of; None: it's no one's.
-    parent: str | None = None
+    # The bottles it may ssh to (`--ssh`).
+    ssh: tuple[SshGrant, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
         object.__setattr__(self, "mounts", tuple(  # dicts, when read from JSON
             Mount(**m) if isinstance(m, dict) else m for m in self.mounts))
+        object.__setattr__(self, "ssh", tuple(SshGrant(**g) if isinstance(g, dict) else g for g in self.ssh))
 
     @property
     def environment(self) -> str:
@@ -220,29 +237,29 @@ def _write(bottles: dict[str, Bottle]) -> None:
     write_json(registry_path(), {"version": 1, "bottles": {b.name: asdict(b) for b in bottles.values()}})
 
 
-def sidecar_of(name: str) -> Bottle | None:
-    """The bottle's sidecar, if it has one."""
-    return next((b for b in load().values() if b.parent == name), None)
-
-
-# What a flow to sidecar.host is joined to, in the sidecar: sshd, for that one connection.
+# What a flow to a bottle it may ssh to is joined to, there: sshd, for that one connection.
 SSHD = "mkdir -p /run/sshd && exec /usr/sbin/sshd -i -e"
 
 
-def sshd_command(name: str) -> list[str]:
-    """The command line, for this machine, that runs sshd for one connection in bottle `name`'s sidecar."""
-    sidecar = sidecar_of(name)
-    if sidecar is None:
-        raise BottleError(f"{name} has no sidecar")
-    runner = runner_of(sidecar)
-    if runner.state(sidecar.machine) != "running":
-        raise BottleError(f"{name}'s sidecar {sidecar.name} isn't running")
-    return runner.exec_command(sidecar.machine, ["sh", "-c", SSHD], user="root")
+def sshd_command(name: str, address: str) -> list[str]:
+    """The command line, for this machine, that runs sshd for one connection in the bottle `name` may ssh to at
+    `address`: the one granted it, if it's still there."""
+    bottle = get(name)
+    grant = next((g for g in bottle.ssh if g.address == address), None)
+    if grant is None:
+        raise BottleError(f"{name} may ssh to nothing at {address}")
+    there = load().get(grant.bottle)
+    if there is None or there.id != grant.id:
+        raise BottleError(f"bottle {grant.bottle}, which {name} may ssh to as {grant.name}, is gone")
+    runner = runner_of(there)
+    if runner.state(there.machine) != "running":
+        raise BottleError(f"bottle {grant.bottle}, which {name} may ssh to as {grant.name}, isn't running")
+    return runner.exec_command(there.machine, ["sh", "-c", SSHD], user="root")
 
 
 def create(
     spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "", image: str = images.BASE,
-    runner: str = runners.LOCAL, parent: str | None = None,
+    runner: str = runners.LOCAL, ssh: dict[str, str] | None = None,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
@@ -252,9 +269,7 @@ def create(
     mounted and whose remotes are served, checked out at its path; without
     any, the bottle has no repo. Nothing is registered in a repo: the bottle's
     creator reads what it pushes, from the namespaces it chose. Its machine is
-    on `runner`.
-
-    Given `parent`, it's that bottle's sidecar, and its mounts are the parent's.
+    on `runner`. It may ssh to each bottle `ssh` gives, by the name given: {name: bottle}.
     """
     on = runners.get(runner)
     spec = specs.canonical(spec, on.memory_mib(), "this machine" if runner == runners.LOCAL else f"runner {runner}")
@@ -264,12 +279,8 @@ def create(
         raise BottleError(f"invalid name {name!r}: use letters, digits, '.', '_' or '-'")
     if name in existing:
         raise BottleError(f"a bottle named {name!r} already exists")
-    if parent is None:
-        planned = _plan_mounts(mounts or [], existing.values())
-    elif mounts:
-        raise BottleError("a sidecar's mounts are its parent's: it takes no others")
-    else:
-        planned = _sidecar_mounts(parent, existing)
+    planned = _plan_mounts(mounts or [], existing.values())
+    grants = _plan_ssh(ssh or {}, existing)
     on.ensure_ready()
     tag = features_.ensure_built(image, installed, on)
     auth.ensure_logged_in(installed)
@@ -277,7 +288,7 @@ def create(
     bottle = Bottle(
         name, uuid.uuid4().hex, image, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
-        mounts=tuple(m for m, _ in planned), context=context, runner=runner, parent=parent,
+        mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
     )
     bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
     log.info("%s: created, %s, features %s", name,
@@ -305,22 +316,20 @@ def _plan_mounts(requests: list[MountRequest], others) -> list[tuple[Mount, repo
     return planned
 
 
-def _sidecar_mounts(parent: str, existing: dict[str, Bottle]) -> list[tuple[Mount, repos.Repo]]:
-    """A sidecar's mounts: its parent's repos at its parent's paths and commits, every remote fetch-only."""
-    if parent not in existing:
-        raise BottleError(f"no bottle named {parent!r} to be the sidecar of")
-    of = existing[parent]
-    if of.parent is not None:
-        raise BottleError(f"{parent} is itself a sidecar, of {of.parent}")
-    taken = next((b.name for b in existing.values() if b.parent == parent), None)
-    if taken is not None:
-        raise BottleError(f"{parent} already has a sidecar, {taken}")
-    planned = []
-    for mount in of.mounts:
-        remotes = tuple(replace(r, push=None) for r in mount.remotes)
-        repo = repos.Repo(repos.derive_name(Path(mount.repo)), Path(mount.repo))
-        planned.append((replace(mount, remotes=remotes), repo))
-    return planned
+def _plan_ssh(ssh: dict[str, str], existing: dict[str, Bottle]) -> tuple[SshGrant, ...]:
+    """Each bottle the new one may ssh to, checked: a bottle that exists and is ready, under a host name."""
+    if len(ssh) > host.MAX_SSH:
+        raise BottleError(f"a bottle may ssh to at most {host.MAX_SSH} others")
+    grants = []
+    for index, (name, target) in enumerate(ssh.items()):
+        if not SSH_NAME.fullmatch(name) or name == host.HOST:
+            raise BottleError(f"invalid --ssh name {name!r}: a host name, e.g. sidecar.host")
+        if target not in existing:
+            raise BottleError(f"--ssh {name}={target}: no bottle named {target!r}")
+        if existing[target].status != "ready":
+            raise BottleError(f"--ssh {name}={target}: {target} is {existing[target].status}")
+        grants.append(SshGrant(name, target, existing[target].id, host.ssh_address(index)))
+    return tuple(grants)
 
 
 def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
@@ -410,30 +419,29 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     trust_egress_ca(bottle)
     point_at_host(bottle)
     _init_mounts(bottle)
-    if bottle.parent is not None:
-        _join_to_parent(bottle)
+    for grant in bottle.ssh:
+        _let_in(bottle, grant)
     return bottle
 
 
-def _join_to_parent(sidecar: Bottle) -> None:
-    """Let the sidecar's parent ssh to it, as sidecar.host: the parent's key let in, the sidecar's host key known
-    to the parent; and tell the parent about it."""
-    parent = ensure_running(sidecar.parent)
-    key = _in_bottle(parent, ["sh", "-c", "test -f ~/.ssh/id_ed25519 || ssh-keygen -q -t ed25519 -N '' "
-                                          "-f ~/.ssh/id_ed25519 -C genie@" + shlex.quote(parent.name)
-                                          + " && cat ~/.ssh/id_ed25519.pub"])
-    host_key = _exec(sidecar, ["sh", "-c", "test -f /etc/ssh/ssh_host_ed25519_key || ssh-keygen -q -t ed25519 -N '' "
-                                           "-f /etc/ssh/ssh_host_ed25519_key && cut -d' ' -f1,2 "
-                                           "/etc/ssh/ssh_host_ed25519_key.pub"], user="root").strip()
-    _exec(sidecar, ["sh", "-c", "install -d -m 700 ~/.ssh && cat > ~/.ssh/authorized_keys"], user=USER,
-          input=key + "\n")
-    _exec(parent, ["sh", "-c", f"install -d -m 700 ~/.ssh && touch ~/.ssh/known_hosts && "
-                               f"sed -i '/^{host.SIDECAR_HOST} /d' ~/.ssh/known_hosts && cat >> ~/.ssh/known_hosts"],
-          user=USER, input=f"{host.SIDECAR_HOST} {host_key}\n")
-    entry = f"{host.SIDECAR_ADDRESS} {host.SIDECAR_HOST}"
-    _exec(parent, ["sh", "-c", f"grep -qsx {shlex.quote(entry)} /etc/hosts || echo {shlex.quote(entry)} >> /etc/hosts "
-                               f"&& cat > {HOME}/{CONTEXT_FILE} && chown {USER}: {HOME}/{CONTEXT_FILE}"],
-          user="root", input=context(parent))
+def _let_in(bottle: Bottle, grant: SshGrant) -> None:
+    """Let the bottle ssh to the one it's granted, as grant.name: its key let in there, that one's host key known
+    here."""
+    there = ensure_running(grant.bottle)
+    key = _in_bottle(bottle, ["sh", "-c", "install -d -m 700 ~/.ssh && { test -f ~/.ssh/id_ed25519 || ssh-keygen -q "
+                                          f"-t ed25519 -N '' -f ~/.ssh/id_ed25519 -C {USER}@{bottle.name}; }} && "
+                                          "cat ~/.ssh/id_ed25519.pub"])
+    host_key = _exec(there, ["sh", "-c", "{ test -f /etc/ssh/ssh_host_ed25519_key || ssh-keygen -q -t ed25519 -N '' "
+                                         "-f /etc/ssh/ssh_host_ed25519_key; } && cut -d' ' -f1,2 "
+                                         "/etc/ssh/ssh_host_ed25519_key.pub"], user="root").strip()
+    # Modes set, not left to a umask: commands run in a machine get 0000, and sshd refuses keys others can write.
+    _exec(there, ["sh", "-c", "install -d -m 700 ~/.ssh && read -r key && touch ~/.ssh/authorized_keys && "
+                              "chmod 600 ~/.ssh/authorized_keys && "
+                              "{ grep -qxF \"$key\" ~/.ssh/authorized_keys || echo \"$key\" >> ~/.ssh/authorized_keys; }"],
+          user=USER, input=key + "\n")
+    _exec(bottle, ["sh", "-c", "install -d -m 700 ~/.ssh && touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts && "
+                               f"sed -i '/^{re.escape(grant.name)} /d' ~/.ssh/known_hosts && cat >> ~/.ssh/known_hosts"],
+          user=USER, input=f"{grant.name} {host_key}\n")
 
 
 def _start_machine(bottle: Bottle) -> None:
@@ -473,9 +481,10 @@ def _memory_mib(memory: str | None) -> int:
 
 
 def point_at_host(bottle: Bottle) -> None:
-    """Give the bottle bottle.host, at the address whose flows the decider hands to bottled's git service."""
-    entry = f"{host.ADDRESS} {host.HOST}"
-    script = f"grep -qsx {shlex.quote(entry)} /etc/hosts || echo {shlex.quote(entry)} >> /etc/hosts"
+    """Give the bottle bottle.host, at the address whose flows the decider hands to bottled's git service, and the
+    name of each bottle it may ssh to, at its address."""
+    entries = [f"{host.ADDRESS} {host.HOST}", *(f"{g.address} {g.name}" for g in bottle.ssh)]
+    script = "; ".join(f"grep -qsx {shlex.quote(e)} /etc/hosts || echo {shlex.quote(e)} >> /etc/hosts" for e in entries)
     try:
         _exec(bottle, ["sh", "-c", script], user="root")
     except BottleError as e:
@@ -569,9 +578,9 @@ def context(bottle: Bottle) -> str:
             lines.append("  It has no remotes.")
     if not bottle.mounts:
         lines.append("- This bottle has no repo.")
-    if bottle.parent is not None:
-        lines.append(f"- This bottle is the sidecar of bottle `{bottle.parent}`, for its jobs: scratch, deleted with it.\n"
-                     "  Its remotes are fetch-only.")
+    for grant in bottle.ssh:
+        lines.append(f"- `ssh {grant.name}` reaches bottle `{grant.bottle}`, as `{USER}`: a shell, a command, "
+                     "scp, git over ssh.")
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     resolved = features_.resolve(list(bottle.features))
@@ -583,9 +592,6 @@ def context(bottle: Bottle) -> str:
     if permissions:
         lines.append("\n## Permissions\n\nThe host lets this bottle do more than most:\n")
         lines += [f"- {specs.PERMISSIONS[p]}" for p in permissions if p in specs.PERMISSIONS]
-    sidecar = sidecar_of(bottle.name) if bottle.parent is None else None
-    if sidecar is not None:
-        lines.append(_sidecar_context(sidecar))
     # Each feature's own word on what it gives the agent (customizations.bottle.context).
     told = [(f.id, f.agent_context()) for f in resolved]
     told = [(feature_id, text) for feature_id, text in told if text]
@@ -594,23 +600,6 @@ def context(bottle: Bottle) -> str:
         lines += [f"\n### Feature '{feature_id}'\n\n{text}" for feature_id, text in told]
     text = "\n".join(lines) + "\n"
     return text + (f"\n{bottle.context}" if bottle.context else "")
-
-
-def _sidecar_context(sidecar: Bottle) -> str:
-    where = "this machine" if sidecar.runner == runners.LOCAL else f"runner `{sidecar.runner}`"
-    features = ", ".join(f"'{f}'" for f in sidecar.spec.get("features", [])) or "none"
-    first = sidecar.mounts[0].path if sidecar.mounts else HOME
-    return (
-        f"\n## Sidecar\n\n"
-        f"This bottle has a sidecar, `{sidecar.name}`: a bottle of its own, on {where}, with {sidecar.memory} of "
-        f"memory and features {features}, for jobs that want more room than this one has. `ssh {host.SIDECAR_HOST}` "
-        f"reaches it (as `{USER}`, in a shell or with a command), and so do scp and git over ssh.\n\n"
-        f"- It has this bottle's repos at the same paths, as they were when it was made, and the same remotes, "
-        f"fetch-only.\n"
-        f"- Your changes get there over ssh, committed or not: `git push {host.SIDECAR_HOST}:{first} "
-        f"$(git stash create || git rev-parse HEAD):refs/heads/job`, then check out `job` there.\n"
-        f"- It's scratch: it's deleted when this bottle is, and what's on it is lost unless you bring it back."
-    )
 
 
 def _describe_remote(remote: host.Remote) -> str:
@@ -677,12 +666,8 @@ def start(name: str) -> Bottle:
 
 
 def stop(name: str) -> None:
-    """Stop the bottle's machine, and its token at the decider, and its sidecar's. Its checkout and changes are
-    kept."""
+    """Stop the bottle's machine, and its token at the decider. Its checkout and changes are kept."""
     bottle = get(name)
-    sidecar = sidecar_of(name)
-    if sidecar is not None:
-        stop(sidecar.name)
     runner = runner_of(bottle)
     if runner.state(bottle.machine) == "running":
         runner.stop(bottle.machine)
@@ -739,23 +724,10 @@ def ensure_running(name: str) -> Bottle:
         verify_contract(bottle)
         trust_egress_ca(bottle)
         point_at_host(bottle)
-        _start_sidecar(bottle)
     else:
         # Running, so its token is kept: the decider, if it had stopped, binds it again as it starts.
         runner.ensure_deciding()
     return bottle
-
-
-def _start_sidecar(parent: Bottle) -> None:
-    """Start the bottle's sidecar with it, if it has one: best effort, since its runner may be off."""
-    sidecar = sidecar_of(parent.name)
-    if sidecar is None:
-        return
-    try:
-        ensure_running(sidecar.name)
-    except BottleError as e:
-        log.warning("%s: its sidecar %s didn't start: %s", parent.name, sidecar.name, e)
-        print(f"bottle: {parent.name}'s sidecar {sidecar.name} didn't start: {e}", file=sys.stderr)
 
 
 def trust_egress_ca(bottle: Bottle) -> None:
@@ -872,7 +844,7 @@ def status(names: list[str] = ()) -> list[dict]:
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
-            "parent": bottle.parent,
+            "ssh": {g.name: g.bottle for g in bottle.ssh},
             # Where its objects and remotes are, as a checkout restored into it has to point.
             "mounts": [{"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,
                         "remotes": [r.spec for r in m.remotes], "objects": m.objects,
@@ -889,9 +861,6 @@ def delete(name: str) -> None:
     (marked broken) so the next delete can retry.
     """
     bottle = get(name)
-    sidecar = sidecar_of(name)
-    if sidecar is not None:
-        delete(sidecar.name)   # first: a sidecar's never left without its parent
     failures = []
     # The registry says the machine is the bottle's: smolvm has no labels to ask.
     runner = runner_of(bottle)

@@ -69,7 +69,7 @@ class FakeSmolvm:
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
-        if "ssh" in argv[-1] or "sidecar.host" in argv[-1]:                      # a sidecar joined to its parent
+        if ".ssh" in argv[-1] or "ssh_host_" in argv[-1]:   # ssh to a bottle granted, set up
             self.ssh_setup.append((name, user, argv[-1], input))
             return f"ssh-ed25519 KEY-OF-{name}\n"
         if bottles.CA_CERTIFICATE in argv[-1]:
@@ -1019,94 +1019,66 @@ class MountsTest(BottleTestCase):
         self.assertEqual((bottles.load(), fake.calls), ({}, []))
 
 
-class SidecarTest(BottleTestCase):
-    """A bottle's sidecar: its parent's repos, fetch-only, on a spec of its own; stopped and deleted with it."""
+class SshTest(BottleTestCase):
+    """A bottle that may ssh to others: those named, as they were when it was made, and nothing else."""
 
     def setUp(self) -> None:
         super().setUp()
         self.fake_smolvm = self.fake()
-        self.notes = self.make_repo("notes")
-        self.parent = bottles.create({"features": [], "memory": "2G"}, "main", [
-            bottles.MountRequest("/workspace", self.repo_path, remotes=["origin:fetch=upstream",
-                                                                       "agent:fetch=ns/w-out,push=ns/w-out"]),
-            bottles.MountRequest("/notes", self.notes, remotes=["agent:fetch=ns/n-out,push=ns/n-out"]),
-        ])
+        self.big = self.create(name="big", memory="8G")
 
-    def sidecar(self, name: str = "big", of: str = "main", memory: str = "8G") -> bottles.Bottle:
-        return bottles.create({"features": ["tools"], "memory": memory}, name, parent=of)
+    def granted(self, **ssh) -> bottles.Bottle:
+        return bottles.create({"features": [], "memory": "2G"}, "main",
+                              [bottles.MountRequest("/workspace", self.repo_path)], ssh=ssh)
 
-    def test_has_its_parents_repos_at_its_paths_fetch_only(self) -> None:
-        sidecar = self.sidecar()
-        self.assertEqual((sidecar.parent, sidecar.memory, sidecar.features), ("main", "8G", ("tools",)))
-        self.assertEqual([(m.path, m.repo, m.branch, m.commit, m.objects) for m in sidecar.mounts],
-                         [(m.path, m.repo, m.branch, m.commit, m.objects) for m in self.parent.mounts])
-        self.assertEqual([[r.spec for r in m.remotes] for m in sidecar.mounts],
-                         [["origin:fetch=upstream", "agent:fetch=ns/w-out"], ["agent:fetch=ns/n-out"]])
-        # Served those, read-only, though another bottle pushes into the same namespaces.
-        self.assertEqual([[r.push for r in repo.remotes] for repo in self.fake_smolvm.egress_repos], [[None, None], [None]])
-        self.assertIn("remote add agent http://bottle.host/git/notes/agent", self.fake_smolvm.workspace_script)
-        self.assertIn("the sidecar of bottle `main`", bottles.context(sidecar))
-        self.assertEqual(bottles.sidecar_of("main"), sidecar)
-        self.assertEqual(bottles.status(["big"])[0]["parent"], "main")
+    def test_each_is_a_name_at_an_address_of_its_own(self) -> None:
+        self.create(name="other")
+        main = bottles.create({"features": [], "memory": "2G"}, "main", ssh={"sidecar.host": "big", "o": "other"})
+        self.assertEqual([(g.name, g.bottle, g.id, g.address) for g in main.ssh],
+                         [("sidecar.host", "big", self.big.id, "192.0.2.2"), ("o", "other", bottles.get("other").id, "192.0.2.3")])
+        self.assertEqual(bottles.get("main").ssh, main.ssh)   # survives the JSON round trip
+        _, hosts = self.fake_smolvm.hosts
+        self.assertIn("192.0.2.2 sidecar.host", hosts)
+        self.assertIn("192.0.2.3 o", hosts)
+        self.assertIn("- `ssh sidecar.host` reaches bottle `big`", bottles.context(main))
+        self.assertEqual(bottles.status(["main"])[0]["ssh"], {"sidecar.host": "big", "o": "other"})
 
-    def test_its_parent_can_ssh_to_it_and_is_told_how(self) -> None:
-        sidecar = self.sidecar()
-        by_machine = {}
-        for machine, user, script, given in self.fake_smolvm.ssh_setup:
-            by_machine.setdefault(machine, []).append((user, script, given))
-        parent, there = by_machine[self.parent.machine], by_machine[sidecar.machine]
-        # The parent's key, let in there; the sidecar's host key, known as sidecar.host here.
-        self.assertIn("ssh-keygen -q -t ed25519", parent[0][1])
-        self.assertEqual(there[1][2], f"ssh-ed25519 KEY-OF-{self.parent.machine}\n")
-        self.assertIn("authorized_keys", there[1][1])
-        self.assertEqual((parent[1][0], parent[1][2]), ("genie", f"sidecar.host ssh-ed25519 KEY-OF-{sidecar.machine}\n"))
-        user, script, told = parent[2]
-        self.assertIn("192.0.2.2 sidecar.host", script)
-        self.assertIn("## Sidecar", told)
-        self.assertIn("`big`: a bottle of its own, on this machine, with 8G of memory and features 'tools'", told)
-        self.assertNotIn("## Sidecar", bottles.context(sidecar))
+    def test_its_key_is_let_in_there_and_that_ones_host_key_known_here(self) -> None:
+        main = self.granted(**{"sidecar.host": "big"})
+        [make_key, host_key, let_in, known] = self.fake_smolvm.ssh_setup
+        self.assertEqual((make_key[0], make_key[1]), (main.machine, "genie"))
+        self.assertEqual((host_key[0], host_key[1]), (self.big.machine, "root"))
+        self.assertEqual((let_in[0], let_in[1], let_in[3]), (self.big.machine, "genie", f"ssh-ed25519 KEY-OF-{main.machine}\n"))
+        self.assertIn("authorized_keys", let_in[2])
+        self.assertEqual((known[0], known[3]), (main.machine, f"sidecar.host ssh-ed25519 KEY-OF-{self.big.machine}\n"))
 
-    def test_sshd_runs_in_it_for_its_parent(self) -> None:
-        sidecar = self.sidecar()
-        self.assertEqual(bottles.sshd_command("main"), ["smolvm-exec", sidecar.machine, "sh", "-c", bottles.SSHD])
+    def test_only_a_bottle_that_exists_under_a_host_name(self) -> None:
+        for ssh, why in (({"x": "nope"}, "no bottle named 'nope'"), ({"Bad Name": "big"}, "invalid --ssh name"),
+                         ({"bottle.host": "big"}, "invalid --ssh name"), ({"10.0.0.5:22": "big"}, "invalid --ssh name")):
+            with self.subTest(ssh), self.assertRaisesRegex(BottleError, why):
+                self.granted(**ssh)
+        self.assertEqual(sorted(bottles.load()), ["big"])
+
+    def test_sshd_runs_there_for_the_address_granted_only(self) -> None:
+        self.granted(**{"sidecar.host": "big"})
+        self.assertEqual(bottles.sshd_command("main", "192.0.2.2"), ["smolvm-exec", self.big.machine, "sh", "-c", bottles.SSHD])
         self.assertEqual(self.fake_smolvm.attached["user"], "root")
+        with self.assertRaisesRegex(BottleError, "main may ssh to nothing at 192.0.2.3"):
+            bottles.sshd_command("main", "192.0.2.3")
+        with self.assertRaisesRegex(BottleError, "big may ssh to nothing"):
+            bottles.sshd_command("big", "192.0.2.2")
         bottles.stop("big")
-        with self.assertRaisesRegex(BottleError, "main's sidecar big isn't running"):
-            bottles.sshd_command("main")
-        with self.assertRaisesRegex(BottleError, "big has no sidecar"):
-            bottles.sshd_command("big")
+        with self.assertRaisesRegex(BottleError, "isn't running"):
+            bottles.sshd_command("main", "192.0.2.2")
 
-    def test_starts_with_its_parent(self) -> None:
-        sidecar = self.sidecar()
-        bottles.stop("main")
-        bottles.start("main")
-        self.assertEqual(self.fake_smolvm.machines[sidecar.machine], "running")
-
-    def test_one_to_a_parent_and_none_of_a_sidecar(self) -> None:
-        self.sidecar()
-        for name, of, why in (("big2", "main", "main already has a sidecar, big"),
-                              ("big2", "big", "big is itself a sidecar, of main"),
-                              ("big2", "nope", "no bottle named 'nope' to be the sidecar of")):
-            with self.subTest(of), self.assertRaisesRegex(BottleError, why):
-                self.sidecar(name, of)
-        with self.assertRaisesRegex(BottleError, "a sidecar's mounts are its parent's"):
-            bottles.create({"features": [], "memory": "2G"}, "big2",
-                           [bottles.MountRequest("/workspace", self.repo_path)], parent="main")
-        self.assertEqual(sorted(bottles.load()), ["big", "main"])
-
-    def test_is_stopped_and_deleted_with_its_parent(self) -> None:
-        sidecar = self.sidecar()
-        bottles.stop("main")
-        self.assertEqual(self.fake_smolvm.machines, {self.parent.machine: "stopped", sidecar.machine: "stopped"})
-        self.assertEqual(self.fake_smolvm.bound, set())
-        bottles.delete("main")
-        self.assertEqual((bottles.load(), self.fake_smolvm.machines), ({}, {}))
-
-    def test_deleting_it_leaves_its_parent(self) -> None:
-        self.sidecar()
+    def test_a_bottle_made_again_under_the_name_isnt_the_one_granted(self) -> None:
+        self.granted(**{"sidecar.host": "big"})
         bottles.delete("big")
-        self.assertEqual(sorted(bottles.load()), ["main"])
-        self.assertIsNone(bottles.sidecar_of("main"))
+        with self.assertRaisesRegex(BottleError, "bottle big, which main may ssh to as sidecar.host, is gone"):
+            bottles.sshd_command("main", "192.0.2.2")
+        self.create(name="big")
+        with self.assertRaisesRegex(BottleError, "is gone"):
+            bottles.sshd_command("main", "192.0.2.2")
 
 
 class StatusTest(BottleTestCase):
@@ -1120,7 +1092,8 @@ class StatusTest(BottleTestCase):
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
         self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G", "parent": None,
+            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G",
+            "ssh": {},
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
                         "remotes": ["work:fetch=ns/t-in,push=ns/t-out"], "objects": "/mnt/objects/workspace",

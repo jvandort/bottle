@@ -175,7 +175,7 @@ class MirrorGit:
 
 class _LinkedGateway:
     """The controller's gateway for a bottle on a runner, as far as the runner's needs it: its credentials' flows,
-    and its sidecar's."""
+    and its ssh's."""
 
     def __init__(self, link: LinkController, bottle: str) -> None:
         self.link, self.bottle = link, bottle
