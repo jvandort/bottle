@@ -88,6 +88,10 @@ HOST = "bottle.host"
 # /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
 # uses, which smolvm hands to the decider like any other.
 ADDRESS = "192.0.2.1"
+# Where a bottle with a sidecar reaches it, over ssh: the next address in TEST-NET-1.
+SIDECAR_HOST = "sidecar.host"
+SIDECAR_ADDRESS = "192.0.2.2"
+SIDECAR_PORT = 22
 GIT_PATH = "/git"
 MESSAGES_PATH = "/messages"
 BOTTLES_PATH = "/bottles"

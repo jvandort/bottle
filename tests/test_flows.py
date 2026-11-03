@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import ca, egress, host
-from bottle.egress import CREDENTIAL, GIT, OPENING, Direct, Flow, Gateway, Policy, Redirect, Refused
+from bottle.egress import CREDENTIAL, GIT, OPENING, SIDECAR, Direct, Flow, Gateway, Policy, Redirect, Refused
 from tests.support import client_hello
 from tests.test_egress import LoopbackPolicy, Upstream, fake_resolve
 
@@ -114,6 +114,12 @@ class DecideTest(unittest.IsolatedAsyncioTestCase):
     async def test_bottle_host_is_the_git_service_on_port_80_only(self) -> None:
         self.assertEqual(await self.decide(host.ADDRESS, 80), Redirect(GIT))
         await self.refused(host.ADDRESS, 22)
+
+    async def test_sidecar_host_is_its_ssh_on_port_22_only(self) -> None:
+        await self.refused(host.SIDECAR_ADDRESS, 22)   # no sidecar to join it to, and no controller to ask
+        self.proxy.sidecar = lambda: None
+        self.assertEqual(await self.decide(host.SIDECAR_ADDRESS, 22), Redirect(SIDECAR))
+        await self.refused(host.SIDECAR_ADDRESS, 80)
 
     async def test_bottle_host_without_services_is_refused(self) -> None:
         self.proxy.services = None
@@ -232,7 +238,7 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         where = tuple(dataclasses.replace(i, value="", credential="", standin="") for i in self.proxy.injections)
         controller = self.proxy
         self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=where,
-                             hand_off=controller.serve_credential)
+                             hand_off=controller.serve_handed_off)
 
     async def test_a_credentials_flow_handed_to_the_controller_gets_the_credential_there(self) -> None:
         self.handing_off()
@@ -252,9 +258,40 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Authorization: Bearer real-token", (await asyncio.wait_for(self.received.get(), 5)).decode())
         self.assertEqual(self.decisions[0].service, OPENING)
 
+    async def sidecar_says_hello_and_echoes(self) -> None:
+        async def command():
+            return ["sh", "-c", "echo SSH-2.0-sidecar; cat"]
+
+        self.proxy.sidecar = command
+
+    async def test_a_flow_to_sidecar_host_is_joined_to_its_sshd(self) -> None:
+        await self.sidecar_says_hello_and_echoes()
+        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        writer.write(b"SSH-2.0-client\r\n")
+        writer.write_eof()
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-sidecar\nSSH-2.0-client\r\n")
+        self.assertEqual(self.decisions[0].service, SIDECAR)
+
+    async def test_a_flow_to_sidecar_host_is_handed_to_the_controller(self) -> None:
+        await self.sidecar_says_hello_and_echoes()
+        self.handing_off()
+        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        writer.write(b"SSH-2.0-client\r\n")
+        writer.write_eof()
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-sidecar\nSSH-2.0-client\r\n")
+
+    async def test_a_flow_to_sidecar_host_with_no_sidecar_is_closed(self) -> None:
+        async def none():
+            raise Refused(None, "test has no sidecar", "no-sidecar")
+
+        self.proxy.sidecar = none
+        reader, writer = await self.connect(host.SIDECAR_ADDRESS, 22)
+        writer.write(b"SSH-2.0-client\r\n")
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+
     async def test_the_controller_refuses_a_flow_handed_it_for_no_credential(self) -> None:
         async def handed(r, w) -> None:
-            await self.proxy.serve_credential(Flow("203.0.113.5", 443, client_hello("elsewhere.test")), r, w)
+            await self.proxy.serve_handed_off(Flow("203.0.113.5", 443, client_hello("elsewhere.test")), r, w)
 
         server = await asyncio.start_server(handed, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, server)

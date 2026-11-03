@@ -174,12 +174,13 @@ class MirrorGit:
 
 
 class _LinkedGateway:
-    """The controller's gateway for a bottle on a runner, as far as the runner's needs it: its credentials' flows."""
+    """The controller's gateway for a bottle on a runner, as far as the runner's needs it: its credentials' flows,
+    and its sidecar's."""
 
     def __init__(self, link: LinkController, bottle: str) -> None:
         self.link, self.bottle = link, bottle
 
-    async def serve_credential(self, flow: egress.Flow, reader, writer) -> None:
+    async def serve_handed_off(self, flow: egress.Flow, reader, writer) -> None:
         try:
             up_reader, up_writer = await self.link._open()
         except BottleError as e:
@@ -272,7 +273,7 @@ class LinkServer:
             if op == "flow":
                 side = self._side(bottle)
                 flow = egress.Flow(message["address"], message["port"], base64.b64decode(message["first"]))
-                await side[1].serve_credential(flow, reader, writer)
+                await side[1].serve_handed_off(flow, reader, writer)
                 return
             if op == "upload-pack":
                 await self._upload_pack(message, reader, writer)

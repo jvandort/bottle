@@ -26,6 +26,7 @@ class FakeSmolvm:
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
         self.tokens = 0
+        self.ssh_setup: list[tuple] = []
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -68,6 +69,9 @@ class FakeSmolvm:
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
             return self.contract_output
+        if "ssh" in argv[-1] or "sidecar.host" in argv[-1]:                      # a sidecar joined to its parent
+            self.ssh_setup.append((name, user, argv[-1], input))
+            return f"ssh-ed25519 KEY-OF-{name}\n"
         if bottles.CA_CERTIFICATE in argv[-1]:
             self._step("trust_egress_ca")
             self.trusted = (user, input)
@@ -1044,6 +1048,39 @@ class SidecarTest(BottleTestCase):
         self.assertIn("the sidecar of bottle `main`", bottles.context(sidecar))
         self.assertEqual(bottles.sidecar_of("main"), sidecar)
         self.assertEqual(bottles.status(["big"])[0]["parent"], "main")
+
+    def test_its_parent_can_ssh_to_it_and_is_told_how(self) -> None:
+        sidecar = self.sidecar()
+        by_machine = {}
+        for machine, user, script, given in self.fake_smolvm.ssh_setup:
+            by_machine.setdefault(machine, []).append((user, script, given))
+        parent, there = by_machine[self.parent.machine], by_machine[sidecar.machine]
+        # The parent's key, let in there; the sidecar's host key, known as sidecar.host here.
+        self.assertIn("ssh-keygen -q -t ed25519", parent[0][1])
+        self.assertEqual(there[1][2], f"ssh-ed25519 KEY-OF-{self.parent.machine}\n")
+        self.assertIn("authorized_keys", there[1][1])
+        self.assertEqual((parent[1][0], parent[1][2]), ("genie", f"sidecar.host ssh-ed25519 KEY-OF-{sidecar.machine}\n"))
+        user, script, told = parent[2]
+        self.assertIn("192.0.2.2 sidecar.host", script)
+        self.assertIn("## Sidecar", told)
+        self.assertIn("`big`: a bottle of its own, on this machine, with 8G of memory and features 'tools'", told)
+        self.assertNotIn("## Sidecar", bottles.context(sidecar))
+
+    def test_sshd_runs_in_it_for_its_parent(self) -> None:
+        sidecar = self.sidecar()
+        self.assertEqual(bottles.sshd_command("main"), ["smolvm-exec", sidecar.machine, "sh", "-c", bottles.SSHD])
+        self.assertEqual(self.fake_smolvm.attached["user"], "root")
+        bottles.stop("big")
+        with self.assertRaisesRegex(BottleError, "main's sidecar big isn't running"):
+            bottles.sshd_command("main")
+        with self.assertRaisesRegex(BottleError, "big has no sidecar"):
+            bottles.sshd_command("big")
+
+    def test_starts_with_its_parent(self) -> None:
+        sidecar = self.sidecar()
+        bottles.stop("main")
+        bottles.start("main")
+        self.assertEqual(self.fake_smolvm.machines[sidecar.machine], "running")
 
     def test_one_to_a_parent_and_none_of_a_sidecar(self) -> None:
         self.sidecar()

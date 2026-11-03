@@ -20,7 +20,7 @@ class Echoing:
     def __init__(self) -> None:
         self.flows: list[egress.Flow] = []
 
-    async def serve_credential(self, flow, reader, writer) -> None:
+    async def serve_handed_off(self, flow, reader, writer) -> None:
         self.flows.append(flow)
         writer.write(b"hello " + flow.first)
         writer.write(await reader.read(100))
@@ -165,7 +165,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         answered = asyncio.Queue()
 
         async def bottle_side(reader, writer):
-            await gateway.serve_credential(egress.Flow("203.0.113.5", 443, b"\x16hello"), reader, writer)
+            await gateway.serve_handed_off(egress.Flow("203.0.113.5", 443, b"\x16hello"), reader, writer)
 
         guest = await asyncio.start_server(bottle_side, "127.0.0.1", 0)
         self.addAsyncCleanup(self._close, guest)
