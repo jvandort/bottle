@@ -226,7 +226,7 @@ class CreateTest(BottleTestCase):
         context = bottles.context(bottle)
         self.assertIn("checkout of `example`, on the `main` branch.", context)
         self.assertNotIn(self.head[:12], context)  # no commits: it never goes stale
-        self.assertIn("You're `genie`, running in a bottle", context)
+        self.assertIn(f"You're `genie`, running in bottle `{bottle.name}`", context)
         self.assertIn("passwordless sudo", context)
         self.assertIn("The network works as usual", context)
         self.assertIn(f"`bottle cp {bottle.name}:<path> .`", context)

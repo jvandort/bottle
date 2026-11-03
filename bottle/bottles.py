@@ -574,7 +574,8 @@ def context(bottle: Bottle) -> str:
     How to work -- branches, pushing, merging -- is its creator's to say, in
     the context it adds; this says what's there.
     """
-    lines = [f"# Bottle\n\nYou're `{USER}`, running in a bottle: a sandboxed Linux VM with passwordless sudo.\n"]
+    lines = [f"# Bottle\n\nYou're `{USER}`, running in bottle `{bottle.name}`: a sandboxed Linux VM with passwordless "
+             "sudo.\n"]
     for mount in bottle.mounts:
         at = f"on the `{mount.branch}` branch" if mount.branch else "at a detached commit"
         lines.append(f"- `{mount.path}` is a checkout of `{Path(mount.repo).name}`, {at}.")
