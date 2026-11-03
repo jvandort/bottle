@@ -3,6 +3,7 @@ import io
 import logging
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from bottle.cli import main
@@ -184,6 +185,15 @@ class SpecCommandsTest(CliTestCase):
         self.assertEqual(self.run_cli("status", "gone", "--json"), (0, '[\n  {\n    "name": "gone",\n    "state": "missing"\n  }\n]\n', ""))
         code, out, _ = self.run_cli("status", "gone")
         self.assertEqual(out.split(), ["gone", "missing"])
+
+    def test_list_and_ls_are_status(self) -> None:
+        for alias in ("list", "ls"):
+            self.assertEqual(self.run_cli(alias, "gone"), self.run_cli("status", "gone"))
+
+    def test_cp_says_where_it_went_and_what_it_left_out(self) -> None:
+        with mock.patch("bottle.bottles.copy_out", return_value=(Path("out/r"), ["r/away: a link out"])) as copy:
+            self.assertEqual(self.run_cli("cp", "b", "build/r", "out"), (0, "Copied to out/r\n", "bottle: left out r/away: a link out\n"))
+        copy.assert_called_once_with("b", "build/r", Path("out"))
 
 
 if __name__ == "__main__":

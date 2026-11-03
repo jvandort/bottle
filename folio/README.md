@@ -168,11 +168,11 @@ its reach until you resume it.
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
-| `folio list` | The repo's threads, most recently active first, where each runs, and the space a paused one's snapshot takes up |
+| `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec, its threads' features, memory and disk, and its runner |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
-| `folio repo list` | Every repo folio has state for |
+| `folio repo list` (`ls`) | Every repo folio has state for |
 
 Leave the thread out, on a terminal, and you choose it from a list: the
 repo's threads, most recently active first, with their state. Move with j/k

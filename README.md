@@ -414,7 +414,7 @@ here, and what a drone needs of them comes here.
   can't set up itself, installs smolvm's latest Linux release into
   `~/.bottle/smolvm` there if it's missing (asking first, its checksum
   checked), and copies bottle's own code over.
-- **`bottle runner status [RUNNER]...`** shows each runner, whether it can be
+- **`bottle runner status [RUNNER]...`** (also `list`, `ls`) shows each runner, whether it can be
   reached, what it lacks, and its bottles.
 - **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
   machine can be shut down. Their disks stay there; `bottle start` starts one again.
@@ -480,9 +480,22 @@ bottle exec reponame -- claude -p 'fix the failing test'
 bottle exec reponame cat /workspace/report.json | jq .failures
 ```
 
+### `bottle cp BOTTLE SRC DST`
+
+Copies SRC, a file or a directory in the bottle (a relative path is from its
+first mount), to DST here, as `cp -r` would: into DST if it's a directory,
+else as DST. Starts the bottle if it's stopped. What the bottle sends is
+unpacked as data: nothing lands outside DST, and a link pointing out of what's
+copied, or a device, is left out and named. A copy that fails leaves DST as it
+was.
+
+```sh
+bottle cp reponame build/reports/tests .
+```
+
 ### `bottle status [BOTTLE]... [--json]`
 
-Shows every bottle's name, state and memory, a line each. Name bottles to see
+Also `bottle list` and `bottle ls`. Shows every bottle's name, state, runner and memory, a line each. Name bottles to see
 all of each: its runner, if it isn't `local`, its features, and each mount's
 path, repo, branch and remotes. A name with no bottle shows as `missing`, and
 one on a runner that can't be reached as `unreachable`. With `--json`, one

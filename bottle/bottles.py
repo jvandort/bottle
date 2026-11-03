@@ -38,7 +38,10 @@ import logging
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -791,6 +794,55 @@ def exec_(name: str, argv: list[str]) -> NoReturn:
     if not argv:
         raise BottleError("bottle exec needs a command: bottle exec NAME COMMAND [ARG...]")
     _attach(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
+
+
+# Whatever SRC names, as a tar of it alone: its last name, and what's under it.
+_PACK = 'p=$(realpath -e -- "$1") && exec tar -C "$(dirname -- "$p")" -cf - -- "$(basename -- "$p")"'
+
+
+def copy_out(name: str, src: str, dst: Path) -> tuple[Path, list[str]]:
+    """Copy `src`, a file or a directory in the bottle (relative to its first mount), to `dst` here, as cp
+    -r would: into `dst` if it's a directory, else as it. Starts the bottle if stopped. Returns where it went,
+    and what was left out, saying why.
+
+    It comes as a tar, unpacked as data: nothing in it lands outside what it
+    names, and a link out of it, or a device, is left out. Nothing is there
+    until all of it is: a copy that fails leaves `dst` as it was.
+    """
+    if src.rstrip("/") == "":
+        raise BottleError("bottle cp copies a file or a directory, not /")
+    auth.ensure_logged_in(get(name).features)
+    bottle = ensure_running(name)
+    command = runner_of(bottle).exec_command(bottle.machine, ["sh", "-c", _PACK, "sh", src], user=USER,
+                                             workdir=bottle.workdir)
+    into = dst.is_dir()
+    with tempfile.TemporaryDirectory(dir=dst if into else dst.parent, prefix=".bottle-cp-") as scratch:
+        # stdin stays open until it ends: an exec's stdin closing early may end it early.
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with tarfile.open(fileobj=process.stdout, mode="r|") as tar:
+                    names, left_out = set(), []
+                    for member in tar:
+                        names.add(member.name.split("/")[0])
+                        try:
+                            tar.extract(member, scratch, filter="data")
+                        except tarfile.FilterError as e:
+                            left_out.append(f"{member.name}: {e}")
+            except tarfile.TarError:
+                names = set()
+            process.stdin.close()
+            error = process.stderr.read().decode(errors="replace").strip()
+        if process.returncode != 0 or len(names) != 1:
+            raise BottleError(f"couldn't copy {src} out of {name}: {error or 'it sent nothing'}")
+        [base] = names
+        target = dst / base if into else dst
+        copied = Path(scratch) / base
+        if target.is_dir() and not target.is_symlink():
+            raise BottleError(f"{target} is a directory already: copy into it, or somewhere new")
+        if copied.is_dir() and target.exists():
+            raise BottleError(f"{target} exists, and {src} is a directory")
+        copied.replace(target)
+    return target, left_out
 
 
 def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:

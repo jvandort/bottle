@@ -160,6 +160,8 @@ class AttachTest(FolioTestCase):
         self.assertEqual(lines[0].split(), ["THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES",
                                             "BRANCHES"])
         self.assertEqual(lines[1].split(), ["fix-it", "running", "local", "-", "-", "just", "now", "tools", "genie/fix-it-1"])
+        self.assertEqual(self.ok("ls"), self.ok("list"))
+        self.assertEqual(self.ok("status"), self.ok("list"))
 
 
 class DeleteTest(FolioTestCase):

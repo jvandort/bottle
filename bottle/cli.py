@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     new.set_defaults(run=_new, parser=new)
 
     status = commands.add_parser(
-        "status", help="show bottles' state",
+        "status", aliases=["list", "ls"], help="show bottles' state",
         description="Show every bottle's state and memory; or, for those named, everything about them: "
         "features, mounts, remotes. A name with no bottle shows as missing.",
     )
@@ -117,6 +117,16 @@ def main(argv: list[str] | None = None) -> int:
     exec_.add_argument("name", metavar="BOTTLE", help="the bottle to run in")
     exec_.add_argument("command", nargs=argparse.REMAINDER, metavar="COMMAND", help="the command and its arguments")
     exec_.set_defaults(run=_exec, parser=exec_)
+
+    cp = commands.add_parser(
+        "cp", help="copy a file or a directory out of a bottle",
+        description="Copy SRC, a file or a directory in the bottle (a relative one from /workspace), to DST here: "
+        "into DST if it's a directory, else as DST. Starts the bottle if it's stopped.",
+    )
+    cp.add_argument("name", metavar="BOTTLE", help="the bottle to copy out of")
+    cp.add_argument("src", metavar="SRC", help="what to copy, in the bottle")
+    cp.add_argument("dst", metavar="DST", help="where to, here")
+    cp.set_defaults(run=_cp, parser=cp)
 
     start = commands.add_parser("start", help="start a bottle", description="Start a stopped bottle and its network access.")
     start.add_argument("name", metavar="BOTTLE", help="the bottle to start")
@@ -154,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                             help="where ssh reaches it: a Host from ~/.ssh/config, or user@host")
     runner_add.set_defaults(run=_runner_add, parser=runner_add)
     runner_status = runner_commands.add_parser(
-        "status", aliases=["list"], help="show runners: reachable or not, what they're missing, their bottles")
+        "status", aliases=["list", "ls"], help="show runners: reachable or not, what they're missing, their bottles")
     runner_status.add_argument("names", nargs="*", metavar="RUNNER", help="the runners to show (default: all)")
     runner_status.add_argument("--json", action="store_true", help="print JSON: one object per runner")
     runner_status.set_defaults(run=_runner_status, parser=runner_status)
@@ -481,6 +491,16 @@ def _exec(args: argparse.Namespace) -> int:
     from bottle import bottles
 
     bottles.exec_(args.name, args.command)  # replaces this process
+
+
+def _cp(args: argparse.Namespace) -> int:
+    from bottle import bottles
+
+    target, left_out = bottles.copy_out(args.name, args.src, Path(args.dst))
+    for why in left_out:
+        print(f"bottle: left out {why}", file=sys.stderr)
+    print(f"Copied to {target}")
+    return 0
 
 
 def _start(args: argparse.Namespace) -> int:

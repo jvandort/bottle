@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     rename.add_argument("new", metavar="NEW", help="its new name: lowercase words joined by '-'")
     rename.set_defaults(run=_rename)
 
-    list_ = commands.add_parser("list", help="the repo's threads", description="The repo's threads, most recently active first.")
+    list_ = commands.add_parser("list", aliases=["ls", "status"], help="the repo's threads", description="The repo's threads, most recently active first.")
     list_.set_defaults(run=_list)
 
     delete = commands.add_parser(
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo = commands.add_parser("repo", help="the repos folio knows")
     repo_commands = repo.add_subparsers(required=True)
-    repo_list = repo_commands.add_parser("list", help="every repo folio has state for, wherever you are")
+    repo_list = repo_commands.add_parser("list", aliases=["ls"], help="every repo folio has state for, wherever you are")
     repo_list.set_defaults(run=_repo_list)
 
     args = parser.parse_args(argv)
