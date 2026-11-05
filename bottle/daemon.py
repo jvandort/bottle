@@ -404,8 +404,10 @@ class Links:
         start. Every bottle there that's ready is taken to be running: one
         that isn't asks nothing of it.
         """
-        from bottle import bottles
+        from bottle import bottles, runners
 
+        if await asyncio.to_thread(runners.is_detached, runner):
+            return  # turned off: none of its bottles runs
         for bottle in await asyncio.to_thread(lambda: list(bottles.load().values())):
             if bottle.runner != runner or bottle.status != "ready":
                 continue
@@ -417,11 +419,14 @@ class Links:
             server.bottles[bottle.name] = (services, gateway)
 
     async def _keep(self, runner: str, destination: str, failure: list[str]) -> None:
-        """Keep the link to `runner` up while any bottle there is bound through it; then let it go."""
+        """Keep the link to `runner` up while any bottle there is bound through it, and it isn't detached; then let
+        it go."""
+        from bottle import runners
+
         transport = ssh.SshTransport(runner, destination)
         here = socket_path(f"links/{runner}.sock")
         backoff, idle = 1, 0.0
-        while idle < LINK_IDLE:
+        while idle < LINK_IDLE and not runners.is_detached(runner):
             try:
                 there = await asyncio.to_thread(transport.prepare_link)
                 process = self.processes[runner] = await asyncio.create_subprocess_exec(
@@ -440,13 +445,13 @@ class Links:
                                    + (f" ({ssh.explained(said[-1])})" if said else ""))
                     log.warning("link to runner %s: %s", runner, failure[-1])
                     raise _Retry
-                while process.returncode is None and idle < LINK_IDLE:
+                while process.returncode is None and idle < LINK_IDLE and not runners.is_detached(runner):
                     try:
                         await asyncio.wait_for(asyncio.shield(process.wait()), LINK_IDLE_CHECK)
                     except TimeoutError:
                         idle = 0.0 if self.servers[runner].bottles else idle + LINK_IDLE_CHECK
                 if process.returncode is None:
-                    log.info("link to runner %s let go: no bottle there is bound through it", runner)
+                    log.info("link to runner %s let go: no bottle there is bound through it, or it's detached", runner)
                     process.terminate()
                     await process.wait()
                     break
@@ -466,11 +471,13 @@ class Links:
         self.up[runner].clear()
 
     async def bring_up(self) -> None:
-        """The links to runners with bottles: theirs may be running, and need the controller to be decided."""
-        from bottle import bottles
+        """The links to runners with bottles, but those detached: theirs may be running, and need the controller to be
+        decided."""
+        from bottle import bottles, runners
 
         wanted = {b.runner for b in await asyncio.to_thread(lambda: list(bottles.load().values()))
                   if b.status == "ready" and b.runner != "local"}
+        wanted = {r for r in wanted if not await asyncio.to_thread(runners.is_detached, r)}
         for runner in sorted(wanted):
             try:
                 await self.ensure(runner)

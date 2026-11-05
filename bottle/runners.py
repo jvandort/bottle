@@ -19,8 +19,10 @@ images it's built and builds those it's sent.
 import json
 import os
 import re
+import sys
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -100,6 +102,9 @@ class Runner(Protocol):
 
     def stop(self, machine: str) -> None: ...
 
+    def running(self) -> list[str]:
+        """Every machine running there, bottles' or not (a builder, say)."""
+
     def delete(self, machine: str) -> None:
         """Delete a machine; a no-op if there's none."""
 
@@ -175,6 +180,9 @@ class LocalRunner:
 
     def stop(self, machine: str) -> None:
         smolvm.stop(machine)
+
+    def running(self) -> list[str]:
+        return smolvm.running()
 
     def delete(self, machine: str) -> None:
         smolvm.delete(machine)
@@ -299,6 +307,9 @@ class RemoteRunner:
     def stop(self, machine: str) -> None:
         self._call("stop", machine=machine)
 
+    def running(self) -> list[str]:
+        return self._call("running")
+
     def delete(self, machine: str) -> None:
         self._call("delete", machine=machine)
 
@@ -325,8 +336,21 @@ def registry_path() -> Path:
 
 
 def registered() -> dict[str, dict]:
-    """Every remote runner added, by name: each one's {"ssh": destination}."""
+    """Every remote runner added, by name: each one's {"ssh": destination}, and "detached" if it is (see detach)."""
     return (read_json(registry_path()) or {}).get("runners", {})
+
+
+def is_detached(name: str) -> bool:
+    """Whether `name` was detached, to be turned off: nothing asks it anything until it's attached again."""
+    return "detached" in registered().get(name, {})
+
+
+def _mark(name: str, detached: dict | None) -> None:
+    runners = registered()
+    runners[name].pop("detached", None)
+    if detached is not None:
+        runners[name]["detached"] = detached
+    write_json(registry_path(), {"version": 1, "runners": runners})
 
 
 def register(name: str, destination: str) -> None:
@@ -352,6 +376,14 @@ def get(name: str = LOCAL) -> Runner:
         raise BottleError(f"no runner named {name!r}; add one with `bottle runner add {name} --ssh DESTINATION`")
     from bottle import ssh
 
+    if "detached" in entry:
+        # Used again: it's attached again if it's back, and if it isn't, that's what's said.
+        try:
+            attach(name)
+        except BottleError as e:
+            raise BottleError(f"runner {name} is detached, and doesn't answer yet ({e}): "
+                              "turn it on, then try again") from None
+        print(f"bottle: runner {name} is back, and attached again", file=sys.stderr)
     return RemoteRunner(name, ssh.SshTransport(name, entry["ssh"]))
 
 
@@ -385,6 +417,52 @@ def add(name: str, destination: str, ask=None) -> "ssh.Check":
     return check
 
 
+def detach(name: str, offline: bool = False) -> list[str]:
+    """Stop everything on remote runner `name`, so it can be turned off, and mark it detached: until it's attached
+    again, it isn't asked anything (its bottles show as detached), and its link and shared connection are let go.
+    Returns the bottles stopped, which attach names to start again.
+
+    Refused, and left attached, if it can't be reached, or if a machine that isn't a bottle's (a build, say)
+    still runs there: it isn't safe to turn off yet. `offline`: it's off already; mark it without asking it.
+    """
+    from bottle import bottles, ssh
+
+    entry = registered().get(name)
+    if name == LOCAL:
+        raise BottleError("the local runner is this machine; it can't be detached")
+    if entry is None:
+        raise BottleError(f"no runner named {name!r}")
+    if "detached" in entry:
+        return []
+    stopped: list[str] = []
+    if not offline:
+        stopped, unreachable = bottles.stop_all(name)
+        if unreachable:
+            raise BottleError(f"{unreachable[name]}; if it's off already, `bottle runner detach {name} --offline`")
+        still = get(name).running()
+        if still:
+            raise BottleError(f"runner {name} still runs {', '.join(still)}, which no bottle here stops: "
+                              f"wait for it to finish, then `bottle runner detach {name}` again")
+    _mark(name, {"at": time.time(), "stopped": stopped})
+    ssh.SshTransport(name, entry["ssh"]).close()
+    return stopped
+
+
+def attach(name: str) -> list[str]:
+    """Attach a detached runner again, once it answers; the bottles detaching it stopped, still there to start."""
+    from bottle import bottles, ssh
+
+    entry = registered().get(name)
+    if entry is None:
+        raise BottleError(f"no runner named {name!r}")
+    ssh.SshTransport(name, entry["ssh"]).check()
+    stopped = entry.get("detached", {}).get("stopped", [])
+    if "detached" in entry:
+        _mark(name, None)
+    there = bottles.load()
+    return [b for b in stopped if b in there and there[b].runner == name]
+
+
 def status(names: list[str] = ()) -> list[dict]:
     """Each runner, or those named: where it is, whether it can be reached and run bottles, and its bottles."""
     from bottle import bottles, ssh
@@ -403,6 +481,9 @@ def status(names: list[str] = ()) -> list[dict]:
             rows.append(row | {"state": "missing"})
             continue
         row["ssh"] = remotes[name]["ssh"]
+        if "detached" in remotes[name]:
+            rows.append(row | {"detached": True, "reachable": None})
+            continue
         try:
             check = ssh.SshTransport(name, row["ssh"]).check()
         except BottleError as e:

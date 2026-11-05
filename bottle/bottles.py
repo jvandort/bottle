@@ -702,8 +702,8 @@ def stop_all(runner: str | None = None) -> tuple[list[str], dict[str, str]]:
     for bottle in load().values():
         if runner is not None and bottle.runner != runner:
             continue
-        if bottle.runner in unreachable:
-            continue
+        if bottle.runner in unreachable or runners.is_detached(bottle.runner):
+            continue  # a detached runner runs nothing
         on = runner_of(bottle)
         try:
             if on.state(bottle.machine) == "running":
@@ -945,13 +945,14 @@ def _in_bottle(bottle: Bottle, argv: list[str]) -> str:
     return _exec(bottle, argv, user=USER).strip()
 
 
-# The state of a bottle on a runner that can't be reached.
+# The state of a bottle on a runner that can't be reached; and on one detached, which isn't asked.
 UNREACHABLE = "unreachable"
+DETACHED = "detached"
 
 
 def list_all() -> list[tuple[Bottle, str]]:
     """Every bottle with its current state: its machine's, unless setup never finished, or its runner can't be
-    reached."""
+    reached or is detached."""
     result = []
     # A runner that couldn't be reached is asked once, not once a bottle.
     unreachable: set[str] = set()
@@ -960,6 +961,8 @@ def list_all() -> list[tuple[Bottle, str]]:
             state = bottle.status
         elif bottle.runner in unreachable:
             state = UNREACHABLE
+        elif runners.is_detached(bottle.runner):
+            state = DETACHED
         else:
             try:
                 state = runner_of(bottle).state(bottle.machine) or "missing"

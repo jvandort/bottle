@@ -22,6 +22,7 @@ from unittest import mock
 
 from bottle import bottles, daemon, decider, host, images, mirrors, repos, runners
 from bottle.host import Remote, Served
+from bottle.errors import BottleError
 from tests.support import GitTestCase, run
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -59,11 +60,25 @@ case "$op" in
     if [ -f "$machines/$name" ]; then printf '{"state": "%s"}' "$(cat "$machines/$name")"
     else echo '{"error": {"code": "NOT_FOUND", "message": "machine not found"}}' >&2; exit 1; fi ;;
   "machine exec") cat > /dev/null; echo "$*" >> "$HOME/execs" ;;
+  "machine ls")
+    printf '['; sep=
+    for m in "$machines"/*; do
+      [ -f "$m" ] && printf '%s{"name": "%s", "state": "%s"}' "$sep" "${m##*/}" "$(cat "$m")" && sep=,
+    done
+    echo ']' ;;
 esac
 """
 
+# ssh to a runner that's off.
+OFF_SSH = r"""#!/usr/bin/env bash
+echo "ssh: connect to host box port 22: No route to host" >&2
+exit 255
+"""
 
-class DroneTest(GitTestCase):
+
+class DroneCase(GitTestCase):
+    """A controller here, and runner box: this machine, in a home of its own."""
+
     def setUp(self) -> None:
         super().setUp()
         short = Path(tempfile.mkdtemp(dir="/tmp"))   # macOS caps Unix socket paths at 104 bytes
@@ -106,6 +121,9 @@ class DroneTest(GitTestCase):
                 answer += chunk
         return answer
 
+
+
+class DroneTest(DroneCase):
     def test_a_drones_fetch_is_served_from_its_runners_mirror_of_the_hub(self) -> None:
         upstream = self.make_repo("upstream")
         repo = self.tmp / "repo"
@@ -199,3 +217,71 @@ class DroneTest(GitTestCase):
         started = json.loads((self.remote / "started.json").read_text())
         answer = self.guest_connects(started, "127.0.0.1", 22, b"SSH-2.0-x\r\n")
         self.assertEqual(answer[:1], decider.DENY)   # the runner's own loopback, never reachable
+
+
+class DetachTest(DroneCase):
+    """A runner detached to be turned off, and attached again."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.remote / ".bottle" / "smolvm" / "current" / "smolvm").write_text(STATEFUL_SMOLVM)
+        self.machines = self.remote / "machines"
+        self.machines.mkdir()
+        bottles._write({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box")
+                        for name in ("a", "b")})
+        self.a = self.machines / bottles.get("a").machine
+        self.a.write_text("running\n")
+        (self.machines / bottles.get("b").machine).write_text("stopped\n")
+
+    def off(self):
+        """ssh as it is while the runner is off."""
+        off = Path(os.environ["BOTTLE_SSH"]).with_name("off-ssh")
+        off.write_text(OFF_SSH)
+        off.chmod(0o755)
+        return mock.patch.dict(os.environ, {"BOTTLE_SSH": str(off)})
+
+    def turn_off(self) -> None:
+        patch = self.off()
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_detaching_stops_its_bottles_and_asks_it_nothing_more(self) -> None:
+        self.assertEqual(runners.detach("box"), ["a"])
+
+        self.assertEqual(self.a.read_text().strip(), "stopped")
+        self.assertTrue(runners.is_detached("box"))
+        self.turn_off()
+        self.assertEqual({row["name"]: row["state"] for row in bottles.status()}, {"a": "detached", "b": "detached"})
+        self.assertEqual(runners.status(["box"])[0]["detached"], True)
+        self.assertEqual(bottles.stop_all(), ([], {}))
+
+    def test_a_machine_no_bottle_stops_keeps_it_attached(self) -> None:
+        (self.machines / "builder-1").write_text("running\n")
+
+        with self.assertRaisesRegex(BottleError, "still runs builder-1"):
+            runners.detach("box")
+        self.assertFalse(runners.is_detached("box"))
+
+    def test_one_that_cant_be_reached_is_detached_only_offline(self) -> None:
+        self.turn_off()
+
+        with self.assertRaisesRegex(BottleError, "unreachable.*--offline"):
+            runners.detach("box")
+        self.assertFalse(runners.is_detached("box"))
+        self.assertEqual(runners.detach("box", offline=True), [])
+        self.assertTrue(runners.is_detached("box"))
+
+    def test_using_it_again_attaches_it_once_its_back(self) -> None:
+        runners.detach("box")
+        with self.off():
+            with self.assertRaisesRegex(BottleError, "box is detached, and doesn't answer yet.*turn it on"):
+                bottles.ensure_running("a")
+            self.assertTrue(runners.is_detached("box"))
+
+        self.assertEqual(runners.get("box").state(self.a.name), "stopped")
+        self.assertFalse(runners.is_detached("box"))
+
+    def test_attaching_names_the_bottles_detaching_stopped(self) -> None:
+        runners.detach("box")
+        self.assertEqual(runners.attach("box"), ["a"])
+        self.assertFalse(runners.is_detached("box"))

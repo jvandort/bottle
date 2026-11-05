@@ -401,7 +401,7 @@ not lost. Repeatable.
 Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
 directory.
 
-### `bottle runner add RUNNER --ssh DESTINATION` / `status` / `stop` / `remove`
+### `bottle runner add RUNNER --ssh DESTINATION` / `status` / `stop` / `detach` / `attach` / `remove`
 
 A **runner** is a machine bottles run on. `local` is this Mac; another is a
 Linux machine reached over ssh, and a bottle on one is a **drone**. Your Mac
@@ -418,6 +418,17 @@ here, and what a drone needs of them comes here.
   reached, what it lacks, and its bottles.
 - **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
   machine can be shut down. Their disks stay there; `bottle start` starts one again.
+- **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
+  it stops its bottles, checks that nothing else runs there (an image build,
+  say; if something does, it says what, and leaves the runner attached), and
+  lets it go, then says it's safe to turn off. Until it's attached again,
+  nothing asks it anything: its bottles show as `detached`, at once, and
+  bottled doesn't keep trying its link. Using one of its bottles again
+  (`start`, `attach`, `exec`, `cp`, folio's `attach`) attaches it again if
+  it answers, and says it's still off if it doesn't. `--offline` marks one
+  that's off already, unasked.
+- **`bottle runner attach RUNNER`** attaches a detached runner again, once it
+  answers, and names the bottles detaching it stopped.
 - **`bottle runner remove RUNNER`** forgets a runner with no bottles. Nothing
   on the machine is touched.
 

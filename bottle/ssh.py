@@ -217,6 +217,11 @@ class SshTransport:
         if result.returncode != 0:
             raise BottleError(f"copying bottle to runner {self.runner} failed: {result.stderr.decode(errors='replace').strip()}")
 
+    def close(self) -> None:
+        """Let go of the shared connection now, rather than when it's been idle for PERSIST; a no-op without one."""
+        subprocess.run([binary(), "-o", f"ControlPath={self._control_path()}", "-O", "exit", "--", self.destination],
+                       capture_output=True)
+
     def command(self, argv: list[str], tty: bool) -> list[str]:
         return [*self._ssh(tty=tty), shlex.join(argv)]
 

@@ -66,6 +66,11 @@ class CommandTest(unittest.TestCase):
         self.run_with(completed(json.dumps({"state": "running", "name": "m"})))
         self.assertEqual(smolvm.state("m"), "running")
 
+    def test_running_is_every_machine_not_stopped(self) -> None:
+        self.run_with(completed(json.dumps([{"name": "a", "state": "running"}, {"name": "b", "state": "stopped"},
+                                            {"name": "c", "state": "created"}, {"name": "d", "state": "unreachable"}])))
+        self.assertEqual(smolvm.running(), ["a", "d"])
+
     def test_no_such_machine_has_no_state(self) -> None:
         for error in ('{"error":{"code":"NOT_FOUND","message":"vm not found: m"}}',
                       # As `machine status` says it.

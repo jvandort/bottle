@@ -69,6 +69,8 @@ def _run(op: str, args: dict):
             local.ensure_deciding()
         case "stop":
             local.stop(args["machine"])
+        case "running":
+            return local.running()
         case "delete":
             local.delete(args["machine"])
         case "state":

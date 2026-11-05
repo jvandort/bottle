@@ -87,6 +87,12 @@ def delete(name: str) -> None:
         _run("machine", "delete", "--name", name, "-f")
 
 
+def running() -> list[str]:
+    """The machines running here, whoever made them: any that isn't stopped (or never started)."""
+    machines = json.loads(_run("machine", "ls", "--json") or "[]")
+    return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
+
+
 def state(name: str) -> str | None:
     """"running", "stopped", "created", ..., or None if there's no such machine."""
     try:

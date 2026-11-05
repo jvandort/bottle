@@ -175,6 +175,20 @@ def main(argv: list[str] | None = None) -> int:
         "and each starts again with `bottle start`.")
     runner_stop.add_argument("name", metavar="RUNNER", help="the runner whose bottles to stop")
     runner_stop.set_defaults(run=_runner_stop, parser=runner_stop)
+    runner_detach = runner_commands.add_parser(
+        "detach", help="stop everything on a runner and let it go, to turn it off",
+        description="Stop every bottle on a runner, check nothing else runs there, and let it go: then it's safe to "
+        "turn off. Until it's attached again it isn't asked anything, and its bottles show as detached. Using one "
+        "of them attaches it again, if it's back; so does `bottle runner attach`.")
+    runner_detach.add_argument("name", metavar="RUNNER", help="the runner to detach")
+    runner_detach.add_argument("--offline", action="store_true",
+                               help="it's off already: mark it detached without asking it anything")
+    runner_detach.set_defaults(run=_runner_detach, parser=runner_detach)
+    runner_attach = runner_commands.add_parser(
+        "attach", help="attach a detached runner again, once it's back",
+        description="Attach a detached runner again, once it answers, and name the bottles detaching it stopped.")
+    runner_attach.add_argument("name", metavar="RUNNER", help="the runner to attach")
+    runner_attach.set_defaults(run=_runner_attach, parser=runner_attach)
     runner_remove = runner_commands.add_parser(
         "remove", help="forget a runner with no bottles", description="Forget a runner with no bottles on it. "
         "Nothing on the machine is touched.")
@@ -438,6 +452,8 @@ def _runner_status(args: argparse.Namespace) -> int:
     for row in rows:
         if row.get("state") == "missing":
             state = "missing"
+        elif row.get("detached"):
+            state = "detached"
         elif not row["reachable"]:
             state = "unreachable"
         elif row.get("missing"):
@@ -452,6 +468,9 @@ def _runner_status(args: argparse.Namespace) -> int:
 def _runner_stop(args: argparse.Namespace) -> int:
     from bottle import bottles, runners
 
+    if runners.is_detached(args.name):
+        print(f"Nothing was running on {args.name}: it's detached")
+        return 0
     runners.get(args.name)  # one there is
     stopped, unreachable = bottles.stop_all(args.name)
     for name in stopped:
@@ -460,6 +479,33 @@ def _runner_stop(args: argparse.Namespace) -> int:
         raise BottleError(unreachable[args.name])
     if not stopped:
         print(f"Nothing was running on {args.name}")
+    return 0
+
+
+def _runner_detach(args: argparse.Namespace) -> int:
+    from bottle import runners
+
+    if runners.is_detached(args.name):
+        print(f"Runner {args.name} is detached already: it's safe to turn off")
+        return 0
+    for name in runners.detach(args.name, args.offline):
+        print(f"Stopped {name}")
+    if args.offline:
+        print(f"Runner {args.name} detached, unasked: nothing was stopped or checked")
+    else:
+        print(f"Runner {args.name} detached: nothing runs on it, so it's safe to turn off.")
+    print(f"Its bottles keep their disks there. When it's back, using one attaches it again, "
+          f"or `bottle runner attach {args.name}`.")
+    return 0
+
+
+def _runner_attach(args: argparse.Namespace) -> int:
+    from bottle import runners
+
+    stopped = runners.attach(args.name)
+    print(f"Runner {args.name} attached")
+    if stopped:
+        print(f"Running when it was detached: {', '.join(stopped)}. Start one with `bottle start NAME`.")
     return 0
 
 
