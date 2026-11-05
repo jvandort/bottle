@@ -111,10 +111,51 @@ class SidecarTest(FolioTestCase):
     def test_a_resume_that_fails_leaves_it_paused_with_neither_bottle(self) -> None:
         self.give_it_one()
         self.ok("pause", "fix-it")
-        self.resume_failing(self.sidecar)
         self.resume_failing(self.bottle)   # the sidecar made, then the thread's bottle not
         self.ok("claude", "fix-it")
         self.assertEqual(sorted(self.bottles()), [self.bottle, self.sidecar])
+
+    def folio_with(self, env: dict, *args: str) -> subprocess.CompletedProcess:
+        result = subprocess.run([sys.executable, str(FOLIO), *args], cwd=self.repo, env={**self.env, **env},
+                                capture_output=True, text=True, input="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_a_resume_goes_on_without_a_sidecar_it_cant_make(self) -> None:
+        self.give_it_one()
+        self.ok("pause", "fix-it")
+
+        said = self.folio_with({"FAKE_BOTTLE_FAIL_NEW": self.sidecar}, "claude", "fix-it").stderr
+
+        self.assertIn("thread fix-it goes on without its sidecar (", said)
+        self.assertEqual(self.bottles()[self.bottle]["ssh"], {})
+        self.assertNotIn("ssh sidecar", self.bottles()[self.bottle]["context"])
+        self.assertIn("comes with its next bottle", self.folio("sidecar", "shell", "fix-it").stderr)
+
+    def test_its_runner_turned_off_holds_nothing_up(self) -> None:
+        self.give_it_one()
+        self.ok("pause", "fix-it")
+        self.ok("claude", "fix-it")
+        off = {"FAKE_BOTTLE_OFF": "desktop"}
+
+        line = self.folio_with(off, "ls").stdout.splitlines()[1]
+        self.assertIn("desktop (detached)", line)
+        self.assertIn("didn't start", self.folio_with(off, "claude", "fix-it").stderr)
+        # A pause leaves it there, and a resume goes on without it.
+        self.assertIn(f"{self.sidecar}, is left on runner desktop, which is off",
+                      self.folio_with(off, "pause", "fix-it").stderr)
+        self.assertIn(self.sidecar, self.bottles())
+        self.assertIn("goes on without its sidecar (its old one is on runner desktop, which is off)",
+                      self.folio_with(off, "claude", "fix-it").stderr)
+        self.assertEqual(self.bottles()[self.bottle]["ssh"], {})
+        self.assertIn("comes with its next bottle", self.folio_with(off, "claude", "fix-it").stderr)
+
+        # Back on: the next bottle has it, the old one gone first.
+        self.ok("pause", "fix-it")
+        self.ok("claude", "fix-it")
+        self.assertEqual(self.bottles()[self.bottle]["ssh"], {"sidecar": self.sidecar})
+        self.assertEqual([c[-1] for c in self.calls("delete")].count(self.sidecar), 1)
+        self.assertIn("desktop (running)", self.ok("ls").splitlines()[1])
 
     def test_shell_only_while_the_thread_runs(self) -> None:
         self.assertIn("has no sidecar", self.folio("sidecar", "shell", "fix-it").stderr)

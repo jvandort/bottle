@@ -122,7 +122,14 @@ scratch: it's made just before the thread's bottle, started with it, and
 deleted with it, a pause included, which keeps nothing of it: what's worth
 keeping there is pushed before. So a thread that has a bottle gets its new
 sidecar, or loses its old one, when it's paused and resumed. `folio list`
-shows each thread's sidecar's runner.
+shows each thread's sidecar's runner, and its state (`running`, `stopped`, or
+`detached` while its runner is turned off: see `bottle runner detach`).
+
+A sidecar's runner that's off holds nothing up. `folio claude` and `folio
+shell` go on without the sidecar, saying so. A pause leaves it there, to be
+deleted when the thread next gets one; a resume makes the thread's bottle
+without one, saying so, and it comes with the bottle after, once its runner is
+back. The same goes for a sidecar that can't be made for any other reason.
 
 ## The broker
 
@@ -168,7 +175,7 @@ its reach until you resume it.
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
-| `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, and the space a paused one's snapshot takes up |
+| `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure set` / `update` / `show` | The repo's spec, its threads' features, memory and disk, and its runner |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |

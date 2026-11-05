@@ -213,6 +213,10 @@ def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False
     return thread
 
 
+# A bottle's state when its runner is off, as bottle says it: unreachable, or detached to be turned off.
+RUNNER_OFF = ("unreachable", "detached")
+
+
 def _make_bottle(repo: Repo, thread: Thread) -> None:
     """Create the thread's bottle from the repo's spec as it is now, served the thread's lane."""
     if thread.broker:
@@ -231,8 +235,16 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
               engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)]
     told, ssh = "", {}
     if thread.sidecar is not None:
-        _make_sidecar(repo, thread, repos_)
-        told, ssh = sidecar_advice(thread.sidecar["runner"], thread.sidecar["spec"]), {SIDECAR_HOST: thread.sidecar_bottle}
+        try:
+            _make_sidecar(repo, thread, repos_)
+        except FolioError as e:
+            # The thread is what's wanted: it goes on without, as when its sidecar doesn't start.
+            print(f"folio: thread {thread.name} goes on without its sidecar ({e}); it comes with the thread's next "
+                  f"bottle: pause and resume it (`folio pause {thread.name}`, then `folio claude {thread.name}`)",
+                  file=sys.stderr)
+        else:
+            told = sidecar_advice(thread.sidecar["runner"], thread.sidecar["spec"])
+            ssh = {SIDECAR_HOST: thread.sidecar_bottle}
     try:
         # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
         engine.new(thread.bottle, spec | {"thread": thread.name}, repos_,
@@ -246,25 +258,36 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
 def _make_sidecar(repo: Repo, thread: Thread, repos_: list[engine.Mount]) -> None:
     """Make the thread's sidecar afresh, from its spec as it is now: the thread's repos and remotes, pushes
     included, which bottle allows as the thread's bottle may ssh to it."""
-    _delete_sidecar(thread)   # scratch: whatever's left of one is no use
+    if not _delete_sidecar(thread):   # scratch: whatever's left of one is no use
+        raise FolioError(f"its old one is on runner {thread.sidecar['runner']}, which is off")
     spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]))
     engine.new(thread.sidecar_bottle, spec, repos_, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
 
 
-def _delete_sidecar(thread: Thread) -> None:
-    """Delete the thread's sidecar, if it has one."""
+def _delete_sidecar(thread: Thread) -> bool:
+    """Delete the thread's sidecar, if it has one; False if its runner is off, which leaves it to be deleted when
+    the thread next gets one."""
     if thread.broker:
-        return
-    if engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"] != "missing":
+        return True
+    row = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]
+    if row["state"] in RUNNER_OFF:
+        print(f"folio: thread {thread.name}'s sidecar, {thread.sidecar_bottle}, is left on runner {row['runner']}, "
+              f"which is off: it's deleted when the thread next gets one, or with `bottle delete "
+              f"{thread.sidecar_bottle}`", file=sys.stderr)
+        return False
+    if row["state"] != "missing":
         engine.delete(thread.sidecar_bottle)
+    return True
 
 
 def _start_sidecar(thread: Thread) -> None:
     """Start the thread's sidecar with its bottle, if it has one that's stopped: bottle starts only the one asked."""
     if thread.sidecar is None:
         return
-    state = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"]
-    if state == "missing":
+    rows = engine.status([thread.bottle, thread.sidecar_bottle])
+    state = rows[thread.sidecar_bottle]["state"]
+    # One the thread's bottle wasn't made with (it went on without) is no use to it, if it's there at all.
+    if state == "missing" or thread.sidecar_bottle not in rows[thread.bottle].get("ssh", {}).values():
         print(f"folio: thread {thread.name}'s sidecar comes with its next bottle: pause and resume it "
               f"(`folio pause {thread.name}`, then `folio claude {thread.name}`)", file=sys.stderr)
     elif state != "running":
@@ -285,7 +308,9 @@ def sidecar_shell(repo: Repo, thread: Thread) -> NoReturn:
     if state != "running":
         raise FolioError(f"thread {thread.name} is {state}: its sidecar is there while it runs "
                          f"(`folio claude {thread.name}` or `folio shell {thread.name}`)")
-    if engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"] == "missing":
+    rows = engine.status([thread.bottle, thread.sidecar_bottle])
+    if (rows[thread.sidecar_bottle]["state"] == "missing"
+            or thread.sidecar_bottle not in rows[thread.bottle].get("ssh", {}).values()):
         raise FolioError(f"thread {thread.name}'s sidecar comes with its next bottle: pause and resume it "
                          f"(`folio pause {thread.name}`, then `folio claude {thread.name}`)")
     engine.attach(thread.sidecar_bottle, ["bash", "-l"])
@@ -340,13 +365,16 @@ def _undo(repo: Repo, thread: Thread) -> None:
 
 
 def states(repo: Repo, threads: list[Thread]) -> dict[str, dict]:
-    """Each thread's bottle's status row, by thread name; a missing bottle with a snapshot is paused."""
-    rows = engine.status([t.bottle for t in threads])
+    """Each thread's bottle's status row, by thread name; a missing bottle with a snapshot is paused. One with a
+    sidecar has its sidecar's state too, as "sidecar"."""
+    rows = engine.status([t.bottle for t in threads] + [t.sidecar_bottle for t in threads if t.sidecar])
     result = {}
     for t in threads:
         row = rows.get(t.bottle, {"name": t.bottle, "state": "missing"})
         if row["state"] == "missing" and _snapshot(repo, t) is not None:
             row = {**row, "state": "paused"}
+        if t.sidecar:
+            row = {**row, "sidecar": rows.get(t.sidecar_bottle, {}).get("state", "missing")}
         result[t.name] = row
     return result
 

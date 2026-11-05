@@ -48,6 +48,12 @@ def main(argv: list[str]) -> int:
     state["calls"].append(argv)
     save(state)
     bottles = state["bottles"]
+    # A runner that's off (detached): its bottles show as such, and can't be made, started or deleted.
+    off = os.environ.get("FAKE_BOTTLE_OFF")
+    if off and argv[0] in ("new", "start", "delete"):
+        on = option(argv, "--runner") if argv[0] == "new" else bottles.get(argv[-1], {}).get("runner")
+        if on == off:
+            fail(f"runner {off} is detached, and doesn't answer yet: turn it on, then try again")
     match argv:
         case ["spec", "validate", "--json", path]:
             spec = json.loads(Path(path).read_text())
@@ -93,7 +99,8 @@ def main(argv: list[str]) -> int:
         case ["status", "--json", *names]:
             print(json.dumps([
                 # Each mount's objects as its clone has them (--shared: the repo's own), and its remotes' URLs.
-                {"name": n, "state": bottles[n]["state"], "features": bottles[n]["spec"]["features"],
+                {"name": n, "features": bottles[n]["spec"]["features"], "ssh": bottles[n].get("ssh", {}),
+                 "state": "detached" if bottles[n].get("runner") == off else bottles[n]["state"],
                  "runner": bottles[n].get("runner", "local"),
                  "mounts": [{"path": m["path"], "objects": str(Path(m["repo"]) / ".git" / "objects"),
                              "urls": {r.partition(":")[0]: f"http://bottle.host/git{m['path']}/{r.partition(':')[0]}"

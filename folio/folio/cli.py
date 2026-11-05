@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from . import broker, engine, lanes, notes, obsidian, picker, repos, threads
+from . import broker, engine, notes, obsidian, picker, repos, threads
 from .errors import FolioError
 
 
@@ -284,16 +284,18 @@ def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
     states = threads.states(repo, all_)
-    rows = [("THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES", "BRANCHES")]
+    rows = [("THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES")]
     for thread in all_:
         row = states[thread.name]
         size = threads.snapshot_size(repo, thread) if row["state"] == "paused" else None
         # Where its bottle is; for one without, where its next is made.
         runner = row.get("runner") or threads.runner_of(repo, thread) or "local"
-        rows.append((thread.name, row["state"], runner, thread.sidecar["runner"] if thread.sidecar else "-",
-                     _size(size) if size is not None else "-", _ago(thread.last_active),
-                     " ".join(row.get("features", ())) or "-",
-                     " ".join(sorted(lanes.branches(repo.path, thread.name))) or "-"))
+        # Its sidecar's runner, and how it is, unless there's none to speak of (a paused thread's).
+        sidecar = "-"
+        if thread.sidecar:
+            sidecar = thread.sidecar["runner"] + ("" if row["sidecar"] == "missing" else f" ({row['sidecar']})")
+        rows.append((thread.name, row["state"], runner, sidecar, _size(size) if size is not None else "-",
+                     _ago(thread.last_active), " ".join(row.get("features", ())) or "-"))
     _table(rows)
     return 0
 
