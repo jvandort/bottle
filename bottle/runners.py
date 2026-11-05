@@ -417,13 +417,15 @@ def add(name: str, destination: str, ask=None) -> "ssh.Check":
     return check
 
 
-def detach(name: str, offline: bool = False) -> list[str]:
+def detach(name: str, offline: bool = False, ask=None) -> list[str]:
     """Stop everything on remote runner `name`, so it can be turned off, and mark it detached: until it's attached
     again, it isn't asked anything (its bottles show as detached), and its link and shared connection are let go.
     Returns the bottles stopped, which attach names to start again.
 
-    Refused, and left attached, if it can't be reached, or if a machine that isn't a bottle's (a build, say)
-    still runs there: it isn't safe to turn off yet. `offline`: it's off already; mark it without asking it.
+    `ask` is asked, given the bottles running there, whether to stop them; without it, or told no, nothing is
+    stopped and it stays attached, so their agents can be told to wrap up first. Refused too, and left attached,
+    if it can't be reached, or if a machine that isn't a bottle's (a build, say) still runs there: it isn't safe
+    to turn off yet. `offline`: it's off already; mark it without asking it.
     """
     from bottle import bottles, ssh
 
@@ -436,6 +438,15 @@ def detach(name: str, offline: bool = False) -> list[str]:
         return []
     stopped: list[str] = []
     if not offline:
+        runner = get(name)
+        try:
+            running = [b.name for b in bottles.load().values()
+                       if b.runner == name and b.status == "ready" and runner.state(b.machine) == "running"]
+        except BottleError as e:
+            raise BottleError(f"{e}; if it's off already, `bottle runner detach {name} --offline`") from None
+        if running and (ask is None or not ask(running)):
+            raise BottleError(f"runner {name} is still attached, and {', '.join(running)} still running: "
+                              f"`bottle runner detach {name}` again when they can be stopped")
         stopped, unreachable = bottles.stop_all(name)
         if unreachable:
             raise BottleError(f"{unreachable[name]}; if it's off already, `bottle runner detach {name} --offline`")

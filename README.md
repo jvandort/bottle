@@ -419,7 +419,9 @@ here, and what a drone needs of them comes here.
 - **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
   machine can be shut down. Their disks stay there; `bottle start` starts one again.
 - **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
-  it stops its bottles, checks that nothing else runs there (an image build,
+  it names the bottles running there and asks before stopping them (in a
+  terminal; told no, or with no one to ask, it stops nothing and leaves the
+  runner attached, so you can have their agents wrap up first), checks that nothing else runs there (an image build,
   say; if something does, it says what, and leaves the runner attached), and
   lets it go, then says it's safe to turn off. Until it's attached again,
   nothing asks it anything: its bottles show as `detached`, at once, and

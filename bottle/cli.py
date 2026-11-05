@@ -177,8 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     runner_stop.set_defaults(run=_runner_stop, parser=runner_stop)
     runner_detach = runner_commands.add_parser(
         "detach", help="stop everything on a runner and let it go, to turn it off",
-        description="Stop every bottle on a runner, check nothing else runs there, and let it go: then it's safe to "
-        "turn off. Until it's attached again it isn't asked anything, and its bottles show as detached. Using one "
+        description="Stop every bottle on a runner (asking first), check nothing else runs there, and let it go: "
+        "then it's safe to turn off. Until it's attached again it isn't asked anything, and its bottles show as detached. Using one "
         "of them attaches it again, if it's back; so does `bottle runner attach`.")
     runner_detach.add_argument("name", metavar="RUNNER", help="the runner to detach")
     runner_detach.add_argument("--offline", action="store_true",
@@ -488,7 +488,14 @@ def _runner_detach(args: argparse.Namespace) -> int:
     if runners.is_detached(args.name):
         print(f"Runner {args.name} is detached already: it's safe to turn off")
         return 0
-    for name in runners.detach(args.name, args.offline):
+    def ask(running: list[str]) -> bool:
+        if not sys.stdin.isatty():
+            return False
+        print(f"Running on {args.name}: {', '.join(running)}. Stopping one ends whatever runs in it, its agent's "
+              "work included: tell them to wrap up first, if they're busy.")
+        return input("Stop them now? [y/N] ").strip().lower() in ("y", "yes")
+
+    for name in runners.detach(args.name, args.offline, ask):
         print(f"Stopped {name}")
     if args.offline:
         print(f"Runner {args.name} detached, unasked: nothing was stopped or checked")
