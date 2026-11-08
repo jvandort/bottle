@@ -4,7 +4,7 @@
 # last 10000 lines, pushed into the terminal's scrollback. The vterm engine,
 # because vt100's replay positions lines by absolute row, so on a terminal
 # shorter than the replay they overwrite each other instead of scrolling.
-# vterm needs shpool-vterm 0.2.8 or later, which shpool-build.sh builds with:
+# vterm needs shpool-vterm 0.2.8 or later, as shpool 0.11.6's release has:
 # earlier, it panics on a zero-width character and the session can't be
 # attached to again.
 prompt_prefix = ""
