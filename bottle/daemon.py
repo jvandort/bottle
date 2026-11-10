@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import resource
 import socket
 import subprocess
 import sys
@@ -58,6 +59,9 @@ LINK_APPEAR = 15
 LINK_BACKOFF = 60
 # A link no bottle is bound through for this long is let go, checked this often, in seconds.
 LINK_IDLE = 120
+# The open files bottled asks for: two for each flow it carries or serves (the bottle's side and the far end's),
+# and the cache's files, for every bottle's builds downloading at once. macOS gives what a shell starts 256.
+OPEN_FILES = 65536
 LINK_IDLE_CHECK = 15
 # How often a runner retries binding the bottles it couldn't when its link was down.
 RESTORE_INTERVAL = 5
@@ -653,8 +657,28 @@ async def _expire_cache(store: cache.Store) -> None:
         await asyncio.sleep(CACHE_EXPIRY_INTERVAL)
 
 
+def raise_open_files(wanted: int = OPEN_FILES) -> int:
+    """Raise this process's limit on open files towards `wanted`, as far as the system lets it; the limit it has.
+
+    Run out, every flow fails at once: a socket, a pipe to openssl, even a
+    lookup (getaddrinfo's socket) fails with EMFILE, and the bottles see
+    resets and failed lookups that look like a flaky network.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+    # macOS refuses more than kern.maxfilesperproc, whatever the hard limit says: halve until it's taken.
+    while target > soft:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            return target
+        except (ValueError, OSError):
+            target //= 2
+    return soft
+
+
 async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     path = path or socket_path()
+    log.info("open files: up to %d", raise_open_files())
     if daemon is None:
         # On a runner elsewhere, bottle.remote names its link: the controller's half is reached through it.
         there = os.environ.get("BOTTLE_LINK")

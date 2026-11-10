@@ -26,6 +26,39 @@ class SocketPathTest(unittest.TestCase):
         self.assertTrue(str(path).startswith(f"/tmp/bottle-{os.getuid()}/"))
 
 
+class OpenFilesTest(unittest.TestCase):
+    """bottled raises its limit on open files: macOS's 256 runs out under a few builds at once."""
+
+    def limits(self, soft: int, hard: int, most: int | None = None):
+        self.set: list[tuple[int, int]] = []
+
+        def setrlimit(_, limits):
+            if most is not None and limits[0] > most:
+                raise ValueError("not allowed to raise maximum limit")
+            self.set.append(limits)
+
+        return mock.patch.multiple(daemon.resource, getrlimit=mock.Mock(return_value=(soft, hard)), setrlimit=setrlimit)
+
+    def test_up_to_what_it_wants(self) -> None:
+        with self.limits(256, daemon.resource.RLIM_INFINITY):
+            self.assertEqual(daemon.raise_open_files(), daemon.OPEN_FILES)
+        self.assertEqual(self.set, [(daemon.OPEN_FILES, daemon.resource.RLIM_INFINITY)])
+
+    def test_no_higher_than_the_hard_limit(self) -> None:
+        with self.limits(256, 4096):
+            self.assertEqual(daemon.raise_open_files(), 4096)
+
+    def test_as_high_as_the_system_takes(self) -> None:
+        # macOS: an unlimited hard limit, and kern.maxfilesperproc below what's asked for.
+        with self.limits(256, daemon.resource.RLIM_INFINITY, most=24576):
+            self.assertEqual(daemon.raise_open_files(), 16384)
+
+    def test_never_lowered(self) -> None:
+        with self.limits(100000, daemon.resource.RLIM_INFINITY):
+            self.assertEqual(daemon.raise_open_files(), 100000)
+        self.assertEqual(self.set, [])
+
+
 class DaemonTest(unittest.IsolatedAsyncioTestCase):
     """bottled itself; what the decider does with a bottle's flows is test_decider's."""
 
