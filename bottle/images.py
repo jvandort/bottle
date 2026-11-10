@@ -209,8 +209,10 @@ def remove_unused(in_use: set[str]) -> None:
 
 # --- building --------------------------------------------------------------------
 
-# The builder: buildah, in a machine made for each build and gone after it.
-BUILDER_IMAGE = "quay.io/buildah/stable"
+# The builder: buildah, in a machine made for each build and gone after it. Pinned, so a release can't break
+# builds the day it's out: 1.44 mounts an overlay over the build context, its upper dir in /var/tmp, and a
+# machine's root is itself an overlay, which the kernel refuses as an upper ("not supported as upperdir").
+BUILDER_IMAGE = "quay.io/buildah/stable:v1.43.5-immutable"
 # Where the build's inputs go in the builder, sent as a tar over exec's stdin:
 # the context, the Dockerfile, and the bottle images a Dockerfile is built FROM.
 INPUTS = "/build"
