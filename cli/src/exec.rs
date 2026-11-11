@@ -1,8 +1,8 @@
-//! bottle-exec: runs one command through a bottle's agent, as `smolvm machine exec -i` does, and
-//! exits with its status (128 and the signal for one a signal killed), or 255 if it couldn't be
+//! `bottle-cli exec`: runs one command through a bottle's agent, as `smolvm machine exec -i` does,
+//! and exits with its status (128 and the signal for one a signal killed), or 255 if it couldn't be
 //! run.
 //!
-//!     bottle-exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
+//!     bottle-cli exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!
 //! With -t the command gets a terminal, as big as this one; this terminal, if stdin is one, is
 //! raw while it runs, and set back after. SIGINT, SIGTERM and SIGHUP sent here are passed on to
@@ -17,8 +17,10 @@ use std::thread;
 
 use bottle_agent_client::{Control, Start, WinSize, run, status};
 
-/// A failure of bottle-exec's own, not the command's: as ssh has it.
-const FAILED: u8 = 255;
+use crate::FAILED;
+
+pub const USAGE: &str =
+    "exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// The size of a terminal that can't be asked.
 const DEFAULT_SIZE: WinSize = WinSize { rows: 24, cols: 80 };
@@ -64,16 +66,11 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(Args { socket, start, tty })
 }
 
-fn main() -> ExitCode {
-    let mut args = match parse(std::env::args().skip(1)) {
+/// Runs `bottle-cli exec` with `args`, those after `exec`.
+pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut args = match parse(args) {
         Ok(args) => args,
-        Err(e) => {
-            eprintln!("bottle-exec: {e}");
-            eprintln!(
-                "usage: bottle-exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]..."
-            );
-            return ExitCode::from(FAILED);
-        }
+        Err(e) => return crate::usage_error(&e),
     };
     // Before any thread starts, so they all inherit it: these signals are waited for, below, and
     // never interrupt anything.
@@ -98,7 +95,7 @@ fn main() -> ExitCode {
     match result {
         Ok(exit) => ExitCode::from(status(exit) as u8),
         Err(e) => {
-            eprintln!("bottle-exec: {e}");
+            eprintln!("bottle-cli: {e}");
             ExitCode::from(FAILED)
         }
     }

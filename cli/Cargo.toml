@@ -1,0 +1,10 @@
+[package]
+name = "bottle-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bottle-agent-client.workspace = true
+libc.workspace = true

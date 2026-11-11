@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["agent-proto", "agent", "agent-client"]
+members = ["agent-proto", "agent", "agent-client", "cli"]
 
 [workspace.package]
 edition = "2024"
@@ -8,6 +8,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+bottle-agent-client = { path = "agent-client" }
 bottle-agent-proto = { path = "agent-proto" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

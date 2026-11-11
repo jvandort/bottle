@@ -1,4 +1,4 @@
-//! bottle-exec end to end, against the agent listening on a unix socket.
+//! `bottle-cli exec` end to end, against the agent listening on a unix socket.
 //!
 //! The agent is another package's binary, which cargo doesn't hand a test: it's built here (cargo
 //! does nothing if it's up to date), and found beside this test's own profile directory.
@@ -45,7 +45,7 @@ impl Agent {
     fn start() -> Agent {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "bottle-exec-test-{}-{}",
+            "bottle-cli-test-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -68,10 +68,10 @@ impl Agent {
         self.dir.join("exec.sock")
     }
 
-    /// bottle-exec, for this agent, with `args` after the socket.
+    /// `bottle-cli exec`, for this agent, with `args` after the socket.
     fn exec(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_bottle-exec"));
-        command.arg(self.socket()).args(args);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bottle-cli"));
+        command.arg("exec").arg(self.socket()).args(args);
         command
     }
 
@@ -165,24 +165,24 @@ fn exits_255_saying_why_when_the_command_cant_run() {
     let out = agent.output(&["/no/such/program"], b"");
     assert_eq!(out.status.code(), Some(255));
     assert!(
-        text(&out.stderr).starts_with("bottle-exec: /no/such/program: "),
+        text(&out.stderr).starts_with("bottle-cli: /no/such/program: "),
         "{}",
         text(&out.stderr)
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_bottle-exec"))
-        .args(["/no/such/socket", "true"])
+    let out = Command::new(env!("CARGO_BIN_EXE_bottle-cli"))
+        .args(["exec", "/no/such/socket", "true"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(255));
-    assert!(text(&out.stderr).starts_with("bottle-exec: "));
+    assert!(text(&out.stderr).starts_with("bottle-cli: "));
 
-    let out = Command::new(env!("CARGO_BIN_EXE_bottle-exec"))
-        .args(["/s"])
+    let out = Command::new(env!("CARGO_BIN_EXE_bottle-cli"))
+        .args(["exec", "/s"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(255));
-    assert!(text(&out.stderr).contains("usage: bottle-exec"));
+    assert!(text(&out.stderr).contains("usage: bottle-cli exec"));
 }
 
 #[test]
@@ -225,8 +225,8 @@ fn read_until(r: &mut impl Read, seen: &mut Vec<u8>, wanted: &str) {
     }
 }
 
-/// A terminal, as a person would run bottle-exec in: its master side for the test, and the side
-/// bottle-exec gets.
+/// A terminal, as a person would run bottle-cli in: its master side for the test, and the side
+/// bottle-cli gets.
 fn terminal(rows: u16, cols: u16) -> (OwnedFd, OwnedFd) {
     let size = libc::winsize {
         ws_row: rows,
@@ -269,7 +269,7 @@ fn gives_the_command_this_terminal_raw_and_sized_and_sets_it_back() {
         .stdin(end(&slave))
         .stdout(end(&slave))
         .stderr(end(&slave));
-    // SAFETY: setsid and TIOCSCTTY between fork and exec: the terminal is bottle-exec's own.
+    // SAFETY: setsid and TIOCSCTTY between fork and exec: the terminal is bottle-cli's own.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
@@ -291,7 +291,7 @@ fn gives_the_command_this_terminal_raw_and_sized_and_sets_it_back() {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: TIOCSWINSZ reads a winsize; bottle-exec, in the foreground, gets SIGWINCH.
+    // SAFETY: TIOCSWINSZ reads a winsize; bottle-cli, in the foreground, gets SIGWINCH.
     unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) };
     thread::sleep(Duration::from_millis(300));
     screen.write_all(b"go\r").unwrap();

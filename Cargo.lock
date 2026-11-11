@@ -27,6 +27,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bottle-cli"
+version = "0.1.0"
+dependencies = [
+ "bottle-agent-client",
+ "libc",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
