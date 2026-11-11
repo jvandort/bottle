@@ -1,6 +1,7 @@
 //! The agent in a bottle's VM: it runs commands for the host, one per connection (see
 //! bottle-agent-proto), and, as PID 1, reaps every orphan in the VM.
 
+pub mod init;
 pub mod reaper;
 pub mod socket;
 pub mod user;
