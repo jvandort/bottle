@@ -22,7 +22,7 @@ fn main() -> ExitCode {
 /// Says what's wrong with the command line, and how it goes.
 fn usage_error(problem: &str) -> ExitCode {
     eprintln!("bottle-cli: {problem}");
-    eprintln!("usage: bottle-cli {}", disk::USAGE);
-    eprintln!("       bottle-cli {}", exec::USAGE);
+    eprintln!("usage: bottle-cli {}", exec::USAGE);
+    eprintln!("   or: bottle-cli {}", disk::USAGE);
     ExitCode::from(FAILED)
 }

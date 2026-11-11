@@ -135,6 +135,7 @@ fn meta<R: Read>(entry: &mut tar::Entry<R>) -> io::Result<Meta> {
         }
     }
     let h = entry.header();
+    let old = h.as_old();
     let kind = match h.entry_type().as_byte() {
         // Contiguous, and GNU's sparse, which the tar crate reads whole.
         b'\0' | b'7' | b'S' => b'0',
@@ -145,10 +146,10 @@ fn meta<R: Read>(entry: &mut tar::Entry<R>) -> io::Result<Meta> {
     };
     Ok(Meta {
         kind,
-        mode: h.mode()? & 0o7777,
-        uid: h.uid()?,
-        gid: h.gid()?,
-        mtime: h.mtime()?,
+        mode: blank_is_zero(h.mode().map(u64::from), &old.mode)? as u32 & 0o7777,
+        uid: blank_is_zero(h.uid(), &old.uid)?,
+        gid: blank_is_zero(h.gid(), &old.gid)?,
+        mtime: blank_is_zero(h.mtime(), &old.mtime)?,
         uname: h.username_bytes().unwrap_or_default().to_vec(),
         gname: h.groupname_bytes().unwrap_or_default().to_vec(),
         // Some tars leave the fields blank for what isn't a device.
@@ -163,6 +164,14 @@ fn meta<R: Read>(entry: &mut tar::Entry<R>) -> io::Result<Meta> {
         link: entry.link_name_bytes().unwrap_or_default().into_owned(),
         pax,
     })
+}
+
+/// A number from a header, 0 if its field is blank, as libarchive and GNU tar read it.
+fn blank_is_zero(n: io::Result<u64>, field: &[u8]) -> io::Result<u64> {
+    match n {
+        Err(_) if field.iter().all(|&b| b == 0 || b == b' ') => Ok(0),
+        n => n,
+    }
 }
 
 fn make_disk(

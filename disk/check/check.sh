@@ -11,7 +11,8 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 archive=$1; shift
-work=$(mktemp -d)
+# Short: overlayfs takes only so many characters of lowerdir.
+work=$(mktemp -d /tmp/dc.XXXX)
 cleanup() {
     umount "$work/merged" 2>/dev/null || true
     for m in "$work"/m*; do umount "$m" 2>/dev/null || true; done
@@ -23,17 +24,9 @@ trap cleanup EXIT
 mkdir "$work/ref"
 python3 -I "$here/layers.py" "$archive" "$work/layers"
 for l in $(ls "$work/layers" | sort -n); do
-    tar -tf "$work/layers/$l" | while IFS= read -r p; do
-        p=${p#./}
-        base=${p##*/}
-        dir=$(dirname "$p")
-        case $base in
-            .wh..wh..opq) [ ! -d "$work/ref/$dir" ] || find "$work/ref/$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
-            .wh.*) rm -rf "$work/ref/$dir/${base#.wh.}" ;;
-        esac
-    done
+    python3 -I "$here/prepare.py" "$work/ref" "$work/layers/$l"
     tar -xpf "$work/layers/$l" -C "$work/ref" --numeric-owner --xattrs --xattrs-include='*' \
-        --exclude='.wh.*' --recursive-unlink --overwrite
+        --exclude='.wh.*' --overwrite
 done
 
 # The disks, stacked.
