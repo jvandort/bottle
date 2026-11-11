@@ -5,8 +5,8 @@
 #
 #     cli/check/measure.sh DISK...
 #
-# DISKs are stage disks, bottom first. Needs what boot needs: BOTTLE_LIBKRUN, DYLD_LIBRARY_PATH
-# (for libkrunfw), BOTTLE_GUEST_AGENT, BOTTLE_MKE2FS, and target/release/bottle-cli signed with
+# DISKs are stage disks, bottom first. Needs what boot needs: BOTTLE_LIBKRUN (libkrunfw beside it),
+# BOTTLE_GUEST_AGENT, BOTTLE_MKE2FS, and target/release/bottle-cli signed with
 # cli/hypervisor.entitlements. Takes a few minutes; stops its VMs when it's done.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)

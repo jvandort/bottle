@@ -11,8 +11,9 @@
 //! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
 //! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else `bottle-agent`
 //! beside this program), which stacks the disks and moves into them (bottle-agent init). libkrun is
-//! $BOTTLE_LIBKRUN, else beside this program, else wherever the dynamic loader finds it; on macOS
-//! this program needs the hypervisor entitlement (cli/hypervisor.entitlements).
+//! $BOTTLE_LIBKRUN, else beside this program, else wherever the dynamic loader finds it, and
+//! libkrunfw, the kernel, is found beside it; on macOS this program needs the hypervisor
+//! entitlement (cli/hypervisor.entitlements).
 
 use std::env;
 use std::ffi::{CString, c_char};
@@ -97,6 +98,9 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
+    let libkrun = krun::locate();
+    #[cfg(target_os = "macos")]
+    libkrunfw_beside(&libkrun)?;
     let agent = fs::read(guest_agent()?)?;
     // libkrun serves the agent from this memory for as long as the VM runs, which is as long as
     // this process does.
@@ -104,7 +108,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     let mke2fs = crate::disk::mke2fs()?;
     bottle_disk::mke2fs::empty(&mke2fs, &args.upper, args.size_gib << 30)
         .map_err(|e| io::Error::other(format!("making {}: {e}", args.upper.display())))?;
-    let krun = Krun::load(&krun::locate())?;
+    let krun = Krun::load(&libkrun)?;
 
     let c = |s: &str| CString::new(s).map_err(|_| io::Error::other(format!("{s:?}: a NUL")));
     let path = |p: &Path| -> io::Result<CString> {
@@ -225,6 +229,35 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         check("starting the VM", (krun.start_enter)(ctx))?;
     }
     Err(io::Error::other("libkrun returned from starting the VM"))
+}
+
+/// Makes sure libkrun finds libkrunfw beside it, when it's there. libkrun loads it by its name
+/// alone, which macOS looks for only on DYLD_LIBRARY_PATH: read once, as a program starts, and
+/// dropped on the way through protected programs, /bin/bash among them. So this program starts
+/// again, with libkrun's directory first on it, unless it's there already.
+#[cfg(target_os = "macos")]
+fn libkrunfw_beside(libkrun: &Path) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let Some(dir) = libkrun.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    if !dir.join("libkrunfw.5.dylib").exists() {
+        return Ok(());
+    }
+    let current = env::var_os("DYLD_LIBRARY_PATH").unwrap_or_default();
+    if env::split_paths(&current).any(|p| p == dir) {
+        return Ok(());
+    }
+    let paths = std::iter::once(dir.to_path_buf()).chain(env::split_paths(&current));
+    let path = env::join_paths(paths).map_err(io::Error::other)?;
+    let err = std::process::Command::new(env::current_exe()?)
+        .args(env::args_os().skip(1))
+        .env("DYLD_LIBRARY_PATH", path)
+        .exec();
+    Err(io::Error::other(format!(
+        "starting again for libkrunfw: {err}"
+    )))
 }
 
 /// Pointers to `strings`, then NULL, as C wants an array of strings.
