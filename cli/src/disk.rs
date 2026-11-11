@@ -51,7 +51,8 @@ fn run(dir: &Path, archive: &Path, bases: &[String]) -> io::Result<Vec<PathBuf>>
     make_disks(&archive, &image, &splits, dir, &mke2fs)
 }
 
-fn mke2fs() -> io::Result<PathBuf> {
+/// The mke2fs bottle runs: $BOTTLE_MKE2FS, else the one beside this program.
+pub fn mke2fs() -> io::Result<PathBuf> {
     if let Some(path) = env::var_os("BOTTLE_MKE2FS") {
         return Ok(path.into());
     }

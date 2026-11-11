@@ -157,6 +157,52 @@ pub fn make(
     Ok(())
 }
 
+/// Makes an empty filesystem `bytes` big at `path`, if nothing's there: a bottle's own disk, or a
+/// build's, written in the VM, so with a journal, a small one. Sparse: what isn't used of it takes
+/// no room.
+pub fn empty(mke2fs: &Path, path: &Path, bytes: u64) -> io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    let partial = path.with_file_name(format!(".{file}.{}", std::process::id()));
+    let mut config = partial.as_os_str().to_owned();
+    config.push(".mke2fs.conf");
+    let config = PathBuf::from(config);
+    fs::write(&config, CONFIG)?;
+    let made = Command::new(mke2fs)
+        .env("MKE2FS_CONFIG", &config)
+        .args([
+            "-q",
+            "-t",
+            "ext4",
+            "-b",
+            "4096",
+            "-O",
+            "has_journal",
+            "-J",
+            "size=16",
+        ])
+        .args(["-E", "root_owner=0:0,lazy_itable_init=1"])
+        .arg(&partial)
+        .arg((bytes / BLOCK).to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    let _ = fs::remove_file(&config);
+    let made = made.map_err(|e| other(format!("{}: {e}", mke2fs.display())))?;
+    if !made.status.success() {
+        let _ = fs::remove_file(&partial);
+        return Err(other(format!(
+            "mke2fs failed ({}): {}",
+            made.status,
+            String::from_utf8_lossy(&made.stderr).trim()
+        )));
+    }
+    fs::rename(&partial, path)
+}
+
 fn uuid(seed: &[u8; 16]) -> String {
     let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
     format!(

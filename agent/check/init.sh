@@ -6,7 +6,8 @@
 #
 #     sudo BOTTLE_MKE2FS=... agent/check/init.sh DISK...
 #
-# Linux only, as root, with loop devices; the binaries are target/release's.
+# Linux only, as root, with loop devices; the binaries are target/release's, the agent $BOTTLE_AGENT
+# if set (the static build a VM gets, say).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 bin=$here/../../target/release
@@ -31,7 +32,7 @@ done
 MKE2FS_CONFIG=/nonexistent "${BOTTLE_MKE2FS:?}" -q -t ext4 -E root_owner=0:0 "$work/rw.ext4" 8G
 rw=$(losetup -f --show "$work/rw.ext4"); loops+=("$rw")
 
-unshare -m -u --propagation private "$bin/bottle-agent" init "${lowers[@]}" --upper "$rw" \
+unshare -m -u --propagation private "${BOTTLE_AGENT:-$bin/bottle-agent}" init "${lowers[@]}" --upper "$rw" \
     --hostname checked --unix /run/agent.sock &
 agent=$!
 sock=/proc/$agent/root/run/agent.sock
