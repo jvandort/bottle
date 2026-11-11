@@ -1,3 +1,7 @@
+[alias]
+# bottle's build steps past cargo's own (xtask/): `cargo xtask dist`.
+xtask = "run -q -p xtask --"
+
 # The agent runs in bottles' VMs: a static Linux build, made on any host with Rust's own musl and
 # linker, nothing else installed (rustup target add aarch64-unknown-linux-musl, say).
 [target.aarch64-unknown-linux-musl]

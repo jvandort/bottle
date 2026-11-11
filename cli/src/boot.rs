@@ -9,8 +9,8 @@
 //! reached, for `bottle-cli exec`.
 //!
 //! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
-//! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else `bottle-agent`
-//! beside this program), which stacks the disks and moves into them (bottle-agent init). libkrun is
+//! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
+//! this program, else `bottle-agent` beside it), which stacks the disks and moves into them (bottle-agent init). libkrun is
 //! $BOTTLE_LIBKRUN, else beside this program, else wherever the dynamic loader finds it, and
 //! libkrunfw, the kernel, is found beside it; on macOS this program needs the hypervisor
 //! entitlement (cli/hypervisor.entitlements).
@@ -101,10 +101,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     let libkrun = krun::locate();
     #[cfg(target_os = "macos")]
     libkrunfw_beside(&libkrun)?;
-    let agent = fs::read(guest_agent()?)?;
-    // libkrun serves the agent from this memory for as long as the VM runs, which is as long as
-    // this process does.
-    let agent: &'static [u8] = Box::leak(agent.into_boxed_slice());
+    let agent = guest_agent()?;
     let mke2fs = crate::disk::mke2fs()?;
     bottle_disk::mke2fs::empty(&mke2fs, &args.upper, args.size_gib << 30)
         .map_err(|e| io::Error::other(format!("making {}: {e}", args.upper.display())))?;
@@ -269,19 +266,35 @@ fn nul_terminated(strings: &[CString]) -> Vec<*const c_char> {
         .collect()
 }
 
-/// The agent the VM runs: $BOTTLE_GUEST_AGENT, else `bottle-agent` beside this program.
-fn guest_agent() -> io::Result<PathBuf> {
-    if let Some(path) = env::var_os("BOTTLE_GUEST_AGENT") {
-        return Ok(path.into());
-    }
-    let beside = env::current_exe()?.with_file_name("bottle-agent");
-    if beside.exists() {
-        return Ok(beside);
-    }
-    Err(io::Error::other(format!(
-        "no agent for the VM: not at {}, and no $BOTTLE_GUEST_AGENT",
-        beside.display()
-    )))
+/// The agent bottle-cli was built with, if it was (see build.rs).
+#[cfg(embedded_agent)]
+const EMBEDDED_AGENT: Option<&[u8]> = Some(include_bytes!(concat!(env!("OUT_DIR"), "/agent")));
+#[cfg(not(embedded_agent))]
+const EMBEDDED_AGENT: Option<&[u8]> = None;
+
+/// The agent the VM runs: $BOTTLE_GUEST_AGENT, else the one bottle-cli was built with, else
+/// `bottle-agent` beside this program. libkrun serves it from this memory for as long as the VM
+/// runs, which is as long as this process does.
+fn guest_agent() -> io::Result<&'static [u8]> {
+    let path = match env::var_os("BOTTLE_GUEST_AGENT") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            if let Some(agent) = EMBEDDED_AGENT {
+                return Ok(agent);
+            }
+            let beside = env::current_exe()?.with_file_name("bottle-agent");
+            if !beside.exists() {
+                return Err(io::Error::other(format!(
+                    "no agent for the VM: none built in, none at {}, and no $BOTTLE_GUEST_AGENT",
+                    beside.display()
+                )));
+            }
+            beside
+        }
+    };
+    let agent =
+        fs::read(&path).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
+    Ok(Box::leak(agent.into_boxed_slice()))
 }
 
 #[cfg(test)]
