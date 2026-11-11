@@ -61,6 +61,11 @@ before=$(filecache); start=$(now)
 x "$work/a.sock" sh -c 'find / -xdev -type f -print0 2>/dev/null | xargs -0 cat > /dev/null 2>&1; true'
 echo "a read it all in $(since "$start"); file cache $before -> $(filecache)"
 echo "a after reading: $(mem "$a")"
+# Which regions the memory is in, at its most: the guest's RAM is one VM_ALLOCATE region of --mem.
+vmmap --summary "$a" > "$work/vmmap.txt" 2>&1 || true
+echo "a's regions, biggest resident first (all of it: $work/vmmap.txt, gone when this ends):"
+awk '/^REGION TYPE/,/^TOTAL/' "$work/vmmap.txt" | sort -k3 -h -r 2>/dev/null | head -12 || true
+cp "$work/vmmap.txt" /tmp/bottle-measure-vmmap.txt 2>/dev/null || true
 x "$work/a.sock" sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
 sleep 15
 echo "a after dropping its caches (+15 s): $(mem "$a")"
