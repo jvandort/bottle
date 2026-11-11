@@ -11,6 +11,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bottle-agent-client"
+version = "0.1.0"
+dependencies = [
+ "bottle-agent-proto",
+ "libc",
+]
+
+[[package]]
 name = "bottle-agent-proto"
 version = "0.1.0"
 dependencies = [
