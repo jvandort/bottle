@@ -1,5 +1,5 @@
 //! The agent in a bottle's VM: it runs commands for the host, one per connection (see
-//! bottle-proto), and, as PID 1, reaps every orphan in the VM.
+//! bottle-agent-proto), and, as PID 1, reaps every orphan in the VM.
 
 pub mod reaper;
 pub mod socket;
@@ -15,7 +15,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bottle_proto::{Exit, Start, ToGuest, ToHost, WinSize};
+use bottle_agent_proto::{Exit, Start, ToGuest, ToHost, WinSize};
 
 use crate::reaper::Reaper;
 use crate::socket::{Listener, Socket};

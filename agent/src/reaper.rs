@@ -19,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use bottle_proto::Exit;
+use bottle_agent_proto::Exit;
 
 #[derive(Default)]
 struct State {

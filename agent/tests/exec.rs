@@ -1,4 +1,4 @@
-//! The agent end to end: the binary, listening on a unix socket, and a client speaking bottle-proto.
+//! The agent end to end: the binary, listening on a unix socket, and a client speaking bottle-agent-proto.
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bottle_proto::{Exit, Start, ToGuest, ToHost, WinSize};
+use bottle_agent_proto::{Exit, Start, ToGuest, ToHost, WinSize};
 
 /// The agent, running until dropped.
 struct Agent {

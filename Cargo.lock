@@ -6,12 +6,12 @@ version = 4
 name = "bottle-agent"
 version = "0.1.0"
 dependencies = [
- "bottle-proto",
+ "bottle-agent-proto",
  "libc",
 ]
 
 [[package]]
-name = "bottle-proto"
+name = "bottle-agent-proto"
 version = "0.1.0"
 dependencies = [
  "serde",
