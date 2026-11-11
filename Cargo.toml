@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["agent-proto", "agent", "agent-client", "cli"]
+members = ["agent-proto", "agent", "agent-client", "cli", "disk"]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +10,10 @@ publish = false
 [workspace.dependencies]
 bottle-agent-client = { path = "agent-client" }
 bottle-agent-proto = { path = "agent-proto" }
+bottle-disk = { path = "disk" }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+tar = { version = "0.4", default-features = false }
