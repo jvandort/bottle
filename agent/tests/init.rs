@@ -57,6 +57,16 @@ impl Bottle {
         let loop_dev = run(Command::new("losetup").args(["-f", "--show"]).arg(&upper))
             .trim()
             .to_string();
+        // A directory of the host's to mount, and an environment.
+        let share = dir.join("share");
+        fs::create_dir_all(&share).unwrap();
+        fs::write(share.join("f"), "shared\n").unwrap();
+        let config = dir.join("config.json");
+        let json = serde_json::json!({
+            "env": [["GREETING", "hello there"]],
+            "mounts": [{"source": share, "target": "/mnt/share"}],
+        });
+        fs::write(&config, json.to_string()).unwrap();
         let unshare = Command::new("unshare")
             .args(["-p", "-f", "-m", "-u", "--propagation", "private"])
             .arg(env!("CARGO_BIN_EXE_bottle-agent"))
@@ -68,7 +78,9 @@ impl Bottle {
                 &loop_dev,
                 "--hostname",
                 "checked",
+                "--config",
             ])
+            .arg(&config)
             .args(["--unix", "/run/agent.sock"])
             .stdin(Stdio::null())
             .spawn()
@@ -245,6 +257,13 @@ fn stacks_unpacks_and_stops_clean() {
         bottle.ok(&["cat", "/proc/sys/kernel/hostname"], b""),
         "checked\n"
     );
+    assert_eq!(
+        bottle.ok(&["sh", "-c", "echo $GREETING"], b""),
+        "hello there\n"
+    );
+    assert_eq!(bottle.ok(&["cat", "/mnt/share/f"], b""), "shared\n");
+    let (_, exit) = bottle.exec(&["touch", "/mnt/share/g"], b"");
+    assert_ne!(exit, Exit::Code(0), "a mount is read-only");
     let root_line = bottle.ok(&["sh", "-c", "grep ' / / ' /proc/self/mountinfo"], b"");
     assert!(root_line.contains(" - overlay "), "{root_line}");
 

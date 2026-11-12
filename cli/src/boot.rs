@@ -2,11 +2,13 @@
 //! guest's console is this process's output.
 //!
 //!     bottle-cli boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB]
-//!                     [--hostname NAME] [--console FILE]
+//!                     [--hostname NAME] [--console FILE] [--env NAME=VALUE]...
+//!                     [--mount SOURCE:TARGET]...
 //!
 //! DISKs are the bottle's stage disks, bottom first, as `bottle-cli disk` prints them; UPPER is its
 //! own, read-write, made (--size GIB, sparse) if it isn't there. SOCKET is where the agent is
-//! reached, for `bottle-cli exec`.
+//! reached, for `bottle-cli exec`. Everything run in it gets --env's variables; each --mount is a
+//! host directory, read-only at TARGET (virtio-fs).
 //!
 //! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
 //! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
@@ -26,13 +28,17 @@ use crate::FAILED;
 use crate::krun::{self, Krun, check};
 
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
-                         [--hostname NAME] [--console FILE]";
+                         [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
+                         [--mount SOURCE:TARGET]...";
 
 /// The vsock port the agent listens on.
 const AGENT_PORT: u32 = 1024;
 
 /// What the agent runs commands with, before a command's own environment.
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// The bottle's environment and mounts, for the agent, in the first root.
+const CONFIG: &std::ffi::CStr = c"bottle-init.json";
 
 /// The mount points libkrun's init and the agent need in the first root, which is read-only.
 const MOUNT_POINTS: [&std::ffi::CStr; 4] = [c"dev", c"proc", c"sys", c"run"];
@@ -47,6 +53,9 @@ struct Args {
     size_gib: u64,
     hostname: Option<String>,
     console: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    /// Host directories, read-only in the bottle at their targets.
+    mounts: Vec<(PathBuf, String)>,
 }
 
 fn number<T: std::str::FromStr>(flag: &str, v: String) -> Result<T, String> {
@@ -57,6 +66,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut positional = Vec::new();
     let (mut cpus, mut mem_mib, mut size_gib) = (2, 2048, 64);
     let (mut hostname, mut console) = (None, None);
+    let (mut env, mut mounts) = (Vec::new(), Vec::new());
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
@@ -66,6 +76,20 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--size" => size_gib = number("--size", value("--size")?)?,
             "--hostname" => hostname = Some(value("--hostname")?),
             "--console" => console = Some(value("--console")?.into()),
+            "--env" => {
+                let pair = value("--env")?;
+                let (name, val) = pair
+                    .split_once('=')
+                    .ok_or(format!("--env {pair}: not NAME=VALUE"))?;
+                env.push((name.into(), val.into()));
+            }
+            "--mount" => {
+                let pair = value("--mount")?;
+                let (source, target) = pair
+                    .rsplit_once(':')
+                    .ok_or(format!("--mount {pair}: not SOURCE:TARGET"))?;
+                mounts.push((source.into(), target.into()));
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             _ => positional.push(PathBuf::from(arg)),
         }
@@ -82,6 +106,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         size_gib,
         hostname,
         console,
+        env,
+        mounts,
     })
 }
 
@@ -132,7 +158,22 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     if let Some(name) = &args.hostname {
         init.extend(["--hostname".into(), name.clone()]);
     }
+    // The bottle's environment and mounts, as a file in the first root (see bottle-agent init).
+    let config = serde_json::json!({
+        "env": args.env,
+        "mounts": args.mounts.iter().enumerate()
+            .map(|(i, (_, target))| serde_json::json!({"source": format!("m{i}"), "target": target}))
+            .collect::<Vec<_>>(),
+    });
+    let config: &'static [u8] = Box::leak(config.to_string().into_bytes().into_boxed_slice());
+    init.extend(["--config".into(), format!("/{}", CONFIG.to_string_lossy())]);
     init.extend(["--vsock".into(), AGENT_PORT.to_string()]);
+    let mounts = args
+        .mounts
+        .iter()
+        .enumerate()
+        .map(|(i, (source, _))| Ok((c(&format!("m{i}"))?, path(source)?)))
+        .collect::<io::Result<Vec<_>>>()?;
     let init: Vec<CString> = init.iter().map(|a| c(a)).collect::<io::Result<_>>()?;
     let argv = nul_terminated(&init);
     let env = [c(PATH)?];
@@ -197,6 +238,24 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
                 false,
             ),
         )?;
+        check(
+            "adding the bottle's config",
+            (krun.fs_add_overlay_file)(
+                ctx,
+                krun::ROOT_TAG.as_ptr(),
+                CONFIG.as_ptr(),
+                config.as_ptr(),
+                config.len(),
+                0o100644,
+                false,
+            ),
+        )?;
+        for (tag, source) in &mounts {
+            check(
+                "adding a mount",
+                (krun.add_virtiofs3)(ctx, tag.as_ptr(), source.as_ptr(), 0, true),
+            )?;
+        }
         for (id, disk) in ids.iter().zip(&disks) {
             check(
                 "adding a stage disk",
@@ -307,7 +366,12 @@ mod tests {
 
     #[test]
     fn parses_positionals_and_options_in_any_order() {
-        let a = args("/s --cpus 4 /rw /d0 --mem 4096 /d1 --hostname b --size 8").unwrap();
+        let a = args(
+            "/s --cpus 4 /rw /d0 --mem 4096 /d1 --hostname b --size 8 --env A=b=c --mount /h/x:/x",
+        )
+        .unwrap();
+        assert_eq!(a.env, [("A".to_string(), "b=c".to_string())]);
+        assert_eq!(a.mounts, [(PathBuf::from("/h/x"), "/x".to_string())]);
         assert_eq!(a.socket, PathBuf::from("/s"));
         assert_eq!(a.upper, PathBuf::from("/rw"));
         assert_eq!(a.disks, [PathBuf::from("/d0"), PathBuf::from("/d1")]);

@@ -75,7 +75,9 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: bottle-agent [init [--lower DISK]... --upper DISK [--hostname NAME]]");
+    eprintln!(
+        "usage: bottle-agent [init [--lower DISK]... --upper DISK [--hostname NAME] [--config FILE]]"
+    );
     eprintln!("                    --vsock PORT | --unix PATH");
     eprintln!("       bottle-agent unpack DIR [--oci]");
     ExitCode::from(2)

@@ -1,6 +1,6 @@
 //! bottle-cli: the host's side of bottles that bottle runs on libkrun itself. For now, `exec`,
 //! `boot`, the VM's launcher, `build` and `import`, which make images' stages in VMs, and `disk`,
-//! the converter they replace; the rest of a bottle's lifecycle is to come.
+//! the converter they replace, and `machine`, bottles' VMs kept, started and stopped.
 
 use std::process::ExitCode;
 
@@ -9,6 +9,7 @@ mod build;
 mod disk;
 mod exec;
 mod krun;
+mod machine;
 
 /// A failure of bottle-cli's own, not a command's: as ssh has it.
 const FAILED: u8 = 255;
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
         Some("boot") => boot::main(args),
         Some("build") => build::build(args),
         Some("import") => build::import(args),
+        Some("machine") => machine::main(args),
         Some("disk") => disk::main(args),
         Some("exec") => exec::main(args),
         Some(other) => usage_error(&format!("no command {other}")),
@@ -34,5 +36,6 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("   or: bottle-cli {}", boot::USAGE);
     eprintln!("   or: bottle-cli {}", build::BUILD_USAGE);
     eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);
+    eprintln!("   or: bottle-cli {}", machine::USAGE);
     ExitCode::from(FAILED)
 }

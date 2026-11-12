@@ -7,7 +7,8 @@
 //!   `rootfs/`s, its `work/` overlayfs's work directory.
 //!
 //! A disk is named by its virtio serial (the block id libkrun was given for it), or by a path to
-//! its device; a lower may also be a directory, used as it is (out of a VM, to try this on). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
+//! its device; a lower may also be a directory, used as it is (out of a VM, to try this on). With
+//! `--config FILE`, the bottle's environment and read-only mounts come too (see Config). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
 //! is a stage.
 
 use std::ffi::CString;
@@ -30,6 +31,29 @@ pub struct Stack {
     pub lowers: Vec<String>,
     pub upper: String,
     pub hostname: Option<String>,
+    /// The bottle's environment and mounts, from --config's file.
+    pub config: Config,
+}
+
+/// What a bottle is given past its disks, as a file (`--config`), which libkrun serves from memory
+/// in its first root: the kernel's command line has room for only so much.
+#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Set for everything run in the bottle, under what a command is given itself.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+}
+
+/// A directory of the host's, read-only in the bottle at `target`.
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mount {
+    /// Its virtio-fs tag; or, out of a VM, a directory, bound.
+    pub source: String,
+    pub target: String,
 }
 
 /// Init's options, taken from `args`; what's left there is how to serve.
@@ -44,6 +68,11 @@ pub fn parse(args: &mut Vec<String>) -> Result<Stack, String> {
             "--lower" => stack.lowers.push(value()?),
             "--upper" => upper = Some(value()?),
             "--hostname" => stack.hostname = Some(value()?),
+            "--config" => {
+                let path = value()?;
+                let json = fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+                stack.config = serde_json::from_slice(&json).map_err(|e| format!("{path}: {e}"))?;
+            }
             _ => rest.push(arg),
         }
     }
@@ -94,8 +123,25 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
             lowers.join(":")
         ),
     )?;
+    // The mounts, in the new root before the move: a directory to bind may be on a mount of its
+    // own, which the old root takes with it.
+    for m in &stack.config.mounts {
+        let target = format!("{root}/{}", m.target.trim_start_matches('/'));
+        fs::create_dir_all(&target)?;
+        if m.source.starts_with('/') {
+            mount_raw(Some(&m.source), &target, None, libc::MS_BIND, None)?;
+            let ro = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
+            mount_raw(None, &target, None, ro, None)?;
+        } else {
+            mount(&m.source, &target, "virtiofs", libc::MS_RDONLY, "")?;
+        }
+    }
     let upper = move_into(&root, &rw)?;
     mount_system()?;
+    for (name, value) in &stack.config.env {
+        // SAFETY: before any thread: the reaper and the connections start after init.
+        unsafe { std::env::set_var(name, value) };
+    }
     if let Some(name) = &stack.hostname {
         // SAFETY: sethostname reads `len` bytes of `name`.
         if unsafe { libc::sethostname(name.as_ptr().cast(), name.len()) } < 0 {
