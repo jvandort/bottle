@@ -22,7 +22,7 @@ over ssh. Let the agent run with full permissions inside. Take back only the com
 - **On another machine, too.** Add a Linux machine you reach over ssh as a *runner*, and a
   bottle there, a *drone*, works as one here does: its pushes, credentials and messages go
   through your Mac, which stays the one place your repo and tokens are.
-- **Composable features.** `tools`, `jvm`, `python`, `cc`, `chromium`, `claude`, `github`, `teamcity`, `develocity`, in the
+- **Composable features.** `tools`, `jvm`, `python`, `cc`, `rust`, `chromium`, `claude`, `github`, `teamcity`, `develocity`, in the
   [Dev Container feature](https://containers.dev/implementors/features/) format, chosen in a spec
   file. Images are prebuilt, and rebuilt when they go stale.
 - **No setup.** Installs what it needs on first use, and asks first. No Docker, no sudo, just
@@ -212,6 +212,13 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
 - `cc`: gcc as `cc`, with the C library headers (`libc6-dev`, which gcc only
   recommends and every link needs): what cargo needs to link build scripts,
   even when the output is wasm. No g++ or make.
+- `rust`: Rust through rustup 1.29.2 (checked against its checksum): a
+  toolchain with clippy and rustfmt, in a shared `RUSTUP_HOME`
+  (`/usr/local/rustup`) the bottle's user owns, so `rustup target add` needs no
+  sudo; `cargo`, `rustc` and `rustup` are in `/usr/local/bin`. `cargo install`
+  puts programs in `~/.cargo/bin`, on login shells' PATH. Brings `cc`.
+  Options: `toolchain` (default `stable`), `components` (default
+  `clippy,rustfmt`) and `targets` (default none), comma-separated.
 - `chromium`: Playwright for Python, with the headless Chromium build it's
   made for (`playwright install --with-deps --only-shell chromium`, at
   `/opt/ms-playwright`, in the image), to see a built web page actually

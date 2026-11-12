@@ -1,0 +1,34 @@
+{
+  "id": "rust",
+  "version": "1.0.0",
+  "name": "Rust",
+  "description": "Rust through rustup: a toolchain (default stable) with clippy and rustfmt, more targets on request, and gcc to link with.",
+  "containerEnv": {
+    "RUSTUP_HOME": "/usr/local/rustup"
+  },
+  "dependsOn": {
+    "cc": {}
+  },
+  "options": {
+    "toolchain": {
+      "type": "string",
+      "default": "stable",
+      "description": "The default toolchain: a channel (stable, beta, nightly) or a release like 1.91.0."
+    },
+    "components": {
+      "type": "string",
+      "default": "clippy,rustfmt",
+      "description": "Components to add to the toolchain, comma-separated, e.g. clippy,rustfmt,rust-src."
+    },
+    "targets": {
+      "type": "string",
+      "default": "",
+      "description": "More targets to install, comma-separated, e.g. wasm32-unknown-unknown,aarch64-unknown-linux-musl."
+    }
+  },
+  "customizations": {
+    "bottle": {
+      "context": "Rust's `${toolchain}` toolchain is installed through rustup (`cargo`, `rustc`, `rustup`), components ${components}; `rustup` can add more without sudo. `cargo install` puts programs in `~/.cargo/bin`, on login shells' PATH."
+    }
+  }
+}

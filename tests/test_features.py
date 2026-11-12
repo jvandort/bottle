@@ -10,7 +10,7 @@ from bottle.errors import BottleError
 
 class RealFeaturesTest(unittest.TestCase):
     def test_every_shipped_feature_is_valid(self) -> None:
-        self.assertEqual(features.available(), ["cc", "chromium", "claude", "develocity", "github", "jvm", "python", "teamcity", "tools"])
+        self.assertEqual(features.available(), ["cc", "chromium", "claude", "develocity", "github", "jvm", "python", "rust", "teamcity", "tools"])
         for feature_id in features.available():
             with self.subTest(feature_id):
                 features.load(feature_id)
