@@ -68,7 +68,8 @@ class RemoteRunnerTest(unittest.TestCase):
         self.runner.delete("bottle-b")
         [create, bind, start, stop, release, delete] = self.calls
         self.assertEqual(create[1], ("bottle-b", "/images/base.tar",
-                                     [runners.krun.Mount(Path("/m/objects"), "/mnt/objects/w")], {"A": "1"}, 512, 32, 50))
+                                     [runners.krun.Mount(Path("/m/objects"), "/mnt/objects/w")], {"A": "1"}, 512, 32, 50,
+                                     None, None, None))
         self.assertEqual(bind[1], ("b", served, ["tools"]))   # the repos it's served, as they were given
         self.assertEqual(start[1], ("bottle-b", "127.0.0.1:1", "t"))
         self.assertEqual([c[0] for c in (stop, release, delete)], ["stop", "release", "delete"])

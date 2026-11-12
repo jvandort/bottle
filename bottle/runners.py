@@ -75,9 +75,11 @@ class Runner(Protocol):
         """Where on the runner a machine mounts `repo`'s objects from."""
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, disk_gib: int | None = None) -> None:
+               memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
+               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
         """Create a stopped machine from `archive` (a top stage's disk), its mounts read-only, with all the runner's
-        cores; `memory_mib` and `disk_gib` None: bottle-cli's defaults."""
+        cores; `memory_mib` and `disk_gib` None: bottle-cli's defaults; `user`, `workdir` and `labels` as
+        krun.create has them."""
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
@@ -156,9 +158,10 @@ class LocalRunner:
         return repos.objects_dir(repo)
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, disk_gib: int | None = None) -> None:
+               memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
+               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
         krun.create(machine, str(archive), [krun.Mount(m.source, m.target) for m in mounts], env, memory_mib,
-                    os.cpu_count() or 1, disk_gib)
+                    os.cpu_count() or 1, disk_gib, user, workdir, labels)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
@@ -280,10 +283,11 @@ class RemoteRunner:
         return Path(self._call("mirror", key=mirrors.key(repos.objects_dir(repo).parent)))
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, disk_gib: int | None = None) -> None:
+               memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
+               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
         self._call("create", machine=machine, archive=str(archive),
                    mounts=[{"source": str(m.source), "target": m.target} for m in mounts],
-                   env=env, memory_mib=memory_mib, disk_gib=disk_gib)
+                   env=env, memory_mib=memory_mib, disk_gib=disk_gib, user=user, workdir=workdir, labels=labels)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:

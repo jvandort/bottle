@@ -37,4 +37,4 @@ class LocalRunnerTest(GitTestCase):
             runners.get().create("m", Path("/stages/a.ext4"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                  {"A": "1"}, 512, 50)
         create.assert_called_once_with("m", "/stages/a.ext4", [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                       {"A": "1"}, 512, 12, 50)
+                                       {"A": "1"}, 512, 12, 50, None, None, None)

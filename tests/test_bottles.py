@@ -38,12 +38,12 @@ class FakeSmolvm:
     def archive(self, tag):
         return Path("/images") / f"{tag.rsplit('/', 1)[-1].replace(':', '-')}.tar"
 
-    def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None):
+    def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None):
         if bottles.load():
             self.statuses_seen.append(bottles.load()[next(iter(bottles.load()))].status)
         self._step("create")
         self.create_args = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib, cpus=cpus,
-                                disk_gib=disk_gib)
+                                disk_gib=disk_gib, user=user, workdir=workdir, labels=labels)
         self.machines[name] = "created"
 
     def start(self, name, decider, token):
@@ -206,6 +206,24 @@ class CreateTest(BottleTestCase):
         self.assertEqual(fake.create_args["env"], {"BOTTLE_WORKDIR": "/workspace", "BOTTLE_MIRROR_ENV": "BOTTLE_WORKDIR"})
         [mount] = fake.create_args["mounts"]
         self.assertEqual((mount.source, mount.target), (self.repo_path / ".git/objects", "/mnt/objects/workspace"))
+
+    def test_its_machine_is_its_name_with_its_users_defaults(self) -> None:
+        fake = self.fake()
+        bottle = self.create(name="fix-it")
+        # As bottle-cli lists it: the bottle's own name, in this home's namespace.
+        self.assertEqual(bottle.machine, f"{bottles.namespace()}fix-it")
+        self.assertEqual(fake.create_args["name"], bottle.machine)
+        self.assertEqual((fake.create_args["user"], fake.create_args["workdir"], fake.create_args["labels"]),
+                         (bottles.USER, "/workspace", {}))
+
+    def test_a_bottle_made_before_keeps_its_machine(self) -> None:
+        self.fake()
+        bottle = self.create(name="old")
+        registry = json.loads(bottles.registry_path().read_text())
+        del registry["bottles"]["old"]["machine_name"]
+        bottles.registry_path().write_text(json.dumps(registry))
+        self.assertEqual(bottles.get("old").machine, f"bottle-{bottles.namespace()}old")
+        self.assertNotEqual(bottle.machine, bottles.get("old").machine)
 
     def test_started_with_its_token_at_the_decider(self) -> None:
         fake = self.fake()
@@ -564,10 +582,10 @@ class OwnershipTest(BottleTestCase):
 
     def test_new_refuses_a_taken_name_and_leaves_it_alone(self) -> None:
         fake = self.fake()
-        fake.machines["bottle-" + bottles.namespace() + "example"] = "running"
+        fake.machines[bottles.namespace() + "example"] = "running"
         with self.assertRaisesRegex(BottleError, "already exists; choose another name"):
             self.create()
-        self.assertEqual(fake.machines, {"bottle-" + bottles.namespace() + "example": "running"})
+        self.assertEqual(fake.machines, {bottles.namespace() + "example": "running"})
         self.assertEqual(bottles.load(), {})
         self.assertEqual(fake.calls, ["ensure_logged_in"])  # nothing was created, so nothing rolled back
 

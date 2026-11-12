@@ -167,6 +167,8 @@ class Bottle:
     runner: str = runners.LOCAL
     # The bottles it may ssh to (`--ssh`).
     ssh: tuple[SshGrant, ...] = ()
+    # Its machine's name, as bottle-cli has it; "" for a bottle made before it was recorded (see machine).
+    machine_name: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -186,7 +188,9 @@ class Bottle:
 
     @property
     def machine(self) -> str:
-        return f"bottle-{namespace()}{self.name}"
+        # Its own name (in this home's namespace), as bottle-cli lists it; one made before machines had that,
+        # bottle- and it.
+        return self.machine_name or f"bottle-{namespace()}{self.name}"
 
 
 def registry_path():
@@ -294,6 +298,7 @@ def create(
         name, uuid.uuid4().hex, images.BASE, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
         mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
+        machine_name=f"{namespace()}{name}",
     )
     bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
     log.info("%s: created, %s, features %s", name,
@@ -420,6 +425,8 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),
+        # What bottle-cli's exec and shell use unless told, and what its ls shows.
+        user=USER, workdir=bottle.workdir, labels={"thread": bottle.spec["thread"]} if "thread" in bottle.spec else {},
     )
     _start_machine(bottle)
     verify_contract(bottle)

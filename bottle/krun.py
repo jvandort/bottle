@@ -54,11 +54,16 @@ class Mount:
 
 
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
-           disk_gib: int | None = None) -> None:
+           disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
+           labels: dict[str, str] | None = None) -> None:
     """Create a stopped machine from `image` (a stage's disk), its mounts read-only; `memory_mib` and `disk_gib`
-    None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes."""
+    None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
+    `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it."""
     args = ["machine", "create", "--name", name, "--image", image, "--cpus", str(min(cpus, MAX_CPUS)),
-            *(["--mem", str(memory_mib)] if memory_mib else []), *(["--storage", str(disk_gib)] if disk_gib else [])]
+            *(["--mem", str(memory_mib)] if memory_mib else []), *(["--storage", str(disk_gib)] if disk_gib else []),
+            *(["--user", user] if user else []), *(["--workdir", workdir] if workdir else [])]
+    for key, value in (labels or {}).items():
+        args += ["--label", f"{key}={value}"]
     for m in mounts:
         args += ["-v", f"{m.source}:{m.target}:ro"]
     for key, value in env.items():

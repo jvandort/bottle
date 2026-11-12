@@ -37,6 +37,13 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][1:], ["machine", "create", "--name", "m", "--image", "/stages/b.ext4",
                                                      "--cpus", "2"])
 
+    def test_create_gives_its_users_defaults_and_labels(self) -> None:
+        run = self.run_with()
+        krun.create("fix-it", "/stages/b.ext4", [], {}, memory_mib=None, cpus=2, user="genie", workdir="/workspace",
+                    labels={"thread": "fix-it"})
+        self.assertEqual(run.call_args.args[0][-6:], ["--user", "genie", "--workdir", "/workspace",
+                                                      "--label", "thread=fix-it"])
+
     def test_start_binds_the_decider_with_the_token_in_the_environment_only(self) -> None:
         run = self.run_with()
         krun.start("bottle-b", "127.0.0.1:47329", "ab" * 32)
@@ -115,7 +122,7 @@ class KrunBottleTest(GitTestCase):
             self.calls.append(f"{what} as {user}")
             return ""
 
-        def create(name, image, mounts, env, memory_mib, cpus, disk_gib=None):
+        def create(name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None):
             self.calls.append("create")
             self.machines[name] = "created"
             self.created = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib)
