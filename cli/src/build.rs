@@ -6,11 +6,19 @@
 //!     bottle-cli import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli gc STORE [IMAGE]...
+//!     bottle-cli image build RECIPE STORE [--tag TAG] [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli image tag IMAGE TAG STORE
+//!     bottle-cli image rm TAG STORE
+//!     bottle-cli images STORE [--json]
 //!
 //! RECIPE is a JSON file, steps run on the stage it's `from` (see bottle_disk::build::Recipe);
 //! ARCHIVE an OCI layout archive of one image; REFERENCE an image in a registry
 //! (`debian:trixie-slim`, `name@sha256:...`), fetched by curl, streamed into the import (see
-//! bottle_disk::registry). gc keeps every machine's stages, running or not, and IMAGEs'. Each VM
+//! bottle_disk::registry). Images are a store's stages by their tags (Store::tags): `image build`
+//! builds a recipe whose base is a registry's image (`pull`: its reference) or one of the store's
+//! (`from`: a tag, or a stage's name), and tags what it made; `image tag` and `image rm` name and
+//! unname stages; `images` lists the tags. gc keeps every tagged image, every machine's stages,
+//! running or not, and IMAGEs'. Each VM
 //! is `bottle-cli boot`, this program again, its console kept for when it fails; libkrun and the
 //! rest are found as boot finds them, and the network options are boot's: a build's VM has the
 //! network they say.
@@ -33,6 +41,9 @@ pub const BUILD_USAGE: &str = "build RECIPE STORE [--decider ADDRESS:PORT | --ne
 pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]";
 pub const PULL_USAGE: &str = "pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]";
 pub const GC_USAGE: &str = "gc STORE [IMAGE]...";
+pub const IMAGE_USAGE: &str = "image build RECIPE STORE [--tag TAG] [--decider ADDRESS:PORT | --net-direct] \
+    | image tag IMAGE TAG STORE | image rm TAG STORE";
+pub const IMAGES_USAGE: &str = "images STORE [--json]";
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";
@@ -103,17 +114,156 @@ pub fn pull(args: impl Iterator<Item = String>) -> ExitCode {
     })())
 }
 
+/// `image build|tag|rm`: images by their tags.
+pub fn image(mut args: impl Iterator<Item = String>) -> ExitCode {
+    match args.next().as_deref() {
+        Some("build") => image_build(args),
+        Some("tag") => match <[String; 3]>::try_from(args.collect::<Vec<_>>()) {
+            Ok([image, tag, store]) => report((|| {
+                let store = store_for_reading(Path::new(&store))?;
+                let name = store.resolve(&image)?;
+                store.tag(&tag, &name)?;
+                store.disks(&name)
+            })()),
+            Err(_) => crate::usage_error("image tag needs IMAGE, TAG and STORE"),
+        },
+        Some("rm") => match <[String; 2]>::try_from(args.collect::<Vec<_>>()) {
+            Ok([tag, store]) => report((|| {
+                let store = store_for_reading(Path::new(&store))?;
+                if !store.untag(&tag)? {
+                    return Err(io::Error::other(format!("no image tagged {tag}")));
+                }
+                Ok(vec![])
+            })()),
+            Err(_) => crate::usage_error("image rm needs TAG and STORE"),
+        },
+        _ => crate::usage_error("image takes build, tag or rm"),
+    }
+}
+
+/// `image build RECIPE STORE [--tag TAG]`: the recipe's base pulled (`pull`) or found (`from`, a
+/// tag or a stage), the recipe built on it, and what it made tagged.
+fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut tag = None;
+    let mut rest = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--tag" {
+            match args.next() {
+                Some(value) => tag = Some(value),
+                None => return crate::usage_error("--tag needs a value"),
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    let (recipe, store, net) =
+        match two_and_net(rest.into_iter(), "image build needs RECIPE and STORE") {
+            Ok(args) => args,
+            Err(code) => return code,
+        };
+    report((|| {
+        let store = store_at(Path::new(&store))?;
+        let json = fs::read(&recipe).map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
+        let mut value: serde_json::Value = serde_json::from_slice(&json)
+            .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other(format!("{recipe}: not an object")))?;
+        let base = match (object.remove("pull"), object.remove("from")) {
+            (Some(_), Some(_)) => {
+                return Err(io::Error::other(format!(
+                    "{recipe}: pull or from, not both"
+                )));
+            }
+            (Some(serde_json::Value::String(reference)), None) => {
+                let mut registry =
+                    Registry::new(Reference::parse(&reference)?, &store.dir.join("registry"));
+                let image = registry.image()?;
+                Some(store.import(&image, |l| registry.layer(l), &Boot { net: net.clone() })?)
+            }
+            (None, Some(serde_json::Value::String(image))) => Some(store.resolve(&image)?),
+            (None, None) => None,
+            _ => {
+                return Err(io::Error::other(format!(
+                    "{recipe}: pull and from are strings"
+                )));
+            }
+        };
+        let mut recipe: Recipe = serde_json::from_value(value)
+            .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
+        recipe.from = base;
+        let name = store.build(&recipe, &Boot { net })?;
+        if let Some(tag) = &tag {
+            store.tag(tag, &name)?;
+        }
+        store.disks(&name)
+    })())
+}
+
+/// `images STORE [--json]`: the store's tags, each with its stage, disks and labels.
+pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    let (store, json) = match args.as_slice() {
+        [store] => (store, false),
+        [store, flag] | [flag, store] if flag == "--json" => (store, true),
+        _ => return crate::usage_error(IMAGES_USAGE),
+    };
+    let listed = (|| -> io::Result<Vec<serde_json::Value>> {
+        let store = store_for_reading(Path::new(store))?;
+        let mut images = Vec::new();
+        for (tag, name) in store.tags()? {
+            // A tag whose stage is gone (deleted by hand) is listed as such, not an error.
+            let (disks, labels) = match store.stage(&name) {
+                Ok(stage) => (store.disks(&name)?, stage.labels),
+                Err(_) => (vec![], Default::default()),
+            };
+            images.push(serde_json::json!({
+                "tag": tag, "name": name, "disks": disks, "labels": labels,
+            }));
+        }
+        Ok(images)
+    })();
+    match listed {
+        Ok(images) if json => {
+            println!("{}", serde_json::Value::Array(images));
+            ExitCode::SUCCESS
+        }
+        Ok(images) => {
+            for image in images {
+                println!(
+                    "{}\t{}",
+                    image["tag"].as_str().unwrap_or(""),
+                    image["name"].as_str().unwrap_or("")
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("bottle-cli: {e}");
+            ExitCode::from(FAILED)
+        }
+    }
+}
+
 /// `gc STORE [IMAGE]...`: deletes the stages in STORE no machine uses, and none of IMAGEs (top
-/// stages' names, or disks) is made of. What a machine uses is safe whether it runs or not.
+/// stages' names, or disks) or of its tagged images is made of. What a machine uses is safe
+/// whether it runs or not.
 pub fn gc(mut args: impl Iterator<Item = String>) -> ExitCode {
     let Some(store) = args.next() else {
         return crate::usage_error("gc needs STORE");
     };
     let keep: Vec<String> = args.collect();
     let result = (|| -> io::Result<Vec<String>> {
-        let store = store_at(Path::new(&store))?;
+        let store = store_for_reading(Path::new(&store))?;
         let mut kept = std::collections::BTreeSet::new();
         let in_use = crate::machine::disks_in_use()?;
+        for name in store.tags()?.values() {
+            // A tag whose stage is gone keeps nothing.
+            if let Ok(disks) = store.disks(name) {
+                kept.extend(disks);
+            }
+        }
         let named = keep.iter().map(|k| {
             let name = Path::new(k)
                 .file_stem()
@@ -157,6 +307,15 @@ fn store_at(dir: &Path) -> io::Result<Store> {
     Ok(Store {
         dir: dir.to_path_buf(),
         mke2fs: crate::mke2fs()?,
+    })
+}
+
+/// The store at `dir`, for what makes no disk (tags, listing, gc): mke2fs needn't be there.
+fn store_for_reading(dir: &Path) -> io::Result<Store> {
+    fs::create_dir_all(dir)?;
+    Ok(Store {
+        dir: dir.to_path_buf(),
+        mke2fs: crate::mke2fs().unwrap_or_default(),
     })
 }
 

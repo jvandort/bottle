@@ -21,6 +21,8 @@ fn main() -> ExitCode {
         Some("import") => build::import(args),
         Some("pull") => build::pull(args),
         Some("gc") => build::gc(args),
+        Some("image") => build::image(args),
+        Some("images") => build::images(args),
         Some("machine") => machine::main(args),
         Some("exec") => exec::main(args),
         Some(other) => usage_error(&format!("no command {other}")),
@@ -37,6 +39,8 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);
     eprintln!("   or: bottle-cli {}", build::PULL_USAGE);
     eprintln!("   or: bottle-cli {}", build::GC_USAGE);
+    eprintln!("   or: bottle-cli {}", build::IMAGE_USAGE);
+    eprintln!("   or: bottle-cli {}", build::IMAGES_USAGE);
     eprintln!("   or: bottle-cli {}", machine::USAGE);
     ExitCode::from(FAILED)
 }

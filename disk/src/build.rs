@@ -151,6 +151,64 @@ impl Store {
         serde_json::from_slice(&json).map_err(|e| other(format!("{}: {e}", path.display())))
     }
 
+    /// The store's tags: names for its stages, each a stage's name, as `image tag` gave them.
+    pub fn tags(&self) -> io::Result<BTreeMap<String, String>> {
+        match fs::read(self.tags_path()) {
+            Ok(json) => serde_json::from_slice(&json)
+                .map_err(|e| other(format!("{}: {e}", self.tags_path().display()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(other(format!("{}: {e}", self.tags_path().display()))),
+        }
+    }
+
+    /// Names stage `name` `tag`, instead of whatever it named before.
+    pub fn tag(&self, tag: &str, name: &str) -> io::Result<()> {
+        if tag.is_empty() || tag.chars().any(char::is_control) {
+            return Err(other(format!("{tag:?} isn't a tag")));
+        }
+        self.stage(name)?;
+        self.change_tags(|tags| {
+            tags.insert(tag.to_string(), name.to_string());
+        })
+    }
+
+    /// Removes `tag`, leaving its stages to gc; whether there was one.
+    pub fn untag(&self, tag: &str) -> io::Result<bool> {
+        let mut was = false;
+        self.change_tags(|tags| was = tags.remove(tag).is_some())?;
+        Ok(was)
+    }
+
+    /// The stage `image` is: a tag's, else a stage of that name.
+    pub fn resolve(&self, image: &str) -> io::Result<String> {
+        if let Some(name) = self.tags()?.get(image) {
+            return Ok(name.clone());
+        }
+        if self.disk(image).exists() && self.stage(image).is_ok() {
+            return Ok(image.to_string());
+        }
+        Err(other(format!("no image {image} in {}", self.dir.display())))
+    }
+
+    fn tags_path(&self) -> PathBuf {
+        self.dir.join("tags.json")
+    }
+
+    /// Reads the tags, changes them and writes them back, whole, with no other process doing the
+    /// same in between (builds tag concurrently).
+    fn change_tags(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) -> io::Result<()> {
+        let lock = fs::File::create(self.dir.join(".tags.lock"))?;
+        // SAFETY: flock on a descriptor this function owns; released when `lock` closes.
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut tags = self.tags()?;
+        change(&mut tags);
+        let partial = self.dir.join(".tags.json.partial");
+        fs::write(&partial, serde_json::to_vec_pretty(&tags).map_err(io::Error::other)?)?;
+        fs::rename(&partial, self.tags_path())
+    }
+
     /// The disks of stage `name`'s image, bottom first, it last.
     pub fn disks(&self, name: &str) -> io::Result<Vec<PathBuf>> {
         let stage = self.stage(name)?;
@@ -491,6 +549,35 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_names_a_stage_until_its_moved_or_removed() {
+        let dir = std::env::temp_dir().join(format!("bottle-tags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = Store {
+            dir: dir.clone(),
+            mke2fs: "mke2fs".into(),
+        };
+        for name in ["aaaa", "bbbb"] {
+            fs::write(store.disk(name), "").unwrap();
+            let stage = serde_json::to_vec(&Stage::default()).unwrap();
+            fs::write(dir.join(format!("{name}.json")), stage).unwrap();
+        }
+        assert!(store.tags().unwrap().is_empty());
+        store.tag("localhost/bottle/base:latest", "aaaa").unwrap();
+        assert_eq!(store.resolve("localhost/bottle/base:latest").unwrap(), "aaaa");
+        assert_eq!(store.resolve("bbbb").unwrap(), "bbbb"); // a stage by its own name
+        store.tag("localhost/bottle/base:latest", "bbbb").unwrap();
+        assert_eq!(store.resolve("localhost/bottle/base:latest").unwrap(), "bbbb");
+        assert!(store.tag("t", "cccc").is_err()); // no such stage
+        assert!(store.tag("a\nb", "aaaa").is_err());
+        assert!(store.untag("localhost/bottle/base:latest").unwrap());
+        assert!(!store.untag("localhost/bottle/base:latest").unwrap());
+        assert!(store.resolve("localhost/bottle/base:latest").is_err());
+        assert_eq!(store.names().unwrap(), ["aaaa", "bbbb"]); // tags.json is no stage
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn recipes_read_as_written() {
