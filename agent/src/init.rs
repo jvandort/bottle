@@ -149,20 +149,20 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         ),
     )?;
     // The mounts, in the new root before the move: a directory to bind may be on a mount of its
-    // own, which the old root takes with it.
-    for m in &stack.config.mounts {
-        let target = format!("{root}/{}", m.target.trim_start_matches('/'));
-        fs::create_dir_all(&target)?;
-        if m.source.starts_with('/') {
-            mount_raw(Some(&m.source), &target, None, libc::MS_BIND, None)?;
-            let ro = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
-            mount_raw(None, &target, None, ro, None)?;
-        } else {
-            mount(&m.source, &target, "virtiofs", libc::MS_RDONLY, "")?;
-        }
+    // own, which the old root takes with it. Those under /run after, on its tmpfs.
+    let (under_run, elsewhere): (Vec<&Mount>, Vec<&Mount>) = stack
+        .config
+        .mounts
+        .iter()
+        .partition(|m| m.target == "/run" || m.target.starts_with("/run/"));
+    for m in elsewhere {
+        mount_share(m, &format!("{root}/{}", m.target.trim_start_matches('/')))?;
     }
     let upper = move_into(&root, &rw)?;
     mount_system()?;
+    for m in under_run {
+        mount_share(m, &m.target)?;
+    }
     for (name, value) in &stack.config.env {
         // SAFETY: before any thread: the reaper and the connections start after init.
         unsafe { std::env::set_var(name, value) };
@@ -200,6 +200,18 @@ fn run(argv: &[String]) {
     }
     if let Err(e) = command.spawn() {
         eprintln!("bottle-agent init: running {argv:?}: {e}");
+    }
+}
+
+/// Mounts `m` at `target`, read-only: a virtio-fs tag, or a directory (out of a VM), bound.
+fn mount_share(m: &Mount, target: &str) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    if m.source.starts_with('/') {
+        mount_raw(Some(&m.source), target, None, libc::MS_BIND, None)?;
+        let ro = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
+        mount_raw(None, target, None, ro, None)
+    } else {
+        mount(&m.source, target, "virtiofs", libc::MS_RDONLY, "")
     }
 }
 

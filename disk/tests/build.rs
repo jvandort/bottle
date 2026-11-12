@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use bottle_disk::build::{Launch, Recipe, Stage, Step, Store, Vm, wait_for_agent};
+use bottle_disk::build::{Launch, Mount, Recipe, Stage, Step, Store, Vm, wait_for_agent};
 use bottle_disk::{Archive, oci::sha256};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -93,7 +93,12 @@ struct Running {
 }
 
 impl Launch for Namespaces {
-    fn launch(&self, lowers: &[PathBuf], upper: &Path) -> std::io::Result<Box<dyn Vm>> {
+    fn launch(
+        &self,
+        lowers: &[PathBuf],
+        upper: &Path,
+        mount: Option<&Mount>,
+    ) -> std::io::Result<Box<dyn Vm>> {
         // Before any loop device: nothing to leak if this fails.
         let agent = agent();
         let mut loops = Vec::new();
@@ -114,12 +119,16 @@ impl Launch for Namespaces {
         let dev = run(Command::new("losetup").args(["-f", "--show"]).arg(upper))
             .trim()
             .to_string();
-        args.extend([
-            "--upper".into(),
-            dev.clone(),
-            "--unix".into(),
-            "/run/agent.sock".into(),
-        ]);
+        args.extend(["--upper".into(), dev.clone()]);
+        if let Some(m) = mount {
+            // The recipe's mount, a directory bound: its source must be where the bottle's root
+            // (this machine's /, as a lower) shows it, on the root filesystem, not a mount of its own.
+            let config = upper.with_extension("config.json");
+            let json = serde_json::json!({"mounts": [{"source": m.source, "target": m.target}]});
+            fs::write(&config, json.to_string())?;
+            args.extend(["--config".into(), config.display().to_string()]);
+        }
+        args.extend(["--unix".into(), "/run/agent.sock".into()]);
         loops.push(dev);
         let unshare = Command::new("unshare")
             .args(["-p", "-f", "-m", "-u", "--propagation", "private"])
@@ -250,7 +259,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Fixture {
-        let dir = PathBuf::from(format!("/tmp/bdb{}", std::process::id()));
+        // On the root filesystem, which the builds' bottles see as their lower, so the recipe's
+        // mount can be bound from there; short, as overlayfs wants lowerdir.
+        let dir = PathBuf::from(format!("/var/tmp/bdb{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("host.ext4"), "").unwrap();
@@ -361,26 +372,29 @@ fn imports_an_image_then_builds_on_a_stage() {
         imported
     );
 
-    let source = f.store.dir.join("source");
-    fs::create_dir_all(source.join("sub")).unwrap();
+    // A features directory, as bottle has one: each feature's install.sh, and what's beside it.
+    let features = f.store.dir.join("features");
+    fs::create_dir_all(features.join("thing")).unwrap();
+    fs::write(features.join("thing/payload"), "from beside install.sh\n").unwrap();
     fs::write(
-        source.join("sub/install.sh"),
-        "#!/bin/sh\necho installed > /installed\n",
+        features.join("thing/install.sh"),
+        "#!/bin/sh\nset -e\ncp ./payload /payload\necho installed > /installed\n",
     )
     .unwrap();
     run(Command::new("chmod")
         .arg("+x")
-        .arg(source.join("sub/install.sh")));
+        .arg(features.join("thing/install.sh")));
     let recipe = Recipe {
         from: Some("host".into()),
+        mount: Some(Mount {
+            source: features.clone(),
+            target: "/run/features".into(),
+        }),
         steps: vec![
-            Step::Copy {
-                copy: source.clone(),
-                to: "/opt/thing".into(),
-            },
             Step::Run {
-                run: vec!["/opt/thing/sub/install.sh".into()],
+                run: vec!["./install.sh".into()],
                 env: BTreeMap::new(),
+                cwd: Some("/run/features/thing".into()),
             },
             Step::Env {
                 env: [("GREETING".into(), "hello".into())].into(),
@@ -392,6 +406,7 @@ fn imports_an_image_then_builds_on_a_stage() {
                     "echo $GREETING $EXTRA > /greeting && rm -rf /etc/motd".into(),
                 ],
                 env: [("EXTRA".into(), "there".into())].into(),
+                cwd: None,
             },
         ],
         cmd: Some(vec!["bash".into()]),
@@ -415,9 +430,13 @@ fn imports_an_image_then_builds_on_a_stage() {
             fs::read_to_string(root.join("greeting")).unwrap(),
             "hello there\n"
         );
-        let meta = fs::metadata(root.join("opt/thing/sub/install.sh")).unwrap();
-        assert_eq!(std::os::unix::fs::MetadataExt::uid(&meta), 0);
+        assert_eq!(
+            fs::read_to_string(root.join("payload")).unwrap(),
+            "from beside install.sh\n"
+        );
         assert!(!root.join("etc/motd").exists());
+        // What was mounted isn't in the stage.
+        assert!(!root.join("run/features").exists());
     });
     // Built again, it's the stage there, not another build.
     let start = Instant::now();

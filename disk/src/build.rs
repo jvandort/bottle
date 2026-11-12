@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::thread;
@@ -40,6 +40,10 @@ pub struct Recipe {
     /// The stage it's built on, by name in the store; on nothing if None.
     #[serde(default)]
     pub from: Option<String>,
+    /// A directory of the host's, read-only in the build's VM at its target, for its steps: what
+    /// they install from. Not in the stage.
+    #[serde(default)]
+    pub mount: Option<Mount>,
     #[serde(default)]
     pub steps: Vec<Step>,
     #[serde(default)]
@@ -54,16 +58,26 @@ pub struct Recipe {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Step {
-    /// A directory of the host's, copied in to `to`, everything owned by root.
-    Copy { copy: PathBuf, to: String },
-    /// A command, as root, in `/`, with the image's environment so far and `env`; it must exit 0.
+    /// A command, as root, in `cwd` (`/` if None), with the image's environment so far and `env`;
+    /// it must exit 0.
     Run {
         run: Vec<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        #[serde(default)]
+        cwd: Option<String>,
     },
     /// Variables set in the image, for the steps after and for what runs in it.
     Env { env: BTreeMap<String, String> },
+}
+
+/// A directory of the host's, at `target` in a VM. A target under /run is on its tmpfs, and
+/// leaves nothing on the stage's disk; anywhere else, the directory made for it would stay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mount {
+    pub source: PathBuf,
+    pub target: String,
 }
 
 /// A stage in the store, as its `.json` has it.
@@ -85,9 +99,15 @@ pub trait Vm {
     fn wait(self: Box<Self>) -> io::Result<()>;
 }
 
-/// How a build boots its VM: on `lowers` (disks, bottom first), with `upper` on top.
+/// How a build boots its VM: on `lowers` (disks, bottom first), with `upper` on top, and
+/// `mount`, read-only, if Some.
 pub trait Launch {
-    fn launch(&self, lowers: &[PathBuf], upper: &Path) -> io::Result<Box<dyn Vm>>;
+    fn launch(
+        &self,
+        lowers: &[PathBuf],
+        upper: &Path,
+        mount: Option<&Mount>,
+    ) -> io::Result<Box<dyn Vm>>;
 }
 
 /// A store of stages.
@@ -152,22 +172,19 @@ impl Store {
             .cmd
             .clone()
             .or_else(|| parent.as_ref().and_then(|(_, s)| s.cmd.clone()));
-        self.make(&name, &disks, launch, |socket| {
+        self.make(&name, &disks, launch, recipe.mount.as_ref(), |socket| {
             for step in &recipe.steps {
                 match step {
-                    Step::Copy { copy, to } => {
-                        let source = copy.clone();
-                        unpack(socket, to, false, move |w| write_tree(&source, w))?;
-                    }
                     Step::Run {
                         run: argv,
                         env: step_env,
+                        cwd,
                     } => {
                         let all = env
                             .iter()
                             .chain(step_env)
                             .map(|(k, v)| (k.clone(), v.clone()));
-                        command(socket, argv, all.collect())?;
+                        command(socket, argv, all.collect(), cwd.as_deref())?;
                     }
                     Step::Env { env: set } => env.extend(set.clone()),
                 }
@@ -203,7 +220,7 @@ impl Store {
         if self.disk(&name).exists() {
             return Ok(name);
         }
-        self.make(&name, &[], launch, |socket| {
+        self.make(&name, &[], launch, None, |socket| {
             for layer in &image.layers {
                 thread::scope(|scope| -> io::Result<()> {
                     let (reader, mut writer) = io::pipe()?;
@@ -242,21 +259,19 @@ impl Store {
         Ok(name)
     }
 
-    /// The name of what `recipe` builds: of the stage it's on, its steps, the content of what they
-    /// copy (not where it is), and the image's config.
+    /// The name of what `recipe` builds: of the stage it's on, the content of what it mounts (not
+    /// where it is), its steps, and the image's config.
     pub fn name_of(&self, recipe: &Recipe) -> io::Result<String> {
-        let mut steps = Vec::new();
-        for step in &recipe.steps {
-            steps.push(match step {
-                Step::Copy { copy, to } => {
-                    serde_json::json!({"copy": tree_hash(copy)?, "to": to})
-                }
-                other => serde_json::to_value(other).unwrap(),
-            });
-        }
+        let mount = match &recipe.mount {
+            Some(m) => {
+                Some(serde_json::json!({"source": tree_hash(&m.source)?, "target": m.target}))
+            }
+            None => None,
+        };
         let inputs = serde_json::json!({
             "from": recipe.from,
-            "steps": steps,
+            "mount": mount,
+            "steps": recipe.steps,
             "entrypoint": recipe.entrypoint,
             "cmd": recipe.cmd,
             "labels": recipe.labels,
@@ -271,6 +286,7 @@ impl Store {
         name: &str,
         lowers: &[PathBuf],
         launch: &dyn Launch,
+        mount: Option<&Mount>,
         steps: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
         let partial = self
@@ -279,7 +295,7 @@ impl Store {
         let _ = fs::remove_file(&partial);
         crate::mke2fs::empty(&self.mke2fs, &partial, DISK_BYTES)?;
         let result = (|| {
-            let vm = launch.launch(lowers, &partial)?;
+            let vm = launch.launch(lowers, &partial, mount)?;
             let ran = steps(vm.socket());
             // Stopped either way, so the VM doesn't outlive the build.
             let stopped = stop(vm.socket()).map_err(|e| other(format!("stopping: {e}")));
@@ -335,13 +351,19 @@ pub fn wait_for_agent(socket: &Path, mut alive: impl FnMut() -> bool) -> io::Res
     }
 }
 
-/// Runs `argv` with `env`, its output to stderr: what a build shows as it goes.
-fn command(socket: &Path, argv: &[String], env: Vec<(String, String)>) -> io::Result<()> {
+/// Runs `argv` with `env`, in `cwd` (`/` if None), its output to stderr: what a build shows as
+/// it goes.
+fn command(
+    socket: &Path,
+    argv: &[String],
+    env: Vec<(String, String)>,
+    cwd: Option<&str>,
+) -> io::Result<()> {
     let (_, controls) = channel();
     let start = Start {
         argv: argv.to_vec(),
         env,
-        cwd: Some("/".into()),
+        cwd: Some(cwd.unwrap_or("/").into()),
         ..Start::default()
     };
     let exit = run(
@@ -357,19 +379,6 @@ fn command(socket: &Path, argv: &[String], env: Vec<(String, String)>) -> io::Re
         Exit::Code(0) => Ok(()),
         exit => Err(other(format!("{argv:?}: {exit:?}"))),
     }
-}
-
-/// Unpacks what `write` writes, a tar, into `dir` in the VM (see bottle-agent unpack).
-fn unpack(
-    socket: &Path,
-    dir: &str,
-    oci: bool,
-    write: impl FnOnce(&mut io::PipeWriter) -> io::Result<()> + Send + 'static,
-) -> io::Result<()> {
-    let (reader, mut writer) = io::pipe()?;
-    let feeding = thread::spawn(move || write(&mut writer));
-    let unpacked = unpack_from(socket, dir, oci, reader);
-    feeding.join().unwrap().and(unpacked)
 }
 
 fn unpack_from(
@@ -400,32 +409,6 @@ fn unpack_from(
         Exit::Code(0) => Ok(()),
         exit => Err(other(format!("unpacking into {dir}: {exit:?}"))),
     }
-}
-
-/// Writes the tree at `dir` as a tar: directories, files and symlinks, owned by root, with their
-/// modes and times.
-fn write_tree(dir: &Path, out: &mut impl Write) -> io::Result<()> {
-    let mut tar = tar::Builder::new(out);
-    for (rel, meta, path) in walk(dir)? {
-        let mut h = tar::Header::new_gnu();
-        h.set_uid(0);
-        h.set_gid(0);
-        h.set_mode(meta.permissions().mode() & 0o7777);
-        h.set_mtime(meta.mtime().max(0) as u64);
-        if meta.is_dir() {
-            h.set_entry_type(tar::EntryType::Directory);
-            h.set_size(0);
-            tar.append_data(&mut h, &rel, io::empty())?;
-        } else if meta.file_type().is_symlink() {
-            h.set_entry_type(tar::EntryType::Symlink);
-            h.set_size(0);
-            tar.append_link(&mut h, &rel, fs::read_link(&path)?)?;
-        } else if meta.is_file() {
-            h.set_size(meta.len());
-            tar.append_data(&mut h, &rel, fs::File::open(&path)?)?;
-        }
-    }
-    tar.finish()
 }
 
 /// Everything under `dir`, sorted, each as its path in it, its metadata and its path.
@@ -486,9 +469,9 @@ mod tests {
     #[test]
     fn recipes_read_as_written() {
         let recipe: Recipe = serde_json::from_str(
-            r#"{"from": "abc", "steps": [
-                {"copy": "/host/f", "to": "/tmp/f"},
-                {"run": ["sh", "-c", "true"], "env": {"A": "1"}},
+            r#"{"from": "abc", "mount": {"source": "/host/features", "target": "/run/features"},
+                "steps": [
+                {"run": ["./install.sh"], "env": {"A": "1"}, "cwd": "/run/features/python"},
                 {"run": ["true"]},
                 {"env": {"LANG": "C.UTF-8"}}
             ], "cmd": ["sh"]}"#,
@@ -496,19 +479,24 @@ mod tests {
         .unwrap();
         assert_eq!(recipe.from.as_deref(), Some("abc"));
         assert_eq!(
+            recipe.mount,
+            Some(Mount {
+                source: "/host/features".into(),
+                target: "/run/features".into()
+            })
+        );
+        assert_eq!(
             recipe.steps,
             [
-                Step::Copy {
-                    copy: "/host/f".into(),
-                    to: "/tmp/f".into()
-                },
                 Step::Run {
-                    run: vec!["sh".into(), "-c".into(), "true".into()],
-                    env: [("A".into(), "1".into())].into()
+                    run: vec!["./install.sh".into()],
+                    env: [("A".into(), "1".into())].into(),
+                    cwd: Some("/run/features/python".into()),
                 },
                 Step::Run {
                     run: vec!["true".into()],
-                    env: BTreeMap::new()
+                    env: BTreeMap::new(),
+                    cwd: None,
                 },
                 Step::Env {
                     env: [("LANG".into(), "C.UTF-8".into())].into()
@@ -519,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_is_named_for_what_it_copies_not_where_from() {
+    fn a_stage_is_named_for_what_it_mounts_not_where_from() {
         let base = std::env::temp_dir().join(format!("bottle-build-{}", std::process::id()));
         let (a, b) = (base.join("a"), base.join("b"));
         for dir in [&a, &b] {
@@ -531,10 +519,10 @@ mod tests {
             mke2fs: "mke2fs".into(),
         };
         let recipe = |dir: &Path| Recipe {
-            steps: vec![Step::Copy {
-                copy: dir.into(),
-                to: "/x".into(),
-            }],
+            mount: Some(Mount {
+                source: dir.into(),
+                target: "/run/x".into(),
+            }),
             ..Recipe::default()
         };
         assert_eq!(

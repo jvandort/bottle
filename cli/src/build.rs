@@ -17,7 +17,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bottle_disk::Archive;
-use bottle_disk::build::{Launch, Recipe, Store, Vm, wait_for_agent};
+use bottle_disk::build::{Launch, Mount, Recipe, Store, Vm, wait_for_agent};
 
 use crate::FAILED;
 use crate::boot::Net;
@@ -114,7 +114,12 @@ struct Booted {
 }
 
 impl Launch for Boot {
-    fn launch(&self, lowers: &[PathBuf], upper: &Path) -> io::Result<Box<dyn Vm>> {
+    fn launch(
+        &self,
+        lowers: &[PathBuf],
+        upper: &Path,
+        mount: Option<&Mount>,
+    ) -> io::Result<Box<dyn Vm>> {
         // A unix socket's path has room for only so many characters (104 on macOS): in the
         // temporary directory, not the store.
         static N: AtomicU32 = AtomicU32::new(0);
@@ -131,6 +136,12 @@ impl Launch for Boot {
             .arg(upper)
             .args(lowers)
             .args(self.net.args())
+            .args(mount.into_iter().flat_map(|m| {
+                [
+                    "--mount".to_string(),
+                    format!("{}:{}", m.source.display(), m.target),
+                ]
+            }))
             .args(["--cpus", CPUS, "--mem", MEM_MIB, "--console"])
             .arg(&console)
             .stdin(Stdio::null())
