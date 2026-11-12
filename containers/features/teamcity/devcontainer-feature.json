@@ -41,7 +41,14 @@
           }
         }
       },
-      "context": "The `teamcity` command is available, set up for ${server} and already authenticated by the host. Read-only (GET requests only): ${readOnly}."
+      "context": "The `teamcity` command is available, set up for ${server} and already authenticated by the host. Read-only (GET requests only): ${readOnly}.",
+      "apt": {
+        "packages": [
+          "ca-certificates",
+          "curl",
+          "gpgv"
+        ]
+      }
     }
   }
 }

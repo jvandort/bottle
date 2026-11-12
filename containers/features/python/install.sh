@@ -1,13 +1,7 @@
 #!/bin/sh
 set -eu
 
-apt-get update
-apt-get install -y --no-install-recommends \
-  python-is-python3 \
-  python3 \
-  python3-pip \
-  python3-venv
-rm -rf /var/lib/apt/lists/*
+# Its packages are its customizations.bottle.apt's, installed before this runs.
 
 # PEP 668: Debian marks the system Python "externally managed", so pip refuses
 # to install into it at all -- not system-wide, not even --user -- until you

@@ -71,7 +71,22 @@
           }
         }
       },
-      "context": "`gh` is installed. It and git are already authenticated to github.com by the host, for reading: gh's queries, and cloning and fetching. Pushes and GitHub's REST writes are refused. SSH URLs for github.com are fetched over https."
+      "context": "`gh` is installed. It and git are already authenticated to github.com by the host, for reading: gh's queries, and cloning and fetching. Pushes and GitHub's REST writes are refused. SSH URLs for github.com are fetched over https.",
+      "apt": {
+        "repositories": [
+          {
+            "uri": "https://cli.github.com/packages",
+            "suite": "stable",
+            "components": [
+              "main"
+            ],
+            "key": "githubcli-archive-keyring.gpg"
+          }
+        ],
+        "packages": [
+          "gh"
+        ]
+      }
     }
   }
 }

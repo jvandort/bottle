@@ -671,7 +671,7 @@ class Gateway:
                 response = response or await _read_response(upstream_reader)
                 length = _body_length(method, response)
                 partial = None
-                if cacheable and method == "GET" and _storable(response, length):
+                if cacheable and method == "GET" and _storable(response, length, decision.cached.immutable):
                     partial = await asyncio.to_thread(self.store.partial, name, path)
                 kept = False
                 # No cookies from a cached host: one the bottle sent back would keep its requests from
@@ -1214,18 +1214,19 @@ def _body_length(method: str, response: _Response) -> int | str | None:
     return int(length)
 
 
-def _storable(response: _Response, length: int | str | None) -> bool:
+def _storable(response: _Response, length: int | str | None, immutable: bool = False) -> bool:
     """Whether the response to a GET can be kept: a 200 of a file as it is, which is known to be all of it.
 
     Not when the server says not to keep it, or to check with it before using
-    it again (no-cache, max-age=0): a kept file is never checked again.
+    it again (no-cache, max-age=0): a kept file is never checked again. Unless
+    what's at its path is `immutable` (see cache.Cached).
     """
     directives = _tokens(response.headers.get("cache-control", "")).union(
         {"no-cache"} if "no-cache" in _tokens(response.headers.get("pragma", "")) else set())
     return (
         response.status == 200 and length is not None
         and response.headers.get("content-encoding", "identity").lower() == "identity"
-        and not directives & {"no-store", "no-cache", "private", "max-age=0", "s-maxage=0"}
+        and (immutable or not directives & {"no-store", "no-cache", "private", "max-age=0", "s-maxage=0"})
     )
 
 

@@ -2,8 +2,8 @@
 //!
 //! First this Mac's own distribution (target/dist), whose bottle-cli then builds the builder, an
 //! image of Debian with what `cargo xtask dist` takes on Linux to build for the target (the `cc`
-//! and `rust` features' install scripts, as a bottle's are run, then the C toolchain for the
-//! target, a cross one for another architecture than the VM's), and runs it as a machine, this
+//! and `rust` features, as a bottle's are installed, and the C toolchain for the target, a cross
+//! one for another architecture than the VM's), and runs it as a machine, this
 //! repo read-only at /src. There `cargo xtask dist --target TRIPLE` builds the distribution, which
 //! comes out as a tar, over exec, into DIR.
 //!
@@ -161,9 +161,10 @@ fn build_in(
 }
 
 /// The builder's recipe, on Debian's stage `debian`, for building for `arch`: the `cc` and `rust`
-/// features' install scripts, as bottle runs a feature's (its directory mounted, read-only, where
-/// it runs), and the rest of what `cargo xtask dist` takes on Linux. Labelled with a hash of all
-/// of that, so other scripts make another stage.
+/// features as bottle installs features, their packages (and the rest of what `cargo xtask dist`
+/// takes on Linux) in one apt step, then their install scripts (each's directory mounted,
+/// read-only, where it runs). Labelled with a hash of all of that, so other scripts make another
+/// stage.
 fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
     let features = root().join("containers/features");
     let user = BTreeMap::from([
@@ -178,9 +179,28 @@ fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
         ("COMPONENTS", ""),
         ("TARGETS", musl.as_str()),
     ]);
-    let toolchain = toolchain(arch);
-    let mut steps = vec![];
+    // What the features install with apt (their customizations.bottle.apt's packages), and the
+    // toolchain, first and in one step, as bottle installs features'.
+    let mut packages = vec![];
+    for feature in ["cc", "rust"] {
+        let path = features.join(feature).join("devcontainer-feature.json");
+        let spec: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        let declared = &spec["customizations"]["bottle"]["apt"]["packages"];
+        packages.extend(
+            declared
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str())
+                .map(String::from),
+        );
+    }
+    let toolchain = toolchain(arch, &packages);
     let mut inputs = Sha256::new();
+    inputs.update(&toolchain);
+    let mut steps = vec![serde_json::json!({ "run": ["/bin/sh", "-c", toolchain], "env": user })];
     for (feature, options) in [("cc", BTreeMap::new()), ("rust", rust)] {
         let script =
             fs::read(features.join(feature).join("install.sh")).map_err(|e| e.to_string())?;
@@ -194,8 +214,6 @@ fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
     }
     // What the rust feature's devcontainer-feature.json gives every command.
     steps.push(serde_json::json!({ "env": { "RUSTUP_HOME": "/usr/local/rustup" } }));
-    inputs.update(&toolchain);
-    steps.push(serde_json::json!({ "run": ["/bin/sh", "-c", toolchain], "env": user }));
     let hash: String = inputs
         .finalize()
         .iter()
@@ -209,11 +227,12 @@ fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
     }))
 }
 
-/// The shell that installs what `cargo xtask dist` takes on Linux besides Rust and gcc, building
-/// for `arch` in a VM of this Mac's architecture: for another, Debian's cross gcc and that
-/// architecture's musl and kernel headers.
-fn toolchain(arch: &str) -> String {
-    let mut packages = vec![
+/// The shell that installs `features`' packages and what else `cargo xtask dist` takes on Linux,
+/// building for `arch` in a VM of this Mac's architecture: for another, Debian's cross gcc and
+/// that architecture's musl and kernel headers.
+fn toolchain(arch: &str, features: &[String]) -> String {
+    let mut packages: Vec<&str> = features.iter().map(String::as_str).collect();
+    packages.extend([
         "make",
         "curl",
         "ca-certificates",
@@ -221,7 +240,7 @@ fn toolchain(arch: &str) -> String {
         "libarchive-tools",
         "linux-libc-dev",
         "musl-tools",
-    ];
+    ]);
     let debian = match arch {
         "x86_64" => "amd64",
         _ => "arm64",
@@ -289,21 +308,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_builder_runs_the_features_install_scripts_then_the_toolchain() {
+    fn the_builder_installs_the_features_packages_and_the_toolchain_then_runs_their_scripts() {
         let recipe = recipe("x86_64", "debian-stage").unwrap();
         assert_eq!(recipe["from"], "debian-stage");
         let steps = recipe["steps"].as_array().unwrap();
-        assert_eq!(steps[0]["cwd"], "/run/features/cc");
-        assert_eq!(steps[1]["cwd"], "/run/features/rust");
-        assert_eq!(steps[1]["env"]["TARGETS"], "x86_64-unknown-linux-musl");
-        assert_eq!(steps[1]["env"]["_REMOTE_USER"], "root");
-        assert_eq!(steps[2]["env"]["RUSTUP_HOME"], "/usr/local/rustup");
-        let script = steps[3]["run"][2].as_str().unwrap();
-        assert!(script.contains("musl-tools"));
+        let script = steps[0]["run"][2].as_str().unwrap();
+        // cc's and rust's own, from their devcontainer-feature.json, with the toolchain's.
+        for package in ["gcc", "libc6-dev", "curl", "musl-tools"] {
+            assert!(
+                script.contains(&format!(" {package}")),
+                "{package} in {script}"
+            );
+        }
+        assert_eq!(script.matches("apt-get update").count(), 1);
         assert_eq!(
             script.contains("musl-dev:amd64"),
             env::consts::ARCH != "x86_64"
         );
+        assert_eq!(steps[1]["cwd"], "/run/features/cc");
+        assert_eq!(steps[2]["cwd"], "/run/features/rust");
+        assert_eq!(steps[2]["env"]["TARGETS"], "x86_64-unknown-linux-musl");
+        assert_eq!(steps[2]["env"]["_REMOTE_USER"], "root");
+        assert_eq!(steps[3]["env"]["RUSTUP_HOME"], "/usr/local/rustup");
         // Another script, another stage.
         assert_ne!(
             recipe["labels"]["bottle.builder"],

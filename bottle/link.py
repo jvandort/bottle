@@ -118,7 +118,7 @@ class LinkController:
         injections = tuple(egress.Injection(i["host"], i["header"], "", i["port"], feature=i.get("feature", ""))
                            for i in answer["injections"])
         caches = tuple(cache.Cached(c["host"], tuple(c.get("exclude", ())), tuple(c.get("include", ())),
-                                    tuple(c.get("ports", (cache.HTTPS_PORT,))))
+                                    tuple(c.get("ports", (cache.HTTPS_PORT,))), c.get("immutable", False))
                        for c in answer.get("caches", ()))
         # Its repos as this runner has them: their mirrors.
         here = tuple(Served(mirrors.path(mirrors.key(r.git_dir)) if r.git_dir else None, r.remotes, r.at)
@@ -304,7 +304,7 @@ class LinkServer:
                 return {"ok": True, "injections": [{"host": i.host, "header": i.header, "port": i.port,
                                                     "feature": i.feature} for i in where],
                         "caches": [{"host": c.host, "exclude": list(c.exclude), "include": list(c.include),
-                                    "ports": list(c.ports)} for c in caches]}, b""
+                                    "ports": list(c.ports), "immutable": c.immutable} for c in caches]}, b""
             case "release":
                 self.bottles.pop(bottle, None)
                 return {"ok": True}, b""

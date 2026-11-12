@@ -11,10 +11,7 @@ case "$(dpkg --print-architecture)" in
   *) echo "rust: rustup has no build for $(dpkg --print-architecture)" >&2; exit 1 ;;
 esac
 
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl
-rm -rf /var/lib/apt/lists/*
-
+# curl and ca-certificates are its customizations.bottle.apt's, installed before this runs.
 curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/$version/$target/rustup-init"
 echo "$sha256  /tmp/rustup-init" | sha256sum -c -
 chmod +x /tmp/rustup-init

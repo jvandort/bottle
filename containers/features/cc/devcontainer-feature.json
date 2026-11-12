@@ -5,7 +5,13 @@
   "description": "gcc as `cc`, with the C library headers: what cargo needs to link build scripts, even for wasm.",
   "customizations": {
     "bottle": {
-      "context": "`cc` is gcc, with the C library headers: enough for cargo's build scripts. No g++ or make."
+      "context": "`cc` is gcc, with the C library headers: enough for cargo's build scripts. No g++ or make.",
+      "apt": {
+        "packages": [
+          "gcc",
+          "libc6-dev"
+        ]
+      }
     }
   }
 }

@@ -50,12 +50,14 @@ HTTP_PORT = 80
 @dataclass(frozen=True)
 class Cached:
     """A host whose downloads bottled keeps, asked on `ports`: those at paths matching `include`, if it says any,
-    but for paths matching `exclude`."""
+    but for paths matching `exclude`; `immutable` if what's at a path never changes, whatever the host says about
+    keeping it (an apt repository's packages, which apt checks against its signed index)."""
 
     host: str  # a name, or `*.` and a name
     exclude: tuple[str, ...] = ()  # fnmatch patterns over the path, e.g. "*/index.json"
     include: tuple[str, ...] = ()  # fnmatch patterns over the path, e.g. "/debian/*.deb"; none: every path
     ports: tuple[int, ...] = (HTTPS_PORT,)
+    immutable: bool = False
 
     def matches(self, host: str) -> bool:
         return fnmatch.fnmatch(host.lower(), self.host)

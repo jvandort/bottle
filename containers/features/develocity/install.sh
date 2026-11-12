@@ -35,10 +35,7 @@ unset IFS
   exit 1
 }
 
-apt-get update
-apt-get install -y --no-install-recommends jq
-apt-get clean
-rm -rf /var/lib/apt/lists/*
+# jq is its customizations.bottle.apt's, installed before this runs.
 
 # Each server, as `claude mcp add --transport http --scope user` would write it,
 # merged into ~/.claude.json: the one the claude feature wrote, when it's here

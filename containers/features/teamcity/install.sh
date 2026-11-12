@@ -13,9 +13,7 @@ set -eu
   exit 1
 }
 
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gpgv
-
+# curl and gpgv are its customizations.bottle.apt's, installed before this runs.
 arch=$(dpkg --print-architecture)  # arm64 or amd64, as the release names them
 package="teamcity_linux_${arch}.deb"
 case "$VERSION" in
@@ -33,9 +31,6 @@ grep " ${package}\$" checksums.txt | sha256sum -c -
 dpkg -i "$package"
 rm -f "$package" checksums.txt checksums.txt.asc jetbrains.gpg
 cd "$OLDPWD"
-
-apt-get clean
-rm -rf /var/lib/apt/lists/*
 
 # The CLI's configuration, which is all it needs to work here. The server is
 # addressed over https, as usual: bottled terminates that TLS with a

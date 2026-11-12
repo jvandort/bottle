@@ -23,8 +23,10 @@ class RealBaseTest(unittest.TestCase):
 
         recipe = features.base_recipe()
         self.assertEqual(recipe["pull"], images.DEBIAN)
-        self.assertEqual(recipe["steps"][0]["run"], ["/bin/sh", "./install.sh"])
-        self.assertEqual(recipe["steps"][1]["env"]["LANG"], "C.UTF-8")
+        apt, install, env = recipe["steps"][:3]
+        self.assertIn("install -y --no-install-recommends ca-certificates git openssh-server sudo tini", apt["run"][2])
+        self.assertEqual(install["run"], ["/bin/sh", "./install.sh"])
+        self.assertEqual(env["env"]["LANG"], "C.UTF-8")
 
 
 class InterpreterTest(unittest.TestCase):

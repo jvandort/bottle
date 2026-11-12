@@ -1,21 +1,12 @@
 #!/bin/sh
 set -eu
 
-# The repository is https; apt needs root certificates to reach it.
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates
-
-# The signing keys are vendored (fingerprints 2C61 0620 1985 B60E 6C7A C873
+# gh, from GitHub's apt repository, is its customizations.bottle.apt's,
+# installed before this runs. The repository's signing keys are vendored,
+# githubcli-archive-keyring.gpg (fingerprints 2C61 0620 1985 B60E 6C7A C873
 # 23F3 D4EA 7571 6059 and its 2026 successor 7F38 BBB5 9D06 4DBC B3D8 4D72
-# 5612 B364 6231 3325, per GitHub's install instructions for Debian) so builds
+# 5612 B364 6231 3325, per GitHub's install instructions for Debian), so builds
 # don't trust a key fetched at build time.
-install -D -m 0644 githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-  > /etc/apt/sources.list.d/github-cli.list
-
-apt-get update
-apt-get install -y --no-install-recommends gh
-rm -rf /var/lib/apt/lists/*
 
 # How this feature is authenticated, since JSON has no room for a comment:
 #

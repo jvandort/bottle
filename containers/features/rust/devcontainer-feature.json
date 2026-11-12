@@ -28,7 +28,13 @@
   },
   "customizations": {
     "bottle": {
-      "context": "Rust's `${toolchain}` toolchain is installed through rustup (`cargo`, `rustc`, `rustup`), components ${components}; `rustup` can add more without sudo. `cargo install` puts programs in `~/.cargo/bin`, on login shells' PATH."
+      "context": "Rust's `${toolchain}` toolchain is installed through rustup (`cargo`, `rustc`, `rustup`), components ${components}; `rustup` can add more without sudo. `cargo install` puts programs in `~/.cargo/bin`, on login shells' PATH.",
+      "apt": {
+        "packages": [
+          "ca-certificates",
+          "curl"
+        ]
+      }
     }
   }
 }

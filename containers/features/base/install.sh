@@ -22,16 +22,9 @@
 # and NODE_EXTRA_CA_CERTS: the system bundle, which update-ca-certificates
 # rebuilds with every CA bottle installs when a bottle starts (CA_CERTIFICATE
 # and CACHE_CERTIFICATE in bottle/bottles.py), however many there are.
+#
+# Its packages are its customizations.bottle.apt's, installed before this runs.
 set -eu
-
-apt-get update
-apt-get install -y --no-install-recommends \
-  ca-certificates \
-  git \
-  openssh-server \
-  sudo \
-  tini
-rm -rf /var/lib/apt/lists/*
 
 groupadd --gid 1000 genie
 useradd --uid 1000 --gid genie --create-home --shell /bin/bash genie

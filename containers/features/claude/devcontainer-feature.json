@@ -80,7 +80,25 @@
           }
         }
       },
-      "context": "Claude Code (`claude`) is installed, and already logged in through the host."
+      "context": "Claude Code (`claude`) is installed, and already logged in through the host.",
+      "apt": {
+        "repositories": [
+          {
+            "uri": "https://downloads.claude.ai/claude-code/apt/stable",
+            "suite": "stable",
+            "components": [
+              "main"
+            ],
+            "key": "claude-code.asc"
+          }
+        ],
+        "packages": [
+          "claude-code",
+          "jq",
+          "inotify-tools",
+          "curl"
+        ]
+      }
     }
   }
 }

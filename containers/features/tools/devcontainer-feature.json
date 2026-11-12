@@ -8,7 +8,23 @@
   },
   "customizations": {
     "bottle": {
-      "context": "`rg`, `fd`, `jq`, `curl`, `vim`, `less`, `unzip`, `tmux` and `shpool` are installed."
+      "context": "`rg`, `fd`, `jq`, `curl`, `vim`, `less`, `unzip`, `tmux` and `shpool` are installed.",
+      "apt": {
+        "packages": [
+          "ca-certificates",
+          "curl",
+          "fd-find",
+          "jq",
+          "less",
+          "openssh-client",
+          "procps",
+          "ripgrep",
+          "tmux",
+          "unzip",
+          "vim",
+          "xz-utils"
+        ]
+      }
     }
   }
 }

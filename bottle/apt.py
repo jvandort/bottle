@@ -11,7 +11,8 @@ bottled keeps what's downloaded from a repository, for every image built and
 every bottle running (see cache.py): its packages, the .deb files under its
 URI, whose names carry their versions, so a file at a path never changes.
 Its indexes (InRelease, Packages) aren't kept: they're how apt learns what's
-new. apt checks every package against the repository's signed index, so a
+new. A package is kept whatever its server says about keeping it (some say
+max-age=0 of everything). apt checks every package against the repository's signed index, so a
 plain-http repository is kept as safely as an https one; bottled fetches
 what it keeps over https regardless.
 """
@@ -47,7 +48,7 @@ class Repository:
         """How its downloads are kept: the .deb files under its URI, on its scheme's port."""
         url = urlsplit(self.uri)
         return cache.Cached(url.hostname or "", include=(f"{url.path.rstrip('/')}/*.deb",),
-                            ports=(PORTS[url.scheme],))
+                            ports=(PORTS[url.scheme],), immutable=True)
 
 
 # Debian's, as debian:trixie-slim's /etc/apt/sources.list.d/debian.sources has them.
@@ -61,7 +62,7 @@ def cached(repositories: tuple[Repository, ...] | list[Repository]) -> list[cach
         key = (kept.host, kept.ports)
         before = merged.get(key)
         merged[key] = kept if before is None else cache.Cached(kept.host, include=before.include + kept.include,
-                                                                 ports=kept.ports)
+                                                                 ports=kept.ports, immutable=True)
     return list(merged.values())
 
 

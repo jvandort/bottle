@@ -246,7 +246,7 @@ class CachingTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.fail(f"{path} wasn't kept")
 
-    async def plain(self, include: tuple[str, ...]) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    async def plain(self, include: tuple[str, ...], immutable: bool = False) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """A connection to a gateway that keeps upstream.test's downloads at paths matching `include`, asked over
         plain http (an apt repository's, say): with no certificates, which plain http needs none of."""
         plain = 8080  # http's port, as far as this test's bottle and its gateway know
@@ -254,7 +254,8 @@ class CachingTest(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         gateway = Gateway("test", LoopbackPolicy(), fake_resolve,
-                          caches=(Cached("upstream.test", include=include, ports=(plain,)),), store=self.store)
+                          caches=(Cached("upstream.test", include=include, ports=(plain,), immutable=immutable),),
+                          store=self.store)
 
         async def decider(reader, writer) -> None:
             flow = Flow(CONNECTED_TO, plain, await reader.read(64 * 1024))
@@ -279,6 +280,13 @@ class CachingTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((status, body), (200, FILE))
         self.assertFalse(self.kept("/dists/stable/index.json").exists())
         self.assertEqual(len(self.received), 3)
+
+    async def test_what_never_changes_is_kept_whatever_the_server_says(self) -> None:
+        # An apt repository's packages: some servers say max-age=0 of everything; apt checks each against its index.
+        reader, writer = await self.plain(("/uncacheable/*",), immutable=True)
+        status, _, body = await self.exchange(reader, writer, "GET", "/uncacheable/max-age=0")
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertEqual(await self.stored("/uncacheable/max-age=0"), b"ok")
 
     async def test_over_plain_http_a_request_for_https_is_refused(self) -> None:
         reader, writer = await self.plain(("/*",))

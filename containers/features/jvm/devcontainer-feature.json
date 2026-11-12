@@ -49,7 +49,23 @@
           "/versions/*"
         ]
       },
-      "context": "Temurin JDK ${version} is the default `java`, at `$JAVA_HOME`. Every JDK installed is at `/usr/lib/jvm/jdk-<version>`."
+      "context": "Temurin JDK ${version} is the default `java`, at `$JAVA_HOME`. Every JDK installed is at `/usr/lib/jvm/jdk-<version>`.",
+      "apt": {
+        "repositories": [
+          {
+            "uri": "https://packages.adoptium.net/artifactory/deb",
+            "suite": "trixie",
+            "components": [
+              "main"
+            ],
+            "key": "adoptium.asc"
+          }
+        ],
+        "packages": [
+          "temurin-${version}-jdk",
+          "temurin-${additionalVersions}-jdk"
+        ]
+      }
     }
   }
 }

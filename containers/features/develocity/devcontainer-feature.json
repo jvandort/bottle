@@ -66,7 +66,12 @@
           }
         }
       },
-      "context": "Develocity (${server}) is set up for Gradle and, as develocity-<host> MCP servers, for Claude Code. Access keys are in ~/.gradle/develocity/keys.properties, by server."
+      "context": "Develocity (${server}) is set up for Gradle and, as develocity-<host> MCP servers, for Claude Code. Access keys are in ~/.gradle/develocity/keys.properties, by server.",
+      "apt": {
+        "packages": [
+          "jq"
+        ]
+      }
     }
   }
 }
