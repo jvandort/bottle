@@ -63,6 +63,7 @@
               "GET|HEAD /rate_limit",
               "GET|HEAD /search/**",
               "GET|HEAD /repos/**",
+              "GET|HEAD /repositories/**",
               "POST /graphql",
               "GET /*/*/info/refs",
               "POST /*/*/git-upload-pack"

@@ -136,6 +136,8 @@ class RealFeaturesTest(unittest.TestCase):
             ("github", "GET", "/repos/o/r/pulls/1"),
             ("github", "GET", "/repos/o/r/actions/runs/1/jobs"),
             ("github", "GET", "/repos/o/r/contents/README.md"),
+            # A moved repo: GitHub redirects /repos/o/r to it by ID (gh api repos/containers/libkrunfw/..., 2026-11-12).
+            ("github", "GET", "/repositories/287064639/releases/tags/v5.6.2"),
             ("github", "POST", "/graphql"),
             ("github", "GET", "/o/r.git/info/refs"),
             ("github", "POST", "/o/r/git-upload-pack"),
