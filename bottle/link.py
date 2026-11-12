@@ -110,9 +110,9 @@ class LinkController:
             raise BottleError(f"the controller: {answer.get('error', 'failed')}")
         return answer, data
 
-    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], credentials: bool = True):
+    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], build: bool = False):
         answer, _ = await self._ask({"op": "bind", "bottle": bottle, "repos": served_to_json(repos),
-                                     "features": list(features), "credentials": credentials})
+                                     "features": list(features), "build": build})
         from bottle import mirrors
 
         injections = tuple(egress.Injection(i["host"], i["header"], "", i["port"], feature=i.get("feature", ""))
@@ -298,7 +298,7 @@ class LinkServer:
             case "bind":
                 where, caches, services, gateway = await self.controller.egress(
                     bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())),
-                    message.get("credentials", True))
+                    message.get("build", False))
                 self.bottles[bottle] = (services, gateway)
                 log.info("%s: bound from runner %s", bottle, self.runner)
                 return {"ok": True, "injections": [{"host": i.host, "header": i.header, "port": i.port,

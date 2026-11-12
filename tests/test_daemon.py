@@ -130,13 +130,14 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.host for i in binding.gateway.injections], ["ci.test"])
         self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test"])
 
-    async def test_a_build_keeps_its_features_downloads_and_gets_none_of_their_credentials(self) -> None:
+    async def test_a_build_keeps_its_apt_downloads_and_gets_none_of_its_features_credentials(self) -> None:
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
         caches = [daemon.cache.Cached("ci.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
-                mock.patch.object(daemon.cache, "cached_for", return_value=caches), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=caches) as cached_for, \
                 mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
-            await self.request({"op": "bind", "bottle": "builder", "features": ["f"], "credentials": False})
+            await self.request({"op": "bind", "bottle": "builder", "features": ["f"], "build": True})
+        cached_for.assert_called_once_with(("f",), True)  # its apt repositories alone (see cache.cached_for)
         [binding] = self.daemon.decider.bindings.values()
         self.assertEqual(binding.gateway.injections, ())
         self.assertEqual(binding.gateway.hand_off.__self__.injections, ())
@@ -333,7 +334,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer x")]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
                 mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
-            await d.restore([("builder", (), ("f",), False), ("b", (), ("f",))])
+            await d.restore([("builder", (), ("f",), True), ("b", (), ("f",))])
         hosts = {b.bottle: [i.host for i in b.gateway.injections] for b in d.decider.bindings.values()}
         self.assertEqual(hosts, {"builder": [], "b": ["ci.test"]})
 

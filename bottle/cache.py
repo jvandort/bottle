@@ -66,12 +66,14 @@ class Cached:
         return any(fnmatch.fnmatchcase(path, pattern) for pattern in self.exclude)
 
 
-def cached_for(specs: tuple[str, ...] | list[str]) -> list[Cached]:
+def cached_for(specs: tuple[str, ...] | list[str], build: bool = False) -> list[Cached]:
     """The hosts a bottle with these features has its downloads kept for: those its features name, and the apt
-    repositories every bottle's image has (see apt.py)."""
+    repositories its image has (see apt.py). For a `build` of its image, the apt repositories alone: what a
+    build's apt trusts bottled's CA for, where nothing else in it does."""
     from bottle import apt, features  # which import this module
 
-    named = [Cached(host.lower(), f.cache.exclude) for f in features.resolve(list(specs)) if f.cache for host in f.cache.hosts]
+    resolved = features.resolve(list(specs))
+    named = [] if build else [Cached(host.lower(), f.cache.exclude) for f in resolved if f.cache for host in f.cache.hosts]
     return named + apt.cached(apt.DEBIAN)
 
 

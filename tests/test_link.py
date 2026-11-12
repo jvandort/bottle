@@ -156,7 +156,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         echoing = Echoing()
         controller = mock.Mock()
 
-        async def egress_for(bottle, repos, features, credentials=True):
+        async def egress_for(bottle, repos, features, build=False):
             return (), (), host.HostServices(), echoing
 
         controller.egress = egress_for
@@ -204,10 +204,10 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
                 mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
             await self.link_up(self.controller())
-            await runner.bind("builder", (), ("f",), credentials=False)
+            await runner.bind("builder", (), ("f",), build=True)
             [binding] = runner.decider.bindings.values()
             self.assertEqual(binding.gateway.injections, ())
-            self.assertEqual(runner.remembered_bindings(), [("builder", (), ("f",), False)])
+            self.assertEqual(runner.remembered_bindings(), [("builder", (), ("f",), True)])
 
 
 class LinksTest(GitTestCase, unittest.IsolatedAsyncioTestCase):

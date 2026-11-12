@@ -80,17 +80,17 @@ def socket_path(name: str = "bottled.sock") -> Path:
 
 
 def bind_decider(
-    bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = (), credentials: bool = True,
+    bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = (), build: bool = False,
 ) -> tuple[str, str]:
     """Have the decider answer `bottle`'s flows; return its address and the bottle's new token, in hex.
 
     The token goes to the driver that starts the bottle's machine, and nowhere
-    else: whoever holds it can speak for the bottle. Without `credentials`,
-    its features' downloads are kept but none of their credentials attached:
-    an image's build.
+    else: whoever holds it can speak for the bottle. For a `build` of an
+    image with these features, only their apt repositories' downloads are
+    kept (see cache.cached_for), and none of their credentials attached.
     """
     message = {
-        "op": "bind", "bottle": bottle, "features": list(features), "credentials": credentials,
+        "op": "bind", "bottle": bottle, "features": list(features), "build": build,
         "repos": [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at,
                    "remotes": [remote.spec for remote in r.remotes]} for r in repos],
     }
@@ -267,7 +267,7 @@ class Controller:
         """A bottle here has stopped: nothing to do, since its side here is made again each time it's bound."""
 
     async def egress(
-        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], credentials: bool = True,
+        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], build: bool = False,
     ) -> tuple[tuple[egress.Injection, ...], tuple[cache.Cached, ...], HostServices, egress.Gateway]:
         """What a runner needs to bind `bottle`: where its credentials are for, the hosts whose downloads are
         kept for it (the features say, and the runner doesn't have them), its bottle.host, and its gateway
@@ -277,18 +277,18 @@ class Controller:
         in or out reaches a bottle when it next starts. Only for the hosts the
         bottle's CA covers, which it was made for when the bottle started:
         those its features name since then can't be terminated, and go
-        direct until it starts again. Without `credentials`, none.
+        direct until it starts again. For a `build`, none, and only its features' apt repositories cached.
         """
         intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
         injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features)
-                           if credentials and i.host.lower() in intercepted)
+                           if not build and i.host.lower() in intercepted)
         certificates = functools.partial(ca.server_context, bottle, intercepted)
         gateway = egress.Gateway(bottle, self.policy, injections=injections, certificates=certificates,
                                  ssh=functools.partial(self.ssh, bottle))
         services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
         # Where each credential is for, and nothing of the credential itself.
         where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
-        caches = tuple(await asyncio.to_thread(cache.cached_for, features))
+        caches = tuple(await asyncio.to_thread(cache.cached_for, features, build))
         return where, caches, services, gateway
 
     async def ssh(self, bottle: str, address: str) -> list[str]:
@@ -545,7 +545,7 @@ class Daemon:
                                          tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
                                   for r in message.get("repos", ()))
                     token = await self.bind(message["bottle"], repos, tuple(message.get("features", ())),
-                                            credentials=message.get("credentials", True))
+                                            build=message.get("build", False))
                     reply = {"ok": True, "decider": self.decider_address, "token": token.hex()}
                 case "release":
                     await self.release(message["bottle"])
@@ -572,13 +572,13 @@ class Daemon:
 
     async def bind(
         self, bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = (),
-        token: bytes | None = None, credentials: bool = True,
+        token: bytes | None = None, build: bool = False,
     ) -> bytes:
-        """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given. Without
-        `credentials`, none of its features' are attached (see bind_decider)."""
+        """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given; for a
+        `build`, as bind_decider says."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             injections, cached, services, controller_gateway = await self.controller.egress(
-                bottle, repos, features, credentials)
+                bottle, repos, features, build)
             # Kept over https only for the hosts this machine's CA for the bottle covers, which bottle made when
             # it started the bottle: what its cached hosts are answered behind. Plain http needs none.
             intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
@@ -589,7 +589,7 @@ class Daemon:
                 caches=caches, store=self.store, hand_off=controller_gateway.serve_handed_off,
             )
             if self.remembered is not None:
-                self._remember(bottle, (bottle, link.served_to_json(repos), list(features), credentials))
+                self._remember(bottle, (bottle, link.served_to_json(repos), list(features), build))
             return self.decider.bind(bottle, gateway, token)
 
     def _remember(self, bottle: str, binding: tuple | None) -> None:
@@ -617,8 +617,8 @@ class Daemon:
         """Answer the flows of bottles the decider gave tokens to before bottled last stopped.
 
         Each is (name, the repos it's served, features), as bound_bottles()
-        gives them, and whether it has their credentials, as remembered_bindings()
-        has it (with credentials if it doesn't say). Their machines still hold
+        gives them, and whether it's a build, as remembered_bindings() has it
+        (a bottle if it doesn't say). Their machines still hold
         those tokens, so the same ones are bound. Returns those it couldn't bind.
         """
         unrestored = []
@@ -628,7 +628,7 @@ class Daemon:
             if token is None or self.decider.bound(bottle):
                 continue
             try:
-                await self.bind(bottle, repos, features, token, credentials=rest[0] if rest else True)
+                await self.bind(bottle, repos, features, token, build=rest[0] if rest else False)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore its decisions: %s", bottle, e)
                 unrestored.append(binding)
