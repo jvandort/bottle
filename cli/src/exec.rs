@@ -101,9 +101,18 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
+/// Does nothing: SIGWINCH's handler, so that it's kept pending for sigwait. macOS discards a signal
+/// whose action is to be ignored, as SIGWINCH's default is, even while it's blocked.
+extern "C" fn nothing(_: libc::c_int) {}
+
 fn block_signals() -> libc::sigset_t {
-    // SAFETY: a sigset made empty, then filled in, and this thread's mask set from it.
+    // SAFETY: a handler that does nothing set for SIGWINCH; a sigset made empty, then filled in,
+    // and this thread's mask set from it.
     unsafe {
+        libc::signal(
+            libc::SIGWINCH,
+            nothing as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
         let mut set: libc::sigset_t = zeroed();
         libc::sigemptyset(&mut set);
         for signal in FORWARDED.into_iter().chain([libc::SIGWINCH]) {
