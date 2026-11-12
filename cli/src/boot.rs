@@ -12,7 +12,8 @@
 //! every connection it makes asked of bottled's decider there, as the bottle whose token is
 //! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection allowed; without either, none.
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
-//! it's up.
+//! it's up. While it runs, its clock is set from this machine's and its freed memory given back
+//! (see upkeep).
 //!
 //! libkrun is linked in. The VM's first root is in memory: the mount points the agent needs, and
 //! the agent itself, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
@@ -273,6 +274,8 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             Some(c(&path.to_string_lossy())?)
         }
     };
+    // Its clock and memory kept, by exec, once the agent answers (see upkeep).
+    crate::upkeep::spawn(args.socket.clone());
     // The bottle's environment, mounts and network, as a file in the first root (see
     // bottle-agent init).
     let mut config = serde_json::json!({

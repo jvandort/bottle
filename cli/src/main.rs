@@ -8,6 +8,7 @@ mod boot;
 mod build;
 mod exec;
 mod machine;
+mod upkeep;
 
 /// A failure of bottle-cli's own, not a command's: as ssh has it.
 const FAILED: u8 = 255;

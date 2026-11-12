@@ -276,7 +276,6 @@ impl Machine {
             )));
         }
         fs::write(self.dir.join("started"), "")?;
-        set_clock(&socket);
         Ok(())
     }
 
@@ -428,40 +427,6 @@ fn image_of(disk: &Path) -> io::Result<Image> {
         stage.env.into_iter().collect(),
         Some(run).filter(|r| !r.is_empty()),
     ))
-}
-
-/// Sets the machine's clock to this one's, with `date`, as root (as the agent runs a command
-/// without a user): the RTC its kernel started the
-/// clock from counts whole seconds, so it starts behind, and a certificate made here a moment ago
-/// (bottled's, for a bottle) isn't valid yet there. GNU date takes the time to the nanosecond,
-/// BusyBox's to the second; an image with neither keeps its clock as it is.
-fn set_clock(socket: &Path) {
-    for precise in [true, false] {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let at = if precise {
-            format!("@{}.{:09}", now.as_secs(), now.subsec_nanos())
-        } else {
-            format!("@{}", now.as_secs())
-        };
-        let start = bottle_agent_client::Start {
-            argv: vec!["date".into(), "-u".into(), "-s".into(), at],
-            ..Default::default()
-        };
-        let (_, controls) = std::sync::mpsc::channel();
-        let ran = bottle_agent_client::run(
-            socket,
-            start,
-            io::empty(),
-            &mut io::sink(),
-            &mut io::sink(),
-            controls,
-        );
-        if matches!(ran, Ok(bottle_agent_client::Exit::Code(0))) {
-            return;
-        }
-    }
 }
 
 /// `machine start --name NAME [--decider ADDRESS:PORT | --net-direct]`: the network is the start's,
