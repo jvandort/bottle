@@ -1,4 +1,4 @@
-//! Empty disks, made with mke2fs (see dist/mke2fs.sh): a machine's own, and each new stage's, which
+//! Empty disks, made with mke2fs (built by `cargo xtask dist`): a machine's own, and each new stage's, which
 //! a VM then writes. bottle runs mke2fs, never links it: e2fsprogs' library is GPL-2 in parts.
 
 use std::fs;

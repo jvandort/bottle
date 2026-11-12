@@ -4,11 +4,12 @@
 //!
 //! Builds the distribution into DIR (target/dist): bottle-cli, with the agent its VMs run built
 //! into it (a static Linux build of bottle-agent for this machine's architecture, the VMs'), and
-//! libkrun linked into it, the mke2fs it runs (dist/mke2fs.sh), beside it, and the kernel the VMs
+//! libkrun linked into it, the mke2fs it runs, built from e2fsprogs' release, beside it, and the kernel the VMs
 //! boot: libkrunfw's, a release of its pinned below, downloaded and checked, as `kernel` (an arm64
 //! Image, out of upstream's prebuilt bundle) or, on x86_64, `libkrunfw.so.5` (out of Fedora's
 //! package), which libkrun loads. On macOS bottle-cli is signed with the hypervisor entitlement. What it
-//! needs: rustup's musl target for this architecture, and what dist/mke2fs.sh needs.
+//! needs: rustup's musl target for this architecture, curl, make and a C compiler (on Linux,
+//! musl-gcc and the kernel's headers).
 
 use std::env;
 use std::fs;
@@ -92,18 +93,127 @@ fn dist(out: &Path) -> Result<()> {
             .arg(&cli))?;
     }
 
-    // mke2fs takes a while: made again only when its script has changed since.
-    let built = root.join("target/mke2fs");
-    let script = root.join("dist/mke2fs.sh");
-    if !newer(&built.join("mke2fs"), &script) {
-        step("mke2fs");
-        run(Command::new(&script).arg(&built))?;
-    }
-    copy(&built.join("mke2fs"), &out.join("mke2fs"))?;
+    let mke2fs = mke2fs(&root.join("target/mke2fs"))?;
+    copy(&mke2fs, &out.join("mke2fs"))?;
 
     kernel(&root.join("target/kernel"), out)?;
     eprintln!("xtask: {}", out.display());
     Ok(())
+}
+
+/// e2fsprogs' release bottle builds mke2fs from: where it is, and its sha256 (from the signed
+/// sha256sums.asc beside it).
+const E2FSPROGS: (&str, &str, &str) = (
+    "1.47.4",
+    "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz",
+    "fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b",
+);
+
+/// mke2fs, built in `dir` from e2fsprogs' release tarball if it isn't there already: what makes
+/// the empty disks VMs then write. It needs nothing installed where it runs: on Linux it's static
+/// (musl: musl-gcc, from Debian's musl-tools, and the kernel's headers, linux-libc-dev, are
+/// needed to build it), on macOS it links only libSystem, which every Mac has. bottle runs it,
+/// never links it: e2fsprogs' library is GPL-2 in parts, bottle is Apache-2.0.
+fn mke2fs(dir: &Path) -> Result<PathBuf> {
+    let (version, url, sha256) = E2FSPROGS;
+    let built = dir.join(format!("mke2fs-{version}"));
+    if built.exists() {
+        return Ok(built);
+    }
+    step(&format!("mke2fs, from e2fsprogs {version}"));
+    let work = dir.join("build");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let tarball = fetch(dir, (url, sha256))?;
+    run(Command::new("tar")
+        .arg("-xf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&work))?;
+    let source = work.join(format!("e2fsprogs-{version}"));
+    let objects = work.join("objects");
+    fs::create_dir_all(&objects).map_err(|e| e.to_string())?;
+
+    let mut env: Vec<(&str, String)> = Vec::new();
+    match env::consts::OS {
+        "linux" => {
+            env.push(("CC", "musl-gcc".into()));
+            env.push(("LDFLAGS", "-static".into()));
+            // musl brings no kernel headers; e2fsprogs wants linux/*.h and asm/*.h.
+            let headers = work.join("kernel-headers");
+            fs::create_dir_all(&headers).map_err(|e| e.to_string())?;
+            let triple = String::from_utf8_lossy(
+                &Command::new("gcc")
+                    .arg("-dumpmachine")
+                    .output()
+                    .map_err(|e| format!("gcc: {e}"))?
+                    .stdout,
+            )
+            .trim()
+            .to_string();
+            for (from, to) in [
+                ("/usr/include/linux".to_string(), "linux"),
+                ("/usr/include/asm-generic".to_string(), "asm-generic"),
+                (format!("/usr/include/{triple}/asm"), "asm"),
+            ] {
+                std::os::unix::fs::symlink(from, headers.join(to)).map_err(|e| e.to_string())?;
+            }
+            env.push(("CPPFLAGS", format!("-idirafter {}", headers.display())));
+        }
+        // Apple supports no static executables: libSystem stays dynamic, all else is linked in.
+        "macos" => env.push(("CC", env::var("CC").unwrap_or("cc".into()))),
+        os => return Err(format!("no mke2fs for {os}")),
+    }
+    let quiet = |what: &str, command: &mut Command| -> Result<()> {
+        let file = fs::File::create(work.join(format!("{what}.log"))).map_err(|e| e.to_string())?;
+        command
+            .current_dir(&objects)
+            .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
+            .stdout(file.try_clone().map_err(|e| e.to_string())?)
+            .stderr(file);
+        run(command).map_err(|e| {
+            let said = fs::read_to_string(work.join(format!("{what}.log"))).unwrap_or_default();
+            let tail: Vec<&str> = said.lines().rev().take(30).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            format!("{e}, building mke2fs ({what}):\n{}", tail.join("\n"))
+        })
+    };
+    // --enable-libuuid and --enable-libblkid build e2fsprogs' own; --disable would mean the
+    // system's.
+    quiet(
+        "configure",
+        Command::new(source.join("configure")).args([
+            "--without-libarchive",
+            "--enable-libuuid",
+            "--enable-libblkid",
+            "--disable-nls",
+            "--disable-fuse2fs",
+            "--disable-e2initrd-helper",
+            "--disable-debugfs",
+            "--disable-imager",
+            "--disable-resizer",
+            "--disable-defrag",
+            "--disable-uuidd",
+            "--disable-tdb",
+            "--disable-bmap-stats",
+            "--disable-tls",
+            "--disable-backtrace",
+            "--without-pthread",
+        ]),
+    )?;
+    let jobs = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .to_string();
+    // `libs` builds the libraries one after another, each in parallel: each library's headers
+    // are there before the next needs them.
+    quiet("libs", Command::new("make").args(["-j", &jobs, "libs"]))?;
+    quiet(
+        "mke2fs",
+        Command::new("make").args(["-j", &jobs, "-C", "misc", "mke2fs"]),
+    )?;
+    copy(&objects.join("misc/mke2fs"), &built)?;
+    let _ = fs::remove_dir_all(&work);
+    Ok(built)
 }
 
 /// libkrunfw's release the VMs boot, for each architecture: where it is, and its sha256.
@@ -257,10 +367,4 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     fs::copy(from, to)
         .map(drop)
         .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))
-}
-
-/// Whether `path` is there, and newer than `than`.
-fn newer(path: &Path, than: &Path) -> bool {
-    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
-    matches!((modified(path), modified(than)), (Some(a), Some(b)) if a > b)
 }
