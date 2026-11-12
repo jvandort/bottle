@@ -3,6 +3,7 @@
 //! stay in the bottle to the agent, which carries each to the host, over vsock, where it's decided
 //! (see bottle_agent_proto::net). Names are looked up through the host too: the agent answers DNS
 //! on 127.0.0.53, which /etc/resolv.conf names. Nothing else leaves: there's nowhere for it to go.
+//! In a VM, the clock is set from the host's too.
 //!
 //! All set up through netlink, the kernel's own interface to it: an image needs no tools for it.
 
@@ -14,8 +15,9 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStr
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::thread;
+use std::time::{Duration, Instant};
 
-use bottle_agent_proto::net::{CONNECTED, PORT, Request, Resolved};
+use bottle_agent_proto::net::{CONNECTED, PORT, Request, Resolved, Time};
 
 use crate::socket::Socket;
 
@@ -26,6 +28,8 @@ const DNS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 53), 53);
 const INTERFACE: &str = "bottle0";
 /// Threads that only pass bytes on need little stack.
 const STACK: usize = 64 * 1024;
+/// How often a VM's clock is set from the host's.
+const CLOCK_EVERY: Duration = Duration::from_secs(60);
 
 /// The bottle's network, as the host gives it (see init's Config).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -64,6 +68,19 @@ pub fn start(config: &Config) -> io::Result<()> {
     fs::create_dir_all("/etc")?;
     fs::write("/etc/resolv.conf", format!("nameserver {}\n", DNS.ip()))?;
 
+    if crate::BOOTED.load(std::sync::atomic::Ordering::Relaxed) {
+        // Before anything runs, then every so often: the RTC the kernel started the clock from
+        // counts whole seconds, so it starts behind the host's, which mints the certificates the
+        // bottle checks, and nothing else keeps it right. Out of a VM, the clock is the host's.
+        let _ = set_clock(&host);
+        let h = host.clone();
+        spawn(move || {
+            loop {
+                thread::sleep(CLOCK_EVERY);
+                let _ = set_clock(&h);
+            }
+        });
+    }
     let h = host.clone();
     spawn(move || {
         for conn in listener.incoming().flatten() {
@@ -84,6 +101,24 @@ pub fn start(config: &Config) -> io::Result<()> {
             });
         }
     });
+    Ok(())
+}
+
+/// Sets this machine's clock to the host's, as it was half the asking's round trip ago.
+fn set_clock(how: &str) -> io::Result<()> {
+    let asked = Instant::now();
+    let mut host = Host::dial(how)?;
+    Request::Time.write(&mut host)?;
+    let Time(then) = Time::read(&mut host)?;
+    let now = then + asked.elapsed() / 2;
+    let time = libc::timespec {
+        tv_sec: now.as_secs() as libc::time_t,
+        tv_nsec: now.subsec_nanos() as libc::c_long,
+    };
+    // SAFETY: clock_settime reads a timespec.
+    if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &time) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 

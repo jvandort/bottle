@@ -305,6 +305,7 @@ pub mod net {
 
     const CONNECT: u8 = 1;
     const RESOLVE: u8 = 2;
+    const TIME: u8 = 3;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Request {
@@ -312,6 +313,8 @@ pub mod net {
         Connect(SocketAddr),
         /// The addresses of a name.
         Resolve(String),
+        /// The host's clock: a VM's starts from its RTC, in whole seconds, and drifts after.
+        Time,
     }
 
     impl Request {
@@ -330,6 +333,7 @@ pub mod net {
                     out.extend_from_slice(&[RESOLVE, len]);
                     out.extend_from_slice(name.as_bytes());
                 }
+                Request::Time => out.push(TIME),
             }
             w.write_all(&out)?;
             w.flush()
@@ -353,8 +357,33 @@ pub mod net {
                         .map(Request::Resolve)
                         .map_err(|_| super::invalid("a name that isn't UTF-8"))
                 }
+                TIME => Ok(Request::Time),
                 other => Err(super::invalid(format!("a network request of kind {other}"))),
             }
+        }
+    }
+
+    /// The answer to a [`Request::Time`]: the host's clock, since the Unix epoch.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Time(pub std::time::Duration);
+
+    impl Time {
+        pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
+            let mut out = self.0.as_secs().to_be_bytes().to_vec();
+            out.extend_from_slice(&self.0.subsec_nanos().to_be_bytes());
+            w.write_all(&out)?;
+            w.flush()
+        }
+
+        pub fn read(r: &mut impl Read) -> io::Result<Time> {
+            let mut b = [0; 12];
+            r.read_exact(&mut b)?;
+            let secs = u64::from_be_bytes(b[..8].try_into().unwrap());
+            let nanos = u32::from_be_bytes(b[8..].try_into().unwrap());
+            if nanos >= 1_000_000_000 {
+                return Err(super::invalid("a time with a second's nanoseconds or more"));
+            }
+            Ok(Time(std::time::Duration::new(secs, nanos)))
         }
     }
 

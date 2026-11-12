@@ -175,11 +175,35 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         if unsafe { libc::sethostname(name.as_ptr().cast(), name.len()) } < 0 {
             return Err(failed("sethostname", io::Error::last_os_error()));
         }
+        name_in_hosts(Path::new("/etc/hosts"), name).map_err(|e| failed("/etc/hosts", e))?;
     }
     if let Some(argv) = stack.config.run.as_deref().filter(|a| !a.is_empty()) {
         run(argv);
     }
     Ok(upper)
+}
+
+/// `name`, this machine's, in `hosts`, as Debian has it (127.0.1.1), unless it's there already:
+/// sudo, for one, looks it up, and waits on DNS and complains if it isn't found.
+fn name_in_hosts(hosts: &Path, name: &str) -> io::Result<()> {
+    let text = match fs::read_to_string(hosts) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let named = text.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or_default();
+        line.split_whitespace().skip(1).any(|n| n == name)
+    });
+    if named {
+        return Ok(());
+    }
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    fs::write(hosts, format!("{text}{gap}127.0.1.1\t{name}\n"))
 }
 
 /// Starts the image's entrypoint and command, in a session of its own: its output to the console,
@@ -360,6 +384,29 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn the_hostname_is_put_in_etc_hosts_once() {
+        let dir = std::env::temp_dir().join(format!("bottle-hosts-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let hosts = dir.join("hosts");
+        name_in_hosts(&hosts, "b1").unwrap();
+        assert_eq!(fs::read_to_string(&hosts).unwrap(), "127.0.1.1\tb1\n");
+        fs::write(
+            &hosts,
+            "127.0.0.1 localhost\n# 1.2.3.4 b2\n192.0.2.1 bottle.host",
+        )
+        .unwrap();
+        name_in_hosts(&hosts, "b2").unwrap();
+        name_in_hosts(&hosts, "b2").unwrap();
+        assert_eq!(
+            fs::read_to_string(&hosts).unwrap(),
+            "127.0.0.1 localhost\n# 1.2.3.4 b2\n192.0.2.1 bottle.host\n127.0.1.1\tb2\n"
+        );
+        name_in_hosts(&hosts, "localhost").unwrap();
+        assert!(!fs::read_to_string(&hosts).unwrap().contains("\tlocalhost"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

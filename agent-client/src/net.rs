@@ -2,7 +2,7 @@
 //! makes arrives as a stream from its agent, and is asked of bottled's decider, as smolvm asked it
 //! (see bottle/decider.py), before it goes anywhere: connected from here directly, handed to bottled,
 //! which is then its far end, or refused. Names the bottle looks up are resolved here, by this
-//! machine's own resolver, at the time.
+//! machine's own resolver, at the time; and the bottle's clock is set from this machine's.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub use bottle_agent_proto::net::PORT;
-use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};
+use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved, Time};
 
 /// The most of a connection's first bytes the decider is given, and how long they're waited for:
 /// a protocol whose server speaks first gives none.
@@ -104,6 +104,12 @@ fn handle(mut conn: UnixStream, decider: Option<&Decider>) -> io::Result<()> {
     match Request::read(&mut conn)? {
         Request::Resolve(name) => Resolved(resolve(&name)).write(&mut conn),
         Request::Connect(to) => connect(conn, to, decider),
+        Request::Time => Time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default(),
+        )
+        .write(&mut conn),
     }
 }
 
@@ -250,6 +256,21 @@ mod tests {
         assert_eq!(u16::from_be_bytes([fixed[73], fixed[74]]), 443);
         assert_eq!(&fixed[75..79], &[192, 0, 2, 9]);
         assert_eq!(first, b"GET / HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn the_time_is_this_machines() {
+        let (mut agent, host) = pair();
+        thread::spawn(move || handle(host, None));
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        Request::Time.write(&mut agent).unwrap();
+        let Time(now) = Time::read(&mut agent).unwrap();
+        assert!(
+            now >= before && now - before < Duration::from_secs(1),
+            "{now:?}"
+        );
     }
 
     #[test]
