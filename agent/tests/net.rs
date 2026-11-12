@@ -115,7 +115,15 @@ fn decider(allow: u16, redirect: u16) -> (SocketAddr, Asked) {
         for conn in listener.incoming() {
             let mut s = conn.unwrap();
             let mut fixed = [0; 8 + 32 + 16 + 16 + 1 + 2];
-            s.read_exact(&mut fixed).unwrap();
+            s.read_exact(&mut fixed[..8]).unwrap();
+            if &fixed[..8] == b"BOTTLPOL" {
+                // No policy: every connection is asked about, as this test wants.
+                let mut rest = [0; 32 + 16];
+                s.read_exact(&mut rest).unwrap();
+                s.write_all(&[0; 4]).unwrap();
+                continue;
+            }
+            s.read_exact(&mut fixed[8..]).unwrap();
             assert_eq!(&fixed[..8], b"SMOLMEG2");
             assert_eq!(&fixed[8..40], &[7; 32], "the bottle's token");
             let port = u16::from_be_bytes([fixed[73], fixed[74]]);
@@ -184,11 +192,7 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("h")).unwrap();
     let listener = UnixListener::bind(dir.join("h/net.sock")).unwrap();
-    let d = Decider {
-        address: decider_address,
-        token: [7; 32],
-        machine: [9; 16],
-    };
+    let d = Decider::new(decider_address, [7; 32], [9; 16]);
     thread::spawn(move || serve(listener, Some(d)));
 
     let upper = dir.join("rw.ext4");

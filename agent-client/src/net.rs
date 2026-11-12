@@ -1,14 +1,18 @@
 //! The host's side of a bottle's network (see bottle_agent_proto::net): each connection the bottle
-//! makes arrives as a stream from its agent, and is asked of bottled's decider, as smolvm asked it
-//! (see bottle/decider.py), before it goes anywhere: connected from here directly, handed to bottled,
-//! which is then its far end, or refused. Names the bottle looks up are resolved here, by this
-//! machine's own resolver, at the time.
+//! makes arrives as a stream from its agent, and is decided before it goes anywhere: connected from
+//! here directly, handed to bottled, which is then its far end, or refused. Decided here, by the
+//! policy bottled gives once (see policy.rs), unless it's one bottled must see; asked of bottled's
+//! decider (see bottle/decider.py), as smolvm asked it, when it is, or when bottled hasn't given a
+//! policy. Names the bottle looks up are resolved here, by this machine's own resolver, at the time.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::policy::{Local, Policy};
 
 pub use bottle_agent_proto::net::PORT;
 use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};
@@ -29,7 +33,11 @@ pub struct Decider {
     pub address: SocketAddr,
     pub token: [u8; 32],
     pub machine: [u8; 16],
+    policy: PolicyState,
 }
+
+/// The policy bottled gave, once it has; when it was last asked for.
+type PolicyState = Arc<Mutex<(Option<Arc<Policy>>, Option<Instant>)>>;
 
 /// What the decider said of a flow.
 enum Decision {
@@ -39,8 +47,63 @@ enum Decision {
 }
 
 const MAGIC: &[u8] = b"SMOLMEG2";
+const POLICY_MAGIC: &[u8] = b"BOTTLPOL";
+/// How long bottled gets to give its policy (one that doesn't know the question waits for more,
+/// then hangs up), and how long after it didn't before it's asked again.
+const POLICY_WAIT: Duration = Duration::from_secs(3);
+const POLICY_RETRY: Duration = Duration::from_secs(30);
 
 impl Decider {
+    pub fn new(address: SocketAddr, token: [u8; 32], machine: [u8; 16]) -> Decider {
+        Decider {
+            address,
+            token,
+            machine,
+            policy: Default::default(),
+        }
+    }
+
+    /// The policy bottled gives, asked for the first time it's needed, and again after
+    /// POLICY_RETRY if it wasn't given; None meanwhile, when every connection is asked of bottled.
+    fn policy(&self) -> Option<Arc<Policy>> {
+        let mut state = self.policy.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(policy) = &state.0 {
+            return Some(Arc::clone(policy));
+        }
+        if state.1.is_some_and(|asked| asked.elapsed() < POLICY_RETRY) {
+            return None;
+        }
+        state.1 = Some(Instant::now());
+        match self.ask_policy() {
+            Ok(policy) => {
+                let policy = Arc::new(policy);
+                state.0 = Some(Arc::clone(&policy));
+                Some(policy)
+            }
+            Err(e) => {
+                eprintln!(
+                    "bottle-cli: no policy from bottled ({e}): asking it of every connection"
+                );
+                None
+            }
+        }
+    }
+
+    fn ask_policy(&self) -> io::Result<Policy> {
+        let mut conn = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)?;
+        conn.set_read_timeout(Some(POLICY_WAIT))?;
+        conn.write_all(&[POLICY_MAGIC, &self.token, &self.machine].concat())?;
+        let mut length = [0; 4];
+        conn.read_exact(&mut length)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length == 0 {
+            return Err(io::Error::other("refused"));
+        }
+        let mut json = vec![0; length];
+        conn.read_exact(&mut json)?;
+        serde_json::from_slice(&json).map_err(io::Error::other)
+    }
+
     fn decide(&self, to: SocketAddr, first: &[u8]) -> io::Result<Decision> {
         let mut conn = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)?;
         conn.set_read_timeout(Some(DECIDE_TIMEOUT))?;
@@ -189,7 +252,23 @@ fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> i
     let first = first_bytes(&mut conn)?;
     let decision = match decider {
         None => Decision::Direct,
-        Some(decider) => decider.decide(to, &first).unwrap_or(Decision::Deny),
+        Some(decider) => match decider.policy().map(|policy| {
+            policy.decide(to, &first, |name| match resolve(name) {
+                Resolved::Addresses(ips) => ips,
+                _ => Vec::new(),
+            })
+        }) {
+            Some(Local::Direct) => Decision::Direct,
+            Some(Local::Deny) => {
+                let name = crate::policy::name_in(&first);
+                eprintln!(
+                    "bottle-cli: refused {to}{}: not allowed",
+                    name.map_or(String::new(), |n| format!(" ({n})"))
+                );
+                Decision::Deny
+            }
+            Some(Local::Hand) | None => decider.decide(to, &first).unwrap_or(Decision::Deny),
+        },
     };
     let far = match decision {
         Decision::Direct => match TcpStream::connect_timeout(&to, CONNECT_TIMEOUT) {
@@ -290,6 +369,12 @@ mod tests {
         let decider = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = decider.local_addr().unwrap();
         let asked = thread::spawn(move || {
+            // Asked for a policy first: none is given, so the flow is asked about.
+            let (mut s, _) = decider.accept().unwrap();
+            let mut question = [0; 8 + 32 + 16];
+            s.read_exact(&mut question).unwrap();
+            assert_eq!(&question[..8], POLICY_MAGIC);
+            s.write_all(&[0; 4]).unwrap();
             let (mut s, _) = decider.accept().unwrap();
             let mut fixed = [0; 8 + 32 + 32 + 1 + 2 + 4 + 2];
             s.read_exact(&mut fixed).unwrap();
@@ -298,11 +383,7 @@ mod tests {
             s.write_all(&[1]).unwrap();
             (fixed, first)
         });
-        let d = Decider {
-            address,
-            token: [7; 32],
-            machine: [9; 16],
-        };
+        let d = Decider::new(address, [7; 32], [9; 16]);
         let (mut agent, host) = pair();
         thread::spawn(move || handle(host, Some(&d)));
         Request::Connect("192.0.2.9:443".parse().unwrap())
@@ -320,6 +401,58 @@ mod tests {
         assert_eq!(u16::from_be_bytes([fixed[73], fixed[74]]), 443);
         assert_eq!(&fixed[75..79], &[192, 0, 2, 9]);
         assert_eq!(first, b"GET / HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn with_a_policy_only_what_bottled_must_see_is_asked_of_it() {
+        let far = TcpListener::bind("127.0.0.1:0").unwrap();
+        let decider = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = decider.local_addr().unwrap();
+        let asked = thread::spawn(move || {
+            let (mut s, _) = decider.accept().unwrap();
+            let mut question = [0; 8 + 32 + 16];
+            s.read_exact(&mut question).unwrap();
+            assert_eq!(
+                (&question[..8], &question[8..40]),
+                (POLICY_MAGIC, &[7; 32][..])
+            );
+            let policy =
+                br#"{"allow_private": [], "hand": [{"name": "handed.example", "port": 443}]}"#;
+            s.write_all(&(policy.len() as u32).to_be_bytes()).unwrap();
+            s.write_all(policy).unwrap();
+            // Then only the handed flow is asked about.
+            let (mut s, _) = decider.accept().unwrap();
+            let mut magic = [0; 8];
+            s.read_exact(&mut magic).unwrap();
+            s.write_all(&[1]).unwrap();
+            magic
+        });
+        let d = Decider::new(address, [7; 32], [9; 16]);
+        let connect = |to: SocketAddr, first: &[u8]| {
+            let (mut agent, host) = pair();
+            let d = d.clone();
+            thread::spawn(move || handle(host, Some(&d)));
+            Request::Connect(to).write(&mut agent).unwrap();
+            agent.write_all(first).unwrap();
+            let mut answer = [0];
+            agent.read_exact(&mut answer).unwrap();
+            answer[0]
+        };
+        // Private, by no name allowed private: refused here. (The loopback stands in for the internet.)
+        assert_eq!(
+            connect(
+                "10.0.0.1:80".parse().unwrap(),
+                b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+            ),
+            REFUSED
+        );
+        let handed = b"GET / HTTP/1.1\r\nHost: handed.example\r\n\r\n";
+        assert_eq!(
+            connect("93.184.216.34:443".parse().unwrap(), handed),
+            REFUSED
+        );
+        assert_eq!(&asked.join().unwrap(), MAGIC);
+        drop(far);
     }
 
     #[test]

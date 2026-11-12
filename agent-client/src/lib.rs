@@ -14,6 +14,7 @@ pub use bottle_agent_proto::{Exit, Start, WinSize};
 use bottle_agent_proto::{ToGuest, ToHost};
 
 pub mod net;
+pub mod policy;
 
 /// Stdin is sent in pieces of at most this much.
 const CHUNK: usize = 64 * 1024;

@@ -127,6 +127,34 @@ class DeciderTest(unittest.IsolatedAsyncioTestCase):
         # No repo, so no remotes: bottle.host itself answers that there's nothing there.
         self.assertTrue((await asyncio.wait_for(reader.read(), 5)).startswith(b"HTTP/1.1 404"))
 
+    async def policy(self, token: bytes, machine: bytes = MACHINE) -> dict | None:
+        address, port = self.daemon.decider_address.rsplit(":", 1)
+        reader, writer = await asyncio.open_connection(address, int(port))
+        self.addCleanup(writer.close)
+        writer.write(decider.POLICY_MAGIC + token + machine)
+        length = int.from_bytes(await asyncio.wait_for(reader.readexactly(4), 5), "big")
+        return json.loads(await reader.readexactly(length)) if length else None
+
+    async def test_a_driver_is_told_what_it_may_decide_itself_and_what_to_hand_here(self) -> None:
+        caches = [daemon.cache.Cached("deb.debian.org", ports=(80,))]
+        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer x", 8443)]
+        with mock.patch.object(daemon.cache, "cached_for", return_value=caches), \
+                mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
+            token = await self.bind()
+        policy = await self.policy(token)
+        self.assertEqual(policy["allow_private"], [])
+        self.assertEqual(policy["hand"], [
+            {"address": host.ADDRESS, "port": 80},
+            {"network": host.SSH_NETWORK, "port": host.SSH_PORT},
+            {"name": "ci.test", "port": 8443},
+            {"name": "deb.debian.org", "port": 80},
+        ])
+        # The machine that first asked is the bottle's, as for its flows; another, and a stranger, get nothing.
+        self.assertIsNone(await self.policy(token, machine=bytes(range(2, 18))))
+        self.assertIsNone(await self.policy(os.urandom(32)))
+        self.assertEqual((await self.flow(prelude(token, "93.184.216.34", 443, machine=bytes(range(2, 18)))))[0], DENY)
+
     async def test_a_token_no_bottle_has_gets_no_answer(self) -> None:
         await self.bind()
         self.assertEqual((await self.flow(prelude(os.urandom(32), "93.184.216.34", 443)))[0], b"")

@@ -470,11 +470,9 @@ fn decider(address: std::net::SocketAddr) -> io::Result<bottle_agent_client::net
     let mut machine = [0; 16];
     fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut machine))?;
-    Ok(bottle_agent_client::net::Decider {
-        address,
-        token,
-        machine,
-    })
+    Ok(bottle_agent_client::net::Decider::new(
+        address, token, machine,
+    ))
 }
 
 /// Pointers to `strings`, then NULL, as C wants an array of strings.

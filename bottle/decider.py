@@ -19,6 +19,11 @@ egress.py).
                2  length of the first bytes, at most 8192
                n  the first bytes
 
+A driver can also ask, once, what it may decide itself (Gateway.driver_policy): a
+prelude of the magic BOTTLPOL, the token and the machine ID, answered with the
+policy as JSON, its length first (4 bytes); a token no bottle has gets length
+0. It still asks here about every flow the policy says to hand over.
+
 A token is the bottle: each bottle has its own, minted when it's bound
 (when its machine starts), and the first machine ID that comes with it is
 the only one accepted after. smolvm keeps the token it was started with for
@@ -44,6 +49,7 @@ log = logging.getLogger("bottle.decider")
 log.addHandler(logging.NullHandler())
 
 MAGIC = b"SMOLMEG2"
+POLICY_MAGIC = b"BOTTLPOL"
 TOKEN_BYTES = 32
 ID_BYTES = 16
 MAX_FIRST_BYTES = 8192
@@ -71,9 +77,10 @@ class Prelude:
     first: bytes
 
 
-async def read_prelude(reader: asyncio.StreamReader) -> Prelude:
-    """One flow's prelude. Lengths are checked before anything is read on their account."""
-    fixed = await reader.readexactly(len(MAGIC) + TOKEN_BYTES + 2 * ID_BYTES + 1 + 2)
+async def read_prelude(reader: asyncio.StreamReader, magic: bytes = b"") -> Prelude:
+    """One flow's prelude, its magic already read if given. Lengths are checked before anything is read on their
+    account."""
+    fixed = magic + await reader.readexactly(len(MAGIC) - len(magic) + TOKEN_BYTES + 2 * ID_BYTES + 1 + 2)
     if fixed[:8] != MAGIC:
         raise BadPrelude("not a version 2 prelude")
     machine_id = fixed[40:56]
@@ -138,7 +145,11 @@ class Decider:
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         started = time.monotonic()
         try:
-            prelude = await asyncio.wait_for(read_prelude(reader), PRELUDE_TIMEOUT)
+            magic = await asyncio.wait_for(reader.readexactly(len(MAGIC)), PRELUDE_TIMEOUT)
+            if magic == POLICY_MAGIC:
+                await self._answer_policy(reader, writer)
+                return
+            prelude = await asyncio.wait_for(read_prelude(reader, magic), PRELUDE_TIMEOUT)
         except (BadPrelude, ValueError, asyncio.IncompleteReadError, TimeoutError, ConnectionError) as e:
             log.warning("decider: refused a connection: %s", e or type(e).__name__)
             writer.close()
@@ -179,6 +190,23 @@ class Decider:
         writer.write(REDIRECT)
         await writer.drain()
         await gateway.serve(flow, decision, reader, writer)
+
+    async def _answer_policy(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """A driver's question of what it may decide itself: the bottle's policy, if the token is a bottle's and the
+        machine its own."""
+        asked = await asyncio.wait_for(reader.readexactly(TOKEN_BYTES + ID_BYTES), PRELUDE_TIMEOUT)
+        token, machine_id = asked[:TOKEN_BYTES], asked[TOKEN_BYTES:]
+        binding = self.bindings.get(_digest(token))
+        if binding is not None and binding.machine_id is None and machine_id != bytes(ID_BYTES):
+            binding.machine_id = machine_id
+        answer = b""
+        if binding is not None and binding.machine_id == machine_id:
+            answer = json.dumps(binding.gateway.driver_policy()).encode()
+        else:
+            log.warning("decider: refused a policy to a token no bottle has, or another machine")
+        writer.write(len(answer).to_bytes(4, "big") + answer)
+        await writer.drain()
+        writer.close()
 
     def _load(self) -> dict[str, bytes]:
         try:

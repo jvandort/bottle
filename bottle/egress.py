@@ -587,6 +587,20 @@ class Gateway:
             raise Refused(400, "Bad Request", "bad-request") from None
         return await self.services.handle(host.HttpRequest(method, url.path or "/", url.query, headers, body), writer)
 
+    def driver_policy(self) -> dict:
+        """What the driver carrying the bottle's flows may decide itself, as decide would, and which flows it
+        must still hand here: those bottled is the far end of or must read (bottle.host's services, ssh to
+        bottles, a credential's or a cached host's), by address or by the name a flow's first bytes give (a
+        ClientHello's server name, an HTTP request's Host); and the private addresses it may reach by name."""
+        hand: list[dict] = []
+        if self.services is not None:
+            hand.append({"address": host.ADDRESS, "port": 80})
+        if self.ssh or self.hand_off:
+            hand.append({"network": host.SSH_NETWORK, "port": host.SSH_PORT})
+        hand += [{"name": i.host.lower(), "port": i.port} for i in self.injections]
+        hand += [{"name": c.host, "port": port} for c in self.caches for port in c.ports]
+        return {"version": 1, "allow_private": list(self.policy.allow_private), "hand": hand}
+
     def _injection_at(self, host: str, port: int) -> Injection | None:
         """The credential for this host and port, if one claims it."""
         return next((i for i in self.injections if i.matches(host, port)), None)

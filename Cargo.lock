@@ -123,6 +123,8 @@ version = "0.1.0"
 dependencies = [
  "bottle-agent-proto",
  "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
