@@ -61,6 +61,10 @@ pub enum ToGuest {
     Resize(WinSize),
     /// A signal for the command.
     Signal(i32),
+    /// Instead of a Start, as a connection's first frame: stop the VM. The agent stops everything
+    /// else running, makes the bottle's disk clean (synced and remounted read-only: what a build's
+    /// upper has to be, to be a stage), says Exit, and exits, which ends the VM.
+    Stop,
 }
 
 /// What the guest sends.
@@ -83,6 +87,7 @@ const STDIN: u8 = 2;
 const STDIN_EOF: u8 = 3;
 const RESIZE: u8 = 4;
 const SIGNAL: u8 = 5;
+const STOP: u8 = 6;
 const STARTED: u8 = 64;
 const STDOUT: u8 = 65;
 const STDERR: u8 = 66;
@@ -144,6 +149,7 @@ impl ToGuest {
             ToGuest::StdinEof => write_frame(w, STDIN_EOF, &[]),
             ToGuest::Resize(size) => write_frame(w, RESIZE, &json(size)),
             ToGuest::Signal(signal) => write_frame(w, SIGNAL, &json(signal)),
+            ToGuest::Stop => write_frame(w, STOP, &[]),
         }
     }
 
@@ -157,6 +163,7 @@ impl ToGuest {
             STDIN_EOF => ToGuest::StdinEof,
             RESIZE => ToGuest::Resize(parse(&payload)?),
             SIGNAL => ToGuest::Signal(parse(&payload)?),
+            STOP => ToGuest::Stop,
             other => return Err(invalid(format!("a frame of kind {other} from the host"))),
         }))
     }
@@ -226,6 +233,7 @@ mod tests {
             cols: 132,
         }));
         round_trip_guest(ToGuest::Signal(15));
+        round_trip_guest(ToGuest::Stop);
         round_trip_host(ToHost::Started { pid: 42 });
         round_trip_host(ToHost::Stdout(b"out".to_vec()));
         round_trip_host(ToHost::Stderr(Vec::new()));

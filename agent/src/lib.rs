@@ -4,6 +4,7 @@
 pub mod init;
 pub mod reaper;
 pub mod socket;
+pub mod unpack;
 pub mod user;
 
 use std::fs::File;
@@ -27,8 +28,10 @@ const CHUNK: usize = 64 * 1024;
 /// End-of-file at the start of a line, for a terminal: what closes its stdin.
 const VEOF: u8 = 0x04;
 
-/// Serves connections on `listener`, each on a thread of its own, until accepting fails.
-pub fn serve(listener: Listener, reaper: Reaper) -> io::Result<()> {
+/// Serves connections on `listener`, each on a thread of its own, until accepting fails, or a
+/// Stop. `upper` is the bottle's own disk, made clean on a Stop, if there is one (see init).
+pub fn serve(listener: Listener, reaper: Reaper, upper: Option<File>) -> io::Result<()> {
+    let upper = Arc::new(upper);
     loop {
         let conn = match listener.accept() {
             Ok(conn) => conn,
@@ -38,8 +41,9 @@ pub fn serve(listener: Listener, reaper: Reaper) -> io::Result<()> {
             Err(e) => return Err(e),
         };
         let reaper = reaper.clone();
+        let upper = Arc::clone(&upper);
         thread::spawn(move || {
-            if let Err(e) = handle(conn, &reaper) {
+            if let Err(e) = handle(conn, &reaper, &upper) {
                 eprintln!("bottle-agent: {e}");
             }
         });
@@ -67,12 +71,21 @@ struct Input {
     pidfd: OwnedFd,
 }
 
-fn handle(conn: Socket, reaper: &Reaper) -> io::Result<()> {
+fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()> {
     let mut incoming = conn.try_clone()?;
     let outgoing = Arc::new(Mutex::new(conn.try_clone()?));
     let send = |message: ToHost| message.write(&mut *outgoing.lock().unwrap());
 
     let start = match ToGuest::read(&mut incoming)? {
+        Some(ToGuest::Stop) => {
+            let exit = match stop(upper.as_ref()) {
+                Ok(()) => ToHost::Exit(Exit::Code(0)),
+                Err(e) => ToHost::Error(format!("stopping: {e}")),
+            };
+            let _ = send(exit);
+            conn.shutdown_write();
+            std::process::exit(0);
+        }
         Some(ToGuest::Start(start)) => start,
         Some(other) => return refuse(&conn, incoming, format!("expected a Start, got {other:?}")),
         None => return Ok(()),
@@ -108,6 +121,45 @@ fn handle(conn: Socket, reaper: &Reaper) -> io::Result<()> {
     let _ = feeder.join();
     drop(running.pidfd);
     sent
+}
+
+/// How long what's running gets to end after SIGTERM, before SIGKILL.
+const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stops everything but this process and pid 1 (libkrun's init, in a VM), then syncs and remounts
+/// `upper`, the root of the bottle's disk, read-only: ext4 is then clean on the disk, nothing left
+/// in its journal to recover. (Freezing would do as well, but a frozen filesystem outlives its
+/// mounts, holding its disk, until thawed.)
+fn stop(upper: Option<&File>) -> io::Result<()> {
+    for (signal, wait) in [(libc::SIGTERM, GRACE), (libc::SIGKILL, GRACE)] {
+        // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
+        unsafe { libc::kill(-1, signal) };
+        let deadline = std::time::Instant::now() + wait;
+        // kill(-1, 0) fails with ESRCH once there's nothing left to signal.
+        while unsafe { libc::kill(-1, 0) } == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    // SAFETY: sync has no preconditions.
+    unsafe { libc::sync() };
+    if let Some(upper) = upper {
+        // The mount is covered, so it's reached through the descriptor.
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", upper.as_raw_fd())).unwrap();
+        // SAFETY: mount with a C string path, the rest NULL.
+        let ret = unsafe {
+            libc::mount(
+                std::ptr::null(),
+                path.as_ptr(),
+                std::ptr::null(),
+                libc::MS_REMOUNT | libc::MS_RDONLY,
+                std::ptr::null(),
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Tells the host why its command won't run, and reads what it sends until it closes.
@@ -167,7 +219,8 @@ fn feed(mut incoming: Socket, mut input: Input) {
                 }
             }
             ToGuest::Signal(signal) => signal_pidfd(&input.pidfd, signal),
-            ToGuest::Start(_) => {}
+            // Only ever first, on a connection of their own.
+            ToGuest::Start(_) | ToGuest::Stop => {}
         }
     }
     // After the exit, this signals nothing: the pidfd refers to that process, reaped or not, and

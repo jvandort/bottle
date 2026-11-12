@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 bottle-agent-proto.workspace = true
 libc.workspace = true
+tar.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
+tar.workspace = true

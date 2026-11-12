@@ -1,6 +1,7 @@
 //! bottle-agent: runs commands for the host, listening on a vsock port in a VM (--vsock PORT), or
 //! on a unix socket (--unix PATH) to try it out of one. As `bottle-agent init`, run by libkrun's
-//! init, it first stacks the bottle's disks into its root and moves into it (see init.rs).
+//! init, it first stacks the bottle's disks into its root and moves into it (see init.rs). As
+//! `bottle-agent unpack`, run through it, it extracts a tar into the bottle (see unpack.rs).
 
 use std::process::ExitCode;
 
@@ -10,6 +11,16 @@ use bottle_agent::socket::Listener;
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("unpack") {
+        return match bottle_agent::unpack::main(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bottle-agent unpack: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let mut upper = None;
     if args.first().map(String::as_str) == Some("init") {
         args.remove(0);
         let stack = match init::parse(&mut args) {
@@ -19,9 +30,12 @@ fn main() -> ExitCode {
                 return usage();
             }
         };
-        if let Err(e) = init::stack(&stack) {
-            eprintln!("bottle-agent init: {e}");
-            return ExitCode::FAILURE;
+        match init::stack(&stack) {
+            Ok(disk) => upper = Some(disk),
+            Err(e) => {
+                eprintln!("bottle-agent init: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     let listener = match args
@@ -51,7 +65,7 @@ fn main() -> ExitCode {
             libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
         }
     }
-    match bottle_agent::serve(listener, Reaper::start()) {
+    match bottle_agent::serve(listener, Reaper::start(), upper) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bottle-agent: {e}");
@@ -63,5 +77,6 @@ fn main() -> ExitCode {
 fn usage() -> ExitCode {
     eprintln!("usage: bottle-agent [init [--lower DISK]... --upper DISK [--hostname NAME]]");
     eprintln!("                    --vsock PORT | --unix PATH");
+    eprintln!("       bottle-agent unpack DIR [--oci]");
     ExitCode::from(2)
 }

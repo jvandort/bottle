@@ -7,12 +7,13 @@
 //!   `rootfs/`s, its `work/` overlayfs's work directory.
 //!
 //! A disk is named by its virtio serial (the block id libkrun was given for it), or by a path to
-//! its device. The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
+//! its device; a lower may also be a directory, used as it is (out of a VM, to try this on). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
 //! is a stage.
 
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 /// Where the disks are mounted, and stacked, before the move: a tmpfs of the agent's own, the root
@@ -51,11 +52,17 @@ pub fn parse(args: &mut Vec<String>) -> Result<Stack, String> {
     Ok(stack)
 }
 
-/// Stacks the disks and moves into them: after this, `/` is the bottle's root.
-pub fn stack(stack: &Stack) -> io::Result<()> {
+/// Stacks the disks and moves into them: after this, `/` is the bottle's root. Returns the
+/// bottle's own disk's root, open, for a Stop to make clean: unreachable by path once moved.
+pub fn stack(stack: &Stack) -> io::Result<fs::File> {
     mount("tmpfs", RUN, "tmpfs", 0, "mode=0755")?;
     let mut lowers = Vec::new();
     for (i, disk) in stack.lowers.iter().enumerate() {
+        // A directory, out of a VM, is a lower as it is: a host's own root, to try this on.
+        if Path::new(disk).is_dir() {
+            lowers.push(disk.clone());
+            continue;
+        }
         let dir = format!("{RUN}/{i}");
         fs::create_dir(&dir)?;
         mount(&device(disk)?, &dir, "ext4", libc::MS_RDONLY, "")?;
@@ -87,7 +94,7 @@ pub fn stack(stack: &Stack) -> io::Result<()> {
             lowers.join(":")
         ),
     )?;
-    move_into(&root)?;
+    let upper = move_into(&root, &rw)?;
     mount_system()?;
     if let Some(name) = &stack.hostname {
         // SAFETY: sethostname reads `len` bytes of `name`.
@@ -95,14 +102,20 @@ pub fn stack(stack: &Stack) -> io::Result<()> {
             return Err(failed("sethostname", io::Error::last_os_error()));
         }
     }
-    Ok(())
+    Ok(upper)
 }
 
 /// Makes `root` the root, of this process and of all whose root was the old one (init.krun too),
-/// and lets go of the old one, whose mounts the overlay keeps what it needs of.
-fn move_into(root: &str) -> io::Result<()> {
+/// and lets go of the old one, whose mounts the overlay keeps what it needs of. The bottle's own
+/// disk, at `rw`, comes along, to /run, where it's covered (see mount_system) but still there for
+/// a Stop to make read-only: what's returned is it, open.
+fn move_into(root: &str, rw: &str) -> io::Result<fs::File> {
     // pivot_root refuses a shared mount, and init.krun makes / shared.
     mount_raw(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+    let run = format!("{root}/run");
+    fs::create_dir_all(&run)?;
+    mount_raw(Some(rw), &run, None, libc::MS_MOVE, None)
+        .map_err(|e| failed("moving the bottle's disk", e))?;
     std::env::set_current_dir(root)?;
     // The old root is put on top of the new, then detached: pivot_root(".", ".").
     let dot = c".";
@@ -116,8 +129,13 @@ fn move_into(root: &str) -> io::Result<()> {
         }
     }
     std::env::set_current_dir("/")?;
+    let upper = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+        .open("/run")?;
     // Shared again, as init.krun had it, for what runs containers in the bottle.
-    mount_raw(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)
+    mount_raw(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
+    Ok(upper)
 }
 
 /// /proc, /sys, /dev and the rest, again, in the bottle's root.
