@@ -97,7 +97,11 @@ pub fn early() -> io::Result<()> {
         ("proc", "/proc", "proc"),
         ("sysfs", "/sys", "sysfs"),
     ] {
-        mount(source, target, fstype, 0, "")?;
+        // Mounted already is as good: the kernel mounts devtmpfs itself (DEVTMPFS_MOUNT).
+        match mount_raw(Some(source), target, Some(fstype), 0, None) {
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {}
+            other => other.map_err(|e| failed(&format!("mounting {target}"), e))?,
+        }
     }
     crate::net::loopback_up()
 }
