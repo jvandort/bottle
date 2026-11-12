@@ -5,16 +5,14 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, runners, ssh
+from bottle import bottles, prereqs, runners, ssh
 from bottle.errors import BottleError
 from tests.support import GitTestCase
 
 # ssh, as far as bottle uses it: options up to --, the destination, and a command for its shell, run here
 # as if at the destination, in a home of its own. "down" can't be reached. Whatever runs the tests, the
-# destination is Linux on x86_64 (uname, from $FAKE_PATH), with no cargo or rustup on its PATH but the tests'
-# own python3 (also from $FAKE_PATH: hiding a cargo can hide a python3 beside it), and what building
-# bottle-cli takes besides (stand-ins, in $FAKE_PATH too). Its shell sees $FAKE_KVM where it says /dev/kvm, and
-# $FAKE_HEADERS where it looks for the kernel's headers, so a test says whether the machine has them.
+# destination is Linux on x86_64 (uname, from $FAKE_PATH), with the tests' own python3 (also from
+# $FAKE_PATH), and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether the machine has KVM.
 FAKE_SSH = r"""#!/usr/bin/env bash
 while [ "$1" != "--" ]; do shift; done
 shift
@@ -25,26 +23,8 @@ if [ "$destination" = down ]; then
   exit 255
 fi
 script=${1//\/dev\/kvm/$FAKE_KVM}
-script=${script//\/usr\/include\/linux\/version.h/$FAKE_HEADERS}
 mkdir -p "$FAKE_REMOTES/$destination"
-path=$FAKE_PATH
-IFS=: ; for dir in $PATH; do [ -x "$dir/cargo" ] || [ -x "$dir/rustup" ] || path="$path:$dir"; done; unset IFS
-exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" PATH="$path" bash -c "$script"
-"""
-
-# rustup there, as `bottle runner add` installs it, with the musl target; and its cargo, whose `xtask dist
-# --out DIR` makes a bottle-cli there.
-FAKE_RUSTUP = """#!/bin/sh
-echo x86_64-unknown-linux-musl
-"""
-FAKE_CARGO = """#!/bin/sh
-echo "$*" >> "$HOME/cargo.log"
-mkdir -p "$4"
-cat > "$4/bottle-cli" <<'EOF'
-#!/bin/sh
-echo '{"state": "running"}'
-EOF
-chmod +x "$4/bottle-cli"
+exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" PATH="$FAKE_PATH:$PATH" bash -c "$script"
 """
 
 # bottle-cli there: every machine is running.
@@ -68,17 +48,23 @@ class SshTestCase(GitTestCase):
         uname.write_text('#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n')
         uname.chmod(0o755)
         (self.path / "python3").symlink_to(sys.executable)
-        for tool in ("cc", "make", "musl-gcc", "curl", "bsdtar"):
-            (self.path / tool).write_text("#!/bin/sh\n")
-            (self.path / tool).chmod(0o755)
-        self.headers = self.tmp / "version.h"
-        self.headers.write_text("")
         env = mock.patch.dict(os.environ, {
             "BOTTLE_SSH": str(fake), "FAKE_SSH_LOG": str(self.log), "FAKE_REMOTES": str(self.remotes),
-            "FAKE_KVM": str(self.kvm), "FAKE_PATH": str(self.path), "FAKE_HEADERS": str(self.headers),
+            "FAKE_KVM": str(self.kvm), "FAKE_PATH": str(self.path),
         })
         env.start()
         self.addCleanup(env.stop)
+        # bottle-cli's distribution for x86_64 Linux, as xtask would build it here: a fake bottle-cli.
+        self.built: list[str] = []
+        self.dist = self.tmp / "dist"
+        self.dist.mkdir()
+        (self.dist / "bottle-cli").write_text(FAKE_CLI)
+        (self.dist / "bottle-cli").chmod(0o755)
+        (self.dist / prereqs.STAMP).write_text(prereqs.source_hash())
+        patcher = mock.patch.object(prereqs, "ensure_dist", side_effect=lambda target: self.built.append(target)
+                                    or self.dist)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def has_kvm(self) -> None:
         self.kvm.write_text("")
@@ -90,12 +76,6 @@ class SshTestCase(GitTestCase):
         cli.chmod(0o755)
         return cli
 
-    def has_rust(self, destination: str = "box") -> None:
-        bin = self.remotes / destination / ".cargo" / "bin"
-        bin.mkdir(parents=True)
-        for name, script in (("rustup", FAKE_RUSTUP), ("cargo", FAKE_CARGO)):
-            (bin / name).write_text(script)
-            (bin / name).chmod(0o755)
 
     def logged(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -128,11 +108,11 @@ class TransportTest(SshTestCase):
             runner.state("bottle-b")
 
     def test_its_connection_is_shared_and_never_asks(self) -> None:
-        command = ssh.SshTransport("box", "user@box.example").command(["smolvm", "machine", "exec"], tty=True)
+        command = ssh.SshTransport("box", "user@box.example").command(["bottle-cli", "machine", "exec"], tty=True)
         self.assertEqual(command[0], os.environ["BOTTLE_SSH"])
         for option in ("BatchMode=yes", "ControlMaster=auto", f"ControlPersist={ssh.PERSIST}"):
             self.assertIn(option, command)
-        self.assertEqual(command[-4:], ["-t", "--", "user@box.example", "smolvm machine exec"])
+        self.assertEqual(command[-4:], ["-t", "--", "user@box.example", "bottle-cli machine exec"])
 
     def test_a_shell_there_is_its_bottle_cli_exec_over_ssh(self) -> None:
         cli = self.has_cli()
@@ -146,15 +126,10 @@ class TransportTest(SshTestCase):
     def test_what_it_has(self) -> None:
         self.has_kvm()
         check = ssh.SshTransport("box", "box").check()
-        self.assertEqual((check.os, check.kvm, check.git, check.rust, check.lacks), ("Linux", True, True, "", ()))
-        self.assertEqual(check.missing(), [])  # Rust is bottle's to install
-        self.has_rust()
-        self.assertEqual(ssh.SshTransport("box", "box").check().rust, "ready")
+        self.assertEqual((check.os, check.arch, check.kvm, check.git), ("Linux", "x86_64", True, True))
+        self.assertEqual(check.missing(), [])
         self.kvm.unlink()
-        self.headers.unlink()
-        check = ssh.SshTransport("box", "box").check()
-        self.assertFalse(check.kvm)
-        self.assertEqual(check.lacks, ("kernel-headers",))
+        self.assertFalse(ssh.SshTransport("box", "box").check().kvm)
 
     def test_no_route_on_a_mac_names_the_local_network_permission(self) -> None:
         why = "ssh: connect to host box.local port 22: No route to host"
@@ -165,63 +140,54 @@ class TransportTest(SshTestCase):
             self.assertEqual(ssh.explained(why), why)
 
     def test_what_it_lacks_is_said_as_its_fixed(self) -> None:
-        check = ssh.Check("Darwin", "arm64", False, "3.9", False, "", ("musl-gcc", "curl"))
+        check = ssh.Check("Darwin", "arm64", False, "3.9", False)
         self.assertEqual(check.missing(), [
             "Linux (it runs Darwin)", "access to /dev/kvm (add the user to the kvm group)",
             "Python 3.11 or later as python3 (it has 3.9)", "git",
-            "musl-gcc, curl, to build bottle-cli (on Debian or Ubuntu: apt install build-essential musl-tools "
-            "linux-libc-dev curl libarchive-tools)",
         ])
+        self.assertEqual(ssh.Check("Linux", "riscv64", True, "3.13", True).missing(), ["x86_64 or arm64 (it's riscv64)"])
 
 
 class RunnerCommandsTest(SshTestCase):
     def test_add_checks_and_records_it_and_sends_its_code(self) -> None:
         self.has_kvm()
-        self.has_rust()
         check = runners.add("box", "box")
-        self.assertEqual(check.rust, "ready")
+        self.assertEqual(check.arch, "x86_64")
         self.assertEqual(runners.registered(), {"box": {"ssh": "box"}})
-        code = self.remotes / "box" / ".bottle" / "runner" / ssh.code_hash()
-        self.assertTrue((code / ".complete").exists())
-        self.assertTrue((code / "cli" / "src" / "main.rs").exists() and (code / "Cargo.lock").exists())
+        self.assertTrue((self.remotes / "box" / ".bottle" / "runner" / ssh.code_hash() / ".complete").exists())
         self.assertIsInstance(runners.get("box"), runners.RemoteRunner)
-
-    def test_add_builds_bottle_cli_there_once_for_its_sources(self) -> None:
-        self.has_kvm()
-        self.has_rust()
-        runners.add("box", "box")
-        home = self.remotes / "box"
-        dist = home / ".bottle" / "dist"
-        self.assertEqual((home / "cargo.log").read_text(), f"xtask dist --out {dist}\n")
-        self.assertTrue((dist / "bottle-cli").exists())
-        runner = runners.get("box")
-        runner.ensure_ready()  # built from these already
-        self.assertEqual(runner.state("bottle-b"), "running")
-        self.assertEqual(len((home / "cargo.log").read_text().splitlines()), 1)
 
     def test_add_refuses_what_bottle_cant_set_up(self) -> None:
         with self.assertRaisesRegex(BottleError, r"box can't be a runner yet; it needs: access to /dev/kvm"):
             runners.add("box", "box")
         self.assertEqual(runners.registered(), {})
 
-    def test_add_installs_rust_only_when_told_to(self) -> None:
+    def test_add_copies_bottle_cli_built_here_for_its_architecture(self) -> None:
         self.has_kvm()
-        asked = []
-        with self.assertRaisesRegex(BottleError, "box needs Rust, to build bottle-cli"):
-            runners.add("box", "box", ask=lambda q: asked.append(q) or False)
-        self.assertIn("Install rustup into ~/.cargo and ~/.rustup there?", asked[0])
-        self.assertEqual(runners.registered(), {})
-        with mock.patch.object(ssh.SshTransport, "install_rust", side_effect=self.has_rust):
-            self.assertEqual(runners.add("box", "box", ask=lambda q: True).rust, "ready")
-        self.assertIn("box", runners.registered())
+        runners.add("box", "box")
+        self.assertEqual(self.built, ["x86_64-unknown-linux-musl"])
+        there = self.remotes / "box" / ".bottle" / "dist"
+        self.assertEqual((there / "bottle-cli").read_text(), FAKE_CLI)
+        self.assertEqual((there / prereqs.STAMP).read_text(), prereqs.source_hash())
+        runner = runners.get("box")
+        self.assertEqual(runner.state("bottle-b"), "running")  # what's there is what it runs
 
-    def test_a_failed_build_there_isnt_added(self) -> None:
-        self.has_kvm()
-        self.has_rust()
-        (self.remotes / "box" / ".cargo" / "bin" / "cargo").write_text("#!/bin/sh\necho 'no linker' >&2\nexit 1\n")
-        with self.assertRaisesRegex(BottleError, "runner box: `cargo xtask dist` failed"):
-            runners.add("box", "box")
-        self.assertEqual(runners.registered(), {})
+    def test_its_bottle_cli_is_copied_again_only_when_its_sources_change(self) -> None:
+        runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
+        runner.ensure_ready()
+        there = self.remotes / "box" / ".bottle" / "dist"
+        (there / "left-by-the-old").write_text("")
+        runner.ensure_ready()
+        self.assertEqual(len(self.built), 1)  # current: neither built nor copied
+        (there / prereqs.STAMP).write_text("other sources")
+        runner.ensure_ready()
+        self.assertEqual(len(self.built), 2)
+        self.assertFalse((there / "left-by-the-old").exists())  # replaced whole
+
+    def test_an_architecture_without_a_build_is_refused(self) -> None:
+        (self.path / "uname").write_text('#!/bin/sh\ncase "$1" in -m) echo riscv64 ;; *) echo Linux ;; esac\n')
+        with self.assertRaisesRegex(BottleError, "runner box is riscv64: bottle-cli is built for x86_64 and arm64"):
+            runners.RemoteRunner("box", ssh.SshTransport("box", "box")).ensure_ready()
 
     def test_add_refuses_a_name_thats_taken_by_another_machine_or_local(self) -> None:
         runners.register("box", "elsewhere")
@@ -237,7 +203,6 @@ class RunnerCommandsTest(SshTestCase):
 
     def test_status_says_which_are_reachable_and_ready(self) -> None:
         self.has_kvm()
-        self.has_rust()
         runners.register("box", "box")
         runners.register("off", "down")
         rows = {row["name"]: row for row in runners.status()}

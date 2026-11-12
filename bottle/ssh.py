@@ -10,9 +10,9 @@ use, so the commands bottle runs there don't each log in again.
 bottle's own code runs there too (bottle/remote.py), copied over the first
 time it's needed into ~/.bottle/runner/<hash>/, named by its content's hash:
 a runner runs exactly the code its controller does, and code from older
-controllers stays out of the way. bottle-cli's sources go with it, and the
-runner builds its own bottle-cli from them (see remote.py), with the Rust
-that `bottle runner add` installs if it's missing.
+controllers stays out of the way. So does bottle-cli: the controller builds
+the distribution for the runner's architecture (see prereqs.ensure_dist) and
+copies it to ~/.bottle/dist there whenever it was built from other sources.
 """
 
 import hashlib
@@ -21,6 +21,7 @@ import os
 import platform
 import shlex
 import subprocess
+import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,6 @@ from bottle.errors import BottleError
 from bottle.store import bottle_home
 
 PACKAGE = Path(__file__).resolve().parent
-REPO = PACKAGE.parent
 # ssh's own failures, connecting or authenticating, exit 255.
 SSH_FAILED = 255
 # What a runner's end exits when the code it's asked to run isn't there yet.
@@ -61,21 +61,16 @@ def binary() -> str:
 
 
 def code_hash() -> str:
-    """A hash of the code a runner runs: every file of this package, less what Python caches, and bottle-cli's
-    sources."""
+    """A hash of the code a runner runs: every file of this package, less what Python caches."""
     digest = hashlib.sha256()
-    for path in _code_files():
-        digest.update(str(path.relative_to(REPO)).encode() + b"\0")
+    for path in sorted(_code_files()):
+        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()[:16]
 
 
 def _code_files() -> list[Path]:
-    """What a runner is sent, each where it is under REPO."""
-    from bottle import prereqs
-
-    package = [p for p in PACKAGE.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
-    return sorted(package + prereqs.source_files())
+    return [p for p in PACKAGE.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
 
 
 def _code_dir() -> str:
@@ -92,30 +87,24 @@ class Check:
     kvm: bool
     python: str  # its python3's version, "3.13"; "" for none
     git: bool
-    rust: str  # "ready", "target" for rustup without the musl target bottle-cli's agent needs, "" for none
-    lacks: tuple[str, ...] = ()  # what building bottle-cli needs that isn't there, besides Rust
 
     def missing(self) -> list[str]:
         """What it lacks that bottle can't set up itself, each as the user would fix it."""
+        from bottle import prereqs
+
         problems = []
         if self.os != "Linux":
             problems.append(f"Linux (it runs {self.os or 'something else'})")
+        elif self.arch not in prereqs.LINUX_TARGETS:
+            problems.append(f"x86_64 or arm64 (it's {self.arch or 'something else'})")
         if not self.kvm:
             problems.append("access to /dev/kvm (add the user to the kvm group)")
         if not self.python or tuple(int(n) for n in self.python.split(".")) < (3, 11):
             problems.append(f"Python 3.11 or later as python3 (it has {self.python or 'none'})")
         if not self.git:
             problems.append("git")
-        if self.lacks:
-            problems.append(f"{', '.join(self.lacks)}, to build bottle-cli (on Debian or Ubuntu: apt install "
-                            f"{' '.join(DEBIAN_PACKAGES)})")
         return problems
 
-
-# What building bottle-cli takes on a runner, besides Rust: a C compiler and make (libkrun's build, mke2fs's),
-# musl-gcc and the kernel's headers (mke2fs, static), curl (downloads), and on x86_64 bsdtar or rpm2cpio
-# (the kernel, out of Fedora's package; see xtask). As Debian packages them:
-DEBIAN_PACKAGES = ("build-essential", "musl-tools", "linux-libc-dev", "curl", "libarchive-tools")
 
 CHECK = r"""
 echo "os=$(uname -s)"
@@ -123,44 +112,13 @@ echo "arch=$(uname -m)"
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo kvm=yes; else echo kvm=no; fi
 echo "python=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
 if command -v git >/dev/null 2>&1; then echo git=yes; else echo git=no; fi
-PATH="$HOME/.cargo/bin:$PATH"
-if command -v rustup >/dev/null 2>&1; then
-  if rustup target list --installed 2>/dev/null | grep -qx "$(uname -m)-unknown-linux-musl"; then echo rust=ready
-  else echo rust=target; fi
-elif command -v cargo >/dev/null 2>&1; then echo rust=ready
-else echo rust=; fi
-lacks=
-for tool in cc make musl-gcc curl; do command -v $tool >/dev/null 2>&1 || lacks="$lacks $tool"; done
-[ -f /usr/include/linux/version.h ] || lacks="$lacks kernel-headers"
-if [ "$(uname -m)" = x86_64 ] && ! command -v bsdtar >/dev/null 2>&1 && ! command -v rpm2cpio >/dev/null 2>&1; then
-  lacks="$lacks bsdtar"
-fi
-echo "lacks=$lacks"
 """
 
-# rustup into the runner's ~/.cargo and ~/.rustup, as rustup.rs would, with the musl target for its
-# architecture; or, with rustup there, just the target. rustup-init is rustup's archived release, checked
-# against the checksums kept here (as the rust feature's install.sh does).
-INSTALL_RUST = r"""
-set -e
-PATH="$HOME/.cargo/bin:$PATH"
-target="$(uname -m)-unknown-linux-musl"
-if command -v rustup >/dev/null 2>&1; then
-  rustup target add "$target"
-  exit
-fi
-version=1.29.2
-case "$(uname -m)" in
-  x86_64) sha256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;;
-  aarch64) sha256=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;;
-  *) echo "no rustup for $(uname -m)" >&2; exit 1 ;;
-esac
-dir=$(mktemp -d)
-trap 'rm -rf "$dir"' EXIT
-curl -fsSL -o "$dir/rustup-init" "https://static.rust-lang.org/rustup/archive/$version/$(uname -m)-unknown-linux-gnu/rustup-init"
-echo "$sha256  $dir/rustup-init" | sha256sum -c --quiet -
-chmod +x "$dir/rustup-init"
-"$dir/rustup-init" -y --profile minimal -t "$target"
+# Where a runner's bottle-cli is (remote.py runs it), and what it was built from.
+DIST = ".bottle/dist"
+DIST_STAMP = r"""
+echo "arch=$(uname -m)"
+echo "sources=$(cat "$HOME/.bottle/dist/.sources" 2>/dev/null)"
 """
 
 
@@ -235,7 +193,7 @@ class SshTransport:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as tar:
             for path in _code_files():
-                tar.add(path, str(path.relative_to(REPO)))
+                tar.add(path, str(Path("bottle") / path.relative_to(PACKAGE)))
         code = _code_dir()
         script = (f"set -e; rm -rf {code}.partial; mkdir -p {code}.partial; tar -xzf - -C {code}.partial; "
                   f"rm -rf {code}; mv {code}.partial {code}; touch {code}/.complete")
@@ -260,13 +218,32 @@ class SshTransport:
         """What the runner has of what it needs."""
         found = dict(line.split("=", 1) for line in self.run(CHECK).stdout.decode().splitlines() if "=" in line)
         return Check(found.get("os", ""), found.get("arch", ""), found.get("kvm") == "yes", found.get("python", ""),
-                     found.get("git") == "yes", found.get("rust", ""), tuple(found.get("lacks", "").split()))
+                     found.get("git") == "yes")
 
-    def install_rust(self) -> None:
-        """Install rustup, and the target bottle-cli's agent is built for, into the runner's home."""
-        result = self.run(INSTALL_RUST)
+    def ensure_dist(self) -> None:
+        """The runner's bottle-cli, in ~/.bottle/dist there, built from this repo's sources as they are now: if it
+        was built from others, or isn't there, the distribution for its architecture is built here (see
+        prereqs.ensure_dist) and copied over, replacing the old whole. Its bottles running keep the old one."""
+        from bottle import prereqs
+
+        found = dict(line.split("=", 1) for line in self.run(DIST_STAMP).stdout.decode().splitlines() if "=" in line)
+        target = prereqs.LINUX_TARGETS.get(found.get("arch", ""))
+        if target is None:
+            raise BottleError(f"runner {self.runner} is {found.get('arch') or 'unknown'}: bottle-cli is built for "
+                              "x86_64 and arm64")
+        if found.get("sources") == prereqs.source_hash():
+            return
+        dist = prereqs.ensure_dist(target)
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            tar.add(dist, ".")
+        there = f'"$HOME/{DIST}"'
+        script = (f"set -e; rm -rf {there}.partial; mkdir -p {there}.partial; tar -xzf - -C {there}.partial; "
+                  f"rm -rf {there}; mv {there}.partial {there}")
+        print(f"bottle: copying bottle-cli to runner {self.runner}...", file=sys.stderr)
+        result = self.run(script, archive.getvalue())
         if result.returncode != 0:
-            raise BottleError(f"installing Rust on runner {self.runner} failed: "
+            raise BottleError(f"copying bottle-cli to runner {self.runner} failed: "
                               f"{result.stderr.decode(errors='replace').strip()}")
 
     # --- the link (see link.py) ------------------------------------------------------

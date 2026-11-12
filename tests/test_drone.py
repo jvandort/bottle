@@ -87,7 +87,7 @@ class DroneCase(GitTestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text(FAKE_CLI)
         cli.chmod(0o755)
-        # Built from these sources, as far as the runner's bottle can tell (see prereqs.ensure_cli).
+        # Built from these sources, as far as the controller can tell (see ssh.SshTransport.ensure_dist): not copied.
         (cli.parent / prereqs.STAMP).write_text(prereqs.source_hash())
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)

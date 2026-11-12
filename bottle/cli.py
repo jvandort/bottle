@@ -158,8 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     runner_add = runner_commands.add_parser(
         "add", help="add a machine to run bottles on, over ssh",
         description="Add a Linux machine to run bottles on, reached over ssh as you reach it. Checks what it has, "
-        "installs Rust there if it's missing (asking first), copies bottle's code over, and builds bottle-cli there "
-        "from it.",
+        "copies bottle's code over, and bottle-cli, built here for its architecture (on a Mac, in a Linux VM).",
     )
     runner_add.add_argument("name", metavar="RUNNER", help="its name, as `bottle new --runner` takes it")
     runner_add.add_argument("--ssh", required=True, metavar="DESTINATION",
@@ -429,12 +428,7 @@ def _status(args: argparse.Namespace) -> int:
 def _runner_add(args: argparse.Namespace) -> int:
     from bottle import runners
 
-    def ask(question: str) -> bool:
-        if not sys.stdin.isatty():
-            return False
-        return input(f"{question} [Y/n] ").strip().lower() in ("", "y", "yes")
-
-    check = runners.add(args.name, args.ssh, ask)
+    check = runners.add(args.name, args.ssh)
     print(f"Added runner {args.name} ({args.ssh}): {check.os} {check.arch}")
     print(f"Make a bottle there with: bottle new --runner {args.name} ...")
     return 0

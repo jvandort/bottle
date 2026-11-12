@@ -77,18 +77,17 @@ dist`, into `target/dist`) when it's missing or its sources have changed;
 A runner, for bottles on another machine, needs:
 
 - Linux, with `/dev/kvm` usable by the user bottle logs in as (the `kvm` group)
+- x86_64 or arm64
 - Python 3.11+ and git
-- what building bottle-cli takes besides Rust: a C compiler, make, musl-gcc,
-  the kernel's headers, curl and, on x86_64, bsdtar (on Debian or Ubuntu:
-  `apt install build-essential musl-tools linux-libc-dev curl libarchive-tools`)
 - ssh from your Mac without a prompt: a key whose passphrase is in your
   Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since bottle
   runs ssh in batch mode
 
-No root otherwise: `bottle runner add` installs Rust (rustup) there, asking
-first, and the runner builds its own bottle-cli from the sources bottle sends
-it. (Untested on a real runner yet: built and checked on Linux, but no bottle
-has run on one.)
+Nothing else, and no root: bottle copies its code there, and bottle-cli,
+built on your Mac for the runner's architecture: static, so it runs on any
+distribution. Your Mac builds it in a Linux VM of its own bottle-cli
+(`cargo xtask dist --target x86_64-unknown-linux-musl`, which bottle runs when
+it's needed; the first time takes a while). (Untested on a real runner yet.)
 
 ## Commands
 
@@ -428,13 +427,10 @@ here, and what a drone needs of them comes here.
 - **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
   it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
-  can't set up itself, installs rustup into `~/.cargo` and `~/.rustup` there
-  if it's missing, with the musl target bottle-cli's agent is built for
-  (asking first; rustup-init's checksum checked), copies bottle's own code
-  over, bottle-cli's sources with it, and builds bottle-cli there (`cargo
-  xtask dist`, minutes the first time; its progress is shown). Whenever the
-  code it's sent changes bottle-cli's sources, the runner builds it again
-  before its next bottle is made.
+  can't set up itself, and copies bottle's own code over, and bottle-cli's
+  distribution for the machine's architecture, built here (see above).
+  Whenever bottle-cli's sources change, it's built and copied again before
+  the runner's next bottle is made.
 - **`bottle runner status [RUNNER]...`** (also `list`, `ls`) shows each runner, whether it can be
   reached, what it lacks, and its bottles.
 - **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
@@ -456,8 +452,8 @@ here, and what a drone needs of them comes here.
   on the machine is touched.
 
 On a runner, everything bottle keeps is in `~/.bottle`: bottle's code
-(copied again whenever it changes), bottle-cli built from it (`~/.bottle/dist`,
-cargo's builds in `~/.bottle/target`), the images built there, the machines,
+(copied again whenever it changes), bottle-cli's distribution
+(`~/.bottle/dist`), the images built there, the machines,
 the HTTP cache, and a mirror of each repo its bottles use (`~/.bottle/git`),
 so a drone's checkout borrows objects from the runner's disk, not over the
 network.

@@ -9,6 +9,7 @@ import functools
 import hashlib
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,8 +29,8 @@ def ensure_cli() -> None:
     """bottle-cli built (see krun.py), from this repo's sources as they are now, or the one $BOTTLE_CLI names.
 
     Built by `cargo xtask dist` when it's missing, or was built from sources
-    other than these; its progress is on stderr. One process builds at a time.
-    One named by $BOTTLE_CLI is used as it is.
+    other than these; its progress is on stderr. One named by $BOTTLE_CLI is
+    used as it is.
     """
     if platform.system() == "Darwin" and platform.machine() != "arm64":
         raise BottleError("bottle runs on macOS on Apple silicon")
@@ -37,29 +38,45 @@ def ensure_cli() -> None:
         if not Path(krun.binary()).is_file():
             raise BottleError(f"BOTTLE_CLI is {krun.binary()}, which isn't there")
         return
-    dist = krun.dist()
+    ensure_dist()
+
+
+# What a Linux runner's distribution is built for, by its architecture (uname -m): static, so any distribution's.
+LINUX_TARGETS = {"x86_64": "x86_64-unknown-linux-musl", "aarch64": "aarch64-unknown-linux-musl"}
+
+
+@functools.cache
+def ensure_dist(target: str | None = None) -> Path:
+    """The distribution `cargo xtask dist` builds for `target` (a Rust target triple; None: this machine's), from
+    this repo's sources as they are now: built when it's missing or was built from other sources, its progress on
+    stderr, one process at a time. This machine's is krun.dist(); another's is target/dist-TARGET, which on a Mac
+    xtask builds in a Linux VM (xtask/src/builder.rs), with this machine's bottle-cli.
+    """
+    dist = krun.dist() if target is None else krun.REPO / "target" / f"dist-{target}"
     built, stamp, sources = dist / "bottle-cli", dist / STAMP, source_hash()
 
     def current() -> bool:
         return built.is_file() and stamp.is_file() and stamp.read_text() == sources
 
     if current():
-        return
+        return dist
     cargo = shutil.which("cargo") or (str(RUSTUP_CARGO) if RUSTUP_CARGO.is_file() else None)
     if cargo is None:
         raise BottleError("bottle builds bottle-cli with Rust's cargo; install it from https://rustup.rs")
     dist.mkdir(parents=True, exist_ok=True)
-    with open(dist / ".lock", "w") as lock:
+    with open(dist.parent / f".{dist.name}.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if current():  # another built it while this waited
-            return
-        print("bottle: building bottle-cli (cargo xtask dist)...", file=sys.stderr)
-        # cargo's own directory first: a non-interactive ssh shell's PATH may not have rustup's.
+            return dist
+        command = [cargo, "xtask", "dist", *(["--target", target] if target else []), "--out", str(dist)]
+        print(f"bottle: building bottle-cli{f' for {target}' if target else ''} (cargo {shlex.join(command[1:-2])})...",
+              file=sys.stderr)
+        # cargo's own directory first: rustup's may not be on PATH.
         env = {**os.environ, "PATH": f"{Path(cargo).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
-        if subprocess.run([cargo, "xtask", "dist", "--out", str(dist)], cwd=krun.REPO, stdout=sys.stderr,
-                          env=env).returncode != 0:
-            raise BottleError("`cargo xtask dist` failed")
+        if subprocess.run(command, cwd=krun.REPO, stdout=sys.stderr, env=env).returncode != 0:
+            raise BottleError(f"`cargo {shlex.join(command[1:-2])}` failed")
         stamp.write_text(sources)
+    return dist
 
 
 # Where rustup puts cargo, for when it isn't on PATH.
