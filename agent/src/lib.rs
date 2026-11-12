@@ -39,6 +39,12 @@ pub fn serve(listener: Listener, reaper: Reaper, upper: Option<File>) -> io::Res
             Err(e) if matches!(e.raw_os_error(), Some(libc::EINTR | libc::ECONNABORTED)) => {
                 continue;
             }
+            // Out of descriptors or memory for now (the bottle's network can use a lot of them at
+            // once): it passes. Booted, serving ending would power the VM off.
+            Err(e) if is_exhaustion(&e) => {
+                thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
             Err(e) => return Err(e),
         };
         let reaper = reaper.clone();
@@ -49,6 +55,29 @@ pub fn serve(listener: Listener, reaper: Reaper, upper: Option<File>) -> io::Res
             }
         });
     }
+}
+
+/// Whether `e` is running out of something that comes back: descriptors, memory, buffers.
+pub fn is_exhaustion(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS)
+    )
+}
+
+/// The most files the agent, and everything it starts, may have open: the kernel's default for
+/// init, 1024, the bottle's network alone can use up (each connection and lookup in flight holds
+/// some). Soft, what processes in the bottle inherit; hard, what they may raise it to.
+const OPEN_FILES: (u64, u64) = (65_536, 1_048_576);
+
+/// Raises the limit on open files to OPEN_FILES, as far as the kernel lets it.
+pub fn raise_open_files() {
+    let limit = libc::rlimit {
+        rlim_cur: OPEN_FILES.0,
+        rlim_max: OPEN_FILES.1,
+    };
+    // SAFETY: setrlimit reads an rlimit.
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
 }
 
 /// What a command writes, and whether that's stderr.

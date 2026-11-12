@@ -66,6 +66,11 @@ struct Agent {
 
 impl Agent {
     fn start() -> Agent {
+        Agent::start_with(None)
+    }
+
+    /// An agent that may have only `open_files` descriptors open, if Some.
+    fn start_with(open_files: Option<u64>) -> Agent {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "bottle-cli-test-{}-{}",
@@ -74,11 +79,24 @@ impl Agent {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("exec.sock");
-        let child = Command::new(agent_binary())
-            .arg("--unix")
-            .arg(&socket)
-            .spawn()
-            .unwrap();
+        let mut command = Command::new(agent_binary());
+        command.arg("--unix").arg(&socket);
+        if let Some(n) = open_files {
+            // SAFETY: setrlimit between fork and exec, reading an rlimit.
+            unsafe {
+                command.pre_exec(move || {
+                    let limit = libc::rlimit {
+                        rlim_cur: n,
+                        rlim_max: n,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while UnixStream::connect(&socket).is_err() {
             assert!(Instant::now() < deadline, "the agent didn't listen");
@@ -359,6 +377,22 @@ fn ctrl_c_typed_interrupts_the_command() {
     screen.write_all(b"\x03").unwrap();
     read_until(&mut screen, &mut seen, "interrupted");
     assert_eq!(child.wait().unwrap().code(), Some(3));
+}
+
+#[test]
+fn running_out_of_descriptors_passes_and_the_agent_serves_on() {
+    // Booted, the agent serving no more powers the VM off: a burst of connections (the bottle's
+    // network, DNS lookups) that ran it out of descriptors did, once.
+    let mut agent = Agent::start_with(Some(40));
+    let held: Vec<UnixStream> = (0..100)
+        .map(|_| UnixStream::connect(agent.socket()).unwrap())
+        .collect();
+    thread::sleep(Duration::from_millis(300));
+    assert!(agent.child.try_wait().unwrap().is_none(), "the agent ended");
+    drop(held);
+    thread::sleep(Duration::from_millis(300));
+    let out = agent.output(&["echo", "still here"], b"");
+    assert_eq!(text(&out.stdout), "still here\n");
 }
 
 #[test]

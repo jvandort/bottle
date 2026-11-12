@@ -274,6 +274,9 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             Some(c(&path.to_string_lossy())?)
         }
     };
+    // The bottle's network takes several descriptors here per connection it makes, and libkrun's
+    // half of each fails, or worse, at the limit: macOS gives a process a shell starts 256.
+    bottle_agent_client::net::raise_open_files();
     // Its clock and memory kept, by exec, once the agent answers (see upkeep).
     crate::upkeep::spawn(args.socket.clone());
     // The bottle's environment, mounts and network, as a file in the first root (see

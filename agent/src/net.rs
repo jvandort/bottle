@@ -14,6 +14,7 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStr
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::thread;
+use std::time::Duration;
 
 use bottle_agent_proto::net::{CONNECTED, PORT, Request, Resolved};
 
@@ -66,11 +67,18 @@ pub fn start(config: &Config) -> io::Result<()> {
 
     let h = host.clone();
     spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let h = h.clone();
-            spawn(move || {
-                let _ = forward(conn, &h);
-            });
+        for conn in listener.incoming() {
+            match conn {
+                Ok(conn) => {
+                    let h = h.clone();
+                    spawn(move || {
+                        let _ = forward(conn, &h);
+                    });
+                }
+                // Out of descriptors, say: it passes, and spinning on it wouldn't help.
+                Err(e) if crate::is_exhaustion(&e) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => {}
+            }
         }
     });
     spawn(move || {

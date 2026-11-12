@@ -75,6 +75,34 @@ impl Decider {
     }
 }
 
+/// The most files the process carrying a bottle's network should have open: each connection the
+/// bottle makes takes several here (libkrun's end of it, ours, the far end, their clones, the
+/// decider's), and macOS gives a process a shell starts 256.
+const OPEN_FILES: u64 = 1 << 20;
+
+/// Raises this process's limit on open files toward OPEN_FILES, as far as the system lets it:
+/// macOS refuses more than kern.maxfilesperproc whatever the hard limit says, so it's halved until
+/// it's taken. The limit it has after.
+pub fn raise_open_files() -> u64 {
+    // SAFETY: getrlimit writes an rlimit; setrlimit reads one.
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return 0;
+        }
+        let soft = limit.rlim_cur as u64;
+        let mut target = OPEN_FILES.min(limit.rlim_max as u64);
+        while target > soft {
+            limit.rlim_cur = target as libc::rlim_t;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
+                return target;
+            }
+            target /= 2;
+        }
+        soft
+    }
+}
+
 /// Serves the bottle's network on `listener`, each stream on a thread of its own, until accepting
 /// fails. Without a decider, every connection goes directly: for trying a machine out, not for
 /// bottles.
@@ -83,6 +111,18 @@ pub fn serve(listener: UnixListener, decider: Option<Decider>) -> io::Result<()>
         let (conn, _) = match listener.accept() {
             Ok(accepted) => accepted,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            // Out of descriptors or memory for now: it passes. Ending would leave the bottle with
+            // no network until it's started again.
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS)
+                ) =>
+            {
+                eprintln!("bottle-cli: the bottle's network: {e}; waiting");
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             Err(e) => return Err(e),
         };
         let decider = decider.clone();
@@ -280,6 +320,19 @@ mod tests {
         assert_eq!(u16::from_be_bytes([fixed[73], fixed[74]]), 443);
         assert_eq!(&fixed[75..79], &[192, 0, 2, 9]);
         assert_eq!(first, b"GET / HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn the_limit_on_open_files_is_raised_as_far_as_it_goes() {
+        let raised = raise_open_files();
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: getrlimit writes an rlimit.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        assert_eq!(limit.rlim_cur as u64, raised);
+        assert!(raised >= 1024 && raised <= OPEN_FILES.max(limit.rlim_max as u64));
     }
 
     #[test]

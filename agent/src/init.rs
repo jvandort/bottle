@@ -92,6 +92,7 @@ pub fn parse(args: &mut Vec<String>) -> Result<Stack, String> {
 /// What an init does before anything, as the VM's (see main): /dev, /proc and /sys mounted,
 /// which finding the disks takes, and loopback up.
 pub fn early() -> io::Result<()> {
+    crate::raise_open_files();
     for (source, target, fstype) in [
         ("devtmpfs", "/dev", "devtmpfs"),
         ("proc", "/proc", "proc"),

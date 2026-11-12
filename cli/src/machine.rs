@@ -214,6 +214,10 @@ impl Machine {
             fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         }
         let _ = fs::remove_file(&socket);
+        // The last run's logs kept, for when it ended badly and this is starting it again.
+        for name in ["boot.log", "console.log"] {
+            let _ = fs::rename(self.dir.join(name), self.dir.join(format!("{name}.1")));
+        }
         let log = fs::File::create(self.dir.join("boot.log"))?;
         let mut boot = match env::var_os("BOTTLE_BOOT") {
             Some(program) => Command::new(program),
