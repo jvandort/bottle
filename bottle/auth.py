@@ -196,7 +196,7 @@ def login(name: str) -> None:
     if login is None:
         value = getpass.getpass(f"{d.credential.description}: ")
     else:
-        from bottle import bottles  # bottles imports features, smolvm, daemon; only logging in needs it
+        from bottle import bottles  # bottles imports features, runners, daemon; only logging in needs it
 
         print(f"Starting a throwaway bottle with {d.feature} to run `{' '.join(login.command)}`...", file=sys.stderr)
         with bottles.throwaway([d.feature]) as argv_for:

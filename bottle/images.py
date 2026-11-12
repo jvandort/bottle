@@ -1,27 +1,38 @@
 """Bottle images, built from containers/images/<name>/ in this repo.
 
-smolvm boots images but doesn't build them, so bottle builds them on top of
-smolvm's machines: buildah runs in a machine made for the build, its inputs
-sent in over exec's stdin, and the archive it pushes comes back over stdout.
-The builder's connections are decided like a bottle's, with no credentials.
+An image is stages: ext4 disks, each what one build wrote on top of the stages
+below it, stacked by overlayfs when a machine boots (see bottle-cli's build).
+Machines on the same stages share them, and the host's cache of them.
 
-Built images are OCI archives in $BOTTLE_HOME/images, with an index of each
-tag's archive and labels. An archive's name carries its inputs' hash, so
-rebuilding a tag never replaces an archive a machine was made from: smolvm
-reads it again on every start.
+An image's directory holds an image.json, saying what it's built on and how it
+runs, and an install.sh, run in a VM on what it's built on, with the
+directory mounted read-only at its working directory, whatever's beside it
+there to install:
+
+  {"pull": "debian:trixie-slim",          a registry's image, by reference; or
+   "from": "base",                        another of bottle's images
+   "env": {"NAME": "value"},              set for install.sh and everything run in the image
+   "entrypoint": [...], "cmd": [...],     what a machine runs when it starts; else what it's built on runs
+   "labels": {"name": "value"}}
+
+Built images are stages in $BOTTLE_HOME/stages, bottle-cli's store, with an
+index of each tag's top stage and labels in $BOTTLE_HOME/images.json. A
+stage's name is a hash of what it was built from, so rebuilding a tag never
+replaces a stage a machine was made from; `bottle-cli gc` deletes those
+nothing uses, keeping every machine's whatever its state.
 """
 
 import hashlib
+import json
 import os
-import re
 import shlex
 import subprocess
 import sys
-import tarfile
+import tempfile
 import uuid
 from pathlib import Path
 
-from bottle import prereqs, smolvm
+from bottle import krun, prereqs
 from bottle.errors import BottleError
 from bottle.store import bottle_home, read_json, write_json
 
@@ -29,21 +40,22 @@ IMAGES = Path(__file__).resolve().parent.parent / "containers" / "images"
 # The image every bottle starts from: the bottle contract. Not user-selectable;
 # other images here would be alternative foundations meeting the same contract.
 BASE = "base"
-# Where bottle's images are named: on no registry. A name without a host in it
-# (bottle/base) is taken to be Docker Hub's; localhost is a host, so a
-# Dockerfile's FROM finds the image built here.
+# What bottle's images are called: a tag names one in the index.
 REPOSITORY = "localhost/bottle"
-# A stage built on another bottle image, e.g. `FROM localhost/bottle/base:latest`.
-FROM_BOTTLE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*localhost/bottle/([A-Za-z0-9._-]+)(?::latest)?(?:\s|$)", re.MULTILINE | re.IGNORECASE)
+IMAGE_KEYS = {"pull", "from", "env", "entrypoint", "cmd", "labels"}
+# Where a build's directory is in its VM: on /run's tmpfs, so nothing of it is on the stage.
+MOUNT = "/run/bottle-build"
+# What a build's steps run with, as a Dockerfile's RUN would: root's home, and no debconf prompts.
+STEP_ENV = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
 
 
 def available() -> list[str]:
-    return sorted(p.parent.name for p in IMAGES.glob("*/Dockerfile"))
+    return sorted(p.parent.name for p in IMAGES.glob("*/image.json"))
 
 
 # Every image bottle builds records a hash of what it was built from. An image
 # whose inputs have changed since is stale: it's rebuilt when next needed, and
-# deleted once no container uses it.
+# deleted once no machine uses it.
 INPUTS_LABEL = "bottle.inputs"
 
 
@@ -60,9 +72,39 @@ def tree_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def definition(name: str) -> dict:
+    """The image's image.json, checked."""
+    _require(name)
+    where = f"containers/images/{name}/image.json"
+    try:
+        spec = json.loads((IMAGES / name / "image.json").read_text())
+    except json.JSONDecodeError as e:
+        raise BottleError(f"{where}: invalid JSON: {e}") from None
+    if not isinstance(spec, dict):
+        raise BottleError(f"{where}: must be a JSON object")
+    unsupported = sorted(set(spec) - IMAGE_KEYS)
+    if unsupported:
+        raise BottleError(f"{where}: unsupported: {', '.join(unsupported)} (supported: {', '.join(sorted(IMAGE_KEYS))})")
+    if ("pull" in spec) == ("from" in spec):
+        raise BottleError(f"{where}: needs pull (a registry's image) or from (one of bottle's), not both")
+    for key in ("pull", "from"):
+        if key in spec and (not isinstance(spec[key], str) or not spec[key]):
+            raise BottleError(f"{where}: {key} must be a string")
+    for key in ("env", "labels"):
+        value = spec.get(key, {})
+        if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+            raise BottleError(f"{where}: {key} must map names to strings")
+    for key in ("entrypoint", "cmd"):
+        value = spec.get(key)
+        if value is not None and (not isinstance(value, list) or not all(isinstance(a, str) for a in value)):
+            raise BottleError(f"{where}: {key} must be a list of strings")
+    if not (IMAGES / name / "install.sh").is_file():
+        raise BottleError(f"containers/images/{name}/install.sh is missing")
+    return spec
+
+
 def inputs_hash(name: str) -> str:
     """What the image `name` is built from: its directory, and the images it's built on."""
-    _require(name)
     digest = hashlib.sha256(tree_hash(IMAGES / name).encode())
     for dependency in dependencies(name):
         digest.update(inputs_hash(dependency).encode())
@@ -85,9 +127,9 @@ def _on(runner):
 
 
 def dependencies(name: str) -> list[str]:
-    """The bottle images `name` is built from, per its Dockerfile's FROM lines."""
-    _require(name)
-    return list(dict.fromkeys(FROM_BOTTLE.findall((IMAGES / name / "Dockerfile").read_text())))
+    """The bottle images `name` is built from, per its image.json's from."""
+    spec = definition(name)
+    return [spec["from"]] if "from" in spec else []
 
 
 def build_order(name: str) -> list[str]:
@@ -102,7 +144,7 @@ def build_order(name: str) -> list[str]:
         if image not in available():
             if not path:
                 _require(image)
-            raise BottleError(f"{path[-1]} is built from {REPOSITORY}/{image}, but there's no containers/images/{image}")
+            raise BottleError(f"{path[-1]} is built from {image}, but there's no containers/images/{image}")
         for dependency in dependencies(image):
             visit(dependency, [*path, image])
         order.append(image)
@@ -139,46 +181,100 @@ def _require(name: str) -> None:
         raise BottleError(f"no image named {name!r}; available: {', '.join(available())}")
 
 
+def recipe(name: str) -> dict:
+    """What builds image `name`: its image.json's, its install.sh as the step (see build_recipe)."""
+    spec = definition(name)
+    steps = [{"env": spec["env"]}] if spec.get("env") else []
+    steps.append({"run": interpreter(IMAGES / name / "install.sh"), "env": STEP_ENV, "cwd": MOUNT})
+    built = {"steps": steps, **{k: spec[k] for k in ("entrypoint", "cmd") if k in spec}}
+    built["labels"] = spec.get("labels", {})
+    return built | ({"pull": spec["pull"]} if "pull" in spec else {"from": tag(spec["from"])})
+
+
+def interpreter(script: Path) -> list[str]:
+    """How to run `script`, in its directory, mounted read-only: by its #! line, so it needn't be executable."""
+    first = script.read_text().split("\n", 1)[0]
+    return [*(shlex.split(first[2:]) if first.startswith("#!") else ["/bin/sh"]), f"./{script.name}"]
+
+
 def _build_one(name: str, no_cache: bool = False, runner=None) -> None:
-    _require(name)
-    _on(runner).build(IMAGES / name, tag(name), inputs_hash(name), no_cache)
+    _on(runner).build(IMAGES / name, tag(name), inputs_hash(name), recipe(name), no_cache)
 
 
-def build_context(
-    context: Path, image: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
-    labels: dict[str, str] | None = None,
-) -> None:
-    """Build `context` into `image`, in a builder machine (see _build).
+def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache: bool = False,
+                 labels: dict[str, str] | None = None) -> Path:
+    """Build `recipe` into `image`, `context` mounted at its working directory (MOUNT): a stage, in a VM of
+    bottle-cli's; return its disk.
 
-    `inputs` is the hash of what the image is built from, recorded as a label,
-    with `labels`. The bottle images its Dockerfile is built FROM are loaded
-    into the builder first.
+    `recipe` is on a registry's image (pull: its reference) or on one of bottle's built here (from: its tag);
+    its steps, entrypoint, cmd and labels are bottle-cli's (see bottle_disk::build::Recipe). `inputs` is the
+    hash of what the image is built from, recorded as a label, with `labels`. With `no_cache`, the stage is
+    made again even if one was made from the same.
     """
-    prereqs.ensure_smolvm()
-    bases = {}
-    for name in FROM_BOTTLE.findall((dockerfile or context / "Dockerfile").read_text()):
-        archive = archive_of(tag(name))
-        if archive is None:
-            raise BottleError(f"{tag(name)} isn't built")
-        bases[tag(name)] = archive
-    _build(context, image, {INPUTS_LABEL: inputs, **(labels or {})}, no_cache, dockerfile, bases)
+    from bottle import daemon  # daemon's auth imports features, which imports this module
+
+    prereqs.ensure_cli()
+    store().mkdir(parents=True, exist_ok=True)
+    if "pull" in recipe:
+        print(f"Pulling {recipe['pull']}...", file=sys.stderr)
+        base = _cli("pull", recipe["pull"], str(store()))
+    else:
+        disk = archive_of(recipe["from"])
+        if disk is None:
+            raise BottleError(f"{recipe['from']} isn't built")
+        base = disk
+    image_labels = {**recipe.get("labels", {}), INPUTS_LABEL: inputs, **(labels or {})}
+    if no_cache:
+        # A stage is named for what it's made from: something new in it makes it anew.
+        image_labels["bottle.build"] = uuid.uuid4().hex
+    made = {"from": base.stem, "mount": {"source": str(context.resolve()), "target": MOUNT},
+            "steps": recipe.get("steps", []), "labels": image_labels,
+            **{k: recipe[k] for k in ("entrypoint", "cmd") if k in recipe}}
+    builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file:
+            json.dump(made, file)
+            file.flush()
+            # Bound with no features: the public network, no credentials, as a bottle would have it.
+            decider, token = daemon.bind_decider(builder)
+            disk = _cli("build", file.name, str(store()), "--decider", decider, env={"BOTTLE_DECIDER_TOKEN": token})
+    finally:
+        try:
+            daemon.release_egress(builder)
+        except BottleError as e:
+            print(f"bottle: cleaning up {builder}: {e}", file=sys.stderr)
+    index = read_json(_index_path()) or {}
+    index[image] = {"disk": disk.name, "labels": image_labels}
+    write_json(_index_path(), index)
+    return disk
+
+
+def _cli(*args: str, env: dict[str, str] | None = None) -> Path:
+    """Run a bottle-cli build, pull or import, its progress on stderr; the disk of the stage it made (its last line)."""
+    result = subprocess.run([krun.binary(), *args], stdout=subprocess.PIPE, text=True,
+                            env={**os.environ, **env} if env else None)
+    lines = result.stdout.split()
+    if result.returncode != 0 or not lines:
+        raise BottleError(f"bottle-cli {args[0]} {args[1]} failed")
+    return Path(lines[-1])
 
 
 # --- the store -----------------------------------------------------------------
 
 
 def store() -> Path:
-    return bottle_home() / "images"
+    """bottle-cli's store of stages."""
+    return bottle_home() / "stages"
 
 
 def _index_path() -> Path:
-    return store() / "index.json"
+    return bottle_home() / "images.json"
 
 
 def archive_of(image: str) -> Path | None:
-    """The archive `image` (a tag) was last built into, or None."""
+    """The disk of the top stage `image` (a tag) was last built into, or None."""
     entry = (read_json(_index_path()) or {}).get(image)
-    return store() / entry["archive"] if entry and (store() / entry["archive"]).exists() else None
+    return store() / entry["disk"] if entry and (store() / entry["disk"]).exists() else None
 
 
 def built_labels(image: str) -> dict[str, str] | None:
@@ -193,95 +289,19 @@ def built() -> dict[str, dict[str, str]]:
 
 
 def forget(image: str) -> None:
-    """Drop `image` from the index; its archive goes once nothing uses it (remove_unused)."""
+    """Drop `image` from the index; its stages go once nothing uses them (remove_unused)."""
     index = read_json(_index_path()) or {}
     if index.pop(image, None) is not None:
         write_json(_index_path(), index)
 
 
 def remove_unused(in_use: set[str]) -> None:
-    """Delete archives no tag points to and no machine was made from (`in_use`, archive names)."""
-    current = {entry["archive"] for entry in (read_json(_index_path()) or {}).values()}
-    for path in store().glob("*.tar") if store().is_dir() else ():
-        if path.name not in current | in_use:
-            path.unlink()
-
-
-# --- building --------------------------------------------------------------------
-
-# The builder: buildah, in a machine made for each build and gone after it. Pinned, so a release can't break
-# builds the day it's out: 1.44 mounts an overlay over the build context, its upper dir in /var/tmp, and a
-# machine's root is itself an overlay, which the kernel refuses as an upper ("not supported as upperdir").
-BUILDER_IMAGE = "quay.io/buildah/stable:v1.43.5-immutable"
-# Where the build's inputs go in the builder, sent as a tar over exec's stdin:
-# the context, the Dockerfile, and the bottle images a Dockerfile is built FROM.
-INPUTS = "/build"
-# Where buildah pushes the archive, in the builder, for exec to carry out.
-OUT = "/tmp/bottle-image.tar"
-
-
-def _build(context: Path, image: str, image_labels: dict[str, str], no_cache: bool = False,
-           dockerfile: Path | None = None, bases: dict[str, Path] | None = None) -> Path:
-    """Build `context` into an archive for `image`, in a builder machine; return the archive.
-
-    `bases` are the bottle images the Dockerfile is built FROM, by tag, and
-    the archives they're in: loaded into the builder first, under those tags.
-    Everything goes in and out over exec, so the builder needs no mounts.
-    """
-    from bottle import daemon  # daemon's auth imports features, which imports this module
-
-    inputs = image_labels.get("bottle.inputs", "")[:12] or "unlabelled"
-    name = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', image)}-{inputs}.tar"
-    store().mkdir(parents=True, exist_ok=True)
-    buildah = "buildah --storage-driver vfs"
-    # Progress on stderr, the user's to see as a build's is; stdout is for the archive.
-    script = ["set -e", "exec >&2"]
-    for base, path in (bases or {}).items():
-        script.append(f"id=$({buildah} pull -q oci-archive:{INPUTS}/bases/{shlex.quote(path.name)})")
-        script.append(f'{buildah} tag "$id" {shlex.quote(base)}')
-    build_args = [f"--label {shlex.quote(f'{k}={v}')}" for k, v in image_labels.items()]
-    script.append(
-        f"{buildah} build --isolation chroot {'--no-cache ' if no_cache else ''}{' '.join(build_args)} "
-        f"-t {shlex.quote(image)} -f {INPUTS}/Dockerfile {INPUTS}/context"
-    )
-    script.append(f"{buildah} push {shlex.quote(image)} oci-archive:{OUT}:{shlex.quote(image)}")
-
-    builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
-    sent = bottle_home() / "build" / f"{builder}.tar"
-    partial = store() / f".{name}.partial"
-    try:
-        sent.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(sent, "w") as tar:
-            tar.add(context, "context")
-            tar.add(dockerfile or context / "Dockerfile", "Dockerfile")
-            for path in (bases or {}).values():
-                tar.add(path, f"bases/{path.name}")
-        smolvm.create(builder, BUILDER_IMAGE, mounts=[], env={}, memory_mib=None, cpus=os.cpu_count() or 1)
-        # Bound with no features: the public network, no credentials, as a bottle would have it.
-        decider, token = daemon.bind_decider(builder)
-        smolvm.start(builder, decider, token)
-        _in_builder(builder, ["sh", "-c", f"mkdir -p {INPUTS} && tar -x -C {INPUTS}"], f"sending {image}'s inputs",
-                    stdin=sent)
-        _in_builder(builder, ["sh", "-c", "\n".join(script)], f"building {image}")
-        with partial.open("wb") as out:
-            _in_builder(builder, ["cat", OUT], f"reading {image} out of the builder", stdout=out)
-        partial.replace(store() / name)
-    finally:
-        sent.unlink(missing_ok=True)
-        partial.unlink(missing_ok=True)
-        for cleanup in (lambda: daemon.release_egress(builder), lambda: smolvm.delete(builder)):
-            try:
-                cleanup()
-            except BottleError as e:
-                print(f"bottle: cleaning up {builder}: {e}", file=sys.stderr)
-    index = read_json(_index_path()) or {}
-    index[image] = {"archive": name, "labels": image_labels}
-    write_json(_index_path(), index)
-    return store() / name
-
-
-def _in_builder(builder: str, argv: list[str], what: str, stdin: Path | None = None, stdout=None) -> None:
-    """Run `argv` in the builder, `stdin` a file to give it; stderr goes to the user."""
-    with stdin.open("rb") if stdin else open(os.devnull, "rb") as source:
-        if subprocess.run(smolvm.exec_command(builder, argv), stdin=source, stdout=stdout).returncode != 0:
-            raise BottleError(f"{what} failed")
+    """Delete the stages no tag's image is made of and no machine uses (bottle-cli knows its machines; `in_use`,
+    the disks bottles were made from by name, are kept too)."""
+    if not store().is_dir():
+        return
+    keep = {entry["disk"] for entry in (read_json(_index_path()) or {}).values()} | in_use
+    kept = [str(store() / name) for name in sorted(keep) if (store() / name).exists()]
+    result = subprocess.run([krun.binary(), "gc", str(store()), *kept], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise BottleError(f"bottle-cli gc: {result.stderr.strip()}")

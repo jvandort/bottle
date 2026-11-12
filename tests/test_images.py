@@ -1,5 +1,5 @@
+import json
 import subprocess
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,9 +12,7 @@ from tests.support import GitTestCase
 
 class TagTest(unittest.TestCase):
     def test_images_are_named_in_full(self) -> None:
-        # On no registry: a name without a host would be taken to be Docker Hub's.
         self.assertEqual(images.tag("base"), "localhost/bottle/base:latest")
-        self.assertEqual(images.FROM_BOTTLE.findall("FROM localhost/bottle/base:latest\nFROM bottle/tools\n"), ["base"])
 
 
 class DependencyTest(unittest.TestCase):
@@ -26,43 +24,68 @@ class DependencyTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def image(self, name: str, dockerfile: str) -> None:
+    def image(self, name: str, **spec) -> None:
         (self.containers / name).mkdir()
-        (self.containers / name / "Dockerfile").write_text(dockerfile)
+        (self.containers / name / "image.json").write_text(json.dumps(spec))
+        (self.containers / name / "install.sh").write_text("#!/bin/sh\n")
 
     def test_real_images(self) -> None:
-        self.assertEqual(images.available.__module__, "bottle.images")
         with mock.patch.object(images, "IMAGES", Path(images.__file__).resolve().parent.parent / "containers" / "images"):
             self.assertIn("base", images.available())
             self.assertEqual(images.dependencies("base"), [])
+            self.assertEqual(images.recipe("base")["pull"], "debian:trixie-slim")
 
-    def test_from_lines(self) -> None:
-        self.image("base", "FROM debian:13\n")
-        self.image("a", "FROM --platform=linux/arm64 localhost/bottle/base:latest AS builder\nFROM localhost/bottle/base\n")
+    def test_from(self) -> None:
+        self.image("base", pull="debian:13")
+        self.image("a", **{"from": "base"})
         self.assertEqual(images.dependencies("a"), ["base"])
         self.assertEqual(images.dependencies("base"), [])
 
     def test_order_is_dependencies_first(self) -> None:
-        self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM localhost/bottle/base:latest\n")
-        self.image("agent", "FROM localhost/bottle/tools:latest\n")
-        self.image("multi", "FROM localhost/bottle/agent:latest AS a\nFROM localhost/bottle/tools:latest\n")
-        self.assertEqual(images.build_order("multi"), ["base", "tools", "agent", "multi"])
+        self.image("base", pull="debian:13")
+        self.image("tools", **{"from": "base"})
+        self.image("agent", **{"from": "tools"})
+        self.assertEqual(images.build_order("agent"), ["base", "tools", "agent"])
 
     def test_cycle(self) -> None:
-        self.image("a", "FROM localhost/bottle/b\n")
-        self.image("b", "FROM localhost/bottle/a\n")
+        self.image("a", **{"from": "b"})
+        self.image("b", **{"from": "a"})
         with self.assertRaisesRegex(BottleError, "cycle: a -> b -> a"):
             images.build_order("a")
 
     def test_missing_dependency(self) -> None:
-        self.image("a", "FROM localhost/bottle/ghost\n")
-        with self.assertRaisesRegex(BottleError, "a is built from localhost/bottle/ghost, but there's no containers/images/ghost"):
+        self.image("a", **{"from": "ghost"})
+        with self.assertRaisesRegex(BottleError, "a is built from ghost, but there's no containers/images/ghost"):
             images.build_order("a")
 
+    def test_a_definition_is_checked(self) -> None:
+        for spec, error in (({}, "needs pull"), ({"pull": "a", "from": "b"}, "not both"),
+                            ({"pull": "a", "run": "x"}, "unsupported: run"), ({"pull": "a", "env": {"A": 1}}, "env"),
+                            ({"pull": "a", "cmd": "sh"}, "cmd must be a list")):
+            with self.subTest(spec=spec):
+                (self.containers / "x").mkdir(exist_ok=True)
+                (self.containers / "x" / "image.json").write_text(json.dumps(spec))
+                (self.containers / "x" / "install.sh").write_text("")
+                with self.assertRaisesRegex(BottleError, error):
+                    images.definition("x")
+
+    def test_a_recipe_runs_install_sh_where_its_directory_is_mounted(self) -> None:
+        self.image("base", pull="debian:13", env={"LANG": "C.UTF-8"}, entrypoint=["tini"], cmd=["sshd"],
+                   labels={"title": "base"})
+        self.image("tools", **{"from": "base"})
+        (self.containers / "tools" / "install.sh").write_text("#!/bin/bash -e\n")
+        self.assertEqual(images.recipe("base"), {
+            "pull": "debian:13", "entrypoint": ["tini"], "cmd": ["sshd"], "labels": {"title": "base"},
+            "steps": [{"env": {"LANG": "C.UTF-8"}},
+                      {"run": ["/bin/sh", "./install.sh"], "env": images.STEP_ENV, "cwd": images.MOUNT}]})
+        # By its #! line: a read-only mount can't be made executable.
+        self.assertEqual(images.recipe("tools"), {
+            "from": "localhost/bottle/base:latest", "labels": {},
+            "steps": [{"run": ["/bin/bash", "-e", "./install.sh"], "env": images.STEP_ENV, "cwd": images.MOUNT}]})
+
     def test_ensure_built_builds_whats_missing_or_stale(self) -> None:
-        self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM localhost/bottle/base:latest\n")
+        self.image("base", pull="debian:13")
+        self.image("tools", **{"from": "base"})
         built = []
         for exists, expected in ((set(), ["base", "tools"]), ({"localhost/bottle/base:latest"}, ["tools"]),
                                  ({"localhost/bottle/base:latest", "localhost/bottle/tools:latest"}, [])):
@@ -75,8 +98,8 @@ class DependencyTest(unittest.TestCase):
                 self.assertEqual(built, expected)
 
     def test_build_rebuilds_the_image_but_not_built_dependencies(self) -> None:
-        self.image("base", "FROM debian:13\n")
-        self.image("tools", "FROM localhost/bottle/base:latest\n")
+        self.image("base", pull="debian:13")
+        self.image("tools", **{"from": "base"})
         built = []
         with mock.patch.object(images, "is_current", return_value=True), \
                 mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False, runner=None: built.append((n, no_cache))):
@@ -89,14 +112,14 @@ class StalenessTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
-        (self.dir / "Dockerfile").write_text("FROM debian:13\n")
+        (self.dir / "install.sh").write_text("apt-get install a\n")
 
     def test_tree_hash_tracks_names_contents_and_the_executable_bit(self) -> None:
         before = images.tree_hash(self.dir)
         self.assertEqual(images.tree_hash(self.dir), before)
-        (self.dir / "Dockerfile").write_text("FROM debian:14\n")
+        (self.dir / "install.sh").write_text("apt-get install b\n")
         after_edit = images.tree_hash(self.dir)
-        (self.dir / "Dockerfile").chmod(0o755)
+        (self.dir / "install.sh").chmod(0o755)
         after_chmod = images.tree_hash(self.dir)
         (self.dir / "extra").write_text("")
         self.assertEqual(len({before, after_edit, after_chmod, images.tree_hash(self.dir)}), 4)
@@ -116,102 +139,109 @@ class BuildImageTest(unittest.TestCase):
         self.assertIn("base", images.available())
 
     def test_unknown_image(self) -> None:
-        with mock.patch.object(images.prereqs, "ensure_smolvm") as ensure_smolvm, \
+        with mock.patch.object(images.prereqs, "ensure_cli") as ensure_cli, \
                 self.assertRaisesRegex(BottleError, "no image named 'nope'; available: .*base"):
             images.build("nope")
-        ensure_smolvm.assert_not_called()
+        ensure_cli.assert_not_called()
 
-    def test_an_image_is_built_by_smolvm_from_its_directory(self) -> None:
-        with mock.patch.object(images.prereqs, "ensure_smolvm"), mock.patch.object(images, "_build") as build:
+    def test_an_image_is_built_from_its_directory(self) -> None:
+        with mock.patch.object(images, "build_recipe") as build:
             self.assertEqual(images.build("base"), "localhost/bottle/base:latest")
-        context, tag, labels = build.call_args.args[:3]
-        self.assertEqual((context, tag), (images.IMAGES / "base", "localhost/bottle/base:latest"))
-        self.assertEqual(labels, {images.INPUTS_LABEL: images.inputs_hash("base")})
+        context, tag, inputs, recipe = build.call_args.args[:4]
+        self.assertEqual((context, tag, inputs), (images.IMAGES / "base", "localhost/bottle/base:latest",
+                                                   images.inputs_hash("base")))
+        self.assertEqual(recipe, images.recipe("base"))
 
 
 class StoreTest(GitTestCase):
-    """Bottle's images: built in a builder machine, kept as OCI archives named for their inputs, while one is used."""
+    """Bottle's images: stages bottle-cli builds, each named for what it's made from, kept while one is used."""
 
     def setUp(self) -> None:
         super().setUp()
         self.calls: list[tuple] = []
-        self.scripts: list[str] = []
-        self.sent: list[str] = []  # the names in the inputs' tar
-        self.build_status, self.readable = 0, True
-        contexts = self.tmp / "containers"
-        (contexts / "images" / "base").mkdir(parents=True)
-        (contexts / "images" / "base" / "Dockerfile").write_text("FROM debian\n")
-        self.contexts = contexts
+        self.recipes: list[dict] = []
+        self.build_status = 0
+        self.context = self.tmp / "context"
+        self.context.mkdir()
+        (self.context / "install.sh").write_text("#!/bin/sh\n")
 
         def bind(bottle, *args, **kwargs):
             self.calls.append(("bind", bottle))
             return "127.0.0.1:47329", "token"
 
         for target, name, fake in (
-            (images.smolvm, "create", lambda name, image, mounts, env, memory_mib, cpus:
-                self.calls.append(("create", image, tuple(mounts)))),
-            (images.smolvm, "start", lambda name, decider, token: self.calls.append(("start", decider, token))),
-            (images.smolvm, "delete", lambda name: self.calls.append(("delete",))),
             (daemon, "bind_decider", bind),
             (daemon, "release_egress", lambda bottle: self.calls.append(("release", bottle))),
-            (images.subprocess, "run", self.in_builder),
+            (images.subprocess, "run", self.cli),
+            (images.prereqs, "ensure_cli", lambda: None),
         ):
             patcher = mock.patch.object(target, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def in_builder(self, command, stdin=None, stdout=None):
-        """An exec in the builder: the build script, or reading the archive out."""
-        argv = command[command.index("--") + 1:]
-        if "tar -x" in argv[-1]:
-            with tarfile.open(fileobj=stdin) as tar:
-                self.sent = tar.getnames()
-            return subprocess.CompletedProcess(command, 0)
-        if argv[0] == "cat":
-            if self.readable:
-                stdout.write(b"the archive")
-            return subprocess.CompletedProcess(command, 0 if self.readable else 1)
-        self.scripts.append(argv[-1])
-        return subprocess.CompletedProcess(command, self.build_status)
+    def cli(self, command, stdout=None, text=False, env=None, capture_output=False):
+        """bottle-cli: a pull or a build makes a stage named for its arguments; gc deletes what it isn't told to keep."""
+        args = command[1:]
+        store = images.store()
+        if args[0] == "gc":
+            keep = {Path(k).name for k in args[2:]}
+            for disk in store.glob("*.ext4"):
+                if disk.name not in keep:
+                    disk.unlink()
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if args[0] == "pull":
+            name = "pulled"
+        else:
+            self.calls.append(("build", args[3:], env.get("BOTTLE_DECIDER_TOKEN")))
+            recipe = json.loads(Path(args[1]).read_text())
+            self.recipes.append(recipe)
+            if self.build_status:
+                return subprocess.CompletedProcess(command, self.build_status, "", "")
+            name = recipe["labels"]["bottle.inputs"][:8] + recipe["labels"].get("bottle.build", "")[:4]
+        (store / f"{name}.ext4").write_text("")
+        return subprocess.CompletedProcess(command, 0, f"{store}/below.ext4\n{store}/{name}.ext4\n", "")
 
-    def build(self, tag: str, inputs: str, bases=None) -> Path:
-        return images._build(self.contexts / "images" / "base", tag, {"bottle.inputs": inputs}, bases=bases)
+    def build(self, tag: str, inputs: str, recipe: dict | None = None, no_cache: bool = False) -> Path:
+        recipe = recipe or {"pull": "debian:13", "steps": [{"run": ["true"]}]}
+        with mock.patch("sys.stderr"):
+            return images.build_recipe(self.context, tag, inputs, recipe, no_cache)
 
-    def test_a_build_runs_in_a_machine_bound_like_a_bottle_and_gone_after(self) -> None:
+    def test_a_build_runs_bound_like_a_bottle_and_released_after(self) -> None:
         self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        [create, bind, start, release, delete] = self.calls
-        self.assertEqual(create, ("create", images.BUILDER_IMAGE, ()))  # no mounts: everything goes over exec
+        [bind, build, release] = self.calls
         self.assertEqual(bind[0], "bind")
-        self.assertEqual(start, ("start", "127.0.0.1:47329", "token"))
-        self.assertEqual((release, delete), (("release", bind[1]), ("delete",)))
+        self.assertEqual(build, ("build", ["--decider", "127.0.0.1:47329"], "token"))
+        self.assertEqual(release, ("release", bind[1]))
 
-    def test_its_inputs_go_in_over_stdin(self) -> None:
-        base = self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        self.build("localhost/bottle/base:with-tools", "bbbb" * 16, bases={"localhost/bottle/base:latest": base})
-        self.assertLessEqual({"context", "context/Dockerfile", "Dockerfile", f"bases/{base.name}"}, set(self.sent))
-        self.assertEqual(list((self.bottle_home / "build").iterdir()), [])  # the tar sent is gone after
+    def test_the_recipe_mounts_the_context_and_is_on_what_it_says(self) -> None:
+        self.build("localhost/bottle/base:latest", "aaaa" * 16,
+                   {"pull": "debian:13", "steps": [{"run": ["true"]}], "cmd": ["sshd"], "labels": {"title": "t"}})
+        [recipe] = self.recipes
+        self.assertEqual(recipe["from"], "pulled")
+        self.assertEqual(recipe["mount"], {"source": str(self.context.resolve()), "target": images.MOUNT})
+        self.assertEqual((recipe["steps"], recipe["cmd"]), ([{"run": ["true"]}], ["sshd"]))
+        self.assertEqual(recipe["labels"], {"title": "t", "bottle.inputs": "aaaa" * 16})
+        self.assertNotIn("entrypoint", recipe)  # what it's built on runs, then
+        self.build("localhost/bottle/base:with-tools", "bbbb" * 16,
+                   {"from": "localhost/bottle/base:latest", "steps": []})
+        self.assertEqual(self.recipes[-1]["from"], "aaaaaaaa")
 
-    def test_its_progress_is_on_stderr_and_the_archive_comes_out_on_stdout(self) -> None:
-        archive = self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        self.assertIn("exec >&2", self.scripts[-1])
-        self.assertIn(f"oci-archive:{images.OUT}:", self.scripts[-1])
-        self.assertEqual(archive.read_bytes(), b"the archive")
-
-    def test_a_build_is_kept_under_its_inputs(self) -> None:
-        archive = self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        self.assertEqual(archive.name, "localhost_bottle_base_latest-aaaaaaaaaaaa.tar")
-        self.assertEqual(images.archive_of("localhost/bottle/base:latest"), archive)
+    def test_a_build_is_kept_under_its_tag(self) -> None:
+        disk = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.assertEqual(disk.name, "aaaaaaaa.ext4")
+        self.assertEqual(images.archive_of("localhost/bottle/base:latest"), disk)
         self.assertEqual(images.built_labels("localhost/bottle/base:latest"), {"bottle.inputs": "aaaa" * 16})
 
-    def test_the_builder_loads_the_images_it_builds_on(self) -> None:
-        base = self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        self.build("localhost/bottle/base:with-tools", "bbbb" * 16, bases={"localhost/bottle/base:latest": base})
-        script = self.scripts[-1]
-        self.assertIn(f"pull -q oci-archive:{images.INPUTS}/bases/{base.name}", script)
-        self.assertIn('tag "$id" localhost/bottle/base:latest', script)
-        self.assertLess(script.index("pull"), script.index(" build "))
+    def test_no_cache_makes_the_stage_anew(self) -> None:
+        first = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        again = self.build("localhost/bottle/base:latest", "aaaa" * 16, no_cache=True)
+        self.assertNotEqual(first, again)
 
-    def test_a_rebuild_leaves_the_archive_a_machine_was_made_from(self) -> None:
+    def test_on_an_image_that_isnt_built_is_an_error(self) -> None:
+        with self.assertRaisesRegex(BottleError, "isn't built"):
+            self.build("t", "inputs", {"from": "localhost/bottle/base:latest", "steps": []})
+
+    def test_a_rebuild_leaves_the_stage_a_machine_was_made_from(self) -> None:
         old = self.build("localhost/bottle/base:latest", "aaaa" * 16)
         new = self.build("localhost/bottle/base:latest", "bbbb" * 16)
         self.assertNotEqual(old, new)
@@ -221,41 +251,12 @@ class StoreTest(GitTestCase):
         self.assertFalse(old.exists())
         self.assertTrue(new.exists())
 
-    def test_a_failed_build_is_an_error_keeps_nothing_and_cleans_up(self) -> None:
-        for what in ("build", "read"):
-            with self.subTest(what):
-                self.calls.clear()
-                self.build_status, self.readable = (1, True) if what == "build" else (0, False)
-                with self.assertRaises(BottleError):
-                    self.build("localhost/bottle/base:latest", "aaaa" * 16)
-                self.assertIsNone(images.archive_of("localhost/bottle/base:latest"))
-                self.assertEqual(list(images.store().iterdir()), [])
-                self.assertEqual([c[0] for c in self.calls[-2:]], ["release", "delete"])
-
-
-class BuildContextTest(GitTestCase):
-    def test_a_features_build_loads_the_base_it_is_built_from(self) -> None:
-        dockerfile = self.tmp / "Dockerfile"
-        dockerfile.write_text("FROM localhost/bottle/base:latest\nRUN true\n")
-        base = self.tmp / "base.tar"
-        with mock.patch.object(images, "archive_of", return_value=base) as archive_of, \
-                mock.patch.object(images, "_build") as build, \
-                mock.patch.object(images.prereqs, "ensure_smolvm"):
-            images.build_context(self.tmp, "localhost/bottle/base:with-tools", "inputs", dockerfile=dockerfile,
-                                 labels={"bottle.features": "tools"})
-        archive_of.assert_called_with("localhost/bottle/base:latest")
-        args = build.call_args.args
-        self.assertEqual(args[1:3], ("localhost/bottle/base:with-tools",
-                                     {"bottle.inputs": "inputs", "bottle.features": "tools"}))
-        self.assertEqual(args[5], {"localhost/bottle/base:latest": base})
-
-    def test_a_base_that_isnt_built_is_an_error(self) -> None:
-        dockerfile = self.tmp / "Dockerfile"
-        dockerfile.write_text("FROM localhost/bottle/base:latest\n")
-        with mock.patch.object(images, "archive_of", return_value=None), \
-                mock.patch.object(images.prereqs, "ensure_smolvm"), \
-                self.assertRaisesRegex(BottleError, "isn't built"):
-            images.build_context(self.tmp, "t", "inputs", dockerfile=dockerfile)
+    def test_a_failed_build_is_an_error_keeps_nothing_and_releases_its_token(self) -> None:
+        self.build_status = 1
+        with self.assertRaisesRegex(BottleError, "bottle-cli build"):
+            self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        self.assertIsNone(images.archive_of("localhost/bottle/base:latest"))
+        self.assertEqual(self.calls[-1][0], "release")
 
 
 if __name__ == "__main__":

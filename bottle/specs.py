@@ -37,7 +37,7 @@ PERMISSIONS = {
 }
 THREAD_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
-# The disk a bottle writes to, in whole G: smolvm sizes it in GiB.
+# The disk a bottle writes to, in whole G: bottle-cli sizes it in GiB.
 DISK_PATTERN = re.compile(r"([1-9][0-9]*)G", re.IGNORECASE)
 
 
@@ -143,7 +143,7 @@ def host_memory_mib() -> int:
 
 
 def disk_gib(spec: dict) -> int | None:
-    """The spec's disk in GiB; None: smolvm's default (20G)."""
+    """The spec's disk in GiB; None: bottle-cli's default (64G, sparse)."""
     return int(spec["disk"][:-1]) if "disk" in spec else None
 
 

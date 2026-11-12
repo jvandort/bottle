@@ -1,95 +1,106 @@
 import contextlib
 import io
+import os
 import subprocess
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from bottle import prereqs
+from bottle import krun, prereqs
 from bottle.errors import BottleError
 
 
-class FakeHost:
-    """A Mac whose installed tools are configurable."""
+class EnsureCliTest(unittest.TestCase):
+    """bottle-cli is built from the repo's sources by `cargo xtask dist` when it's missing or older than they are."""
 
-    def __init__(self, tools=("brew", "smolvm"), machine="arm64", tty=True, answer="y"):
-        self.tools = set(tools)
-        self.machine = machine
-        self.tty = tty
-        self.answer = answer
+    def setUp(self) -> None:
+        prereqs.ensure_cli.cache_clear()
+        self.addCleanup(prereqs.ensure_cli.cache_clear)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name)
+        (self.repo / "cli" / "src").mkdir(parents=True)
+        self.source = self.repo / "cli" / "src" / "main.rs"
+        self.source.write_text("fn main() {}\n")
+        self.built = self.repo / "target" / "dist" / "bottle-cli"
         self.commands: list[list[str]] = []
-        self.prompts: list[str] = []
+        for target, name, value in ((krun, "REPO", self.repo), (prereqs.platform, "system", lambda: "Darwin"),
+                                    (prereqs.platform, "machine", lambda: "arm64")):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("BOTTLE_CLI", None)
 
-    def run(self, cmd, capture_output=False, text=False):
+    def run_(self, cmd, cwd=None, stdout=None):
         self.commands.append(cmd)
-        if cmd == ["brew", "install", "smol-machines/tap/smolvm"]:
-            self.tools.add("smolvm")
+        self.built.parent.mkdir(parents=True, exist_ok=True)
+        self.built.write_text("")
         return subprocess.CompletedProcess(cmd, 0)
 
-    def input(self, prompt):
-        self.prompts.append(prompt)
-        return self.answer
+    def ensure(self, cargo: bool = True) -> str:
+        with mock.patch.object(prereqs.subprocess, "run", side_effect=self.run_), \
+                mock.patch.object(prereqs.shutil, "which", return_value="/bin/cargo" if cargo else None), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            prereqs.ensure_cli()
+        prereqs.ensure_cli.cache_clear()
+        return stderr.getvalue()
 
-    @contextlib.contextmanager
-    def active(self):
-        with (
-            mock.patch.object(prereqs.platform, "system", return_value="Darwin"),
-            mock.patch.object(prereqs.platform, "machine", return_value=self.machine),
-            mock.patch.object(prereqs.shutil, "which", side_effect=lambda t: f"/bin/{t}" if t in self.tools else None),
-            mock.patch.object(prereqs.subprocess, "run", side_effect=self.run),
-            mock.patch.object(prereqs.sys.stdin, "isatty", return_value=self.tty),
-            mock.patch("builtins.input", side_effect=self.input),
-            contextlib.redirect_stderr(io.StringIO()) as stderr,
-        ):
-            self.stderr = stderr
-            yield self
+    def test_built_when_missing(self) -> None:
+        self.assertIn("cargo xtask dist", self.ensure())
+        self.assertEqual(self.commands, [["cargo", "xtask", "dist"]])
 
+    def test_silent_when_current(self) -> None:
+        self.ensure()
+        self.commands.clear()
+        self.assertEqual(self.ensure(), "")
+        self.assertEqual(self.commands, [])
 
-class EnsureSmolvmTest(unittest.TestCase):
-    def setUp(self) -> None:
-        prereqs.ensure_smolvm.cache_clear()
-        self.addCleanup(prereqs.ensure_smolvm.cache_clear)
+    def test_built_again_when_a_source_changes(self) -> None:
+        self.ensure()
+        later = time.time() + 10
+        os.utime(self.source, (later, later))
+        self.ensure()
+        self.assertEqual(len(self.commands), 2)
 
-    def test_silent_when_ready(self) -> None:
-        with FakeHost().active() as host:
-            prereqs.ensure_smolvm()
-        self.assertEqual((host.commands, host.prompts, host.stderr.getvalue()), ([], [], ""))
+    def test_what_cargo_builds_in_target_isnt_a_source(self) -> None:
+        self.ensure()
+        later = time.time() + 10
+        (self.repo / "cli" / "target").mkdir()
+        (self.repo / "cli" / "target" / "x").write_text("")
+        os.utime(self.repo / "cli" / "target" / "x", (later, later))
+        self.ensure()
+        self.assertEqual(len(self.commands), 1)
 
-    def test_installs_smolvm_after_prompt(self) -> None:
-        with FakeHost(tools=("brew",)).active() as host:
-            prereqs.ensure_smolvm()
-        self.assertEqual(host.commands, [["brew", "install", "smol-machines/tap/smolvm"]])
-        self.assertEqual(len(host.prompts), 1)
+    def test_one_named_is_used_as_it_is(self) -> None:
+        os.environ["BOTTLE_CLI"] = str(self.repo / "mine")
+        with self.assertRaisesRegex(BottleError, "BOTTLE_CLI is .*mine, which isn't there"):
+            self.ensure()
+        (self.repo / "mine").write_text("")
+        self.ensure()
+        self.assertEqual(self.commands, [])
 
-    def test_declined_install_fails(self) -> None:
-        with FakeHost(tools=("brew",), answer="n").active() as host, self.assertRaises(BottleError):
-            prereqs.ensure_smolvm()
-        self.assertEqual(host.commands, [])
-
-    def test_never_installs_without_a_terminal(self) -> None:
-        with FakeHost(tools=("brew",), tty=False).active() as host, \
-                self.assertRaisesRegex(BottleError, "brew install smol-machines/tap/smolvm"):
-            prereqs.ensure_smolvm()
-        self.assertEqual((host.commands, host.prompts), ([], []))
-
-    def test_requires_homebrew(self) -> None:
-        with FakeHost(tools=()).active(), self.assertRaisesRegex(BottleError, "Homebrew"):
-            prereqs.ensure_smolvm()
+    def test_needs_cargo(self) -> None:
+        with self.assertRaisesRegex(BottleError, "rustup"):
+            self.ensure(cargo=False)
 
     def test_checks_once_per_process(self) -> None:
-        with FakeHost().active():
-            prereqs.ensure_smolvm()
-        with FakeHost(tools=()).active():
-            prereqs.ensure_smolvm()  # would fail if it checked again
-
-    def test_on_linux_a_runner_has_it_or_is_told_where_it_comes_from(self) -> None:
-        with FakeHost().active(), mock.patch.object(prereqs.platform, "system", return_value="Linux"):
-            prereqs.ensure_smolvm()
-        prereqs.ensure_smolvm.cache_clear()
-        with FakeHost(tools=()).active() as host, mock.patch.object(prereqs.platform, "system", return_value="Linux"), \
-                self.assertRaisesRegex(BottleError, "`bottle runner add` on the controller installs it"):
-            prereqs.ensure_smolvm()
-        self.assertEqual(host.commands, [])   # nothing installed, nothing asked
+        with mock.patch.object(prereqs.subprocess, "run", side_effect=self.run_), \
+                mock.patch.object(prereqs.shutil, "which", return_value="/bin/cargo"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            prereqs.ensure_cli()
+            prereqs.ensure_cli()
+        self.assertEqual(len(self.commands), 1)
 
     def test_rejects_intel(self) -> None:
-        with FakeHost(machine="x86_64").active(), self.assertRaisesRegex(BottleError, "Apple silicon"):
-            prereqs.ensure_smolvm()
+        with mock.patch.object(prereqs.platform, "machine", return_value="x86_64"), \
+                self.assertRaisesRegex(BottleError, "Apple silicon"):
+            self.ensure()
+
+
+if __name__ == "__main__":
+    unittest.main()

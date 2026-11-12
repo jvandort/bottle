@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Runs under tini on every bottle start. Keep it fast.
+# Runs under tini on every bottle start (image.json's entrypoint). Keep it fast.
 
 # sshd setup needs root; skip it when the container runs as another user (`run --user`).
 if [ "$(id -u)" = 0 ]; then
@@ -20,5 +20,5 @@ if [ "$(id -u)" = 0 ]; then
   done
 fi
 
-# Run the command: sshd by default (see CMD), or whatever was passed to `run`.
+# Run the command: sshd by default (image.json's cmd), or whatever was passed to `run`.
 exec "$@"

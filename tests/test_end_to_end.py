@@ -1,6 +1,6 @@
-"""A real bottle, end to end: bin/bottle on smolvm, with bottled deciding its connections.
+"""A real bottle, end to end: bin/bottle on bottle-cli's machines, with bottled deciding its connections.
 
-Runs only where smolvm is: a Mac with it on PATH, or $BOTTLE_SMOLVM naming
+Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built or $BOTTLE_CLI naming
 one. Makes one bottle with `tools` from a clone of this repo, and deletes it
 after. Its BOTTLE_HOME is $BOTTLE_E2E_HOME (default /tmp/bottle-e2e), kept
 between runs so the images it builds are reused: the first run builds them,
@@ -19,14 +19,14 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import requires_smolvm
+from tests.support import requires_krun
 
 REPO = Path(__file__).resolve().parent.parent
 BOTTLE = REPO / "bin" / "bottle"
 NAME = "e2e"
 
 
-@requires_smolvm
+@requires_krun
 class EndToEndTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

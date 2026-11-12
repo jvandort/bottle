@@ -5,8 +5,9 @@
 Bottle manages sandboxed Linux VMs for coding agents, on macOS, or on a Linux machine of yours
 over ssh. Let the agent run with full permissions inside. Take back only the commits you want.
 
-- **A real VM per bottle.** Its own kernel, via [smolvm](https://github.com/smol-machines/smolvm),
-  with everything it needs already installed. Starts in about a second.
+- **A real VM per bottle.** Its own kernel, via [libkrun](https://github.com/containers/libkrun),
+  with everything it needs already installed. Starts in well under a second, and bottles on the
+  same image share it on disk and in your Mac's memory.
 - **Your repo, live — and nothing else of yours.** The bottle checks out your history from a
   read-only mount of the repo's git objects, and fetches your upstream through your Mac. Your
   working copy, and the rest of your machine, are never mounted.
@@ -64,11 +65,14 @@ bottle shell foo          # Open a shell at /workspace, its first mount; run `cl
 ## Prerequisites
 
 - macOS on Apple silicon
-- [Homebrew](https://brew.sh)
 - Python 3.11+
+- [Rust](https://rustup.rs), with the musl target for the VMs' agent
+  (`rustup target add aarch64-unknown-linux-musl`), and Xcode's command line
+  tools
 
-Bottle installs smolvm (`brew install smol-machines/tap/smolvm`) when it's
-missing, and asks first.
+Bottle builds bottle-cli, which runs its VMs, from this repo (`cargo xtask
+dist`, into `target/dist`) when it's missing or its sources have changed;
+`BOTTLE_CLI` names another to use instead.
 
 A runner, for bottles on another machine, needs:
 
@@ -78,7 +82,8 @@ A runner, for bottles on another machine, needs:
   Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since bottle
   runs ssh in batch mode
 
-No root: `bottle runner add` installs smolvm there, asking first.
+No root: `bottle runner add` installs smolvm there, asking first. (Runners
+don't run bottle-cli yet: they're being moved over from smolvm.)
 
 ## Commands
 
@@ -317,8 +322,8 @@ is built first if it isn't built yet.
 ```
 
 A spec can give the bottle's `disk`, in G (`"disk": "50G"`): the disk what
-it writes goes to, sparse, so it costs what it holds; 20G if it doesn't say.
-Its VM gets every core of the machine it runs on, up to smolvm's 16.
+it writes goes to, sparse, so it costs what it holds; 64G if it doesn't say.
+Its VM gets every core of the machine it runs on, up to 16.
 
 A spec can also give the bottle `permissions`, what bottled lets it do beyond
 what every bottle may: `message-any`, to send messages to a running bottle by
@@ -546,12 +551,12 @@ reached are left as they are, and it says so.
 ### `bottle daemon start` / `bottle daemon stop`
 
 Starts or stops `bottled`, the background process that decides bottles'
-connections. smolvm asks it about each TCP connection a bottle opens, before
+connections. A bottle's VM asks it about each TCP connection the bottle opens, before
 making it: public destinations, IPv4 and IPv6, go straight there; private
 addresses are refused, but for a credential's own host; `bottle.host` is
 answered by bottled itself, with the bottle's git remotes. A refused
-connection is reset. DNS is smolvm's, which asks the resolver of the machine
-the bottle runs on. Logs one line per connection, in `~/.bottle/logs` (a
+connection is reset. A bottle's names are looked up by the machine it runs
+on, with its resolver, as they're asked; a bottle has no UDP. Logs one line per connection, in `~/.bottle/logs` (a
 drone's, in the runner's).
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
@@ -587,21 +592,23 @@ Run the tests from the repo root:
 python3 -m unittest
 ```
 
-Where smolvm is installed (or `BOTTLE_SMOLVM` names one), that includes two
-suites that run real machines, and take minutes the first time, while they
-pull and build images:
+On a Mac with bottle-cli built (`cargo xtask dist`, or `BOTTLE_CLI` naming
+one), that includes two suites that run real machines, and take minutes the
+first time, while they pull and build images:
 
-- `tests/test_smolvm_contract.py`: what bottle relies on smolvm for. Run it
-  after upgrading smolvm.
+- `tests/test_krun_contract.py`: what bottle relies on bottle-cli for. Run it
+  after changing bottle-cli, the agent or libkrun.
 - `tests/test_end_to_end.py`: a real bottle through `bin/bottle`, in its own
   `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
 
 Elsewhere they're skipped. Runners are tested here with a fake ssh, which
 runs each command on this machine, in a home of its own: `tests/test_drone.py`
-is a drone end to end, with only ssh and smolvm faked. To check a real
-runner's smolvm, run the contract suite on it, from a checkout there:
+is a drone end to end, with only ssh and bottle-cli faked.
+
+bottle-cli's own tests are Rust's: `cargo test`. Those that need root (they
+stack disks with loop devices, in namespaces) skip without it; to run them,
+as root but built as you:
 
 ```sh
-BOTTLE_HOME=/tmp/bottle-contract BOTTLE_SMOLVM=$HOME/.bottle/smolvm/current/smolvm \
-  python3 -m unittest -v tests.test_smolvm_contract
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 ```

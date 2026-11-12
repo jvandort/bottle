@@ -18,13 +18,13 @@ class GetTest(unittest.TestCase):
 
 
 class LocalRunnerTest(GitTestCase):
-    """The local runner is smolvm, images and bottled here, as bottle used them before runners."""
+    """The local runner is bottle-cli, images and bottled here, as bottle used them before runners."""
 
     def test_starting_binds_at_bottleds_decider_then_starts_with_its_token(self) -> None:
         calls = []
         with mock.patch.object(runners.daemon, "bind_decider",
                                side_effect=lambda *a: calls.append(("bind", *a)) or ("127.0.0.1:1", "t")), \
-                mock.patch.object(runners.smolvm, "start", side_effect=lambda *a: calls.append(("start", *a))):
+                mock.patch.object(runners.krun, "start", side_effect=lambda *a: calls.append(("start", *a))):
             runners.get().start("bottle-b", "b", (), ["tools"])
         self.assertEqual(calls, [("bind", "b", (), ["tools"]), ("start", "bottle-b", "127.0.0.1:1", "t")])
 
@@ -32,9 +32,9 @@ class LocalRunnerTest(GitTestCase):
         path = self.make_repo("example")
         self.assertEqual(runners.get().objects(repos.Repo("example", path)), (path / ".git" / "objects").resolve())
 
-    def test_mounts_are_smolvms_and_a_machine_has_all_the_cores(self) -> None:
-        with mock.patch.object(runners.smolvm, "create") as create, mock.patch.object(runners.os, "cpu_count", return_value=12):
-            runners.get().create("m", Path("/images/a.tar"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
+    def test_mounts_are_bottle_clis_and_a_machine_has_all_the_cores(self) -> None:
+        with mock.patch.object(runners.krun, "create") as create, mock.patch.object(runners.os, "cpu_count", return_value=12):
+            runners.get().create("m", Path("/stages/a.ext4"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                  {"A": "1"}, 512, 50)
-        create.assert_called_once_with("m", "/images/a.tar", [runners.smolvm.Mount(Path("/repo/objects"), "/mnt/objects/w")],
+        create.assert_called_once_with("m", "/stages/a.ext4", [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                        {"A": "1"}, 512, 12, 50)

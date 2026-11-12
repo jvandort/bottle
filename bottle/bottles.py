@@ -6,9 +6,9 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a smolvm machine, bottle-<name> (see smolvm.py), with each of its mounts'
+  - a machine, bottle-<name> (see krun.py), with each of its mounts'
     repos' objects mounted read-only
-  - a token at bottled's decider, which smolvm asks about each of the
+  - a token at bottled's decider, which the machine asks about each of the
     machine's connections before making them, and which serves each mount's git
     remotes at bottle.host (see decider.py, egress.py, host.py)
   - for each mount, a checkout at its path that borrows those objects via
@@ -71,7 +71,7 @@ NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ORIGIN, HOST_REMOTE = "origin", "host"
 
 # What bottle relies on inside every bottle, checked (as genie) whenever one
-# starts. Documented in containers/images/base/Dockerfile; keep them in sync.
+# starts. Documented in containers/images/base/install.sh; keep them in sync.
 CONTRACT = (
     ("bottle-entrypoint is installed", "test -x /usr/local/bin/bottle-entrypoint"),
     ("the genie user has UID 1000", '[ "$(id -un)" = genie ] && [ "$(id -u)" = 1000 ]'),
@@ -518,7 +518,7 @@ def throwaway(feature_specs: list[str]):
         archive = runner.archive(tag)
         if archive is None:
             raise BottleError(f"{tag} isn't built")
-        # No spec to say how much memory: smolvm's own default, for a login command.
+        # No spec to say how much memory: bottle-cli's own default, for a login command.
         runner.create(name, archive, mounts=[], env={}, memory_mib=None)
         # Bound with no features, so no credentials and no egress CA: a login starts from
         # nothing, and mustn't find its own credential attached to what it sends.
@@ -1009,7 +1009,7 @@ def delete(name: str) -> None:
     """
     bottle = get(name)
     failures = []
-    # The registry says the machine is the bottle's: smolvm has no labels to ask.
+    # The registry says the machine is the bottle's: a machine has no labels to ask.
     runner = runner_of(bottle)
     for step, action in (
         ("egress", lambda: runner.release(bottle.name)),

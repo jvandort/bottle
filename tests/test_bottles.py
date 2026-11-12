@@ -117,7 +117,7 @@ class FakeSmolvm:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runners.smolvm, ("create", "start", "stop", "delete", "state", "exec_", "exec_command")),
+            (bottles.runners.krun, ("create", "start", "stop", "delete", "state", "exec_", "exec_command")),
             (bottles.daemon, ("bind_decider", "release_egress")),
         ):
             for name in names:
@@ -128,7 +128,7 @@ class FakeSmolvm:
             mock.patch.object(bottles.images, "archive_of", self.archive),
             mock.patch.object(bottles.daemon, "start", self.daemon_start),
             mock.patch.object(bottles.daemon, "stop", self.daemon_stop),
-            mock.patch.object(bottles.runners.prereqs, "ensure_smolvm"),
+            mock.patch.object(bottles.runners.prereqs, "ensure_cli"),
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
             mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
             mock.patch.object(bottles.auth, "intercepted_hosts", side_effect=lambda specs: list(self.intercepted)),
@@ -355,7 +355,7 @@ class RollbackTest(BottleTestCase):
 
     def test_interrupt_rolls_back(self) -> None:
         fake = self.fake()
-        with mock.patch.object(bottles.runners.smolvm, "start", side_effect=KeyboardInterrupt):
+        with mock.patch.object(bottles.runners.krun, "start", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.create()
         self.assertEqual(bottles.load(), {})
@@ -481,7 +481,7 @@ class ContractTest(BottleTestCase):
             return ""
 
         bottle = bottles.Bottle("b", "id", "base", 0.0)
-        with mock.patch.object(bottles.runners.smolvm, "exec_", side_effect=capture):
+        with mock.patch.object(bottles.runners.krun, "exec_", side_effect=capture):
             bottles.verify_contract(bottle)
         return __import__("subprocess").run(script, capture_output=True, text=True)
 
@@ -793,7 +793,7 @@ class CopyTest(BottleTestCase):
             self.users.append((user, workdir, tty))
             return ["sh", "-c", f"cd {self.inside[name]} && " + argv[2], *argv[3:]]
 
-        self.enterContext(mock.patch.object(bottles.runners.smolvm, "exec_command", side_effect=exec_command))
+        self.enterContext(mock.patch.object(bottles.runners.krun, "exec_command", side_effect=exec_command))
 
     HTML = b"<html>\x00\xff</html>"
 

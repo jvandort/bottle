@@ -40,13 +40,13 @@ class RemoteRunnerTest(unittest.TestCase):
             return lambda *args, **kwargs: self.calls.append((name, args, kwargs))
 
         for name in ("create", "stop", "delete"):
-            patcher = mock.patch.object(runners.smolvm, name, side_effect=record(name))
+            patcher = mock.patch.object(runners.krun, name, side_effect=record(name))
             patcher.start()
             self.addCleanup(patcher.stop)
         for target, value in (
-            ((runners.smolvm, "state"), lambda name: self.machines.get(name)),
-            ((runners.smolvm, "start"), record("start")),
-            ((runners.smolvm, "exec_"), lambda name, argv, **kw: f"ran {argv} as {kw['user']} with {kw['input']!r}"),
+            ((runners.krun, "state"), lambda name: self.machines.get(name)),
+            ((runners.krun, "start"), record("start")),
+            ((runners.krun, "exec_"), lambda name, argv, **kw: f"ran {argv} as {kw['user']} with {kw['input']!r}"),
             ((runners.daemon, "bind_decider"), lambda *args: self.calls.append(("bind", args)) or ("127.0.0.1:1", "t")),
             ((runners.daemon, "release_egress"), record("release")),
             ((runners.images, "archive_of"), lambda tag: Path("/images/base.tar") if tag == "base" else None),
@@ -68,7 +68,7 @@ class RemoteRunnerTest(unittest.TestCase):
         self.runner.delete("bottle-b")
         [create, bind, start, stop, release, delete] = self.calls
         self.assertEqual(create[1], ("bottle-b", "/images/base.tar",
-                                     [runners.smolvm.Mount(Path("/m/objects"), "/mnt/objects/w")], {"A": "1"}, 512, 32, 50))
+                                     [runners.krun.Mount(Path("/m/objects"), "/mnt/objects/w")], {"A": "1"}, 512, 32, 50))
         self.assertEqual(bind[1], ("b", served, ["tools"]))   # the repos it's served, as they were given
         self.assertEqual(start[1], ("bottle-b", "127.0.0.1:1", "t"))
         self.assertEqual([c[0] for c in (stop, release, delete)], ["stop", "release", "delete"])
@@ -84,14 +84,14 @@ class RemoteRunnerTest(unittest.TestCase):
         self.assertEqual(self.runner.exec_("bottle-b", ["cat"], user="root", input="pem"),
                          "ran ['cat'] as root with 'pem'")
 
-    def test_an_attached_command_is_its_smolvm_exec_run_there(self) -> None:
-        with mock.patch.object(runners.smolvm, "binary", return_value="/there/smolvm"):
+    def test_an_attached_command_is_its_bottle_cli_exec_run_there(self) -> None:
+        with mock.patch.object(runners.krun, "binary", return_value="/there/bottle-cli"):
             command = self.runner.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)
-        self.assertEqual(command[:3], ["there", "-t", "/there/smolvm"])
+        self.assertEqual(command[:3], ["there", "-t", "/there/bottle-cli"])
         self.assertEqual(command[-3:], ["--", "bash", "-l"])
 
     def test_its_failures_are_the_controllers_errors_naming_it(self) -> None:
-        with mock.patch.object(runners.smolvm, "stop", side_effect=BottleError("no such machine")), \
+        with mock.patch.object(runners.krun, "stop", side_effect=BottleError("no such machine")), \
                 self.assertRaisesRegex(BottleError, "runner box: no such machine"):
             self.runner.stop("bottle-b")
 
@@ -108,27 +108,26 @@ class RemoteRunnerTest(unittest.TestCase):
 class RemoteBuildTest(unittest.TestCase):
     """A build on a runner: the controller works out what, the runner builds it from what it's sent."""
 
-    def test_the_context_and_dockerfile_are_sent_and_built_there(self) -> None:
+    def test_the_context_and_recipe_are_sent_and_built_there(self) -> None:
         import tempfile
 
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(__import__("shutil").rmtree, tmp)
         (tmp / "context").mkdir()
         (tmp / "context" / "install.sh").write_text("echo hi")
-        (tmp / "Dockerfile").write_text("FROM localhost/bottle/base:latest")
+        recipe = {"from": "localhost/bottle/base:latest", "steps": [{"run": ["true"]}],
+                  "labels": {"bottle.features": "x"}}
         seen = {}
 
-        def build(context, tag, inputs, no_cache, dockerfile, labels):
-            seen.update(files=sorted(p.name for p in context.iterdir()), dockerfile=dockerfile.read_text(),
-                        args=(tag, inputs, no_cache, labels))
+        def build(context, tag, inputs, recipe, no_cache):
+            seen.update(files=sorted(p.name for p in context.iterdir()), args=(tag, inputs, recipe, no_cache))
 
         transport = InProcess()
         with mock.patch.object(runners.LocalRunner, "build", side_effect=lambda *a: build(*a)):
-            runners.RemoteRunner("box", transport).build(tmp / "context", "localhost/bottle/base:with-x", "abc",
-                                                         dockerfile=tmp / "Dockerfile", labels={"bottle.features": "x"})
-        self.assertEqual(seen, {"files": ["install.sh"], "dockerfile": "FROM localhost/bottle/base:latest",
-                                "args": ("localhost/bottle/base:with-x", "abc", False, {"bottle.features": "x"})})
-        self.assertEqual([op for op, _ in transport.requests], ["link", "build"])  # its builder's flows need the link
+            runners.RemoteRunner("box", transport).build(tmp / "context", "localhost/bottle/base:with-x", "abc", recipe)
+        self.assertEqual(seen, {"files": ["install.sh"],
+                                "args": ("localhost/bottle/base:with-x", "abc", recipe, False)})
+        self.assertEqual([op for op, _ in transport.requests], ["link", "build"])  # its build's flows need the link
 
     def test_a_build_that_fails_there_is_the_controllers_error(self) -> None:
         import tempfile
@@ -137,7 +136,7 @@ class RemoteBuildTest(unittest.TestCase):
         self.addCleanup(__import__("shutil").rmtree, tmp)
         with mock.patch.object(runners.LocalRunner, "build", side_effect=BottleError("building x failed")), \
                 self.assertRaisesRegex(BottleError, "runner box: building x failed"):
-            runners.RemoteRunner("box", InProcess()).build(tmp, "t", "i")
+            runners.RemoteRunner("box", InProcess()).build(tmp, "t", "i", {"steps": []})
 
 
 class AnswerTest(unittest.TestCase):

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, host, smolvm
+from bottle import bottles, host, krun
 from bottle.errors import BottleError
 from tests.support import GitTestCase
 
@@ -14,90 +14,90 @@ def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subpro
 
 
 class CommandTest(unittest.TestCase):
-    """What bottle asks of smolvm, word for word."""
+    """What bottle asks of bottle-cli, word for word."""
 
     def run_with(self, result: subprocess.CompletedProcess | None = None):
-        patcher = mock.patch.object(smolvm.subprocess, "run", return_value=result or completed())
+        patcher = mock.patch.object(krun.subprocess, "run", return_value=result or completed())
         self.addCleanup(patcher.stop)
         return patcher.start()
 
-    def test_create_makes_a_mediated_machine_with_read_only_mounts(self) -> None:
+    def test_create_makes_a_machine_with_read_only_mounts(self) -> None:
         run = self.run_with()
-        smolvm.create("bottle-b", "/images/b.tar", [smolvm.Mount(Path("/repo/.git/objects"), "/mnt/repo/objects")],
-                      {"TOKEN": "stand-in"}, memory_mib=8192, cpus=1000, disk_gib=50)
+        krun.create("bottle-b", "/stages/b.ext4", [krun.Mount(Path("/repo/.git/objects"), "/mnt/repo/objects")],
+                    {"TOKEN": "stand-in"}, memory_mib=8192, cpus=1000, disk_gib=50)
         self.assertEqual(run.call_args.args[0], [
-            "smolvm", "--error-format", "json", "machine", "create", "--name", "bottle-b", "--image", "/images/b.tar",
-            "--net", "--net-backend", "virtio-net", "--cpus", "16", "--mem", "8192", "--storage", "50",
+            krun.binary(), "machine", "create", "--name", "bottle-b", "--image", "/stages/b.ext4",
+            "--cpus", "16", "--mem", "8192", "--storage", "50",
             "-v", "/repo/.git/objects:/mnt/repo/objects:ro", "-e", "TOKEN=stand-in",
         ])
 
+    def test_create_with_bottle_clis_defaults(self) -> None:
+        run = self.run_with()
+        krun.create("m", "/stages/b.ext4", [], {}, memory_mib=None, cpus=2)
+        self.assertEqual(run.call_args.args[0][1:], ["machine", "create", "--name", "m", "--image", "/stages/b.ext4",
+                                                     "--cpus", "2"])
+
     def test_start_binds_the_decider_with_the_token_in_the_environment_only(self) -> None:
         run = self.run_with()
-        smolvm.start("bottle-b", "127.0.0.1:47329", "ab" * 32)
+        krun.start("bottle-b", "127.0.0.1:47329", "ab" * 32)
         argv, env = run.call_args.args[0], run.call_args.kwargs["env"]
-        self.assertEqual(argv[3:], ["machine", "start", "--name", "bottle-b", "--egress-interceptor", "127.0.0.1:47329",
-                                    "--mediated-egress"])
-        self.assertEqual(env["SMOLVM_INTERCEPTOR_TOKEN"], "ab" * 32)
+        self.assertEqual(argv[1:], ["machine", "start", "--name", "bottle-b", "--decider", "127.0.0.1:47329"])
+        self.assertEqual(env["BOTTLE_DECIDER_TOKEN"], "ab" * 32)
         self.assertNotIn("ab" * 32, " ".join(argv))
 
-    def test_start_raises_the_tcp_relay_capacity(self) -> None:
-        run = self.run_with()
-        smolvm.start("bottle-b", "127.0.0.1:47329", "ab" * 32)
-        self.assertEqual(run.call_args.kwargs["env"]["SMOLVM_TCP_RELAY_CAPACITY"], "4096")
-
-    def test_exec_is_always_interactive(self) -> None:
-        # A plain exec cuts output at 11 MiB without saying so.
-        self.assertEqual(smolvm.exec_args("m", ["cat", "f"]), ["machine", "exec", "--name", "m", "-i", "--", "cat", "f"])
+    def test_exec_args(self) -> None:
+        self.assertEqual(krun.exec_args("m", ["cat", "f"]), ["machine", "exec", "--name", "m", "--", "cat", "f"])
         self.assertEqual(
-            smolvm.exec_args("m", ["sh"], user="genie", workdir="/workspace", env={"A": "1"}, tty=True),
-            ["machine", "exec", "--name", "m", "-i", "-t", "-u", "genie", "-w", "/workspace", "-e", "A=1", "--", "sh"],
+            krun.exec_args("m", ["sh"], user="genie", workdir="/workspace", env={"A": "1"}, tty=True),
+            ["machine", "exec", "--name", "m", "-t", "-u", "genie", "-w", "/workspace", "-e", "A=1", "--", "sh"],
         )
 
     def test_exec_gives_the_command_stdin_and_returns_its_output(self) -> None:
         run = self.run_with(completed("out"))
-        self.assertEqual(smolvm.exec_("m", ["cat"], input="in"), "out")
+        self.assertEqual(krun.exec_("m", ["cat"], input="in"), "out")
         self.assertEqual(run.call_args.kwargs["input"], "in")
 
     def test_the_command_line_for_a_terminal(self) -> None:
-        self.assertEqual(smolvm.exec_command("m", ["claude"], user="genie", tty=True)[:3],
-                         ["smolvm", "--error-format", "json"])
+        self.assertEqual(krun.exec_command("m", ["claude"], user="genie", tty=True)[:3],
+                         [krun.binary(), "machine", "exec"])
+
+    def test_the_binary_is_the_repos_dist_unless_named(self) -> None:
+        with mock.patch.dict(krun.os.environ, {"BOTTLE_CLI": ""}):
+            self.assertEqual(krun.binary(), str(krun.REPO / "target" / "dist" / "bottle-cli"))
+        with mock.patch.dict(krun.os.environ, {"BOTTLE_CLI": "/opt/bottle-cli"}):
+            self.assertEqual(krun.binary(), "/opt/bottle-cli")
 
     def test_state(self) -> None:
         self.run_with(completed(json.dumps({"state": "running", "name": "m"})))
-        self.assertEqual(smolvm.state("m"), "running")
+        self.assertEqual(krun.state("m"), "running")
 
     def test_running_is_every_machine_not_stopped(self) -> None:
         self.run_with(completed(json.dumps([{"name": "a", "state": "running"}, {"name": "b", "state": "stopped"},
-                                            {"name": "c", "state": "created"}, {"name": "d", "state": "unreachable"}])))
-        self.assertEqual(smolvm.running(), ["a", "d"])
+                                            {"name": "c", "state": "created"}])))
+        self.assertEqual(krun.running(), ["a"])
 
     def test_no_such_machine_has_no_state(self) -> None:
-        for error in ('{"error":{"code":"NOT_FOUND","message":"vm not found: m"}}',
-                      # As `machine status` says it.
-                      '{"error":{"code":"CONFIG_ERROR","message":"config operation failed: machine status: '
-                      'machine \'m\' not found"}}'):
-            with self.subTest(error):
-                self.run_with(completed(stderr=error, returncode=1))
-                self.assertIsNone(smolvm.state("m"))
+        self.run_with(completed(stderr="bottle-cli: no machine m\n", returncode=1))
+        self.assertIsNone(krun.state("m"))
 
-    def test_smolvms_own_failures_are_its_message(self) -> None:
-        self.run_with(completed(stderr='{"error":{"code":"MOUNT_ERROR","message":"no such directory"}}', returncode=1))
-        with self.assertRaisesRegex(BottleError, "^no such directory$"):
-            smolvm.stop("m")
+    def test_bottle_clis_own_failures_are_its_message(self) -> None:
+        self.run_with(completed(stderr="bottle-cli: stopping m: the agent went away; killed\n", returncode=1))
+        with self.assertRaisesRegex(BottleError, "^stopping m: the agent went away; killed$"):
+            krun.stop("m")
 
     def test_a_commands_failure_is_its_stderr(self) -> None:
         self.run_with(completed(stderr="sh: nope: not found\n", returncode=127))
         with self.assertRaisesRegex(BottleError, "nope: not found"):
-            smolvm.exec_("m", ["nope"])
+            krun.exec_("m", ["nope"])
 
     def test_deleting_a_machine_that_isnt_there(self) -> None:
-        run = self.run_with(completed(stderr='{"error":{"code":"NOT_FOUND","message":"gone"}}', returncode=1))
-        smolvm.delete("m")
+        run = self.run_with(completed(stderr="bottle-cli: no machine m\n", returncode=1))
+        krun.delete("m")
         self.assertEqual(run.call_count, 1)  # the status, and no delete
 
 
-class SmolvmBottleTest(GitTestCase):
-    """A bottle: its machine made, started, stopped and deleted, with smolvm and bottled stood in for."""
+class KrunBottleTest(GitTestCase):
+    """A bottle: its machine made, started, stopped and deleted, with bottle-cli and bottled stood in for."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -105,7 +105,7 @@ class SmolvmBottleTest(GitTestCase):
         self.calls: list[str] = []
         self.machines: dict[str, str] = {}
         self.created: dict = {}
-        archive = self.tmp / "base.tar"
+        archive = self.tmp / "base.ext4"
         archive.write_bytes(b"archive")
 
         def exec_(name, argv, user=None, workdir=None, input=None, env=None):
@@ -134,13 +134,13 @@ class SmolvmBottleTest(GitTestCase):
 
         bind = lambda bottle, *args: (self.calls.append(f"bind {bottle}"), ("127.0.0.1:47329", "token"))[1]
         for target, name, value in (
-            (bottles.runners.smolvm, "create", create), (bottles.runners.smolvm, "start", start), (bottles.runners.smolvm, "stop", stop),
-            (bottles.runners.smolvm, "delete", delete), (bottles.runners.smolvm, "exec_", exec_),
-            (bottles.runners.smolvm, "state", lambda name: self.machines.get(name)),
+            (bottles.runners.krun, "create", create), (bottles.runners.krun, "start", start), (bottles.runners.krun, "stop", stop),
+            (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),
+            (bottles.runners.krun, "state", lambda name: self.machines.get(name)),
             (bottles.images, "archive_of", lambda tag: archive),
             (bottles.daemon, "bind_decider", bind),
             (bottles.daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
-            (bottles.runners.prereqs, "ensure_smolvm", lambda: None),
+            (bottles.runners.prereqs, "ensure_cli", lambda: None),
             (bottles.features_, "ensure_built", lambda image, specs, runner=None: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda runner=None: []),
             (bottles.auth, "ensure_logged_in", lambda specs: None),
@@ -158,8 +158,8 @@ class SmolvmBottleTest(GitTestCase):
 
     def test_a_new_bottle_is_a_machine_bound_to_the_decider(self) -> None:
         bottle = self.create()
-        self.assertEqual(bottle.archive, "base.tar")
-        self.assertEqual(bottles.get("b").archive, "base.tar")
+        self.assertEqual(bottle.archive, "base.ext4")
+        self.assertEqual(bottles.get("b").archive, "base.ext4")
         self.assertEqual(self.calls, [
             "create", "bind b", "start 127.0.0.1:47329 token", "contract as genie", "trust CA as root",
             "bottle.host as root", "workspace as root", "workspace as genie",
@@ -213,7 +213,7 @@ class SmolvmBottleTest(GitTestCase):
         self.assertNotIn("b", bottles.load())
 
     def test_a_failed_start_rolls_the_bottle_back(self) -> None:
-        with mock.patch.object(bottles.runners.smolvm, "start", side_effect=BottleError("no hypervisor")):
+        with mock.patch.object(bottles.runners.krun, "start", side_effect=BottleError("no hypervisor")):
             with self.assertRaisesRegex(BottleError, "no hypervisor"):
                 self.create()
         self.assertEqual(self.machines, {})

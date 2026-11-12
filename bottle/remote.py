@@ -95,7 +95,7 @@ def answer(op: str, request: str) -> str:
 
 
 def build(request: str, sent: BinaryIO) -> str:
-    """Build what's on stdin, a tar of a context and perhaps its Dockerfile, as `request` says; the answer."""
+    """Build what `request`'s recipe says, the context it mounts a tar on stdin; the answer."""
     args = json.loads(request)
     # What the build prints is for the user, on stderr: stdout is only the answer.
     answer_to = os.dup(1)
@@ -104,9 +104,8 @@ def build(request: str, sent: BinaryIO) -> str:
         with tempfile.TemporaryDirectory() as tmp:
             with tarfile.open(fileobj=sent, mode="r|") as tar:
                 tar.extractall(tmp, filter="data")
-            dockerfile = Path(tmp) / "Dockerfile" if args["dockerfile"] else None
-            runners.get(runners.LOCAL).build(Path(tmp) / "context", args["tag"], args["inputs"], args["no_cache"],
-                                             dockerfile, args["labels"])
+            runners.get(runners.LOCAL).build(Path(tmp) / "context", args["tag"], args["inputs"], args["recipe"],
+                                             args["no_cache"])
         return json.dumps({"ok": True, "result": None})
     except BottleError as e:
         return json.dumps({"ok": False, "error": str(e)})
@@ -149,10 +148,10 @@ def relay(service: str, key: str) -> int:
 
 
 def main(argv: list[str]) -> int:
-    # The smolvm bottle installed here, unless one's named: one on PATH is used only without it.
-    installed = Path.home() / ".bottle" / "smolvm" / "current" / "smolvm"
-    if not os.environ.get("BOTTLE_SMOLVM") and installed.exists():
-        os.environ["BOTTLE_SMOLVM"] = str(installed)
+    # The bottle-cli installed here (its distribution, bottle-cli with its kernel and mke2fs), unless one's named.
+    installed = Path.home() / ".bottle" / "dist" / "bottle-cli"
+    if not os.environ.get("BOTTLE_CLI") and installed.exists():
+        os.environ["BOTTLE_CLI"] = str(installed)
     # The bottled this starts here is the runner's half alone: the controller's is reached over the link.
     os.environ.setdefault("BOTTLE_LINK", str(bottle_home() / SOCKET))
     if argv[:1] == ["relay"] and len(argv) == 3:

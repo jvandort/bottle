@@ -6,10 +6,10 @@ the repos bottles are served -- is the driver's, the machine bottle's commands
 run on. The code on the driver's side reaches machines only through a
 Runner, so it can't tell which runner it has.
 
-The local runner is the driver itself: today's smolvm.py, images.py and
-bottled, called in-process. Its decider is bottled's.
+The local runner is the driver itself: krun.py (bottle-cli's machines),
+images.py and bottled, called in-process. Its decider is bottled's.
 
-Code on the runner's side (smolvm.py, images.py's store and builds, the
+Code on the runner's side (krun.py, images.py's store and builds, the
 decider) uses its neighbours directly: a builder machine is the runner's own
 business. What to build (an image's tag, its inputs and their hash) is the
 controller's to work out, in images.py and features.py; the runner keeps the
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from bottle import daemon, images, prereqs, repos, smolvm
+from bottle import daemon, images, krun, prereqs, repos
 from bottle.errors import BottleError
 from bottle.host import Served
 from bottle.store import bottle_home, read_json, write_json
@@ -53,7 +53,7 @@ class Runner(Protocol):
         """How much memory the runner has, in MiB: what a bottle's spec there must fit."""
 
     def archive(self, tag: str) -> Path | None:
-        """The archive `tag` was last built into, in the runner's image store; None if it isn't built there."""
+        """The disk of the top stage `tag` was last built into, in the runner's store; None if it isn't built there."""
 
     def image_labels(self, tag: str) -> dict[str, str] | None:
         """The labels `tag` was last built with there; None if it isn't built there."""
@@ -61,23 +61,23 @@ class Runner(Protocol):
     def built(self) -> dict[str, dict[str, str]]:
         """Every tag built there, with its labels."""
 
-    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
-              labels: dict[str, str] | None = None) -> None:
-        """Build `context` into `tag` there (see images.build_context), its progress on this process's stderr."""
+    def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
+        """Build `recipe` into `tag` there, `context` mounted for its steps (see images.build_recipe), its progress
+        on this process's stderr."""
 
     def forget(self, tag: str) -> None:
-        """Drop `tag` from the runner's index of images; its archive goes once nothing uses it."""
+        """Drop `tag` from the runner's index of images; its stages go once nothing uses them."""
 
     def remove_unused(self, in_use: set[str]) -> None:
-        """Delete the runner's archives no tag points to and no machine (`in_use`, archive names) was made from."""
+        """Delete the runner's stages no tag's image is made of and no machine (`in_use`, disk names) was made from."""
 
     def objects(self, repo: repos.Repo) -> Path:
         """Where on the runner a machine mounts `repo`'s objects from."""
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None) -> None:
-        """Create a stopped machine from `archive`, its mounts read-only, with all the runner's cores;
-        `memory_mib` and `disk_gib` None: smolvm's defaults."""
+        """Create a stopped machine from `archive` (a top stage's disk), its mounts read-only, with all the runner's
+        cores; `memory_mib` and `disk_gib` None: bottle-cli's defaults."""
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
@@ -121,12 +121,12 @@ class Runner(Protocol):
 
 
 class LocalRunner:
-    """The driver itself: machines are smolvm's here, images are in $BOTTLE_HOME, the decider is bottled's."""
+    """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, the decider is bottled's."""
 
     name = LOCAL
 
     def ensure_ready(self) -> None:
-        prereqs.ensure_smolvm()
+        prereqs.ensure_cli()
 
     def memory_mib(self) -> int:
         from bottle import specs
@@ -142,9 +142,8 @@ class LocalRunner:
     def built(self) -> dict[str, dict[str, str]]:
         return images.built()
 
-    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
-              labels: dict[str, str] | None = None) -> None:
-        images.build_context(context, tag, inputs, no_cache, dockerfile, labels)
+    def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
+        images.build_recipe(context, tag, inputs, recipe, no_cache)
 
     def forget(self, tag: str) -> None:
         images.forget(tag)
@@ -158,13 +157,13 @@ class LocalRunner:
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None) -> None:
-        smolvm.create(machine, str(archive), [smolvm.Mount(m.source, m.target) for m in mounts], env, memory_mib,
-                      os.cpu_count() or 1, disk_gib)
+        krun.create(machine, str(archive), [krun.Mount(m.source, m.target) for m in mounts], env, memory_mib,
+                    os.cpu_count() or 1, disk_gib)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
         decider, token = daemon.bind_decider(bottle, served, features)
-        smolvm.start(machine, decider, token)
+        krun.start(machine, decider, token)
 
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
@@ -179,24 +178,24 @@ class LocalRunner:
         daemon.start()
 
     def stop(self, machine: str) -> None:
-        smolvm.stop(machine)
+        krun.stop(machine)
 
     def running(self) -> list[str]:
-        return smolvm.running()
+        return krun.running()
 
     def delete(self, machine: str) -> None:
-        smolvm.delete(machine)
+        krun.delete(machine)
 
     def state(self, machine: str) -> str | None:
-        return smolvm.state(machine)
+        return krun.state(machine)
 
     def exec_(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
               input: str | None = None, env: dict[str, str] | None = None) -> str:
-        return smolvm.exec_(machine, argv, user=user, workdir=workdir, input=input, env=env)
+        return krun.exec_(machine, argv, user=user, workdir=workdir, input=input, env=env)
 
     def exec_command(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
                      tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
-        return smolvm.exec_command(machine, argv, user=user, workdir=workdir, tty=tty, env=env)
+        return krun.exec_command(machine, argv, user=user, workdir=workdir, tty=tty, env=env)
 
 
 class Transport(Protocol):
@@ -249,19 +248,15 @@ class RemoteRunner:
     def built(self) -> dict[str, dict[str, str]]:
         return self._call("built")
 
-    def build(self, context: Path, tag: str, inputs: str, no_cache: bool = False, dockerfile: Path | None = None,
-              labels: dict[str, str] | None = None) -> None:
-        # Sent as a tar: the context, and the Dockerfile. Built FROM images there, by a builder machine there,
-        # whose connections are decided there and so through the controller.
+    def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
+        # The context sent as a tar, the recipe with the request. Built on images there, by a VM there, whose
+        # connections are decided there and so through the controller.
         with tempfile.TemporaryFile() as sent:
             with tarfile.open(fileobj=sent, mode="w") as tar:
                 tar.add(context, "context")
-                if dockerfile is not None:
-                    tar.add(dockerfile, "Dockerfile")
             sent.seek(0)
             self.transport.link()
-            request = {"tag": tag, "inputs": inputs, "no_cache": no_cache, "dockerfile": dockerfile is not None,
-                       "labels": labels or {}}
+            request = {"tag": tag, "inputs": inputs, "no_cache": no_cache, "recipe": recipe}
             answer = json.loads(self.transport.stream("build", json.dumps(request), sent))
         if not answer.get("ok"):
             raise BottleError(f"runner {self.name}: {answer.get('error', 'build failed')}")

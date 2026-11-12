@@ -1,11 +1,11 @@
-"""A drone, end to end, with only ssh and smolvm faked: the controller's bottled, the link, a runner's bottled.
+"""A drone, end to end, with only ssh and bottle-cli faked: the controller's bottled, the link, a runner's bottled.
 
 The runner is this machine, in a home of its own, reached through a fake ssh
 that runs each command there and makes a forward (-R) a symlink to the
 socket here. Each bottled's decider listens on a port of its own choosing
-(BOTTLE_DECIDER_PORT=0), so neither meets a real one. smolvm there records
+(BOTTLE_DECIDER_PORT=0), so neither meets a real one. bottle-cli there records
 how a machine was started; the test is then its guest, opening a connection
-through the runner's decider as smolvm would.
+through the runner's decider as bottle-cli would.
 """
 
 import json
@@ -34,18 +34,17 @@ if [ -n "$forward" ]; then ln -sfn "${forward#*:}" "${forward%%:*}"; exec sleep 
 exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
 """
 
-# smolvm there: a machine started is recorded, with the decider and token it was given.
-FAKE_SMOLVM = r"""#!/usr/bin/env bash
-if [ "$1 $2 $3 $4" = "--error-format json machine start" ]; then
-  printf '{"args": "%s", "token": "%s"}' "$*" "$SMOLVM_INTERCEPTOR_TOKEN" > "$HOME/started.json"
+# bottle-cli there: a machine started is recorded, with the decider and token it was given.
+FAKE_CLI = r"""#!/usr/bin/env bash
+if [ "$1 $2" = "machine start" ]; then
+  printf '{"args": "%s", "token": "%s"}' "$*" "$BOTTLE_DECIDER_TOKEN" > "$HOME/started.json"
 fi
 echo '{"state": "running"}'
 """
 
 
-# smolvm there with machines: made, started, stopped, deleted and asked about, each a file; exec runs nothing.
-STATEFUL_SMOLVM = r"""#!/usr/bin/env bash
-shift 2  # --error-format json
+# bottle-cli there with machines: made, started, stopped, deleted and asked about, each a file; exec runs nothing.
+STATEFUL_CLI = r"""#!/usr/bin/env bash
 op="$1 $2"; shift 2
 while [ $# -gt 0 ]; do [ "$1" = --name ] && name=$2; [ "$1" = -- ] && break; shift; done
 machines="$HOME/machines"; mkdir -p "$machines"
@@ -53,12 +52,12 @@ case "$op" in
   "machine create") echo created > "$machines/$name" ;;
   "machine start")
     echo running > "$machines/$name"
-    printf '{"args": "%s", "token": "%s"}' "$*" "$SMOLVM_INTERCEPTOR_TOKEN" > "$HOME/started.json" ;;
+    printf '{"args": "%s", "token": "%s"}' "$*" "$BOTTLE_DECIDER_TOKEN" > "$HOME/started.json" ;;
   "machine stop") echo stopped > "$machines/$name" ;;
   "machine delete") rm -f "$machines/$name" ;;
   "machine status")
     if [ -f "$machines/$name" ]; then printf '{"state": "%s"}' "$(cat "$machines/$name")"
-    else echo '{"error": {"code": "NOT_FOUND", "message": "machine not found"}}' >&2; exit 1; fi ;;
+    else echo "bottle-cli: no machine $name" >&2; exit 1; fi ;;
   "machine exec") cat > /dev/null; echo "$*" >> "$HOME/execs" ;;
   "machine ls")
     printf '['; sep=
@@ -84,10 +83,10 @@ class DroneCase(GitTestCase):
         short = Path(tempfile.mkdtemp(dir="/tmp"))   # macOS caps Unix socket paths at 104 bytes
         self.addCleanup(shutil.rmtree, short, ignore_errors=True)
         self.remote = short / "r" / "box"
-        smolvm = self.remote / ".bottle" / "smolvm" / "current" / "smolvm"
-        smolvm.parent.mkdir(parents=True)
-        smolvm.write_text(FAKE_SMOLVM)
-        smolvm.chmod(0o755)
+        cli = self.remote / ".bottle" / "dist" / "bottle-cli"
+        cli.parent.mkdir(parents=True)
+        cli.write_text(FAKE_CLI)
+        cli.chmod(0o755)
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)
         fake.chmod(0o755)
@@ -110,8 +109,8 @@ class DroneCase(GitTestCase):
                 s.recv(100)
 
     def guest_connects(self, started: dict, address: str, port: int, first: bytes) -> bytes:
-        """A connection from the machine's guest, as smolvm hands it to the decider it was given."""
-        decider_address = started["args"].split("--egress-interceptor ")[1].split()[0]
+        """A connection from the machine's guest, as bottle-cli hands it to the decider it was given."""
+        decider_address = started["args"].split("--decider ")[1].split()[0]
         ip, _, decider_port = decider_address.rpartition(":")
         with socket.create_connection((ip, int(decider_port)), timeout=10) as s:
             s.sendall(decider.MAGIC + bytes.fromhex(started["token"]) + b"m" * 16 + bytes(16) + bytes([4])
@@ -139,7 +138,7 @@ class DroneTest(DroneCase):
         box.start("bottle-b", "b", (Served(repo / ".git", remotes, "workspace"),), ())
 
         started = json.loads((self.remote / "started.json").read_text())
-        self.assertIn("--mediated-egress", started["args"])
+        self.assertIn("--decider", started["args"])
         request = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         answer = self.guest_connects(started, host.ADDRESS, 80, request)
         self.assertEqual(answer[:1], decider.REDIRECT)
@@ -152,19 +151,19 @@ class DroneTest(DroneCase):
         self.assertIn('"b"', (self.remote / ".bottle" / "bindings.json").read_text())
 
     def test_bottle_new_on_a_runner_makes_a_drone_there(self) -> None:
-        (self.remote / ".bottle" / "smolvm" / "current" / "smolvm").write_text(STATEFUL_SMOLVM)
+        (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
         # Its base image built there already, from what it's built from now.
-        store = self.remote / ".bottle" / "images"
+        store = self.remote / ".bottle" / "stages"
         store.mkdir(parents=True)
-        (store / "base.tar").write_text("an archive")
-        (store / "index.json").write_text(json.dumps({images.tag("base"): {
-            "archive": "base.tar", "labels": {images.INPUTS_LABEL: images.inputs_hash("base")}}}))
+        (store / "base.ext4").write_text("a stage")
+        (self.remote / ".bottle" / "images.json").write_text(json.dumps({images.tag("base"): {
+            "disk": "base.ext4", "labels": {images.INPUTS_LABEL: images.inputs_hash("base")}}}))
         repo = self.make_repo("app")
 
         bottle = bottles.create({"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],
                                 runner="box")
 
-        self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.tar"))
+        self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.ext4"))
         machine = self.remote / "machines" / bottle.machine
         self.assertEqual(machine.read_text().strip(), "running")
         mirror = self.remote / ".bottle" / "git" / f"{mirrors.key(repo / '.git')}.git"
@@ -224,7 +223,7 @@ class DetachTest(DroneCase):
 
     def setUp(self) -> None:
         super().setUp()
-        (self.remote / ".bottle" / "smolvm" / "current" / "smolvm").write_text(STATEFUL_SMOLVM)
+        (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
         self.machines = self.remote / "machines"
         self.machines.mkdir()
         bottles._write({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box")

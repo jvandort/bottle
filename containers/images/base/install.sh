@@ -1,0 +1,59 @@
+#!/bin/sh
+# bottle/base: the bottle contract, and nothing else. Features add the rest.
+#
+# The contract is what bottle's own commands rely on inside a bottle:
+#   - the genie user, UID 1000, with passwordless sudo
+#   - /workspace, owned by genie: the checkout
+#   - git: setting up /workspace, pushing work back to the host, and
+#     `bottle delete`'s check for unpushed work
+#   - sshd, for IDEs
+#   - ca-certificates, so bottle can install the egress CA (bottle/ca.py) in
+#     the trust store when the bottle starts; NODE_EXTRA_CA_CERTS points at
+#     the store's bundle, so Node tools (Claude Code among them) trust it too
+# bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
+# keep the two in sync.
+#
+# Built on Debian 13 by name, not by digest (image.json's pull): a build takes
+# trixie's latest point release and security fixes, but a new Debian release is
+# a change to that line. Its apt sources name trixie too, so later installs stay
+# on the same release.
+#
+# Run as root in this directory, mounted read-only (see bottle/images.py), with
+# image.json's env: LANG, and NODE_EXTRA_CA_CERTS, which every exec gets. Node
+# trusts its own roots, and NODE_EXTRA_CA_CERTS: the system bundle, which
+# update-ca-certificates rebuilds with every CA bottle installs when a bottle
+# starts (CA_CERTIFICATE and CACHE_CERTIFICATE in bottle/bottles.py), however
+# many there are.
+set -eu
+
+apt-get update
+apt-get install -y --no-install-recommends \
+  ca-certificates \
+  git \
+  openssh-server \
+  sudo \
+  tini
+rm -rf /var/lib/apt/lists/*
+
+groupadd --gid 1000 genie
+useradd --uid 1000 --gid genie --create-home --shell /bin/bash genie
+# Passwordless sudo, and the sudoers files checked.
+echo 'genie ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/genie
+chmod 0440 /etc/sudoers.d/genie
+visudo -c -q
+install -d -o genie -g genie /workspace
+# The agent commits as itself, never as you. bottle.host isn't a real domain.
+su genie -c 'git config --global user.name genie && git config --global user.email genie@bottle.host'
+
+install -m 0644 sshd_config /etc/ssh/sshd_config.d/bottle.conf
+# Installing openssh-server generates host keys. Delete the defaults so bottles
+# don't share one: entrypoint.sh makes a fresh key on first boot.
+rm -f /etc/ssh/ssh_host_*
+# Drop AcceptEnv to stop clients forwarding locales the image doesn't have.
+sed -i '/^AcceptEnv/d' /etc/ssh/sshd_config
+
+install -m 0755 entrypoint.sh /usr/local/bin/bottle-entrypoint
+install -m 0644 profile.sh /etc/profile.d/bottle.sh
+
+# The environment reaches every exec; SSH sessions only see /etc/environment (via PAM).
+printf '%s\n' "LANG=$LANG" "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS" > /etc/environment

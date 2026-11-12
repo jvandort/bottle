@@ -30,8 +30,13 @@ IFS=: ; for dir in $PATH; do [ -x "$dir/smolvm" ] || path="$path:$dir"; done; un
 exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" PATH="$path" bash -c "$script"
 """
 
-# smolvm there: every machine is running.
+# smolvm there, as `bottle runner add` installs it.
 FAKE_SMOLVM = """#!/bin/sh
+echo '{"state": "running"}'
+"""
+
+# bottle-cli there: every machine is running.
+FAKE_CLI = """#!/bin/sh
 echo '{"state": "running"}'
 """
 
@@ -61,6 +66,13 @@ class SshTestCase(GitTestCase):
     def has_kvm(self) -> None:
         self.kvm.write_text("")
 
+    def has_cli(self, destination: str = "box") -> Path:
+        cli = self.remotes / destination / ".bottle" / "dist" / "bottle-cli"
+        cli.parent.mkdir(parents=True)
+        cli.write_text(FAKE_CLI)
+        cli.chmod(0o755)
+        return cli
+
     def has_smolvm(self, destination: str = "box") -> Path:
         smolvm = self.remotes / destination / ".bottle" / "smolvm" / "current" / "smolvm"
         smolvm.parent.mkdir(parents=True)
@@ -74,7 +86,7 @@ class SshTestCase(GitTestCase):
 
 class TransportTest(SshTestCase):
     def test_its_code_is_sent_the_first_time_and_run_there_after(self) -> None:
-        self.has_smolvm()
+        self.has_cli()
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
         self.assertEqual(runner.state("bottle-b"), "running")
         code = self.remotes / "box" / ".bottle" / "runner" / ssh.code_hash()
@@ -86,12 +98,12 @@ class TransportTest(SshTestCase):
     def test_a_build_streams_its_context_there_and_its_answer_back(self) -> None:
         context = self.tmp / "context"
         context.mkdir()
-        (context / "Dockerfile").write_text("FROM scratch")
+        (context / "install.sh").write_text("#!/bin/sh\n")
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
-        # No smolvm there: the build fails there, before any machine, and says why, here.
-        with mock.patch.object(ssh.SshTransport, "link"), mock.patch.dict(os.environ, {"BOTTLE_SMOLVM": "/no/smolvm"}), \
-                self.assertRaisesRegex(BottleError, r"runner box: .*/no/smolvm"):
-            runner.build(context, "localhost/bottle/x:latest", "abc")
+        # No bottle-cli there: the build fails there, before any VM, and says why, here.
+        with mock.patch.object(ssh.SshTransport, "link"), mock.patch.dict(os.environ, {"BOTTLE_CLI": "/no/bottle-cli"}), \
+                self.assertRaisesRegex(BottleError, r"runner box: .*/no/bottle-cli"):
+            runner.build(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []})
 
     def test_a_runner_it_cant_reach_is_unreachable(self) -> None:
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "down"))
@@ -105,12 +117,12 @@ class TransportTest(SshTestCase):
             self.assertIn(option, command)
         self.assertEqual(command[-4:], ["-t", "--", "user@box.example", "smolvm machine exec"])
 
-    def test_a_shell_there_is_its_smolvm_exec_over_ssh(self) -> None:
-        smolvm = self.has_smolvm()
+    def test_a_shell_there_is_its_bottle_cli_exec_over_ssh(self) -> None:
+        cli = self.has_cli()
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
         command = runner.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)
         self.assertEqual(command[-3:-1], ["--", "box"])
-        self.assertTrue(command[-1].startswith(f"{smolvm} --error-format json machine exec --name bottle-b -i -t"))
+        self.assertTrue(command[-1].startswith(f"{cli} machine exec --name bottle-b -t"))
         result = subprocess.run(command, capture_output=True, text=True)   # runs there
         self.assertEqual(json.loads(result.stdout), {"state": "running"})
 

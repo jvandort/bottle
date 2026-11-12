@@ -288,6 +288,9 @@ class LoadTest(FeatureTestCase):
     def test_container_env_names(self) -> None:
         self.assert_invalid("invalid variable name '1X'", containerEnv={"1X": "v"})
 
+    def test_container_env_values_are_as_they_are(self) -> None:
+        self.assert_invalid("references to other variables", containerEnv={"PATH": "/opt/bin:${PATH}"})
+
     def test_remote_dependencies_are_unsupported(self) -> None:
         self.assert_invalid("remote features aren't supported", dependsOn={"ghcr.io/devcontainers/features/node:1": {}})
 
@@ -645,24 +648,29 @@ class ImageTest(FeatureTestCase):
         self.assertEqual(explicit_default, default)  # setting an option to its default changes nothing
         self.assertRegex(other, r"^localhost/bottle/base:with-jvm-[0-9a-f]{8}$")
 
-    def test_dockerfile(self) -> None:
+    def test_recipe(self) -> None:
         self.feature("tools", containerEnv={"EDITOR": "vim"})
         self.feature("jvm", dependsOn={"tools": {}}, options={"version": {"type": "string", "default": "21"}},
-                     containerEnv={"JAVA_HOME": "/opt/jdk", "PATH": "/opt/jdk/bin:${PATH}"})
+                     containerEnv={"JAVA_HOME": "/opt/jdk", "JDK": "21"})
 
-        text = features.dockerfile("base", features.resolve(["jvm"]))
+        recipe = features.recipe("base", features.resolve(["jvm"]))
 
-        self.assertTrue(text.splitlines()[1] == "FROM localhost/bottle/base:latest")
-        self.assertLess(text.index("COPY tools "), text.index("COPY jvm "))
-        self.assertIn("_REMOTE_USER=genie", text)
-        self.assertIn("VERSION=21 ./install.sh", text)
-        self.assertIn('ENV JAVA_HOME="/opt/jdk" PATH="/opt/jdk/bin:${PATH}"', text)
-        self.assertIn("printf '%s\\n' \"PATH=$PATH\" >> /etc/environment", text)
-        self.assertIn('LABEL bottle.features="jvm tools"', text)
+        self.assertEqual(recipe["from"], "localhost/bottle/base:latest")
+        self.assertEqual(recipe["labels"], {"bottle.features": "jvm tools"})
+        tools, editor, _, jvm, java_env, mirror = recipe["steps"]
+        # Each install.sh where it is, in the features directory mounted for the build: tools first.
+        self.assertEqual((tools["cwd"], jvm["cwd"]), (f"{features.images.MOUNT}/tools", f"{features.images.MOUNT}/jvm"))
+        self.assertEqual(jvm["run"], ["/bin/sh", "./install.sh"])
+        self.assertEqual(jvm["env"]["_REMOTE_USER"], "genie")
+        self.assertEqual(jvm["env"]["VERSION"], "21")
+        self.assertEqual(editor, {"env": {"EDITOR": "vim"}})
+        self.assertEqual(java_env, {"env": {"JAVA_HOME": "/opt/jdk", "JDK": "21"}})
+        self.assertIn("printf '%s\\n' \"JDK=$JDK\" >> /etc/environment", mirror["run"][-1])
 
-    def test_option_values_are_quoted(self) -> None:
+    def test_option_values_go_as_they_are(self) -> None:
         self.feature("a", options={"flags": {"type": "string", "default": "a b; rm -rf /"}})
-        self.assertIn("FLAGS='a b; rm -rf /'", features.dockerfile("base", features.resolve(["a"])))
+        [step] = features.recipe("base", features.resolve(["a"]))["steps"]
+        self.assertEqual(step["env"]["FLAGS"], "a b; rm -rf /")  # an environment, not a shell line
 
 
 class BuildTest(FeatureTestCase):

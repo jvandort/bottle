@@ -1,6 +1,6 @@
 import contextlib
 import os
-import shutil
+import platform
 import ssl
 import subprocess
 import tempfile
@@ -67,12 +67,12 @@ def client_hello(name: str | None) -> bytes:
     return outgoing.read()
 
 
-def smolvm_present() -> bool:
-    """Whether the smolvm bottle would run ($BOTTLE_SMOLVM, else `smolvm` on PATH) is on this machine."""
-    from bottle import smolvm
+def krun_present() -> bool:
+    """Whether bottle-cli ($BOTTLE_CLI, else the one `cargo xtask dist` built here) is here, on a Mac to run VMs."""
+    from bottle import krun
 
-    return shutil.which(smolvm.binary()) is not None
+    return platform.system() == "Darwin" and os.path.isfile(krun.binary())
 
 
-# For tests that run real machines: they need smolvm, so they run on a Mac with it, and skip elsewhere.
-requires_smolvm = unittest.skipUnless(smolvm_present(), "needs smolvm ($BOTTLE_SMOLVM, or smolvm on PATH)")
+# For tests that run real machines: they need bottle-cli and a Mac, and skip elsewhere.
+requires_krun = unittest.skipUnless(krun_present(), "needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")

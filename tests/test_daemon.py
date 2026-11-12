@@ -169,7 +169,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
 
 
 class DeliverTest(unittest.IsolatedAsyncioTestCase):
-    """Daemon.deliver and Daemon.peers: messages between bottles, run in the recipient by way of a fake smolvm."""
+    """Daemon.deliver and Daemon.peers: messages between bottles, run in the recipient by way of a fake bottle-cli."""
 
     async def asyncSetUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -180,7 +180,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         smolvm.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_DIR/argv"\ncat > "$FAKE_DIR/stdin"\n'
                           'echo "$FAKE_ERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
         smolvm.chmod(0o755)
-        env = {"BOTTLE_SMOLVM": str(smolvm), "FAKE_DIR": str(self.tmp), "FAKE_ERR": "", "BOTTLE_HOME": str(self.tmp)}
+        env = {"BOTTLE_CLI": str(smolvm), "FAKE_DIR": str(self.tmp), "FAKE_ERR": "", "BOTTLE_HOME": str(self.tmp)}
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -210,7 +210,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
             await self.daemon.bind(name)
 
     def ran(self) -> tuple[list[str], str]:
-        """What the fake smolvm ran last, after `--`, and in which machine; and its stdin."""
+        """What the fake bottle-cli ran last, after `--`, and in which machine; and its stdin."""
         argv = (self.tmp / "argv").read_text().splitlines()
         return argv[argv.index("--name") + 1], argv[argv.index("--") + 1:], (self.tmp / "stdin").read_text()
 
