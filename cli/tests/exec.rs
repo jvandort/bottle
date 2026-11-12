@@ -26,7 +26,30 @@ fn agent_binary() -> &'static PathBuf {
             .parent()
             .unwrap()
             .to_path_buf();
-        let mut cargo = Command::new(env!("CARGO"));
+        let mut cargo = match std::env::var("SUDO_USER") {
+            // Run as root (a sudo runner, for the tests that need it): built as whoever owns the
+            // target directory, and sudo sets its own PATH, so cargo's own directory, where rustc
+            // is, goes first.
+            Ok(user) => {
+                let bin = std::path::Path::new(env!("CARGO"))
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string();
+                let path = std::env::var("PATH").unwrap_or_default();
+                let mut c = Command::new("sudo");
+                c.args([
+                    "-E",
+                    "-u",
+                    &user,
+                    "env",
+                    &format!("PATH={bin}:{path}"),
+                    env!("CARGO"),
+                ]);
+                c
+            }
+            Err(_) => Command::new(env!("CARGO")),
+        };
         cargo.args(["build", "-q", "-p", "bottle-agent"]);
         if profile.ends_with("release") {
             cargo.arg("--release");
