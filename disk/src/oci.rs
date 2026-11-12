@@ -21,10 +21,26 @@ pub struct Archive {
     index: Vec<u8>,
 }
 
-/// An image in an archive: its layers, bottom first.
+/// An image in an archive: its layers, bottom first, and how it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
     pub layers: Vec<Layer>,
+    pub config: RunConfig,
+}
+
+/// What an image's config says of running it: the part bottle keeps.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RunConfig {
+    /// NAME=VALUE.
+    #[serde(default)]
+    pub env: Option<Vec<String>>,
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default)]
+    pub cmd: Option<Vec<String>>,
+    #[serde(default)]
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +79,8 @@ struct Manifest {
 #[derive(Deserialize)]
 struct Config {
     rootfs: RootFs,
+    #[serde(default)]
+    config: Option<RunConfig>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +132,7 @@ impl Archive {
         }
         let manifest: Manifest = parse("its manifest", &self.small_blob(&descriptor.digest)?)?;
         let config: Config = parse("its config", &self.small_blob(&manifest.config.digest)?)?;
+        let run = config.config.unwrap_or_default();
         let diff_ids = config.rootfs.diff_ids;
         if diff_ids.len() != manifest.layers.len() {
             return Err(other(format!(
@@ -132,7 +151,10 @@ impl Archive {
                 diff_id,
             })
             .collect();
-        Ok(Image { layers })
+        Ok(Image {
+            layers,
+            config: run,
+        })
     }
 
     /// A layer's tar, uncompressed: its end is an error if it isn't what the layer's diff_id says.

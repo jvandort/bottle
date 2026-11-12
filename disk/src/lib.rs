@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+pub mod build;
 pub mod mke2fs;
 pub mod oci;
 pub mod tree;

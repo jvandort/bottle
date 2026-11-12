@@ -105,6 +105,18 @@ pub fn run(
     exit.ok_or(Error::NoExit)
 }
 
+/// Stops the VM whose agent listens at `socket` (see ToGuest::Stop): once this returns, the
+/// bottle's disk is clean, and the VM is ending.
+pub fn stop(socket: &Path) -> Result<(), Error> {
+    let mut conn = UnixStream::connect(socket)?;
+    ToGuest::Stop.write(&mut conn)?;
+    match ToHost::read(&mut conn)? {
+        Some(ToHost::Exit(Exit::Code(0))) => Ok(()),
+        Some(ToHost::Error(message)) => Err(Error::Agent(message)),
+        _ => Err(Error::NoExit),
+    }
+}
+
 fn send_stdin(mut stdin: impl Read, outgoing: &Mutex<UnixStream>) {
     let mut buf = vec![0; CHUNK];
     loop {

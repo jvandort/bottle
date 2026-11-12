@@ -214,7 +214,7 @@ fn blank_is_zero(n: io::Result<u64>, field: &[u8]) -> io::Result<u64> {
 fn set_time(dst: &Path, mtime: i64) -> io::Result<()> {
     let c = cstr(dst)?;
     let t = libc::timespec {
-        tv_sec: mtime as libc::time_t,
+        tv_sec: mtime as _,
         tv_nsec: 0,
     };
     // SAFETY: utimensat with a C string path and two timespecs.
