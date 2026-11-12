@@ -1,9 +1,318 @@
 //! Linux's distribution, built on a Mac: in a Linux VM of this Mac's bottle-cli.
+//!
+//! First this Mac's own distribution (target/dist), whose bottle-cli then builds the builder, an
+//! image of Debian with what `cargo xtask dist` takes on Linux to build for the target (the `cc`
+//! and `rust` features' install scripts, as a bottle's are run, then the C toolchain for the
+//! target, a cross one for another architecture than the VM's), and runs it as a machine, this
+//! repo read-only at /src. There `cargo xtask dist --target TRIPLE` builds the distribution, which
+//! comes out as a tar, over exec, into DIR.
+//!
+//! The builder's machines and images are bottle-cli's in their own home, target/builder, apart from
+//! bottle's: the machine is kept, stopped, between builds, its disk with cargo's builds and
+//! downloads, so the next build builds only what's changed. An image built from other scripts is a
+//! new machine. Its network is direct (--net-direct): it's this repo's build, fetching crates and
+//! what xtask downloads, as on a Mac.
 
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
-use crate::Result;
+use sha2::{Digest, Sha256};
 
-pub fn dist(target: &str, _out: &Path) -> Result<()> {
-    Err(format!("{target}'s dist on a Mac: not yet"))
+use crate::{Result, mac_dist, root, run, step, target};
+
+/// The builder's distribution of Debian.
+const DEBIAN: &str = "debian:trixie-slim";
+/// Where the repo is in the builder.
+const SOURCE: &str = "/src";
+/// Where the builder keeps cargo's builds and the distributions it makes, on its own disk.
+const WORK: &str = "/var/cache/bottle-dist";
+/// The builder's memory: rustc's, building libkrun.
+const MEM_MIB: &str = "8192";
+
+pub fn dist(triple: &str, out: &Path) -> Result<()> {
+    let arch = triple.split('-').next().unwrap();
+    let mac = root().join("target/dist");
+    mac_dist(&mac)?;
+    let cli = mac.join("bottle-cli");
+    let home = target().join("builder");
+    let store = home.join("stages");
+    fs::create_dir_all(&store).map_err(|e| format!("{}: {e}", store.display()))?;
+    let bottle_cli = |args: &[&str]| {
+        let mut command = Command::new(&cli);
+        command.args(args).env("BOTTLE_HOME", &home);
+        command
+    };
+
+    step(&format!(
+        "the builder, {DEBIAN} with what builds for {triple}"
+    ));
+    let store_arg = store.to_str().ok_or("a non-UTF-8 path")?;
+    let debian = last_line(bottle_cli(&["pull", DEBIAN, store_arg, "--net-direct"]))?;
+    let recipe = recipe(arch, stem(&debian)?)?;
+    let file = home.join(format!("builder-{arch}.json"));
+    fs::write(&file, serde_json(&recipe)).map_err(|e| e.to_string())?;
+    let image = last_line(bottle_cli(&[
+        "build",
+        file.to_str().unwrap(),
+        store_arg,
+        "--net-direct",
+    ]))?;
+
+    // A machine per image: one from other scripts is new, and the old one goes.
+    let machine = format!("builder-{arch}-{}", &stem(&image)?[..12]);
+    let listed: serde_json::Value =
+        serde_json::from_slice(&output(bottle_cli(&["machine", "ls", "--json"]))?)
+            .map_err(|e| format!("bottle-cli machine ls: {e}"))?;
+    let machines: Vec<&str> = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    for old in machines
+        .iter()
+        .filter(|name| name.starts_with(&format!("builder-{arch}-")) && **name != machine)
+    {
+        run(&mut bottle_cli(&["machine", "delete", "--name", old, "-f"]))?;
+    }
+    if !machines.contains(&machine.as_str()) {
+        let cpus = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .to_string();
+        let source = format!("{}:{SOURCE}:ro", root().display());
+        run(&mut bottle_cli(&[
+            "machine", "create", "--name", &machine, "--image", &image, "--cpus", &cpus, "--mem",
+            MEM_MIB, "-v", &source,
+        ]))?;
+    }
+    run(&mut bottle_cli(&[
+        "machine",
+        "start",
+        "--name",
+        &machine,
+        "--net-direct",
+    ]))?;
+    let built = build_in(&bottle_cli, &machine, triple, out);
+    let stopped = run(&mut bottle_cli(&["machine", "stop", "--name", &machine]));
+    built.and(stopped)?;
+    // The stages the builder's machine isn't made of.
+    run(&mut bottle_cli(&["gc", store_arg, &image]))
+}
+
+/// `cargo xtask dist` in the builder, for `triple`; its distribution, out of it, into `out`.
+fn build_in(
+    bottle_cli: &dyn Fn(&[&str]) -> Command,
+    machine: &str,
+    triple: &str,
+    out: &Path,
+) -> Result<()> {
+    step(&format!("{triple}'s dist, in the builder"));
+    let there = format!("{WORK}/dist-{triple}");
+    let target_dir = format!("CARGO_TARGET_DIR={WORK}/target");
+    let exec = |argv: &[&str]| {
+        let mut args = vec![
+            "machine",
+            "exec",
+            "--name",
+            machine,
+            "-w",
+            SOURCE,
+            "-e",
+            &target_dir,
+            "--",
+        ];
+        args.extend_from_slice(argv);
+        bottle_cli(&args)
+    };
+    // Its progress on stderr: stdout is the tar, after.
+    run(exec(&[
+        "sh",
+        "-c",
+        &format!("cargo xtask dist --target {triple} --out {there} 1>&2"),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null()))?;
+    // Replaced whole: what an older one had is gone.
+    let _ = fs::remove_dir_all(out);
+    fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut tar = exec(&["tar", "-C", &there, "-c", "."])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut extract = Command::new("tar");
+    extract
+        .arg("-x")
+        .arg("-C")
+        .arg(out)
+        .stdin(tar.stdout.take().unwrap());
+    let extracted = run(&mut extract);
+    let status = tar.wait().map_err(|e| e.to_string())?;
+    extracted?;
+    if !status.success() {
+        return Err(format!(
+            "taking the dist out of the builder failed ({status})"
+        ));
+    }
+    Ok(())
+}
+
+/// The builder's recipe, on Debian's stage `debian`, for building for `arch`: the `cc` and `rust`
+/// features' install scripts, as bottle runs a feature's (its directory mounted, read-only, where
+/// it runs), and the rest of what `cargo xtask dist` takes on Linux. Labelled with a hash of all
+/// of that, so other scripts make another stage.
+fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
+    let features = root().join("containers/features");
+    let user = BTreeMap::from([
+        ("_REMOTE_USER", "root"),
+        ("_REMOTE_USER_HOME", "/root"),
+        ("HOME", "/root"),
+        ("DEBIAN_FRONTEND", "noninteractive"),
+    ]);
+    let musl = format!("{arch}-unknown-linux-musl");
+    let rust = BTreeMap::from([
+        ("TOOLCHAIN", "stable"),
+        ("COMPONENTS", ""),
+        ("TARGETS", musl.as_str()),
+    ]);
+    let toolchain = toolchain(arch);
+    let mut steps = vec![];
+    let mut inputs = Sha256::new();
+    for (feature, options) in [("cc", BTreeMap::new()), ("rust", rust)] {
+        let script =
+            fs::read(features.join(feature).join("install.sh")).map_err(|e| e.to_string())?;
+        inputs.update(&script);
+        let env: BTreeMap<_, _> = user.iter().chain(options.iter()).collect();
+        steps.push(serde_json::json!({
+            "run": ["/bin/sh", "./install.sh"],
+            "env": env,
+            "cwd": format!("/run/features/{feature}"),
+        }));
+    }
+    // What the rust feature's devcontainer-feature.json gives every command.
+    steps.push(serde_json::json!({ "env": { "RUSTUP_HOME": "/usr/local/rustup" } }));
+    inputs.update(&toolchain);
+    steps.push(serde_json::json!({ "run": ["/bin/sh", "-c", toolchain], "env": user }));
+    let hash: String = inputs
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(serde_json::json!({
+        "from": debian,
+        "mount": { "source": features, "target": "/run/features" },
+        "steps": steps,
+        "labels": { "bottle.builder": hash },
+    }))
+}
+
+/// The shell that installs what `cargo xtask dist` takes on Linux besides Rust and gcc, building
+/// for `arch` in a VM of this Mac's architecture: for another, Debian's cross gcc and that
+/// architecture's musl and kernel headers.
+fn toolchain(arch: &str) -> String {
+    let mut packages = vec![
+        "make",
+        "curl",
+        "ca-certificates",
+        "xz-utils",
+        "libarchive-tools",
+        "linux-libc-dev",
+        "musl-tools",
+    ];
+    let debian = match arch {
+        "x86_64" => "amd64",
+        _ => "arm64",
+    };
+    let cross = arch != env::consts::ARCH;
+    let (gcc, musl, headers) = (
+        format!("gcc-{}-linux-gnu", arch.replace('_', "-")),
+        format!("musl-dev:{debian}"),
+        format!("linux-libc-dev-{debian}-cross"),
+    );
+    if cross {
+        packages.extend([gcc.as_str(), musl.as_str(), headers.as_str()]);
+    }
+    format!(
+        "set -e\n{}apt-get update\napt-get install -y --no-install-recommends {}\nrm -rf /var/lib/apt/lists/*\n",
+        if cross {
+            format!("dpkg --add-architecture {debian}\n")
+        } else {
+            String::new()
+        },
+        packages.join(" ")
+    )
+}
+
+/// A stage's name, from its disk's path.
+fn stem(disk: &str) -> Result<&str> {
+    Path::new(disk)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("not a stage's disk: {disk}"))
+}
+
+fn serde_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap()
+}
+
+/// What `command` prints, its progress on stderr; it must succeed.
+fn output(mut command: Command) -> Result<Vec<u8>> {
+    let done = command
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|e| format!("{:?}: {e}", command.get_program()))?;
+    if !done.status.success() {
+        return Err(format!(
+            "{:?} failed ({})",
+            command.get_program(),
+            done.status
+        ));
+    }
+    Ok(done.stdout)
+}
+
+/// The last line `command` prints: the disk of the stage a pull or a build made.
+fn last_line(command: Command) -> Result<String> {
+    let printed = String::from_utf8_lossy(&output(command)?).to_string();
+    printed
+        .lines()
+        .last()
+        .map(|line| line.trim().to_string())
+        .ok_or_else(|| "no stage made".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_builder_runs_the_features_install_scripts_then_the_toolchain() {
+        let recipe = recipe("x86_64", "debian-stage").unwrap();
+        assert_eq!(recipe["from"], "debian-stage");
+        let steps = recipe["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["cwd"], "/run/features/cc");
+        assert_eq!(steps[1]["cwd"], "/run/features/rust");
+        assert_eq!(steps[1]["env"]["TARGETS"], "x86_64-unknown-linux-musl");
+        assert_eq!(steps[1]["env"]["_REMOTE_USER"], "root");
+        assert_eq!(steps[2]["env"]["RUSTUP_HOME"], "/usr/local/rustup");
+        let script = steps[3]["run"][2].as_str().unwrap();
+        assert!(script.contains("musl-tools"));
+        assert_eq!(
+            script.contains("musl-dev:amd64"),
+            env::consts::ARCH != "x86_64"
+        );
+        // Another script, another stage.
+        assert_ne!(
+            recipe["labels"]["bottle.builder"],
+            super::recipe("aarch64", "debian-stage").unwrap()["labels"]["bottle.builder"]
+        );
+    }
+
+    #[test]
+    fn a_stage_is_named_by_its_disk() {
+        assert_eq!(stem("/s/stages/abc123.ext4").unwrap(), "abc123");
+    }
 }

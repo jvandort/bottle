@@ -1281,6 +1281,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "linux-loader",
+ "serde_json",
  "sha2",
  "vm-memory",
 ]
