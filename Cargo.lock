@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "bottle-agent-proto",
  "libc",
+ "tar",
 ]
 
 [[package]]
@@ -42,13 +43,16 @@ dependencies = [
  "bottle-agent-client",
  "bottle-disk",
  "libc",
+ "serde_json",
 ]
 
 [[package]]
 name = "bottle-disk"
 version = "0.1.0"
 dependencies = [
+ "bottle-agent-client",
  "flate2",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
