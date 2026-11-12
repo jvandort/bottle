@@ -5,12 +5,14 @@
 #
 #     cli/check/measure.sh DISK...
 #
-# DISKs are stage disks, bottom first. Needs what boot needs: BOTTLE_LIBKRUN (libkrunfw beside it),
-# BOTTLE_GUEST_AGENT, BOTTLE_MKE2FS, and target/release/bottle-cli signed with
-# cli/hypervisor.entitlements. Takes a few minutes; stops its VMs when it's done.
+# DISKs are stage disks, bottom first (bottle-cli pull's, say). Runs the distribution, built by
+# cargo xtask dist into target/dist (or BOTTLE_DIST). Takes a few minutes; stops its VMs when it's
+# done.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-cli=$here/../../target/release/bottle-cli
+dist=${BOTTLE_DIST:-$here/../../target/dist}
+cli=$dist/bottle-cli
+[ -x "$cli" ] || { echo "no $cli: cargo xtask dist first"; exit 1; }
 work=$(mktemp -d /tmp/bm.XXXX)
 pids=()
 cleanup() {
