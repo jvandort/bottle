@@ -224,6 +224,20 @@ fn original_destination(conn: &TcpStream) -> io::Result<SocketAddrV4> {
 /// The answer to the DNS query `query`, the host asked for an A record's addresses; AAAA and the
 /// rest have none (the bottle has no IPv6 route). None for what isn't a query.
 fn answer(query: &[u8], how: &str) -> Option<Vec<u8>> {
+    answer_by(query, |name| {
+        Host::dial(how)
+            .and_then(|mut host| {
+                Request::Resolve(name.into()).write(&mut host)?;
+                Resolved::read(&mut host)
+            })
+            .unwrap_or(Resolved::Failed)
+    })
+}
+
+/// The answer to `query`, its name looked up by `resolve`: A records for an A query; for AAAA, none,
+/// but with the name's status (there's no IPv6 route, and a lookup of both mustn't hear "there, but
+/// no addresses" for a name that failed, or isn't there); anything else, no records.
+fn answer_by(query: &[u8], resolve: impl Fn(&str) -> Resolved) -> Option<Vec<u8>> {
     if query.len() < 12 || query[2] & 0x80 != 0 || u16::from_be_bytes([query[4], query[5]]) != 1 {
         return None;
     }
@@ -247,18 +261,16 @@ fn answer(query: &[u8], how: &str) -> Option<Vec<u8>> {
     query.get(..question_end)?;
     let name = labels.join(".");
 
-    let (rcode, addrs) = if qtype == 1 {
-        let resolved = Host::dial(how).and_then(|mut host| {
-            Request::Resolve(name).write(&mut host)?;
-            Resolved::read(&mut host)
-        });
-        match resolved {
-            Ok(Resolved(Some(addrs))) => (0, addrs),
-            Ok(Resolved(None)) => (3, Vec::new()),
-            Err(_) => (2, Vec::new()),
-        }
-    } else {
-        (0, Vec::new())
+    const A: u16 = 1;
+    const AAAA: u16 = 28;
+    let (rcode, addrs) = match qtype {
+        A | AAAA => match resolve(&name) {
+            Resolved::Addresses(addrs) if qtype == A => (0, addrs),
+            Resolved::Addresses(_) => (0, Vec::new()),
+            Resolved::NoSuchName => (3, Vec::new()),
+            Resolved::Failed => (2, Vec::new()),
+        },
+        _ => (0, Vec::new()),
     };
     let v4: Vec<Ipv4Addr> = addrs
         .into_iter()
@@ -608,22 +620,40 @@ mod tests {
     }
 
     #[test]
-    fn dns_queries_for_a_records_go_to_the_host_and_the_rest_have_no_answers() {
-        // A query for AAAA of "a.b", id 0x1234, recursion desired: answered here, no records.
+    fn dns_queries_are_answered_by_what_the_host_says_of_the_name() {
+        // A query for A of "a.b", id 0x1234, recursion desired.
         let query = [
-            0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 1, b'b', 0, 0, 28, 0, 1,
+            0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 1, b'b', 0, 0, 1, 0, 1,
         ];
-        let answer = answer(&query, "unix:/nonexistent").unwrap();
+        let mut aaaa = query;
+        aaaa[18] = 28;
+        let mut mx = query;
+        mx[18] = 15;
+        let there = |_: &str| Resolved::Addresses(vec!["192.0.2.7".parse().unwrap()]);
+        let answer = answer_by(&query, there).unwrap();
+        // A response, recursion available, no error, one answer.
         assert_eq!(
             &answer[..12],
-            &[0x12, 0x34, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0]
+            &[0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]
         );
-        assert_eq!(&answer[12..], &query[12..]);
-        // A, with no host to ask: a server failure.
-        let mut a = query;
-        a[18] = 1;
-        let answer = super::answer(&a, "unix:/nonexistent").unwrap();
-        assert_eq!(answer[3] & 0x0f, 2);
+        assert_eq!(&answer[12..query.len()], &query[12..]);
+        assert_eq!(&answer[answer.len() - 4..], &[192, 0, 2, 7]);
+        // AAAA and the rest: no records, but the name's status.
+        for q in [aaaa, mx] {
+            let answer = answer_by(&q, there).unwrap();
+            assert_eq!(&answer[2..8], &[0x81, 0x80, 0, 1, 0, 0]);
+        }
+        for (resolved, rcode) in [(Resolved::NoSuchName, 3), (Resolved::Failed, 2)] {
+            for q in [query, aaaa] {
+                let answer = answer_by(&q, |_| resolved.clone()).unwrap();
+                assert_eq!((answer[3] & 0x0f, &answer[6..8]), (rcode, &[0, 0][..]));
+            }
+        }
+        // With no host to ask: a server failure.
+        assert_eq!(
+            super::answer(&query, "unix:/nonexistent").unwrap()[3] & 0x0f,
+            2
+        );
         // Not a query.
         assert!(super::answer(&[0; 5], "unix:/x").is_none());
     }

@@ -358,16 +358,27 @@ pub mod net {
         }
     }
 
-    /// The answer to a [`Request::Resolve`]: the name's addresses, or None if it has none.
+    /// The answer to a [`Request::Resolve`].
     #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct Resolved(pub Option<Vec<IpAddr>>);
+    pub enum Resolved {
+        /// The name's addresses: perhaps none, a name with none of the kind asked for.
+        Addresses(Vec<IpAddr>),
+        /// There's no such name.
+        NoSuchName,
+        /// It couldn't be looked up, for now: worth asking again.
+        Failed,
+    }
+
+    const NO_SUCH_NAME: u8 = 0xff;
+    const FAILED: u8 = 0xfe;
 
     impl Resolved {
         pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
             let mut out = Vec::new();
-            match &self.0 {
-                None => out.push(0xff),
-                Some(addrs) => {
+            match self {
+                Resolved::NoSuchName => out.push(NO_SUCH_NAME),
+                Resolved::Failed => out.push(FAILED),
+                Resolved::Addresses(addrs) => {
                     let addrs = &addrs[..addrs.len().min(32)];
                     out.push(addrs.len() as u8);
                     for &ip in addrs {
@@ -380,14 +391,14 @@ pub mod net {
         }
 
         pub fn read(r: &mut impl Read) -> io::Result<Resolved> {
-            let count = byte(r)?;
-            if count == 0xff {
-                return Ok(Resolved(None));
+            match byte(r)? {
+                NO_SUCH_NAME => Ok(Resolved::NoSuchName),
+                FAILED => Ok(Resolved::Failed),
+                count => (0..count)
+                    .map(|_| get_ip(r))
+                    .collect::<io::Result<_>>()
+                    .map(Resolved::Addresses),
             }
-            (0..count)
-                .map(|_| get_ip(r))
-                .collect::<io::Result<_>>()
-                .map(|addrs| Resolved(Some(addrs)))
         }
     }
 
@@ -442,12 +453,10 @@ pub mod net {
                 assert_eq!(Request::read(&mut wire.as_slice()).unwrap(), request);
             }
             for answer in [
-                Resolved(None),
-                Resolved(Some(vec![])),
-                Resolved(Some(vec![
-                    "1.2.3.4".parse().unwrap(),
-                    "::1".parse().unwrap(),
-                ])),
+                Resolved::NoSuchName,
+                Resolved::Failed,
+                Resolved::Addresses(vec![]),
+                Resolved::Addresses(vec!["1.2.3.4".parse().unwrap(), "::1".parse().unwrap()]),
             ] {
                 let mut wire = Vec::new();
                 answer.write(&mut wire).unwrap();

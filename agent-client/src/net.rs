@@ -5,7 +5,7 @@
 //! machine's own resolver, at the time.
 
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -102,17 +102,47 @@ pub fn serve(listener: UnixListener, decider: Option<Decider>) -> io::Result<()>
 
 fn handle(mut conn: UnixStream, decider: Option<&Decider>) -> io::Result<()> {
     match Request::read(&mut conn)? {
-        Request::Resolve(name) => Resolved(resolve(&name)).write(&mut conn),
+        Request::Resolve(name) => resolve(&name).write(&mut conn),
         Request::Connect(to) => connect(conn, to, decider),
     }
 }
 
-/// `name`'s addresses, IPv4 only: the bottle has no IPv6 route.
-fn resolve(name: &str) -> Option<Vec<IpAddr>> {
-    let addrs = (name, 0).to_socket_addrs().ok()?;
-    let mut ips: Vec<IpAddr> = addrs.map(|a| a.ip()).filter(IpAddr::is_ipv4).collect();
-    ips.dedup();
-    Some(ips)
+/// `name`'s addresses, IPv4 only: the bottle has no IPv6 route. A lookup that fails for now is
+/// said to have failed, not that there's no such name, so the bottle's resolver asks again rather
+/// than giving up on the name (and Java caching that).
+fn resolve(name: &str) -> Resolved {
+    let Ok(c_name) = std::ffi::CString::new(name) else {
+        return Resolved::NoSuchName;
+    };
+    // SAFETY: hints zeroed but for the family and socket type; getaddrinfo writes a list we free.
+    unsafe {
+        let mut hints: libc::addrinfo = std::mem::zeroed();
+        hints.ai_family = libc::AF_INET;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut list = std::ptr::null_mut();
+        match libc::getaddrinfo(c_name.as_ptr(), std::ptr::null(), &hints, &mut list) {
+            0 => {}
+            libc::EAI_NONAME => return Resolved::NoSuchName,
+            // The name is there, with no address of this kind.
+            libc::EAI_NODATA => return Resolved::Addresses(Vec::new()),
+            _ => return Resolved::Failed,
+        }
+        let mut ips = Vec::new();
+        let mut entry = list;
+        while !entry.is_null() {
+            let addr = (*entry).ai_addr;
+            if !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
+                let v4 = &*(addr as *const libc::sockaddr_in);
+                let ip = IpAddr::from(u32::from_be(v4.sin_addr.s_addr).to_be_bytes());
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+            entry = (*entry).ai_next;
+        }
+        libc::freeaddrinfo(list);
+        Resolved::Addresses(ips)
+    }
 }
 
 fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> io::Result<()> {
@@ -259,7 +289,15 @@ mod tests {
         Request::Resolve("localhost".into())
             .write(&mut agent)
             .unwrap();
-        let Resolved(addrs) = Resolved::read(&mut agent).unwrap();
-        assert!(addrs.unwrap().contains(&"127.0.0.1".parse().unwrap()));
+        let Resolved::Addresses(addrs) = Resolved::read(&mut agent).unwrap() else {
+            panic!("localhost didn't resolve");
+        };
+        assert!(addrs.contains(&"127.0.0.1".parse().unwrap()));
+        assert!(addrs.iter().all(IpAddr::is_ipv4));
+    }
+
+    #[test]
+    fn a_name_that_isnt_there_is_said_to_be_so() {
+        assert_eq!(resolve("no-such-name.invalid"), Resolved::NoSuchName);
     }
 }
