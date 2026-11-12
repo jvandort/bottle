@@ -77,12 +77,12 @@ class LogTest(CliTestCase):
 
 
 class BuildCommandTest(unittest.TestCase):
-    def test_image_defaults_to_base(self) -> None:
+    def test_builds_the_features_on_base(self) -> None:
         with mock.patch("bottle.features.build", return_value="bottle/base:latest") as build, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["build", "--feature", "tools"]), 0)
         from bottle import runners
-        build.assert_called_once_with("base", ["tools"], False, runners.get("local"))
+        build.assert_called_once_with(["tools"], False, runners.get("local"))
 
     def test_on_a_runner(self) -> None:
         box = mock.Mock()
@@ -92,7 +92,7 @@ class BuildCommandTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(main(["build", "--runner", "box"]), 0)
         get.assert_called_once_with("box")
-        build.assert_called_once_with("base", [], False, box)
+        build.assert_called_once_with([], False, box)
         self.assertIn("on runner box", out.getvalue())
 
 

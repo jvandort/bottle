@@ -1,0 +1,10 @@
+{
+  "id": "base",
+  "version": "1.0.0",
+  "name": "Base",
+  "description": "The bottle contract, and nothing else: every bottle has it, under its other features.",
+  "containerEnv": {
+    "LANG": "C.UTF-8",
+    "NODE_EXTRA_CA_CERTS": "/etc/ssl/certs/ca-certificates.crt"
+  }
+}

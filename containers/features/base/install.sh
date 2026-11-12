@@ -13,17 +13,15 @@
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.
 #
-# Built on Debian 13 by name, not by digest (image.json's pull): a build takes
-# trixie's latest point release and security fixes, but a new Debian release is
-# a change to that line. Its apt sources name trixie too, so later installs stay
-# on the same release.
+# A feature like the others, installed first and on its own, on Debian 13 by
+# name (DEBIAN in bottle/images.py), so every bottle shares it. What a bottle
+# runs when it starts, bottle-entrypoint and sshd, is bottle's own (ENTRYPOINT
+# and CMD there).
 #
-# Run as root in this directory, mounted read-only (see bottle/images.py), with
-# image.json's env: LANG, and NODE_EXTRA_CA_CERTS, which every exec gets. Node
-# trusts its own roots, and NODE_EXTRA_CA_CERTS: the system bundle, which
-# update-ca-certificates rebuilds with every CA bottle installs when a bottle
-# starts (CA_CERTIFICATE and CACHE_CERTIFICATE in bottle/bottles.py), however
-# many there are.
+# Its containerEnv: LANG, and NODE_EXTRA_CA_CERTS. Node trusts its own roots,
+# and NODE_EXTRA_CA_CERTS: the system bundle, which update-ca-certificates
+# rebuilds with every CA bottle installs when a bottle starts (CA_CERTIFICATE
+# and CACHE_CERTIFICATE in bottle/bottles.py), however many there are.
 set -eu
 
 apt-get update
@@ -54,6 +52,3 @@ sed -i '/^AcceptEnv/d' /etc/ssh/sshd_config
 
 install -m 0755 entrypoint.sh /usr/local/bin/bottle-entrypoint
 install -m 0644 profile.sh /etc/profile.d/bottle.sh
-
-# The environment reaches every exec; SSH sessions only see /etc/environment (via PAM).
-printf '%s\n' "LANG=$LANG" "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS" > /etc/environment

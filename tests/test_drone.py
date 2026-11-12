@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, daemon, decider, host, images, mirrors, repos, runners
+from bottle import bottles, daemon, decider, features, host, images, mirrors, repos, runners
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
@@ -157,7 +157,7 @@ class DroneTest(DroneCase):
         store.mkdir(parents=True)
         (store / "base.ext4").write_text("a stage")
         (self.remote / ".bottle" / "images.json").write_text(json.dumps({images.tag("base"): {
-            "disk": "base.ext4", "labels": {images.INPUTS_LABEL: images.inputs_hash("base")}}}))
+            "disk": "base.ext4", "labels": {images.INPUTS_LABEL: features.base_inputs()}}}))
         repo = self.make_repo("app")
 
         bottle = bottles.create({"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],

@@ -147,14 +147,14 @@ class BottleTestCase(GitTestCase):
         self.repo_path = self.make_repo("example")
         self.head = run("git", "-C", self.repo_path, "rev-parse", "HEAD")
 
-    def create(self, image: str = "base", branch: str | None = None, name: str | None = None,
+    def create(self, branch: str | None = None, name: str | None = None,
                features=(), memory: str = "2G", context: str = "", remotes=None, disk=None) -> bottles.Bottle:
         """A bottle with the example repo checked out: named example, then example-2, ..., unless named."""
         taken = set(bottles.load())
         name = name or next(n for n in ("example", *(f"example-{i}" for i in range(2, 100))) if n not in taken)
         spec = {"features": list(features), "memory": memory, **({"disk": disk} if disk else {})}
         return bottles.create(spec, name, [bottles.MountRequest("/workspace", self.repo_path, branch, remotes)],
-                              context, image)
+                              context)
 
     def fake(self, **kwargs) -> FakeSmolvm:
         fake = FakeSmolvm(**kwargs)
@@ -283,12 +283,6 @@ class CreateTest(BottleTestCase):
         with self.assertRaisesRegex(BottleError, "already exists"):
             self.create(name="mine")
 
-    def test_unknown_image(self) -> None:
-        self.fake()
-        with self.assertRaisesRegex(BottleError, "no image named 'nope'"):
-            self.create(image="nope")
-        self.assertEqual(bottles.load(), {})
-
     def test_an_image_that_isnt_built_rolls_back(self) -> None:
         fake = self.fake()
         fake.archive = lambda tag: None
@@ -300,13 +294,13 @@ class CreateTest(BottleTestCase):
     def test_builds_the_image_first(self) -> None:
         fake = self.fake()
 
-        def ensure_built(image, feature_ids, runner=None):
-            fake.calls.append(f"ensure_built {image} {feature_ids}")
+        def ensure_built(feature_ids, runner=None):
+            fake.calls.append(f"ensure_built {feature_ids}")
             return "localhost/bottle/base:with-tools"
 
         with mock.patch.object(bottles.features_, "ensure_built", side_effect=ensure_built):
             bottle = self.create(features=["tools"])
-        self.assertEqual(fake.calls[0], "ensure_built base ['tools']")
+        self.assertEqual(fake.calls[0], "ensure_built ['tools']")
         self.assertEqual(fake.create_args["image"], "/images/base-with-tools.tar")
         self.assertEqual((bottle.features, bottle.environment), (("tools",), "base+tools"))
         self.assertEqual(bottles.get("example").features, ("tools",))  # survives the JSON round trip

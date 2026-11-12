@@ -2,9 +2,11 @@
 
 Each feature is a directory, containers/features/<id>/, holding a
 devcontainer-feature.json and an install.sh (https://containers.dev/implementors/features/).
-bottle composes an image from a base image plus features with a build that
-runs each feature's install.sh in turn, the way the Dev Container tooling
-does, but without it: no Node, no Docker, local features only.
+bottle composes an image from features with builds that run each feature's
+install.sh in turn, the way the Dev Container tooling does, but without it: no
+Node, no Docker, local features only. The base feature, the bottle contract,
+is in every bottle: installed on Debian on its own, so every bottle shares it,
+and a bottle's features on that. It isn't one to ask for.
 
 Only a subset of the spec is supported. Anything else in a definition is an
 error, so a feature never silently loses behavior it asked for:
@@ -141,6 +143,8 @@ FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
 ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FEATURES_LABEL = "bottle.features"
+# The feature every bottle has, first and on its own: the bottle contract. Not one to ask for.
+BASE = images.BASE
 REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
@@ -331,7 +335,8 @@ class Feature:
 
 
 def available() -> list[str]:
-    return sorted(p.parent.name for p in FEATURES.glob("*/devcontainer-feature.json"))
+    """The features a bottle can ask for: all but base, which every bottle has."""
+    return sorted(p.parent.name for p in FEATURES.glob("*/devcontainer-feature.json") if p.parent.name != BASE)
 
 
 def load(feature_id: str) -> Feature:
@@ -592,6 +597,8 @@ def _id_list(ids, field, fail) -> tuple[str, ...]:
             raise fail(f"{field}: {feature_id!r} isn't a local feature id (remote features aren't supported)")
         if not (FEATURES / feature_id / "devcontainer-feature.json").is_file():
             raise fail(f"{field}: no feature named {feature_id!r}")
+        if feature_id == BASE:
+            raise fail(f"{field}: every feature is installed on {BASE} already")
     return tuple(ids)
 
 
@@ -630,6 +637,8 @@ def resolve(requested: list[str]) -> list[Feature]:
     settings: dict[str, dict[str, str]] = {}
     for spec in requested:
         feature_id, options = parse_spec(spec)
+        if feature_id == BASE:
+            raise BottleError(f"{BASE} is in every bottle, under its features: it isn't one to ask for")
         if feature_id in settings and settings[feature_id] != options:
             raise BottleError(f"feature {feature_id} requested twice with different options")
         settings[feature_id] = options
@@ -656,22 +665,38 @@ def resolve(requested: list[str]) -> list[Feature]:
     return order
 
 
-def image_tag(image: str, features: list[Feature]) -> str:
-    """The tag for `image` with features: the same features and options always get the same tag.
+def image_tag(features: list[Feature]) -> str:
+    """The tag for the base image with features: the same features and options always get the same tag.
 
     Options can't be spelled in a tag, so a feature with options set appears as
     its id plus a short hash of its spec, e.g. jvm-1a2b3c4d.
     """
     if not features:
-        return images.tag(image)
+        return images.tag(images.BASE)
     parts = sorted(f.id if not f.overrides else f"{f.id}-{hashlib.sha256(f.spec.encode()).hexdigest()[:8]}" for f in features)
-    return f"{images.REPOSITORY}/{image}:with-{'.'.join(parts)}"
+    return f"{images.REPOSITORY}/{images.BASE}:with-{'.'.join(parts)}"
 
 
-def recipe(image: str, features: list[Feature]) -> dict:
-    """What installs `features`, in order, on top of `image`: each one's install.sh, run in its own directory, the
-    features directory mounted read-only in the build (see images.build_recipe), the way the Dev Container tooling
-    runs it."""
+def base() -> Feature:
+    """The base feature: the bottle contract, under every bottle's other features."""
+    return load(BASE)
+
+
+def base_recipe() -> dict:
+    """What builds the base image: the base feature on Debian, and what a bottle runs when it starts."""
+    return {"pull": images.DEBIAN, "entrypoint": images.ENTRYPOINT, "cmd": images.CMD, "labels": {},
+            "steps": _steps([base()])}
+
+
+def recipe(features: list[Feature]) -> dict:
+    """What installs `features`, in order, on top of the base image."""
+    return {"from": images.tag(images.BASE), "steps": _steps(features),
+            "labels": {FEATURES_LABEL: " ".join(sorted(f.spec for f in features))}}
+
+
+def _steps(features: list[Feature]) -> list[dict]:
+    """Each feature's install.sh, run in its own directory, the features directory mounted read-only in the build
+    (see images.build_recipe), the way the Dev Container tooling runs it; then its containerEnv."""
     steps: list[dict] = []
     for f in features:
         # The spec's variables telling install.sh who the container's user is, plus the options.
@@ -690,31 +715,47 @@ def recipe(image: str, features: list[Feature]) -> dict:
                 for k in f.container_env
             )
             steps.append({"run": ["sh", "-c", mirror]})
-    return {"from": images.tag(image), "steps": steps,
-            "labels": {FEATURES_LABEL: " ".join(sorted(f.spec for f in features))}}
+    return steps
 
 
-def inputs_hash(image: str, features: list[Feature]) -> str:
-    """What an image with features is built from: the image's inputs, and each feature's directory and options."""
-    digest = hashlib.sha256(images.inputs_hash(image).encode())
+def base_inputs() -> str:
+    """What the base image is built from: Debian's reference, what it runs, and the base feature's directory."""
+    digest = hashlib.sha256(json.dumps([images.DEBIAN, images.ENTRYPOINT, images.CMD]).encode())
+    digest.update(images.tree_hash(FEATURES / BASE).encode())
+    return digest.hexdigest()
+
+
+def inputs_hash(features: list[Feature]) -> str:
+    """What the base image with features is built from: base's inputs, and each feature's directory and options."""
+    digest = hashlib.sha256(base_inputs().encode())
     for f in features:
         digest.update(f"\0{f.spec}\0{images.tree_hash(f.path)}".encode())
     return digest.hexdigest()
 
 
-def ensure_built(image: str, specs: list[str], runner=None) -> str:
-    """Build `image` with the features in `specs` on `runner` (default: this machine) if missing or stale there;
-    return its tag."""
+def ensure_built(specs: list[str], runner=None) -> str:
+    """Build the base image with the features in `specs` on `runner` (default: this machine), and the base image
+    under it, if missing or stale there; return its tag."""
     features = resolve(specs)
-    tag = image_tag(image, features)
-    built = images.ensure_built(image, runner)
-    if features and not images.is_current(tag, inputs_hash(image, features), runner):
+    tag = image_tag(features)
+    built = _ensure_base(runner)
+    if features and not images.is_current(tag, inputs_hash(features), runner):
         print(f"Building {tag}{images._where(runner)}...", file=sys.stderr)
-        _build(image, features, tag, runner=runner)
+        _build(features, tag, runner=runner)
         built = True
     if built:
         _report_removed(remove_stale(runner))
     return tag
+
+
+def _ensure_base(runner=None, no_cache: bool = False) -> bool:
+    """The base image built on `runner` if it's missing or stale there (or always, with `no_cache`); whether it was."""
+    tag = images.tag(images.BASE)
+    if not no_cache and images.is_current(tag, base_inputs(), runner):
+        return False
+    print(f"Building {tag}{images._where(runner)}...", file=sys.stderr)
+    images._on(runner).build(FEATURES, tag, base_inputs(), base_recipe(), no_cache)
+    return True
 
 
 def remove_stale(runner=None) -> list[str]:
@@ -738,25 +779,25 @@ def remove_stale(runner=None) -> list[str]:
 
 def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
     """The inputs hash an image with this tag and labels should have now; None if it can't be built any more."""
-    repository, _, _ = tag.partition(":")
-    image = repository.removeprefix(f"{images.REPOSITORY}/")
+    if not tag.startswith(f"{images.REPOSITORY}/{images.BASE}:"):
+        return None
     try:
         if FEATURES_LABEL not in labels:
-            return images.inputs_hash(image)
-        return inputs_hash(image, resolve(labels[FEATURES_LABEL].split()))
+            return base_inputs() if tag == images.tag(images.BASE) else None
+        return inputs_hash(resolve(labels[FEATURES_LABEL].split()))
     except BottleError:
         return None
 
 
-def build(image: str, specs: list[str], no_cache: bool = False, runner=None) -> str:
-    """Build `image` with the features in `specs` on `runner`, first building anything missing underneath."""
-    if not specs:
-        tag = images.build(image, no_cache, runner)
-    else:
+def build(specs: list[str], no_cache: bool = False, runner=None) -> str:
+    """Build the base image with the features in `specs` on `runner`, first building base if it's missing or stale;
+    without features, base, always."""
+    _ensure_base(runner, no_cache=not specs)
+    tag = images.tag(images.BASE)
+    if specs:
         features = resolve(specs)
-        tag = image_tag(image, features)
-        images.ensure_built(image, runner)
-        _build(image, features, tag, no_cache, runner)
+        tag = image_tag(features)
+        _build(features, tag, no_cache, runner)
     _report_removed(remove_stale(runner))
     return tag
 
@@ -766,8 +807,8 @@ def _report_removed(removed: list[str]) -> None:
         print(f"Removed stale image {name}", file=sys.stderr)
 
 
-def _build(image: str, features: list[Feature], tag: str, no_cache: bool = False, runner=None) -> None:
-    images._on(runner).build(FEATURES, tag, inputs_hash(image, features), recipe(image, features), no_cache)
+def _build(features: list[Feature], tag: str, no_cache: bool = False, runner=None) -> None:
+    images._on(runner).build(FEATURES, tag, inputs_hash(features), recipe(features), no_cache)
 
 
 def _option_env_name(option: str) -> str:

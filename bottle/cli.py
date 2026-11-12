@@ -533,11 +533,11 @@ def _delete(args: argparse.Namespace) -> int:
 
 
 def _build(args: argparse.Namespace) -> int:
-    from bottle import features, images, runners
+    from bottle import features, runners
 
     runner = runners.get(args.runner)
     where = "" if runner.name == runners.LOCAL else f" on runner {runner.name}"
-    print(f"Built {features.build(images.BASE, args.feature, args.no_cache, runner)}{where}")
+    print(f"Built {features.build(args.feature, args.no_cache, runner)}{where}")
     return 0
 
 

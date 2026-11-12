@@ -634,16 +634,16 @@ class ImageTest(FeatureTestCase):
     def test_tag_is_canonical(self) -> None:
         self.feature("tools")
         self.feature("claude")
-        tag = features.image_tag("base", features.resolve(["tools", "claude"]))
+        tag = features.image_tag(features.resolve(["tools", "claude"]))
         self.assertEqual(tag, "localhost/bottle/base:with-claude.tools")
-        self.assertEqual(features.image_tag("base", features.resolve(["claude", "tools"])), tag)
-        self.assertEqual(features.image_tag("base", []), "localhost/bottle/base:latest")
+        self.assertEqual(features.image_tag(features.resolve(["claude", "tools"])), tag)
+        self.assertEqual(features.image_tag([]), "localhost/bottle/base:latest")
 
     def test_tag_distinguishes_options(self) -> None:
         self.feature("jvm", options={"version": {"type": "string", "default": "25"}})
-        default = features.image_tag("base", features.resolve(["jvm"]))
-        explicit_default = features.image_tag("base", features.resolve(["jvm:version=25"]))
-        other = features.image_tag("base", features.resolve(["jvm:version=17"]))
+        default = features.image_tag(features.resolve(["jvm"]))
+        explicit_default = features.image_tag(features.resolve(["jvm:version=25"]))
+        other = features.image_tag(features.resolve(["jvm:version=17"]))
         self.assertEqual(default, "localhost/bottle/base:with-jvm")
         self.assertEqual(explicit_default, default)  # setting an option to its default changes nothing
         self.assertRegex(other, r"^localhost/bottle/base:with-jvm-[0-9a-f]{8}$")
@@ -653,7 +653,7 @@ class ImageTest(FeatureTestCase):
         self.feature("jvm", dependsOn={"tools": {}}, options={"version": {"type": "string", "default": "21"}},
                      containerEnv={"JAVA_HOME": "/opt/jdk", "JDK": "21"})
 
-        recipe = features.recipe("base", features.resolve(["jvm"]))
+        recipe = features.recipe(features.resolve(["jvm"]))
 
         self.assertEqual(recipe["from"], "localhost/bottle/base:latest")
         self.assertEqual(recipe["labels"], {"bottle.features": "jvm tools"})
@@ -669,49 +669,88 @@ class ImageTest(FeatureTestCase):
 
     def test_option_values_go_as_they_are(self) -> None:
         self.feature("a", options={"flags": {"type": "string", "default": "a b; rm -rf /"}})
-        [step] = features.recipe("base", features.resolve(["a"]))["steps"]
+        [step] = features.recipe(features.resolve(["a"]))["steps"]
         self.assertEqual(step["env"]["FLAGS"], "a b; rm -rf /")  # an environment, not a shell line
 
 
 class BuildTest(FeatureTestCase):
     def setUp(self) -> None:
         super().setUp()
+        self.feature("base", containerEnv={"LANG": "C.UTF-8"})
         self.feature("tools")
         self.feature("jvm", dependsOn={"tools": {}})
         self.built: list[str] = []
+        self.runner = mock.Mock()
+        self.runner.name = "local"
+        self.runner.build.side_effect = lambda context, tag, inputs, recipe, no_cache=False: self.built.append(tag)
         for patcher in (
-            mock.patch.object(features.images, "ensure_built", side_effect=lambda i, runner=None: self.built.append(f"image {i}")),
-            mock.patch.object(features, "_build", side_effect=lambda i, fs, tag, no_cache=False, runner=None: self.built.append(tag)),
+            mock.patch.object(features.images, "_on", return_value=self.runner),
             mock.patch.object(features, "remove_stale", side_effect=lambda runner=None: self.built.append("remove stale") or []),
             mock.patch("sys.stderr"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
-        with mock.patch.object(features.images, "is_current", return_value=False):
-            self.assertEqual(features.ensure_built("base", ["jvm"]), "localhost/bottle/base:with-jvm.tools")
-        self.assertEqual(self.built, ["image base", "localhost/bottle/base:with-jvm.tools", "remove stale"])
+    def current(self, *tags: str):
+        return mock.patch.object(features.images, "is_current", side_effect=lambda tag, inputs, runner=None: tag in tags)
 
-    def test_ensure_built_skips_a_current_combination(self) -> None:
-        with mock.patch.object(features.images, "is_current", return_value=True):
-            features.ensure_built("base", ["jvm"])
-        self.assertEqual(self.built, ["image base"])
+    def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
+        with self.current():
+            self.assertEqual(features.ensure_built(["jvm"]), "localhost/bottle/base:with-jvm.tools")
+        self.assertEqual(self.built, ["localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools",
+                                      "remove stale"])
+
+    def test_ensure_built_skips_whats_current(self) -> None:
+        with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
+            features.ensure_built(["jvm"])
+        self.assertEqual(self.built, [])
+        with self.current("localhost/bottle/base:latest"):
+            features.ensure_built(["jvm"])
+        self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
+
+    def test_base_is_the_base_feature_on_debian_running_bottles_entrypoint(self) -> None:
+        with self.current():
+            features.ensure_built([])
+        [(context, tag, inputs, recipe, no_cache)] = [c.args for c in self.runner.build.call_args_list]
+        self.assertEqual((context, tag, inputs), (self.root, "localhost/bottle/base:latest", features.base_inputs()))
+        self.assertEqual((recipe["pull"], recipe["entrypoint"], recipe["cmd"]),
+                         (features.images.DEBIAN, features.images.ENTRYPOINT, features.images.CMD))
+        self.assertEqual(recipe["steps"][0]["cwd"], f"{features.images.MOUNT}/base")
+        self.assertEqual(recipe["steps"][1], {"env": {"LANG": "C.UTF-8"}})
 
     def test_feature_changes_make_the_combination_stale(self) -> None:
         [jvm, tools] = features.resolve(["jvm"])[::-1]
-        before = features.inputs_hash("base", [tools, jvm])
+        before = features.inputs_hash([tools, jvm])
         (self.root / "jvm" / "install.sh").write_text("#!/bin/sh\necho changed\n")
-        self.assertNotEqual(features.inputs_hash("base", [tools, jvm]), before)
+        self.assertNotEqual(features.inputs_hash([tools, jvm]), before)
 
-    def test_no_features_is_just_the_image(self) -> None:
-        self.assertEqual(features.ensure_built("base", []), "localhost/bottle/base:latest")
-        self.assertEqual(self.built, ["image base"])
+    def test_base_changes_make_everything_stale(self) -> None:
+        [tools] = features.resolve(["tools"])
+        before = (features.base_inputs(), features.inputs_hash([tools]))
+        (self.root / "base" / "install.sh").write_text("#!/bin/sh\necho changed\n")
+        after = (features.base_inputs(), features.inputs_hash([tools]))
+        self.assertTrue(before[0] != after[0] and before[1] != after[1])
 
-    def test_build_always_rebuilds_the_combination(self) -> None:
-        with mock.patch.object(features.images, "is_current", return_value=True):
-            features.build("base", ["jvm"])
-        self.assertEqual(self.built, ["image base", "localhost/bottle/base:with-jvm.tools", "remove stale"])
+    def test_no_features_is_just_base(self) -> None:
+        with self.current("localhost/bottle/base:latest"):
+            self.assertEqual(features.ensure_built([]), "localhost/bottle/base:latest")
+        self.assertEqual(self.built, [])
+
+    def test_build_always_rebuilds_the_combination_and_without_features_base(self) -> None:
+        with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
+            features.build(["jvm"])
+            self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
+            self.built.clear()
+            features.build([])
+        self.assertEqual(self.built, ["localhost/bottle/base:latest", "remove stale"])
+
+    def test_base_isnt_a_feature_to_ask_for(self) -> None:
+        self.assertNotIn("base", features.available())
+        with self.assertRaisesRegex(BottleError, "base is in every bottle"):
+            features.resolve(["base"])
+        self.feature("needy", dependsOn={"base": {}})
+        with self.assertRaisesRegex(BottleError, "installed on base already"):
+            features.load("needy")
 
 
 class RemoveStaleTest(FeatureTestCase):
@@ -719,7 +758,7 @@ class RemoveStaleTest(FeatureTestCase):
         super().setUp()
         self.feature("tools")
         [tools] = features.resolve(["tools"])
-        self.current = features.inputs_hash("base", [tools])
+        self.current = features.inputs_hash([tools])
         self.deleted: list[str] = []
 
     def run_with(self, images: dict[str, dict], bottles: dict) -> list[str]:

@@ -1,19 +1,14 @@
-"""Bottle images, built from containers/images/<name>/ in this repo.
+"""Bottle images: Debian, then the base feature (the bottle contract), then a bottle's features.
 
 An image is stages: ext4 disks, each what one build wrote on top of the stages
 below it, stacked by overlayfs when a machine boots (see bottle-cli's build).
-Machines on the same stages share them, and the host's cache of them.
+Machines on the same stages share them, and the host's cache of them: every
+bottle's image is Debian's stage, base's on it, and its features' on that
+(see features.py, which works out what to build).
 
-An image's directory holds an image.json, saying what it's built on and how it
-runs, and an install.sh, run in a VM on what it's built on, with the
-directory mounted read-only at its working directory, whatever's beside it
-there to install:
-
-  {"pull": "debian:trixie-slim",          a registry's image, by reference; or
-   "from": "base",                        another of bottle's images
-   "env": {"NAME": "value"},              set for install.sh and everything run in the image
-   "entrypoint": [...], "cmd": [...],     what a machine runs when it starts; else what it's built on runs
-   "labels": {"name": "value"}}
+A build is a recipe on a registry's image (pull: its reference) or on one of
+bottle's built here (from: its tag): steps run in a VM, a directory of this
+repo mounted read-only where they run, nothing of it copied in.
 
 Built images are stages in $BOTTLE_HOME/stages, bottle-cli's store, with an
 index of each tag's top stage and labels in $BOTTLE_HOME/images.json. A
@@ -36,21 +31,22 @@ from bottle import krun, prereqs
 from bottle.errors import BottleError
 from bottle.store import bottle_home, read_json, write_json
 
-IMAGES = Path(__file__).resolve().parent.parent / "containers" / "images"
-# The image every bottle starts from: the bottle contract. Not user-selectable;
-# other images here would be alternative foundations meeting the same contract.
+# The image every bottle is: the base feature, the bottle contract, on Debian. Not user-selectable.
 BASE = "base"
+# Debian 13 by name, not by digest: a build takes trixie's latest point release
+# and security fixes, but a new Debian release is a change to this line. Its apt
+# sources name trixie too, so later installs stay on the same release.
+DEBIAN = "debian:trixie-slim"
+# What a bottle runs when it starts: the base feature's entrypoint, under tini (a subreaper, -s: it isn't PID 1),
+# and sshd. Part of the contract bottle relies on (CONTRACT in bottles.py).
+ENTRYPOINT = ["/usr/bin/tini", "-s", "--", "/usr/local/bin/bottle-entrypoint"]
+CMD = ["/usr/sbin/sshd", "-D", "-e"]
 # What bottle's images are called: a tag names one in the index.
 REPOSITORY = "localhost/bottle"
-IMAGE_KEYS = {"pull", "from", "env", "entrypoint", "cmd", "labels"}
 # Where a build's directory is in its VM: on /run's tmpfs, so nothing of it is on the stage.
 MOUNT = "/run/bottle-build"
 # What a build's steps run with, as a Dockerfile's RUN would: root's home, and no debconf prompts.
 STEP_ENV = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-
-
-def available() -> list[str]:
-    return sorted(p.parent.name for p in IMAGES.glob("*/image.json"))
 
 
 # Every image bottle builds records a hash of what it was built from. An image
@@ -72,45 +68,6 @@ def tree_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def definition(name: str) -> dict:
-    """The image's image.json, checked."""
-    _require(name)
-    where = f"containers/images/{name}/image.json"
-    try:
-        spec = json.loads((IMAGES / name / "image.json").read_text())
-    except json.JSONDecodeError as e:
-        raise BottleError(f"{where}: invalid JSON: {e}") from None
-    if not isinstance(spec, dict):
-        raise BottleError(f"{where}: must be a JSON object")
-    unsupported = sorted(set(spec) - IMAGE_KEYS)
-    if unsupported:
-        raise BottleError(f"{where}: unsupported: {', '.join(unsupported)} (supported: {', '.join(sorted(IMAGE_KEYS))})")
-    if ("pull" in spec) == ("from" in spec):
-        raise BottleError(f"{where}: needs pull (a registry's image) or from (one of bottle's), not both")
-    for key in ("pull", "from"):
-        if key in spec and (not isinstance(spec[key], str) or not spec[key]):
-            raise BottleError(f"{where}: {key} must be a string")
-    for key in ("env", "labels"):
-        value = spec.get(key, {})
-        if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
-            raise BottleError(f"{where}: {key} must map names to strings")
-    for key in ("entrypoint", "cmd"):
-        value = spec.get(key)
-        if value is not None and (not isinstance(value, list) or not all(isinstance(a, str) for a in value)):
-            raise BottleError(f"{where}: {key} must be a list of strings")
-    if not (IMAGES / name / "install.sh").is_file():
-        raise BottleError(f"containers/images/{name}/install.sh is missing")
-    return spec
-
-
-def inputs_hash(name: str) -> str:
-    """What the image `name` is built from: its directory, and the images it's built on."""
-    digest = hashlib.sha256(tree_hash(IMAGES / name).encode())
-    for dependency in dependencies(name):
-        digest.update(inputs_hash(dependency).encode())
-    return digest.hexdigest()
-
-
 def is_current(image: str, expected: str, runner=None) -> bool:
     """Whether `image` is built on `runner` (default: this machine) from what it's built from now."""
     labels = _on(runner).image_labels(image)
@@ -126,79 +83,14 @@ def _on(runner):
     return runners.get()
 
 
-def dependencies(name: str) -> list[str]:
-    """The bottle images `name` is built from, per its image.json's from."""
-    spec = definition(name)
-    return [spec["from"]] if "from" in spec else []
-
-
-def build_order(name: str) -> list[str]:
-    """`name` and everything it's built from, dependencies first."""
-    order: list[str] = []
-
-    def visit(image: str, path: list[str]) -> None:
-        if image in path:
-            raise BottleError(f"images depend on each other in a cycle: {' -> '.join([*path, image])}")
-        if image in order:
-            return
-        if image not in available():
-            if not path:
-                _require(image)
-            raise BottleError(f"{path[-1]} is built from {image}, but there's no containers/images/{image}")
-        for dependency in dependencies(image):
-            visit(dependency, [*path, image])
-        order.append(image)
-
-    visit(name, [])
-    return order
-
-
-def ensure_built(name: str, runner=None) -> bool:
-    """Build `name`, and whatever it's built from, on `runner` if missing or stale there. True if anything was built."""
-    built = False
-    for image in build_order(name):
-        if not is_current(tag(image), inputs_hash(image), runner):
-            print(f"Building {tag(image)}{_where(runner)}...", file=sys.stderr)
-            _build_one(image, runner=runner)
-            built = True
-    return built
-
-
-def build(name: str, no_cache: bool = False, runner=None) -> str:
-    """Build the named image on `runner`, first building anything it's built from that isn't built there yet."""
-    for dependency in build_order(name)[:-1]:
-        ensure_built(dependency, runner)
-    _build_one(name, no_cache, runner)
-    return tag(name)
-
-
 def _where(runner) -> str:
     return f" on runner {runner.name}" if runner is not None and runner.name != "local" else ""
-
-
-def _require(name: str) -> None:
-    if name not in available():
-        raise BottleError(f"no image named {name!r}; available: {', '.join(available())}")
-
-
-def recipe(name: str) -> dict:
-    """What builds image `name`: its image.json's, its install.sh as the step (see build_recipe)."""
-    spec = definition(name)
-    steps = [{"env": spec["env"]}] if spec.get("env") else []
-    steps.append({"run": interpreter(IMAGES / name / "install.sh"), "env": STEP_ENV, "cwd": MOUNT})
-    built = {"steps": steps, **{k: spec[k] for k in ("entrypoint", "cmd") if k in spec}}
-    built["labels"] = spec.get("labels", {})
-    return built | ({"pull": spec["pull"]} if "pull" in spec else {"from": tag(spec["from"])})
 
 
 def interpreter(script: Path) -> list[str]:
     """How to run `script`, in its directory, mounted read-only: by its #! line, so it needn't be executable."""
     first = script.read_text().split("\n", 1)[0]
     return [*(shlex.split(first[2:]) if first.startswith("#!") else ["/bin/sh"]), f"./{script.name}"]
-
-
-def _build_one(name: str, no_cache: bool = False, runner=None) -> None:
-    _on(runner).build(IMAGES / name, tag(name), inputs_hash(name), recipe(name), no_cache)
 
 
 def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache: bool = False,

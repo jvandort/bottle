@@ -71,7 +71,7 @@ NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ORIGIN, HOST_REMOTE = "origin", "host"
 
 # What bottle relies on inside every bottle, checked (as genie) whenever one
-# starts. Documented in containers/images/base/install.sh; keep them in sync.
+# starts. Documented in containers/features/base/install.sh; keep them in sync.
 CONTRACT = (
     ("bottle-entrypoint is installed", "test -x /usr/local/bin/bottle-entrypoint"),
     ("the genie user has UID 1000", '[ "$(id -un)" = genie ] && [ "$(id -u)" = 1000 ]'),
@@ -262,7 +262,7 @@ def sshd_command(name: str, address: str) -> list[str]:
 
 
 def create(
-    spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "", image: str = images.BASE,
+    spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "",
     runner: str = runners.LOCAL, ssh: dict[str, str] | None = None,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
@@ -287,11 +287,11 @@ def create(
     # A bottle it may ssh to is one it works with: their lanes may be shared.
     planned = _plan_mounts(mounts or [], [b for b in existing.values() if b.id not in {g.id for g in grants}])
     on.ensure_ready()
-    tag = features_.ensure_built(image, installed, on)
+    tag = features_.ensure_built(installed, on)
     auth.ensure_logged_in(installed)
 
     bottle = Bottle(
-        name, uuid.uuid4().hex, image, time.time(),
+        name, uuid.uuid4().hex, images.BASE, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
         mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
     )
@@ -510,7 +510,7 @@ def throwaway(feature_specs: list[str]):
     Yields a function turning a command into the command line that runs it in
     the throwaway bottle, attached to a terminal. Everything is removed on exit.
     """
-    tag = features_.ensure_built(images.BASE, feature_specs)
+    tag = features_.ensure_built(feature_specs)
     name = f"bottle-throwaway-{uuid.uuid4().hex[:12]}"
     log.info("%s: throwaway bottle with %s", name, ", ".join(feature_specs) or "no features")
     runner = runners.get()

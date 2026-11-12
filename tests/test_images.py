@@ -15,96 +15,26 @@ class TagTest(unittest.TestCase):
         self.assertEqual(images.tag("base"), "localhost/bottle/base:latest")
 
 
-class DependencyTest(unittest.TestCase):
-    def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.containers = Path(tmp.name)
-        patcher = mock.patch.object(images, "IMAGES", self.containers)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+class RealBaseTest(unittest.TestCase):
+    """The base image as this repo has it: the base feature on Debian."""
 
-    def image(self, name: str, **spec) -> None:
-        (self.containers / name).mkdir()
-        (self.containers / name / "image.json").write_text(json.dumps(spec))
-        (self.containers / name / "install.sh").write_text("#!/bin/sh\n")
+    def test_its_recipe(self) -> None:
+        from bottle import features
 
-    def test_real_images(self) -> None:
-        with mock.patch.object(images, "IMAGES", Path(images.__file__).resolve().parent.parent / "containers" / "images"):
-            self.assertIn("base", images.available())
-            self.assertEqual(images.dependencies("base"), [])
-            self.assertEqual(images.recipe("base")["pull"], "debian:trixie-slim")
+        recipe = features.base_recipe()
+        self.assertEqual(recipe["pull"], images.DEBIAN)
+        self.assertEqual(recipe["steps"][0]["run"], ["/bin/sh", "./install.sh"])
+        self.assertEqual(recipe["steps"][1]["env"]["LANG"], "C.UTF-8")
 
-    def test_from(self) -> None:
-        self.image("base", pull="debian:13")
-        self.image("a", **{"from": "base"})
-        self.assertEqual(images.dependencies("a"), ["base"])
-        self.assertEqual(images.dependencies("base"), [])
 
-    def test_order_is_dependencies_first(self) -> None:
-        self.image("base", pull="debian:13")
-        self.image("tools", **{"from": "base"})
-        self.image("agent", **{"from": "tools"})
-        self.assertEqual(images.build_order("agent"), ["base", "tools", "agent"])
-
-    def test_cycle(self) -> None:
-        self.image("a", **{"from": "b"})
-        self.image("b", **{"from": "a"})
-        with self.assertRaisesRegex(BottleError, "cycle: a -> b -> a"):
-            images.build_order("a")
-
-    def test_missing_dependency(self) -> None:
-        self.image("a", **{"from": "ghost"})
-        with self.assertRaisesRegex(BottleError, "a is built from ghost, but there's no containers/images/ghost"):
-            images.build_order("a")
-
-    def test_a_definition_is_checked(self) -> None:
-        for spec, error in (({}, "needs pull"), ({"pull": "a", "from": "b"}, "not both"),
-                            ({"pull": "a", "run": "x"}, "unsupported: run"), ({"pull": "a", "env": {"A": 1}}, "env"),
-                            ({"pull": "a", "cmd": "sh"}, "cmd must be a list")):
-            with self.subTest(spec=spec):
-                (self.containers / "x").mkdir(exist_ok=True)
-                (self.containers / "x" / "image.json").write_text(json.dumps(spec))
-                (self.containers / "x" / "install.sh").write_text("")
-                with self.assertRaisesRegex(BottleError, error):
-                    images.definition("x")
-
-    def test_a_recipe_runs_install_sh_where_its_directory_is_mounted(self) -> None:
-        self.image("base", pull="debian:13", env={"LANG": "C.UTF-8"}, entrypoint=["tini"], cmd=["sshd"],
-                   labels={"title": "base"})
-        self.image("tools", **{"from": "base"})
-        (self.containers / "tools" / "install.sh").write_text("#!/bin/bash -e\n")
-        self.assertEqual(images.recipe("base"), {
-            "pull": "debian:13", "entrypoint": ["tini"], "cmd": ["sshd"], "labels": {"title": "base"},
-            "steps": [{"env": {"LANG": "C.UTF-8"}},
-                      {"run": ["/bin/sh", "./install.sh"], "env": images.STEP_ENV, "cwd": images.MOUNT}]})
-        # By its #! line: a read-only mount can't be made executable.
-        self.assertEqual(images.recipe("tools"), {
-            "from": "localhost/bottle/base:latest", "labels": {},
-            "steps": [{"run": ["/bin/bash", "-e", "./install.sh"], "env": images.STEP_ENV, "cwd": images.MOUNT}]})
-
-    def test_ensure_built_builds_whats_missing_or_stale(self) -> None:
-        self.image("base", pull="debian:13")
-        self.image("tools", **{"from": "base"})
-        built = []
-        for exists, expected in ((set(), ["base", "tools"]), ({"localhost/bottle/base:latest"}, ["tools"]),
-                                 ({"localhost/bottle/base:latest", "localhost/bottle/tools:latest"}, [])):
-            built.clear()
-            with self.subTest(exists=exists), \
-                    mock.patch.object(images, "is_current", side_effect=lambda t, inputs, runner=None: t in exists), \
-                    mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False, runner=None: built.append(n)), \
-                    mock.patch("sys.stderr"):
-                images.ensure_built("tools")
-                self.assertEqual(built, expected)
-
-    def test_build_rebuilds_the_image_but_not_built_dependencies(self) -> None:
-        self.image("base", pull="debian:13")
-        self.image("tools", **{"from": "base"})
-        built = []
-        with mock.patch.object(images, "is_current", return_value=True), \
-                mock.patch.object(images, "_build_one", side_effect=lambda n, no_cache=False, runner=None: built.append((n, no_cache))):
-            self.assertEqual(images.build("tools", no_cache=True), "localhost/bottle/tools:latest")
-        self.assertEqual(built, [("tools", True)])
+class InterpreterTest(unittest.TestCase):
+    def test_a_script_is_run_by_its_hash_bang_line(self) -> None:
+        # A read-only mount can't be made executable.
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "install.sh"
+            for first, argv in (("#!/bin/bash -e", ["/bin/bash", "-e"]), ("#!/bin/sh", ["/bin/sh"]), ("set -e", ["/bin/sh"])):
+                script.write_text(f"{first}\n")
+                self.assertEqual(images.interpreter(script), [*argv, "./install.sh"])
 
 
 class StalenessTest(unittest.TestCase):
@@ -132,25 +62,6 @@ class StalenessTest(unittest.TestCase):
             self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # missing
         with mock.patch.object(images, "built_labels", return_value={}):
             self.assertFalse(images.is_current("localhost/bottle/base:latest", "abc"))  # built before labels
-
-
-class BuildImageTest(unittest.TestCase):
-    def test_base_is_available(self) -> None:
-        self.assertIn("base", images.available())
-
-    def test_unknown_image(self) -> None:
-        with mock.patch.object(images.prereqs, "ensure_cli") as ensure_cli, \
-                self.assertRaisesRegex(BottleError, "no image named 'nope'; available: .*base"):
-            images.build("nope")
-        ensure_cli.assert_not_called()
-
-    def test_an_image_is_built_from_its_directory(self) -> None:
-        with mock.patch.object(images, "build_recipe") as build:
-            self.assertEqual(images.build("base"), "localhost/bottle/base:latest")
-        context, tag, inputs, recipe = build.call_args.args[:4]
-        self.assertEqual((context, tag, inputs), (images.IMAGES / "base", "localhost/bottle/base:latest",
-                                                   images.inputs_hash("base")))
-        self.assertEqual(recipe, images.recipe("base"))
 
 
 class StoreTest(GitTestCase):
