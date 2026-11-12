@@ -45,6 +45,8 @@ echo '{"state": "running"}'
 
 # bottle-cli there with machines: made, started, stopped, deleted and asked about, each a file; exec runs nothing.
 STATEFUL_CLI = r"""#!/usr/bin/env bash
+# Its images: as the test wrote them.
+[ "$1" = images ] && exec cat "$HOME/images.listed"
 op="$1 $2"; shift 2
 while [ $# -gt 0 ]; do [ "$1" = --name ] && name=$2; [ "$1" = -- ] && break; shift; done
 machines="$HOME/machines"; mkdir -p "$machines"
@@ -158,8 +160,9 @@ class DroneTest(DroneCase):
         store = self.remote / ".bottle" / "stages"
         store.mkdir(parents=True)
         (store / "base.ext4").write_text("a stage")
-        (self.remote / ".bottle" / "images.json").write_text(json.dumps({images.tag("base"): {
-            "disk": "base.ext4", "labels": {images.INPUTS_LABEL: features.base_inputs()}}}))
+        (self.remote / "images.listed").write_text(json.dumps([{
+            "tag": images.tag("base"), "name": "base", "disks": [str(store / "base.ext4")],
+            "labels": {images.INPUTS_LABEL: features.base_inputs()}}]))
         repo = self.make_repo("app")
 
         bottle = bottles.create({"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],

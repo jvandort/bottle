@@ -74,6 +74,8 @@ class StoreTest(GitTestCase):
         self.calls: list[tuple] = []
         self.recipes: list[dict] = []
         self.build_status = 0
+        self.tags: dict[str, str] = {}
+        self.labels: dict[str, dict] = {}
         self.context = self.tmp / "context"
         self.context.mkdir()
         (self.context / "install.sh").write_text("#!/bin/sh\n")
@@ -96,26 +98,39 @@ class StoreTest(GitTestCase):
             self.addCleanup(patcher.stop)
 
     def cli(self, command, stdout=None, text=False, env=None, capture_output=False):
-        """bottle-cli: a pull or a build makes a stage named for its arguments; gc deletes what it isn't told to keep."""
+        """bottle-cli: an image build makes a stage named for its labels, on what it pulls or a tag's stage, and tags
+        it; images lists the tags; gc deletes what no tag names and it isn't told to keep."""
         args = command[1:]
         store = images.store()
+        store.mkdir(parents=True, exist_ok=True)
+        done = lambda out="": subprocess.CompletedProcess(command, 0, out, "")
+        if args[0] == "images":
+            return done(json.dumps([{"tag": tag, "name": name, "disks": [str(store / f"{name}.ext4")],
+                                     "labels": self.labels.get(name, {})}
+                                    for tag, name in self.tags.items() if (store / f"{name}.ext4").exists()]))
+        if args[:2] == ["image", "rm"]:
+            del self.tags[args[2]]
+            return done()
+        if args[:2] == ["image", "tag"]:
+            self.tags[args[3]] = args[2]
+            return done()
         if args[0] == "gc":
-            keep = {Path(k).name for k in args[2:]}
+            keep = {Path(k).name for k in args[2:]} | {f"{name}.ext4" for name in self.tags.values()}
             for disk in store.glob("*.ext4"):
                 if disk.name not in keep:
                     disk.unlink()
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if args[0] == "pull":
-            name = "pulled"
-        else:
-            self.calls.append(("build", args[3:], env.get("BOTTLE_DECIDER_TOKEN")))
-            recipe = json.loads(Path(args[1]).read_text())
-            self.recipes.append(recipe)
-            if self.build_status:
-                return subprocess.CompletedProcess(command, self.build_status, "", "")
-            name = recipe["labels"]["bottle.inputs"][:8] + recipe["labels"].get("bottle.build", "")[:4]
+            return done()
+        # image build RECIPE STORE --tag TAG --decider ADDRESS
+        self.calls.append(("build", args[4:], env.get("BOTTLE_DECIDER_TOKEN")))
+        recipe = json.loads(Path(args[2]).read_text())
+        self.recipes.append(recipe)
+        if self.build_status:
+            return subprocess.CompletedProcess(command, self.build_status, "", "")
+        name = recipe["labels"]["bottle.inputs"][:8] + recipe["labels"].get("bottle.build", "")[:4]
         (store / f"{name}.ext4").write_text("")
-        return subprocess.CompletedProcess(command, 0, f"{store}/below.ext4\n{store}/{name}.ext4\n", "")
+        self.tags[args[args.index("--tag") + 1]] = name
+        self.labels[name] = recipe["labels"]
+        return done(f"{store}/below.ext4\n{store}/{name}.ext4\n")
 
     def build(self, tag: str, inputs: str, recipe: dict | None = None, no_cache: bool = False) -> Path:
         recipe = recipe or {"pull": "debian:13", "steps": [{"run": ["true"]}]}
@@ -126,21 +141,22 @@ class StoreTest(GitTestCase):
         self.build("localhost/bottle/base:latest", "aaaa" * 16)
         [bind, build, release] = self.calls
         self.assertEqual(bind[0], "bind")
-        self.assertEqual(build, ("build", ["--decider", "127.0.0.1:47329"], "token"))
+        self.assertEqual(build, ("build", ["--tag", "localhost/bottle/base:latest", "--decider", "127.0.0.1:47329"],
+                                 "token"))
         self.assertEqual(release, ("release", bind[1]))
 
     def test_the_recipe_mounts_the_context_and_is_on_what_it_says(self) -> None:
         self.build("localhost/bottle/base:latest", "aaaa" * 16,
                    {"pull": "debian:13", "steps": [{"run": ["true"]}], "cmd": ["sshd"], "labels": {"title": "t"}})
         [recipe] = self.recipes
-        self.assertEqual(recipe["from"], "pulled")
+        self.assertEqual(recipe["pull"], "debian:13")  # bottle-cli's to pull
         self.assertEqual(recipe["mount"], {"source": str(self.context.resolve()), "target": images.MOUNT})
         self.assertEqual((recipe["steps"], recipe["cmd"]), ([{"run": ["true"]}], ["sshd"]))
         self.assertEqual(recipe["labels"], {"title": "t", "bottle.inputs": "aaaa" * 16})
         self.assertNotIn("entrypoint", recipe)  # what it's built on runs, then
         self.build("localhost/bottle/base:with-tools", "bbbb" * 16,
                    {"from": "localhost/bottle/base:latest", "steps": []})
-        self.assertEqual(self.recipes[-1]["from"], "aaaaaaaa")
+        self.assertEqual(self.recipes[-1]["from"], "localhost/bottle/base:latest")  # by its tag
 
     def test_a_build_is_decided_as_a_build_of_its_features_and_its_apt_step_gets_the_builds_ca(self) -> None:
         recipe = {"pull": "debian:13", "features": ["claude"], "steps": [
@@ -182,9 +198,28 @@ class StoreTest(GitTestCase):
         self.assertFalse(old.exists())
         self.assertTrue(new.exists())
 
+    def test_a_forgotten_image_is_untagged_and_its_stages_gone_once_unused(self) -> None:
+        disk = self.build("localhost/bottle/base:latest", "aaaa" * 16)
+        images.forget("localhost/bottle/base:latest")
+        images.forget("localhost/bottle/base:latest")  # gone already: nothing to do
+        self.assertEqual(images.built(), {})
+        self.assertTrue(disk.exists())
+        images.remove_unused(set())
+        self.assertFalse(disk.exists())
+
+    def test_the_tags_bottle_kept_itself_are_given_to_bottle_cli_once(self) -> None:
+        images.store().mkdir(parents=True)
+        (images.store() / "old.ext4").write_text("")
+        (images.bottle_home() / "images.json").write_text(json.dumps({
+            "localhost/bottle/base:latest": {"disk": "old.ext4", "labels": {}},
+            "localhost/bottle/base:gone": {"disk": "gone.ext4", "labels": {}}}))
+        self.assertEqual(images.archive_of("localhost/bottle/base:latest"), images.store() / "old.ext4")
+        self.assertEqual(self.tags, {"localhost/bottle/base:latest": "old"})
+        self.assertFalse((images.bottle_home() / "images.json").exists())
+
     def test_a_failed_build_is_an_error_keeps_nothing_and_releases_its_token(self) -> None:
         self.build_status = 1
-        with self.assertRaisesRegex(BottleError, "bottle-cli build"):
+        with self.assertRaisesRegex(BottleError, "bottle-cli image build"):
             self.build("localhost/bottle/base:latest", "aaaa" * 16)
         self.assertIsNone(images.archive_of("localhost/bottle/base:latest"))
         self.assertEqual(self.calls[-1][0], "release")

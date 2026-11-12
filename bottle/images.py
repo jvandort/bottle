@@ -10,11 +10,12 @@ A build is a recipe on a registry's image (pull: its reference) or on one of
 bottle's built here (from: its tag): steps run in a VM, a directory of this
 repo mounted read-only where they run, nothing of it copied in.
 
-Built images are stages in $BOTTLE_HOME/stages, bottle-cli's store, with an
-index of each tag's top stage and labels in $BOTTLE_HOME/images.json. A
-stage's name is a hash of what it was built from, so rebuilding a tag never
+Built images are stages in $BOTTLE_HOME/stages, bottle-cli's store, which
+keeps each tag's top stage too (`bottle-cli images`); labels are the stage's.
+A stage's name is a hash of what it was built from, so rebuilding a tag never
 replaces a stage a machine was made from; `bottle-cli gc` deletes those
-nothing uses, keeping every machine's whatever its state.
+nothing uses, keeping every tagged image and every machine's stages whatever
+its state.
 """
 
 import hashlib
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from bottle import krun, prereqs
 from bottle.errors import BottleError
-from bottle.store import bottle_home, read_json, write_json
+from bottle.store import bottle_home, read_json
 
 # The image every bottle is: the base feature, the bottle contract, on Debian. Not user-selectable.
 BASE = "base"
@@ -110,15 +111,11 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     from bottle import ca, daemon, features  # daemon's auth imports features, which imports this module
 
     prereqs.ensure_cli()
-    store().mkdir(parents=True, exist_ok=True)
+    _migrate()
     if "pull" in recipe:
         print(f"Pulling {recipe['pull']}...", file=sys.stderr)
-        base = _cli("pull", recipe["pull"], str(store()))
-    else:
-        disk = archive_of(recipe["from"])
-        if disk is None:
-            raise BottleError(f"{recipe['from']} isn't built")
-        base = disk
+    elif archive_of(recipe["from"]) is None:
+        raise BottleError(f"{recipe['from']} isn't built")
     image_labels = {**recipe.get("labels", {}), INPUTS_LABEL: inputs, **(labels or {})}
     if no_cache:
         # A stage is named for what it's made from: something new in it makes it anew.
@@ -126,9 +123,8 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     certificate = ca.certificate(ca.BUILDS, features.apt_https_hosts()) or ""
     steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step
              for step in recipe.get("steps", [])]
-    made = {"from": base.stem, "mount": {"source": str(context.resolve()), "target": MOUNT},
-            "steps": steps, "labels": image_labels,
-            **{k: recipe[k] for k in ("entrypoint", "cmd") if k in recipe}}
+    made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},
+            "mount": {"source": str(context.resolve()), "target": MOUNT}, "steps": steps, "labels": image_labels}
     builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file:
@@ -136,25 +132,22 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
             file.flush()
             # The public network, with none of its features' credentials; their apt repositories kept.
             decider, token = daemon.bind_decider(builder, features=recipe.get("features", []), build=True)
-            disk = _cli("build", file.name, str(store()), "--decider", decider, env={"BOTTLE_DECIDER_TOKEN": token})
+            return _cli("image", "build", file.name, str(store()), "--tag", image, "--decider", decider,
+                        env={"BOTTLE_DECIDER_TOKEN": token})
     finally:
         try:
             daemon.release_egress(builder)
         except BottleError as e:
             print(f"bottle: cleaning up {builder}: {e}", file=sys.stderr)
-    index = read_json(_index_path()) or {}
-    index[image] = {"disk": disk.name, "labels": image_labels}
-    write_json(_index_path(), index)
-    return disk
 
 
 def _cli(*args: str, env: dict[str, str] | None = None) -> Path:
-    """Run a bottle-cli build, pull or import, its progress on stderr; the disk of the stage it made (its last line)."""
+    """Run a bottle-cli image build, its progress on stderr; the disk of the stage it made (its last line)."""
     result = subprocess.run([krun.binary(), *args], stdout=subprocess.PIPE, text=True,
                             env={**os.environ, **env} if env else None)
     lines = result.stdout.split()
     if result.returncode != 0 or not lines:
-        raise BottleError(f"bottle-cli {args[0]} {args[1]} failed")
+        raise BottleError(f"bottle-cli {' '.join(args[:2])} failed")
     return Path(lines[-1])
 
 
@@ -162,45 +155,69 @@ def _cli(*args: str, env: dict[str, str] | None = None) -> Path:
 
 
 def store() -> Path:
-    """bottle-cli's store of stages."""
+    """bottle-cli's store of stages, which keeps its images' tags too."""
     return bottle_home() / "stages"
 
 
-def _index_path() -> Path:
-    return bottle_home() / "images.json"
+def _images() -> list[dict]:
+    """bottle-cli's images: each tag, its stage, disks and labels."""
+    if not store().is_dir():
+        return []
+    _migrate()
+    result = subprocess.run([krun.binary(), "images", str(store()), "--json"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise BottleError(f"bottle-cli images: {result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def _image(tag: str) -> dict | None:
+    return next((i for i in _images() if i["tag"] == tag and i["disks"]), None)
 
 
 def archive_of(image: str) -> Path | None:
     """The disk of the top stage `image` (a tag) was last built into, or None."""
-    entry = (read_json(_index_path()) or {}).get(image)
-    return store() / entry["disk"] if entry and (store() / entry["disk"]).exists() else None
+    found = _image(image)
+    return Path(found["disks"][-1]) if found else None
 
 
 def built_labels(image: str) -> dict[str, str] | None:
     """The labels `image` was last built with, or None if it's not built."""
-    entry = (read_json(_index_path()) or {}).get(image)
-    return dict(entry["labels"]) if entry and archive_of(image) else None
+    found = _image(image)
+    return dict(found["labels"]) if found else None
 
 
 def built() -> dict[str, dict[str, str]]:
     """Every built tag, with its labels."""
-    return {image: dict(entry["labels"]) for image, entry in (read_json(_index_path()) or {}).items()}
+    return {i["tag"]: dict(i["labels"]) for i in _images()}
 
 
 def forget(image: str) -> None:
-    """Drop `image` from the index; its stages go once nothing uses them (remove_unused)."""
-    index = read_json(_index_path()) or {}
-    if index.pop(image, None) is not None:
-        write_json(_index_path(), index)
+    """Untag `image`; its stages go once nothing uses them (remove_unused)."""
+    if any(i["tag"] == image for i in _images()):
+        result = subprocess.run([krun.binary(), "image", "rm", image, str(store())], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise BottleError(f"bottle-cli image rm: {result.stderr.strip()}")
 
 
 def remove_unused(in_use: set[str]) -> None:
-    """Delete the stages no tag's image is made of and no machine uses (bottle-cli knows its machines; `in_use`,
-    the disks bottles were made from by name, are kept too)."""
+    """Delete the stages no image is made of and no machine uses (bottle-cli knows its images and machines;
+    `in_use`, the disks bottles were made from by name, are kept too)."""
     if not store().is_dir():
         return
-    keep = {entry["disk"] for entry in (read_json(_index_path()) or {}).values()} | in_use
-    kept = [str(store() / name) for name in sorted(keep) if (store() / name).exists()]
+    kept = [str(store() / name) for name in sorted(in_use) if (store() / name).exists()]
     result = subprocess.run([krun.binary(), "gc", str(store()), *kept], capture_output=True, text=True)
     if result.returncode != 0:
         raise BottleError(f"bottle-cli gc: {result.stderr.strip()}")
+
+
+def _migrate() -> None:
+    """The tags bottle kept itself, in $BOTTLE_HOME/images.json, given to bottle-cli's store, once."""
+    index = bottle_home() / "images.json"
+    entries = read_json(index)
+    if entries is None:
+        return
+    for tag, entry in entries.items():
+        if (store() / entry["disk"]).exists():
+            subprocess.run([krun.binary(), "image", "tag", Path(entry["disk"]).stem, tag, str(store())],
+                           capture_output=True)
+    index.unlink()
