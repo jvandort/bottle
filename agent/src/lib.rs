@@ -141,6 +141,8 @@ pub fn end(code: i32) -> ! {
 
 /// How long what's running gets to end after SIGTERM, before SIGKILL.
 const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a stop waits for what's ended to let go of the upper disk.
+const RELEASE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Stops everything but this process and pid 1 (libkrun's init, in a VM), then syncs and remounts
 /// `upper`, the root of the bottle's disk, read-only: ext4 is then clean on the disk, nothing left
@@ -155,13 +157,20 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
             thread::sleep(std::time::Duration::from_millis(20));
         }
     }
-    // SAFETY: sync has no preconditions.
-    unsafe { libc::sync() };
-    if let Some(upper) = upper {
-        // The mount is covered, so it's reached through the descriptor.
-        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", upper.as_raw_fd())).unwrap();
-        // SAFETY: mount with a C string path, the rest NULL.
+    let Some(upper) = upper else {
+        // SAFETY: sync has no preconditions.
+        unsafe { libc::sync() };
+        return Ok(());
+    };
+    // The mount is covered, so it's reached through the descriptor.
+    let path = std::ffi::CString::new(format!("/proc/self/fd/{}", upper.as_raw_fd())).unwrap();
+    // A process gone can still have files open for writing a while: those of its io_uring (Node's
+    // libuv uses one) are let go by a kernel worker after it ends. Until then it's EBUSY.
+    let deadline = std::time::Instant::now() + RELEASE;
+    loop {
+        // SAFETY: sync has no preconditions; mount with a C string path, the rest NULL.
         let ret = unsafe {
+            libc::sync();
             libc::mount(
                 std::ptr::null(),
                 path.as_ptr(),
@@ -170,45 +179,57 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
                 std::ptr::null(),
             )
         };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
+        if ret == 0 {
+            return Ok(());
         }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EBUSY) || std::time::Instant::now() > deadline {
+            let left = still_running();
+            return Err(if left.is_empty() {
+                e
+            } else {
+                io::Error::new(
+                    e.kind(),
+                    format!("{e}, with {} still running", left.join(", ")),
+                )
+            });
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
     }
-    Ok(())
 }
 
 /// Whether anything is still running but this process and pid 1: kernel threads (which kill(-1)
 /// counts, never ending) and zombies (dead, to be reaped) aside.
 fn others_running() -> bool {
+    !still_running().is_empty()
+}
+
+/// What's still running but this process and pid 1, kernel threads and zombies aside: "pid comm"s.
+fn still_running() -> Vec<String> {
     let me = std::process::id();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        if pid == 1 || pid == me {
-            return false;
-        }
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            return false;
-        };
-        // "pid (comm) state ppid pgrp session tty tpgid flags ...", comm perhaps with spaces.
-        let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
-            return false;
-        };
-        let fields: Vec<&str> = rest.split_whitespace().collect();
-        let state = fields.first().copied().unwrap_or("Z");
-        let flags: u64 = fields.get(6).and_then(|f| f.parse().ok()).unwrap_or(0);
-        /// PF_KTHREAD, from linux/sched.h.
-        const KERNEL_THREAD: u64 = 0x0020_0000;
-        !matches!(state, "Z" | "X") && flags & KERNEL_THREAD == 0
-    })
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if pid == 1 || pid == me {
+                return None;
+            }
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            // "pid (comm) state ppid pgrp session tty tpgid flags ...", comm perhaps with spaces.
+            let (head, rest) = stat.rsplit_once(')')?;
+            let comm = head.split_once('(').map_or("", |(_, c)| c);
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            let state = fields.first().copied().unwrap_or("Z");
+            let flags: u64 = fields.get(6).and_then(|f| f.parse().ok()).unwrap_or(0);
+            /// PF_KTHREAD, from linux/sched.h.
+            const KERNEL_THREAD: u64 = 0x0020_0000;
+            (!matches!(state, "Z" | "X") && flags & KERNEL_THREAD == 0)
+                .then(|| format!("{pid} {comm}"))
+        })
+        .collect()
 }
 
 /// Tells the host why its command won't run, and reads what it sends until it closes.
