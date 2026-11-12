@@ -19,7 +19,8 @@
 //! this program, else `bottle-agent` beside it), as /init.krun, the init the kernel starts: it
 //! mounts what an init does, stacks the disks and moves into them (bottle-agent init). The kernel
 //! is $BOTTLE_KERNEL, else `kernel` beside this program, else libkrunfw, loaded by libkrun. On
-//! macOS this program needs the hypervisor entitlement (cli/hypervisor.entitlements).
+//! macOS this program needs the hypervisor entitlement, which cargo xtask dist signs it with
+//! (xtask/hypervisor.entitlements).
 
 use std::env;
 use std::ffi::{CString, c_char};

@@ -86,7 +86,7 @@ fn dist(out: &Path) -> Result<()> {
     copy(&root.join("target/release/bottle-cli"), &cli)?;
     if cfg!(target_os = "macos") {
         step("signing bottle-cli");
-        let entitlements = root.join("cli/hypervisor.entitlements");
+        let entitlements = root.join("xtask/hypervisor.entitlements");
         run(Command::new("codesign")
             .args(["--force", "-s", "-", "--entitlements"])
             .arg(&entitlements)
