@@ -379,7 +379,7 @@ fn create(args: &[String]) -> io::Result<()> {
         return Err(other(format!("there's a machine {} already", machine.name)));
     }
     (config.image, config.run) = image_of(&image)?;
-    let mke2fs = crate::disk::mke2fs()?;
+    let mke2fs = crate::mke2fs()?;
     fs::create_dir_all(&machine.dir)?;
     let made = (|| {
         bottle_disk::mke2fs::empty(&mke2fs, &machine.disk(), config.storage_gib << 30)?;

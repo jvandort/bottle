@@ -195,7 +195,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     #[cfg(target_os = "macos")]
     libkrunfw_beside(&libkrun)?;
     let agent = guest_agent()?;
-    let mke2fs = crate::disk::mke2fs()?;
+    let mke2fs = crate::mke2fs()?;
     bottle_disk::mke2fs::empty(&mke2fs, &args.upper, args.size_gib << 30)
         .map_err(|e| io::Error::other(format!("making {}: {e}", args.upper.display())))?;
     let krun = Krun::load(&libkrun)?;

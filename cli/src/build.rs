@@ -83,7 +83,7 @@ fn store_at(dir: &Path) -> io::Result<Store> {
     fs::create_dir_all(dir)?;
     Ok(Store {
         dir: dir.to_path_buf(),
-        mke2fs: crate::disk::mke2fs()?,
+        mke2fs: crate::mke2fs()?,
     })
 }
 
