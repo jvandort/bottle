@@ -135,8 +135,7 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
         // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
         unsafe { libc::kill(-1, signal) };
         let deadline = std::time::Instant::now() + wait;
-        // kill(-1, 0) fails with ESRCH once there's nothing left to signal.
-        while unsafe { libc::kill(-1, 0) } == 0 && std::time::Instant::now() < deadline {
+        while others_running() && std::time::Instant::now() < deadline {
             thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -160,6 +159,40 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether anything is still running but this process and pid 1: kernel threads (which kill(-1)
+/// counts, never ending) and zombies (dead, to be reaped) aside.
+fn others_running() -> bool {
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if pid == 1 || pid == me {
+            return false;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            return false;
+        };
+        // "pid (comm) state ppid pgrp session tty tpgid flags ...", comm perhaps with spaces.
+        let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            return false;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let state = fields.first().copied().unwrap_or("Z");
+        let flags: u64 = fields.get(6).and_then(|f| f.parse().ok()).unwrap_or(0);
+        /// PF_KTHREAD, from linux/sched.h.
+        const KERNEL_THREAD: u64 = 0x0020_0000;
+        !matches!(state, "Z" | "X") && flags & KERNEL_THREAD == 0
+    })
 }
 
 /// Tells the host why its command won't run, and reads what it sends until it closes.
