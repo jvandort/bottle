@@ -97,15 +97,23 @@ def answer(op: str, request: str) -> str:
 def build(request: str, sent: BinaryIO) -> str:
     """Build what `request`'s recipe says, the context it mounts a tar on stdin; the answer."""
     args = json.loads(request)
-    # What the build prints is for the user, on stderr: stdout is only the answer.
-    answer_to = os.dup(1)
-    os.dup2(2, 1)
-    try:
+
+    def built() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with tarfile.open(fileobj=sent, mode="r|") as tar:
                 tar.extractall(tmp, filter="data")
             runners.get(runners.LOCAL).build(Path(tmp) / "context", args["tag"], args["inputs"], args["recipe"],
                                              args["no_cache"])
+
+    return _watched(built)
+
+
+def _watched(do) -> str:
+    """The answer to doing `do`, whose output is for the user, on stderr: stdout is only the answer."""
+    answer_to = os.dup(1)
+    os.dup2(2, 1)
+    try:
+        do()
         return json.dumps({"ok": True, "result": None})
     except BottleError as e:
         return json.dumps({"ok": False, "error": str(e)})
@@ -148,10 +156,10 @@ def relay(service: str, key: str) -> int:
 
 
 def main(argv: list[str]) -> int:
-    # The bottle-cli installed here (its distribution, bottle-cli with its kernel and mke2fs), unless one's named.
-    installed = Path.home() / ".bottle" / "dist" / "bottle-cli"
-    if not os.environ.get("BOTTLE_CLI") and installed.exists():
-        os.environ["BOTTLE_CLI"] = str(installed)
+    # bottle-cli built here from the sources sent with this code (see prereqs.ensure_cli), into ~/.bottle/dist,
+    # where it stays as this code is replaced by the next; cargo's builds in ~/.bottle/target, likewise.
+    os.environ.setdefault("BOTTLE_DIST", str(Path.home() / ".bottle" / "dist"))
+    os.environ.setdefault("CARGO_TARGET_DIR", str(Path.home() / ".bottle" / "target"))
     # The bottled this starts here is the runner's half alone: the controller's is reached over the link.
     os.environ.setdefault("BOTTLE_LINK", str(bottle_home() / SOCKET))
     if argv[:1] == ["relay"] and len(argv) == 3:
@@ -159,6 +167,12 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["build"] and len(argv) == 2:
         # Its request is its argument: stdin is what's built.
         print(build(argv[1], sys.stdin.buffer))
+        return 0
+    if argv[:1] == ["ensure_cli"]:
+        # Streamed, like a build: building bottle-cli the first time takes minutes, worth watching.
+        from bottle import prereqs
+
+        print(_watched(prereqs.ensure_cli))
         return 0
     if len(argv) != 1:
         print("usage: python3 -m bottle.remote OP < ARGS.json, or build ARGS.json < CONTEXT.tar", file=sys.stderr)

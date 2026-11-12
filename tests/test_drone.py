@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, daemon, decider, features, host, images, mirrors, repos, runners
+from bottle import bottles, daemon, decider, features, host, images, mirrors, prereqs, repos, runners
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
@@ -87,6 +87,8 @@ class DroneCase(GitTestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text(FAKE_CLI)
         cli.chmod(0o755)
+        # Built from these sources, as far as the runner's bottle can tell (see prereqs.ensure_cli).
+        (cli.parent / prereqs.STAMP).write_text(prereqs.source_hash())
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)
         fake.chmod(0o755)

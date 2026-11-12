@@ -9,7 +9,8 @@
 //! Image, out of upstream's prebuilt bundle) or, on x86_64, `libkrunfw.so.5` (out of Fedora's
 //! package), which libkrun loads. On macOS bottle-cli is signed with the hypervisor entitlement. What it
 //! needs: rustup's musl target for this architecture, curl, make and a C compiler (on Linux,
-//! musl-gcc and the kernel's headers).
+//! musl-gcc and the kernel's headers; on x86_64, bsdtar, or rpm2cpio and cpio, to open Fedora's
+//! package). Cargo's builds, and this step's, are in $CARGO_TARGET_DIR if it's set.
 
 use std::env;
 use std::fs;
@@ -53,6 +54,12 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Where cargo builds, and the downloads and builds of this step are kept: $CARGO_TARGET_DIR, as
+/// cargo has it (a runner keeps one apart from the code it's sent), else the workspace's target.
+fn target() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), |dir| root().join(dir))
+}
+
 fn dist(out: &Path) -> Result<()> {
     let root = root();
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -72,10 +79,7 @@ fn dist(out: &Path) -> Result<()> {
         &[],
     )
     .map_err(|e| format!("{e} (is the target installed? rustup target add {guest})"))?;
-    let agent = root
-        .join("target")
-        .join(&guest)
-        .join("release/bottle-agent");
+    let agent = target().join(&guest).join("release/bottle-agent");
 
     step("bottle-cli, the agent built in");
     cargo(
@@ -83,7 +87,7 @@ fn dist(out: &Path) -> Result<()> {
         &[("BOTTLE_EMBED_AGENT", agent.as_os_str())],
     )?;
     let cli = out.join("bottle-cli");
-    copy(&root.join("target/release/bottle-cli"), &cli)?;
+    copy(&target().join("release/bottle-cli"), &cli)?;
     if cfg!(target_os = "macos") {
         step("signing bottle-cli");
         let entitlements = root.join("xtask/hypervisor.entitlements");
@@ -93,10 +97,10 @@ fn dist(out: &Path) -> Result<()> {
             .arg(&cli))?;
     }
 
-    let mke2fs = mke2fs(&root.join("target/mke2fs"))?;
+    let mke2fs = mke2fs(&target().join("mke2fs"))?;
     copy(&mke2fs, &out.join("mke2fs"))?;
 
-    kernel(&root.join("target/kernel"), out)?;
+    kernel(&target().join("kernel"), out)?;
     eprintln!("xtask: {}", out.display());
     Ok(())
 }

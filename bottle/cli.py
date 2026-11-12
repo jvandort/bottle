@@ -158,7 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     runner_add = runner_commands.add_parser(
         "add", help="add a machine to run bottles on, over ssh",
         description="Add a Linux machine to run bottles on, reached over ssh as you reach it. Checks what it has, "
-        "installs smolvm there if it's missing (asking first), and copies bottle's code over.",
+        "installs Rust there if it's missing (asking first), copies bottle's code over, and builds bottle-cli there "
+        "from it.",
     )
     runner_add.add_argument("name", metavar="RUNNER", help="its name, as `bottle new --runner` takes it")
     runner_add.add_argument("--ssh", required=True, metavar="DESTINATION",

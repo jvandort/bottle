@@ -30,8 +30,14 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def binary() -> str:
-    """The bottle-cli bottle runs: $BOTTLE_CLI if set, else the one `cargo xtask dist` built in this repo."""
-    return os.environ.get("BOTTLE_CLI") or str(REPO / "target" / "dist" / "bottle-cli")
+    """The bottle-cli bottle runs: $BOTTLE_CLI if set, else the one `cargo xtask dist` built (see dist)."""
+    return os.environ.get("BOTTLE_CLI") or str(dist() / "bottle-cli")
+
+
+def dist() -> Path:
+    """Where `cargo xtask dist` builds bottle-cli, from this repo: $BOTTLE_DIST (a runner's, see remote.py), else
+    the repo's target/dist."""
+    return Path(os.environ.get("BOTTLE_DIST") or REPO / "target" / "dist")
 
 
 # A machine's caps. vCPUs cost nothing idle; memory is committed as the guest touches it.

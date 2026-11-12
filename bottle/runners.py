@@ -233,7 +233,12 @@ class RemoteRunner:
         return answer.get("result")
 
     def ensure_ready(self) -> None:
-        pass  # what it's missing is the controller's to ask about, and set up when the runner's added
+        # Its bottle-cli built from the sources sent with this code; what else it's missing is the controller's to
+        # ask about, and set up when the runner's added.
+        with tempfile.TemporaryFile() as nothing:
+            answer = json.loads(self.transport.stream("ensure_cli", "{}", nothing))
+        if not answer.get("ok"):
+            raise BottleError(f"runner {self.name}: {answer.get('error', 'building bottle-cli failed')}")
 
     def memory_mib(self) -> int:
         return self._call("memory_mib")
@@ -385,9 +390,10 @@ def get(name: str = LOCAL) -> Runner:
 def add(name: str, destination: str, ask=None) -> "ssh.Check":
     """Add a remote runner: check it over ssh, set up what bottle can (asking first), and record it.
 
-    `ask` is asked whether to install smolvm there, given what it's about to
-    do; without it, a runner missing smolvm is refused. What bottle can't set
-    up itself refuses it, saying what's missing.
+    `ask` is asked whether to install Rust there (rustup, or the target
+    bottle-cli's agent needs), given what it's about to do; without it, a
+    runner missing it is refused. What bottle can't set up itself refuses it,
+    saying what's missing. bottle-cli is built there before it's recorded.
     """
     from bottle import ssh
 
@@ -401,13 +407,16 @@ def add(name: str, destination: str, ask=None) -> "ssh.Check":
     missing = check.missing()
     if missing:
         raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(missing)}")
-    if not check.smolvm:
-        question = f"{destination} has no smolvm. Install its latest release into ~/.bottle/smolvm there?"
+    if check.rust != "ready":
+        question = (f"{destination} has no Rust, which bottle builds bottle-cli there with. Install rustup into "
+                    "~/.cargo and ~/.rustup there?" if not check.rust else
+                    f"{destination}'s rustup lacks the target bottle-cli's agent is built for. Add it?")
         if ask is None or not ask(question):
-            raise BottleError(f"{destination} needs smolvm")
-        transport.install_smolvm()
+            raise BottleError(f"{destination} needs Rust, to build bottle-cli")
+        transport.install_rust()
         check = transport.check()
     transport.ship()
+    RemoteRunner(name, transport).ensure_ready()
     register(name, destination)
     return check
 
@@ -495,8 +504,8 @@ def status(names: list[str] = ()) -> list[dict]:
         except BottleError as e:
             rows.append(row | {"reachable": False, "error": str(e)})
             continue
-        rows.append(row | {"reachable": True, "os": check.os, "arch": check.arch, "smolvm": check.smolvm,
-                           "missing": check.missing() + ([] if check.smolvm else ["smolvm"])})
+        rows.append(row | {"reachable": True, "os": check.os, "arch": check.arch, "rust": check.rust,
+                           "missing": check.missing() + ([] if check.rust == "ready" else ["Rust"])})
     return rows
 
 
