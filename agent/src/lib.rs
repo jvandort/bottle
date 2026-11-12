@@ -51,7 +51,7 @@ pub fn serve(listener: Listener, reaper: Reaper, upper: Option<File>) -> io::Res
         let upper = Arc::clone(&upper);
         thread::spawn(move || {
             if let Err(e) = handle(conn, &reaper, &upper) {
-                eprintln!("bottle-agent: {e}");
+                crate::say!("bottle-agent: {e}");
             }
         });
     }
@@ -164,16 +164,40 @@ fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()>
 /// Whether this is the VM's init (see main): then its end is the VM's.
 pub static BOOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Ends this process, with `code`; as the VM's init, the VM, powered off, everything synced.
+/// Ends this process, with `code`; as the VM's init, the VM, everything synced. By a reboot, as
+/// libkrun's own init ends it: libkrun ends the VM on a reset, which on x86_64 the kernel makes
+/// through the keyboard controller (reboot=k), where a power off only halts it (no ACPI).
 pub fn end(code: i32) -> ! {
     if BOOTED.load(std::sync::atomic::Ordering::Relaxed) {
         // SAFETY: sync, then reboot, which doesn't return when it works.
         unsafe {
             libc::sync();
-            libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
+            libc::reboot(libc::LINUX_REBOOT_CMD_RESTART);
         }
     }
     std::process::exit(code)
+}
+
+/// Says something of the agent's own, as `eprintln!` would. As the VM's init, in the kernel's
+/// log instead, at error level: so it's on the VM's console whatever init's stderr is (on x86_64
+/// it can be a console nothing reads) and through `quiet`, which shows only errors.
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => { $crate::said(&format!($($arg)*)) };
+}
+
+pub fn said(message: &str) {
+    if BOOTED.load(std::sync::atomic::Ordering::Relaxed) {
+        use std::io::Write;
+        // One write, one record.
+        let record = format!("<3>{message}\n");
+        if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg")
+            && kmsg.write_all(record.as_bytes()).is_ok()
+        {
+            return;
+        }
+    }
+    eprintln!("{message}");
 }
 
 /// How long what's running gets to end after SIGTERM, before SIGKILL.
@@ -224,14 +248,14 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
         };
         if ret == 0 {
             if tries > 1 {
-                eprintln!("bottle-agent: stop: the upper disk read-only after {tries} tries");
+                crate::say!("bottle-agent: stop: the upper disk read-only after {tries} tries");
             }
             return Ok(());
         }
         let e = io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::EBUSY) || std::time::Instant::now() > deadline {
             let left = still_running();
-            eprintln!(
+            crate::say!(
                 "bottle-agent: stop: the upper disk still busy after {tries} tries: {e}; running: {left:?}"
             );
             return Err(if left.is_empty() {
@@ -248,7 +272,7 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
             // still holds of it, cached, deleted files overlayfs or the dentry cache hasn't let go
             // of among them, is let go of. What came of it is on the console (console.log.1,
             // once the machine's started again).
-            eprintln!("bottle-agent: stop: the upper disk busy ({e}); dropping caches");
+            crate::say!("bottle-agent: stop: the upper disk busy ({e}); dropping caches");
             let _ = std::fs::write("/proc/sys/vm/drop_caches", "3");
         }
         thread::sleep(std::time::Duration::from_millis(50));

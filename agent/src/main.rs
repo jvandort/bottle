@@ -20,7 +20,7 @@ fn main() -> ExitCode {
     if booted {
         bottle_agent::BOOTED.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = init::early() {
-            eprintln!("bottle-agent: {e}");
+            bottle_agent::say!("bottle-agent: {e}");
             bottle_agent::end(1);
         }
     }
@@ -37,7 +37,7 @@ fn run() -> ExitCode {
         return match bottle_agent::unpack::main(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("bottle-agent unpack: {e}");
+                bottle_agent::say!("bottle-agent unpack: {e}");
                 ExitCode::FAILURE
             }
         };
@@ -48,14 +48,14 @@ fn run() -> ExitCode {
         let stack = match init::parse(&mut args) {
             Ok(stack) => stack,
             Err(e) => {
-                eprintln!("bottle-agent init: {e}");
+                bottle_agent::say!("bottle-agent init: {e}");
                 return usage();
             }
         };
         match init::stack(&stack) {
             Ok(disk) => upper = Some(disk),
             Err(e) => {
-                eprintln!("bottle-agent init: {e}");
+                bottle_agent::say!("bottle-agent init: {e}");
                 return ExitCode::FAILURE;
             }
         }
@@ -76,7 +76,7 @@ fn run() -> ExitCode {
     let listener = match listener {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("bottle-agent: listening: {e}");
+            bottle_agent::say!("bottle-agent: listening: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -90,7 +90,7 @@ fn run() -> ExitCode {
     match bottle_agent::serve(listener, Reaper::start(), upper) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("bottle-agent: {e}");
+            bottle_agent::say!("bottle-agent: {e}");
             ExitCode::FAILURE
         }
     }

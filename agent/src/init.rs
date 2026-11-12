@@ -224,7 +224,7 @@ fn run(argv: &[String]) {
         });
     }
     if let Err(e) = command.spawn() {
-        eprintln!("bottle-agent init: running {argv:?}: {e}");
+        crate::say!("bottle-agent init: running {argv:?}: {e}");
     }
 }
 
