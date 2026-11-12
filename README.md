@@ -50,7 +50,7 @@ you:
 
 ```sh
 cd ~/path/to/foo
-folio configure set --feature tools --feature claude
+folio configure --feature claude
 folio claude fix-it       # A thread: a bottle, a lane for its commits, and Claude in it
 ```
 

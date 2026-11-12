@@ -82,25 +82,14 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("--yes", action="store_true", help="don't ask (needed without a terminal)")
     delete.set_defaults(run=_delete, command="delete")
 
-    configure = commands.add_parser("configure", help="the repo's spec: its threads' features and memory")
-    configure_commands = configure.add_subparsers(required=True)
-    feature_help = "a feature, optionally with options, e.g. jvm:version=21 (repeatable)"
-    memory_help = f"memory for each bottle, in M or G, e.g. 8G (default: {repos.DEFAULT_MEMORY})"
-    for name, help_ in (("set", "replace the spec: exactly these features, and this memory"),
-                        ("update", "change the spec: add features (one given again replaces its options), or the memory")):
-        command = configure_commands.add_parser(
-            name, help=help_, description=f"{help_[0].upper()}{help_[1:]}. Bottle checks it before it's saved. "
-            "Threads get it in their next bottle; a bottle already running keeps what it has.",
-        )
-        command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
-        command.add_argument("--memory", help=memory_help)
-        command.add_argument("--disk", help=DISK_HELP)
-        command.add_argument("--runner", metavar="RUNNER",
-                             help="the runner the repo's threads' bottles are made on, unless a thread is given its "
-                             "own (`bottle runner status` lists them; local: this machine)")
-        command.set_defaults(run=_configure, replace=name == "set", parser=command)
-    show = configure_commands.add_parser("show", help="the repo's spec")
-    show.set_defaults(run=_configure_show)
+    configure = commands.add_parser(
+        "configure", help="the repo's spec: its threads' features, memory and disk, and its runner",
+        description="The repo's spec: shown without options, changed with them. Bottle checks it before it's saved. "
+        "Threads get it in their next bottle; a bottle already running keeps what it has.",
+    )
+    _configure_arguments(configure, runner_help="the runner the repo's threads' bottles are made on, unless a "
+                         "thread is given its own (`bottle runner status` lists them; default: this machine)")
+    configure.set_defaults(run=_configure, parser=configure, command="configure")
 
     sidecar = commands.add_parser(
         "sidecar", help="a thread's sidecar: a bottle of its own on another runner, which the thread ssh-es to",
@@ -110,20 +99,16 @@ def main(argv: list[str] | None = None) -> int:
         "with a bottle when it's paused and resumed.",
     )
     sidecar_commands = sidecar.add_subparsers(required=True)
-    for name, help_ in (("set", "give the thread a sidecar: exactly these features, memory and runner"),
-                        ("update", "change the thread's sidecar: add features (one given again replaces its options), "
-                         "or its memory or runner")):
-        command = sidecar_commands.add_parser(name, help=help_, description=f"{help_[0].upper()}{help_[1:]}. "
-                                              "Bottle checks its spec before it's saved.")
-        command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-        command.add_argument("--feature", action="append", default=[], metavar="FEATURE", help=feature_help)
-        command.add_argument("--memory", help=f"its memory, in M or G, e.g. 32G (default: {repos.DEFAULT_MEMORY})")
-        command.add_argument("--disk", help=DISK_HELP)
-        command.add_argument("--runner", metavar="RUNNER", required=name == "set",
-                             help="the runner it's made on (`bottle runner status` lists them)")
-        command.set_defaults(run=_sidecar, replace=name == "set", parser=command, command=f"sidecar {name}")
-    for name, help_, run in (("show", "the thread's sidecar", _sidecar_show),
-                             ("remove", "take the thread's sidecar away", _sidecar_remove),
+    command = sidecar_commands.add_parser(
+        "configure", help="the thread's sidecar, as `folio configure` the repo's spec: --runner gives it one",
+        description="The thread's sidecar: shown without options, changed with them, as `folio configure` does the "
+        "repo's spec; a thread without one is given one, which needs --runner. Bottle checks its spec before it's "
+        "saved.",
+    )
+    command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
+    _configure_arguments(command, runner_help="the runner it's made on (`bottle runner status` lists them)")
+    command.set_defaults(run=_sidecar_configure, parser=command, command="sidecar configure")
+    for name, help_, run in (("remove", "take the thread's sidecar away", _sidecar_remove),
                              ("shell", "a shell in the running thread's sidecar, at /workspace, for as long as you're "
                               "in it", _sidecar_shell)):
         command = sidecar_commands.add_parser(name, help=help_)
@@ -328,72 +313,96 @@ def _delete(args: argparse.Namespace) -> int:
     return 0
 
 
-def _configure(args: argparse.Namespace) -> int:
-    if not args.feature and args.memory is None and args.disk is None and args.runner is None and not args.replace:
-        args.parser.error("give --feature, --memory, --disk or --runner")
-    repo = repos.current()
-    if args.runner is not None or args.replace:
-        repo.save_runner(args.runner)
-    if not args.feature and args.memory is None and args.disk is None and not args.replace:
-        print(f"Set {repo.name}'s runner: {args.runner}")
-        return 0
-    spec = dict(repo.spec() or repos.DEFAULT_SPEC)
-    if args.replace:
-        spec = _given(args)
-    else:
-        spec = _updated(spec, args)
-    spec = repos.check_repo_spec(engine.validate_spec(spec))
-    repo.save_spec(spec)
-    print(f"Set {repo.name}'s spec: {_spec(spec)}{_runner(repo)}")
-    return 0
+def _configure_arguments(command: argparse.ArgumentParser, runner_help: str) -> None:
+    """What `folio configure` and `folio sidecar configure` change, the same for both."""
+    command.add_argument("--feature", action="append", default=[], metavar="FEATURE",
+                         help="add a feature, optionally with options, e.g. jvm:version=21; one there already gets "
+                         "these options (repeatable)")
+    command.add_argument("--no-feature", action="append", default=[], metavar="FEATURE",
+                         help="take a feature away, by its name alone, e.g. jvm (repeatable)")
+    command.add_argument("--memory", help=f"memory for each bottle, in M or G, e.g. 8G (default: {repos.DEFAULT_MEMORY})")
+    disk = command.add_mutually_exclusive_group()
+    disk.add_argument("--disk", help=DISK_HELP)
+    disk.add_argument("--no-disk", action="store_true", help="the default disk again")
+    runner = command.add_mutually_exclusive_group()
+    runner.add_argument("--runner", metavar="RUNNER", help=runner_help)
+    runner.add_argument("--no-runner", action="store_true", help="this machine again")
 
 
-def _sidecar(args: argparse.Namespace) -> int:
-    if not args.replace and not args.feature and args.memory is None and args.disk is None and args.runner is None:
-        args.parser.error("give --feature, --memory, --disk or --runner")
-    repo = repos.current()
-    thread = _thread(args, repo)
-    if thread is None:
-        return 0
-    if args.replace:
-        sidecar = {"runner": args.runner, "spec": _given(args)}
-    elif thread.sidecar is None:
-        raise FolioError(f"thread {thread.name} has no sidecar to update; give it one with "
-                         f"`folio sidecar set {thread.name} --runner RUNNER ...`")
-    else:
-        sidecar = {"runner": args.runner or thread.sidecar["runner"], "spec": _updated(thread.sidecar["spec"], args)}
-    thread = threads.set_sidecar(repo, thread, sidecar)
-    print(f"Set thread {thread.name}'s sidecar: {_sidecar_text(thread.sidecar)}{_when(repo, thread)}")
-    return 0
+def _changes_spec(args: argparse.Namespace) -> bool:
+    return bool(args.feature or args.no_feature or args.memory is not None or args.disk is not None or args.no_disk)
 
 
-def _given(args: argparse.Namespace) -> dict:
-    """The spec `set` gives: exactly what's given."""
-    return {"features": list(args.feature), "memory": args.memory or repos.DEFAULT_MEMORY,
-            **({"disk": args.disk} if args.disk else {})}
+def _changes(args: argparse.Namespace) -> bool:
+    """Whether a configure command was given anything to change: else it shows."""
+    return _changes_spec(args) or args.runner is not None or args.no_runner
 
 
-def _updated(spec: dict, args: argparse.Namespace) -> dict:
-    """`spec` as `update` changes it: features added (one given again replaces its options), memory or disk set."""
+def _changed(spec: dict, args: argparse.Namespace) -> dict:
+    """`spec` as a configure command changes it: features added (one there already gets the options given) or taken
+    away, memory or disk set, or the disk the default again."""
     spec = dict(spec)
-    spec["features"] = repos.merge_features(list(spec.get("features", [])), args.feature)
+    for name in args.no_feature:
+        if ":" in name or "=" in name:
+            args.parser.error(f"--no-feature takes a feature's name alone, e.g. {name.split(':', 1)[0]}")
+    both = sorted({given.split(":", 1)[0] for given in args.feature} & set(args.no_feature))
+    if both:
+        args.parser.error(f"--feature and --no-feature both name {', '.join(both)}")
+    features = repos.merge_features(list(spec.get("features", [])), args.feature)
+    there = [f.split(":", 1)[0] for f in features]
+    for name in args.no_feature:
+        if name not in there:
+            raise FolioError(f"there's no feature {name} to take away (features: {', '.join(there) or 'none'})")
+    spec["features"] = [f for f in features if f.split(":", 1)[0] not in args.no_feature]
     if args.memory is not None:
         spec["memory"] = args.memory
     if args.disk is not None:
         spec["disk"] = args.disk
+    if args.no_disk:
+        spec.pop("disk", None)
     return spec
 
 
-def _sidecar_show(args: argparse.Namespace) -> int:
+def _configure(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    if not _changes(args):
+        spec = repo.spec()
+        print((_spec(spec) if spec else f"{_spec(repos.DEFAULT_SPEC)} (the default; nothing set yet)") + _runner(repo))
+        return 0
+    if _changes_spec(args):
+        # Checked before anything's saved, the runner included.
+        spec = repos.check_repo_spec(engine.validate_spec(_changed(dict(repo.spec() or repos.DEFAULT_SPEC), args)))
+    if args.runner is not None or args.no_runner:
+        repo.save_runner(args.runner)
+    if _changes_spec(args):
+        repo.save_spec(spec)
+        print(f"Set {repo.name}'s spec: {_spec(spec)}{_runner(repo)}")
+    else:
+        print(f"Set {repo.name}'s runner: {repo.runner() or 'this machine'}")
+    return 0
+
+
+def _sidecar_configure(args: argparse.Namespace) -> int:
     repo = repos.current()
     thread = _thread(args, repo)
     if thread is None:
         return 0
-    if thread.sidecar is None:
-        print(f"Thread {thread.name} has no sidecar")
+    if not _changes(args):
+        if thread.sidecar is None:
+            print(f"Thread {thread.name} has no sidecar")
+            return 0
+        state = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"]
+        print(f"{_sidecar_text(thread.sidecar)}; bottle {thread.sidecar_bottle}, {state}")
         return 0
-    state = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]["state"]
-    print(f"{_sidecar_text(thread.sidecar)}; bottle {thread.sidecar_bottle}, {state}")
+    if args.no_runner:
+        raise FolioError(f"a sidecar is on a runner of its own; `folio sidecar remove {thread.name}` takes it away")
+    if thread.sidecar is None and args.runner is None:
+        raise FolioError(f"thread {thread.name} has no sidecar; give it one with "
+                         f"`folio sidecar configure {thread.name} --runner RUNNER ...`")
+    current = thread.sidecar or {"runner": args.runner, "spec": {"features": [], "memory": repos.DEFAULT_MEMORY}}
+    sidecar = {"runner": args.runner or current["runner"], "spec": _changed(current["spec"], args)}
+    thread = threads.set_sidecar(repo, thread, sidecar)
+    print(f"Set thread {thread.name}'s sidecar: {_sidecar_text(thread.sidecar)}{_when(repo, thread)}")
     return 0
 
 
@@ -427,13 +436,6 @@ def _when(repo: repos.Repo, thread: threads.Thread) -> str:
     if threads.states(repo, [thread])[thread.name]["state"] in ("paused", "missing"):
         return ""
     return f". It comes with the thread's next bottle: `folio pause {thread.name}`, then `folio claude {thread.name}`"
-
-
-def _configure_show(args: argparse.Namespace) -> int:
-    repo = repos.current()
-    spec = repo.spec()
-    print((_spec(spec) if spec else f"{_spec(repos.DEFAULT_SPEC)} (the default; nothing set yet)") + _runner(repo))
-    return 0
 
 
 def _runner(repo: repos.Repo) -> str:

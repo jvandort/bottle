@@ -107,7 +107,7 @@ class PauseAndResumeTest(PauseTestCase):
 
     def test_a_resume_gets_the_repos_spec_as_it_is_now(self) -> None:
         self.ok("pause", "fix-it")
-        self.ok("configure", "update", "--feature", "claude")
+        self.ok("configure", "--feature", "claude")
         self.ok("claude", "fix-it")
         self.assertEqual(self.fake()["bottles"][self.bottle]["spec"]["features"], ["claude", "tools"])
 

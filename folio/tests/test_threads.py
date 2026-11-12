@@ -252,24 +252,39 @@ class DeleteTest(FolioTestCase):
 
 
 class ConfigureTest(FolioTestCase):
-    def test_show_the_default_until_set(self) -> None:
-        self.assertEqual(self.ok("configure", "show"), "features [tools], memory 2G (the default; nothing set yet)\n")
+    def test_without_options_it_shows_the_default_until_set(self) -> None:
+        self.assertEqual(self.ok("configure"), "features [tools], memory 2G (the default; nothing set yet)\n")
 
-    def test_set_replaces_and_update_adds(self) -> None:
-        self.assertEqual(self.ok("configure", "set", "--feature", "tools", "--feature", "jvm:version=17", "--memory", "8G"),
+    def test_features_added_given_options_and_taken_away_memory_and_disk_set(self) -> None:
+        self.assertEqual(self.ok("configure", "--feature", "jvm:version=17", "--memory", "8G"),
                          "Set project's spec: features [jvm:version=17, tools], memory 8G\n")
-        self.ok("configure", "update", "--feature", "jvm:version=21", "--feature", "claude")
+        self.ok("configure", "--feature", "jvm:version=21", "--feature", "claude")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
-        self.ok("configure", "set", "--feature", "python")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["python"], "memory": "2G"})
-        self.assertEqual(self.ok("configure", "update", "--disk", "50G"),
-                         "Set project's spec: features [python], memory 2G, disk 50G\n")
-        self.ok("configure", "set", "--feature", "python")
+        self.ok("configure", "--no-feature", "jvm", "--no-feature", "tools", "--feature", "python")
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "python"], "memory": "8G"})
+        self.assertEqual(self.ok("configure", "--disk", "50G"),
+                         "Set project's spec: features [claude, python], memory 8G, disk 50G\n")
+        self.assertEqual(self.ok("configure"), "features [claude, python], memory 8G, disk 50G\n")
+        self.ok("configure", "--no-disk")
         self.assertNotIn("disk", repos.current(self.repo).spec())
 
+    def test_a_feature_taken_away_is_named_alone_and_must_be_there(self) -> None:
+        for args, error in ((("--no-feature", "tools:x=1"), "takes a feature's name alone, e.g. tools"),
+                            (("--no-feature", "tools", "--feature", "tools"), "both name tools"),
+                            (("--disk", "50G", "--no-disk"), "not allowed with argument"),
+                            (("--no-disk", "50G"), "unrecognized arguments: 50G")):
+            with self.subTest(args):
+                result = self.folio("configure", *args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(error, result.stderr)
+        result = self.folio("configure", "--no-feature", "jvm")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("there's no feature jvm to take away (features: tools)", result.stderr)
+        self.assertIsNone(repos.current(self.repo).spec())
+
     def test_bottle_checks_it_before_its_saved(self) -> None:
-        self.ok("configure", "set", "--feature", "tools")
-        result = self.folio("configure", "update", "--feature", "nope")
+        self.ok("configure", "--memory", "2G")
+        result = self.folio("configure", "--feature", "nope")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "bottle: error: no feature named 'nope'\n"
                                         "folio: error: `bottle spec validate` failed (exit 1)\n")
@@ -282,11 +297,8 @@ class ConfigureTest(FolioTestCase):
                 repo.save_spec(saved)
                 self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
 
-    def test_update_needs_something_to_change(self) -> None:
-        self.assertEqual(self.folio("configure", "update").returncode, 2)
-
     def test_a_new_thread_gets_the_spec_and_its_name(self) -> None:
-        self.ok("configure", "set", "--feature", "tools", "--feature", "claude")
+        self.ok("configure", "--feature", "claude")
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
         self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "thread": "fix-it"})
@@ -305,7 +317,7 @@ class ConfigureTest(FolioTestCase):
         for key, value in (("permissions", ["message-any"]), ("thread", "other")):
             with self.subTest(key):
                 repos.current(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
-                for args in (("new", f"t-{key}"), ("configure", "update", "--memory", "4G")):
+                for args in (("new", f"t-{key}"), ("configure", "--memory", "4G")):
                     result = self.folio(*args)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(f"can't give {key}", result.stderr)
@@ -316,7 +328,7 @@ class RepoListTest(FolioTestCase):
     def test_every_repo_wherever_its_run(self) -> None:
         other = self.make_repo("other")
         self.ok("new", "a")
-        self.ok("configure", "set", "--feature", "tools", cwd=other)
+        self.ok("configure", "--memory", "2G", cwd=other)
         lines = self.ok("repo", "list", cwd=self.tmp).splitlines()
         self.assertEqual(sorted(line.split()[1:] for line in lines[1:]), [[str(other), "0"], [str(self.repo), "1"]])
 
@@ -342,16 +354,17 @@ class RunnerTest(FolioTestCase):
         self.assertIn("desktop", self.ok("list").splitlines()[1].split())
 
     def test_the_repos_runner_is_its_threads_unless_one_has_its_own(self) -> None:
-        self.assertEqual(self.ok("configure", "update", "--runner", "desktop"), f"Set {repos.current(self.repo).name}'s runner: desktop\n")
-        self.assertIn("runner desktop", self.ok("configure", "show"))
+        self.assertEqual(self.ok("configure", "--runner", "desktop"), f"Set {repos.current(self.repo).name}'s runner: desktop\n")
+        self.assertIn("runner desktop", self.ok("configure"))
         self.ok("new", "one")
         self.ok("new", "two", "--runner", "local")
         self.assertEqual((self.runner("one"), self.runner("two")), ("desktop", "local"))
 
-    def test_set_replaces_the_runner_too(self) -> None:
-        self.ok("configure", "update", "--runner", "desktop")
-        self.ok("configure", "set", "--feature", "tools")
-        self.assertNotIn("runner", self.ok("configure", "show"))
+    def test_no_runner_is_this_machine_again(self) -> None:
+        self.ok("configure", "--runner", "desktop")
+        self.assertEqual(self.ok("configure", "--no-runner"), f"Set {repos.current(self.repo).name}'s runner: this machine\n")
+        self.assertNotIn("runner", self.ok("configure"))
+        self.assertEqual(self.folio("configure", "--runner", "desktop", "--no-runner").returncode, 2)
 
     def test_a_paused_thread_resumes_on_the_runner_its_given(self) -> None:
         self.ok("new", "fix-it")

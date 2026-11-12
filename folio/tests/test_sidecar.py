@@ -20,10 +20,10 @@ class SidecarTest(FolioTestCase):
         return self.fake()["bottles"]
 
     def give_it_one(self) -> None:
-        self.ok("sidecar", "set", "fix-it", "--runner", "desktop", "--feature", "jvm:version=21", "--memory", "32G")
+        self.ok("sidecar", "configure", "fix-it", "--runner", "desktop", "--feature", "jvm:version=21", "--memory", "32G")
 
-    def test_set_says_it_comes_with_the_next_bottle(self) -> None:
-        out = self.folio("sidecar", "set", "fix-it", "--runner", "desktop", "--memory", "32G").stdout
+    def test_given_one_it_says_it_comes_with_the_next_bottle(self) -> None:
+        out = self.folio("sidecar", "configure", "fix-it", "--runner", "desktop", "--memory", "32G").stdout
         self.assertIn("Set thread fix-it's sidecar: features [], memory 32G, runner desktop", out)
         self.assertIn("`folio pause fix-it`, then `folio claude fix-it`", out)
         self.assertNotIn(self.sidecar, self.bottles())
@@ -70,21 +70,27 @@ class SidecarTest(FolioTestCase):
         self.ok("shell", "fix-it")
         self.assertEqual(self.bottles()[self.sidecar]["state"], "running")
 
-    def test_update_show_and_remove(self) -> None:
-        self.assertIn("no sidecar to update", self.folio("sidecar", "update", "fix-it", "--memory", "8G").stderr)
+    def test_configured_as_the_repos_spec_is_shown_and_removed(self) -> None:
+        self.assertEqual(self.ok("sidecar", "configure", "fix-it").strip(), "Thread fix-it has no sidecar")
         self.give_it_one()
-        self.ok("sidecar", "update", "fix-it", "--feature", "tools", "--memory", "64G", "--disk", "100G")
-        self.assertEqual(self.ok("sidecar", "show", "fix-it").strip(),
+        self.ok("sidecar", "configure", "fix-it", "--feature", "tools", "--memory", "64G", "--disk", "100G")
+        self.assertEqual(self.ok("sidecar", "configure", "fix-it").strip(),
                          f"features [jvm:version=21, tools], memory 64G, disk 100G, runner desktop; "
                          f"bottle {self.sidecar}, missing")
         self.assertEqual(self.ok("list").splitlines()[1].split()[3], "desktop")
+        self.ok("sidecar", "configure", "fix-it", "--no-feature", "jvm", "--no-disk", "--runner", "big")
+        self.assertEqual(threads.load(self.repo_, "fix-it").sidecar,
+                         {"runner": "big", "spec": {"features": ["tools"], "memory": "64G"}})
+        result = self.folio("sidecar", "configure", "fix-it", "--no-runner")
+        self.assertIn("`folio sidecar remove fix-it` takes it away", result.stderr)
         self.ok("sidecar", "remove", "fix-it")
         self.assertIsNone(threads.load(self.repo_, "fix-it").sidecar)
-        self.assertEqual(self.ok("sidecar", "show", "fix-it").strip(), "Thread fix-it has no sidecar")
+        self.assertEqual(self.ok("sidecar", "configure", "fix-it").strip(), "Thread fix-it has no sidecar")
 
-    def test_set_needs_a_runner_and_a_spec_bottle_takes(self) -> None:
-        self.assertNotEqual(self.folio("sidecar", "set", "fix-it", "--memory", "8G").returncode, 0)
-        result = self.folio("sidecar", "set", "fix-it", "--runner", "desktop", "--feature", "nope")
+    def test_a_new_one_needs_a_runner_and_a_spec_bottle_takes(self) -> None:
+        result = self.folio("sidecar", "configure", "fix-it", "--memory", "8G")
+        self.assertIn("give it one with `folio sidecar configure fix-it --runner RUNNER ...`", result.stderr)
+        result = self.folio("sidecar", "configure", "fix-it", "--runner", "desktop", "--feature", "nope")
         self.assertIn("no feature named 'nope'", result.stderr)
         self.assertIsNone(threads.load(self.repo_, "fix-it").sidecar)
 

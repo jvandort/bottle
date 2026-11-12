@@ -17,7 +17,7 @@ record:
 A thread has a snapshot only while it has no bottle: attaching to one drops
 it, since the bottle is where the work is from then on.
 
-A thread can have a sidecar (`folio sidecar set`): a bottle of a spec of its
+A thread can have a sidecar (`folio sidecar configure`): a bottle of a spec of its
 own, on a runner of its own, `<thread's bottle>-sidecar`, with the thread's
 repos, fetch-only, which the thread's bottle reaches as `ssh sidecar`. It's
 scratch: made just before the thread's bottle is, started with it, and deleted
@@ -303,7 +303,7 @@ def sidecar_shell(repo: Repo, thread: Thread) -> NoReturn:
     running, which is what the sidecar is for. Nothing keeps it: closing the terminal ends it."""
     if thread.sidecar is None:
         raise FolioError(f"thread {thread.name} has no sidecar; give it one with "
-                         f"`folio sidecar set {thread.name} --runner RUNNER ...`")
+                         f"`folio sidecar configure {thread.name} --runner RUNNER ...`")
     state = states(repo, [thread])[thread.name]["state"]
     if state != "running":
         raise FolioError(f"thread {thread.name} is {state}: its sidecar is there while it runs "

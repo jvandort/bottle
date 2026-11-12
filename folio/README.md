@@ -87,7 +87,7 @@ then, so a resume is also how a thread gets features added since.
 A thread's bottle can run on another machine of yours, a runner added with
 `bottle runner add` (see bottle's README): its sessions, lane, notes and
 pause work as here, over ssh. A repo's threads are made on the repo's runner
-(`folio configure update --runner desktop`), else here; a thread can have its
+(`folio configure --runner desktop`), else here; a thread can have its
 own (`folio new fix-it --runner desktop`). It applies whenever the thread's
 bottle is made, so moving a thread is pausing it and resuming it where it's
 to go: `folio pause fix-it`, then `folio claude fix-it --runner desktop`. Its
@@ -106,12 +106,16 @@ thread's bottle has. The thread's agent reaches it as `ssh sidecar` -- a shell,
 a command, scp, git over ssh -- and is told so.
 
 ```sh
-folio sidecar set fix-it --runner desktop --feature jvm:version=21 --memory 32G
-folio sidecar update fix-it --memory 64G --disk 100G
-folio sidecar show fix-it
+folio sidecar configure fix-it --runner desktop --feature jvm:version=21 --memory 32G
+folio sidecar configure fix-it --memory 64G --disk 100G --no-feature jvm
+folio sidecar configure fix-it   # shows it
 folio sidecar remove fix-it
 folio sidecar shell fix-it     # a shell of your own there, while the thread runs
 ```
+
+`folio sidecar configure` takes what `folio configure` does (below), for the
+sidecar: a thread without one is given one, which needs `--runner`, and
+starts with no features and 2G of memory; `folio sidecar remove` takes it away.
 
 It has the thread's repos, as they were when it was made, and their remotes,
 pushes included: what the agent pushes from there lands in the thread's lane,
@@ -177,7 +181,8 @@ its reach until you resume it.
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
-| `folio configure set` / `update` / `show` | The repo's spec, its threads' features, memory and disk, and its runner |
+| `folio configure [--feature F] [--no-feature F] [--memory M] [--disk D \| --no-disk] [--runner R \| --no-runner]` | The repo's spec, its threads' features, memory and disk, and its runner: shown without options |
+| `folio sidecar configure` / `remove` / `shell [THREAD]` | A thread's sidecar (see Sidecars) |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` (`ls`) | Every repo folio has state for |
 
@@ -195,10 +200,12 @@ that aren't on your branches or origin's, and work in the bottle that never
 reached the lane. Then it asks you to type the thread's name. Without a
 terminal it needs `--yes`.
 
-**`folio configure`** edits the repo's spec, which every new bottle of its
-threads is made from: `set` replaces it, `update` adds features (a feature
-given again replaces its options), changes the memory, or sets `--runner`,
-where its threads' bottles are made (see Runners). Bottle checks the spec
+**`folio configure`** shows the repo's spec, which every new bottle of its
+threads is made from, and changes it: `--feature` adds a feature (one there
+already gets the options given), `--no-feature` takes one away, by its name
+alone, `--memory` and `--disk` set them (`--no-disk`: the default again), and
+`--runner` sets where its threads' bottles are made (see Runners;
+`--no-runner`: this machine again). Bottle checks the spec
 before folio saves it: that it's valid, while whether its memory fits is
 checked against the runner each bottle is made on. A repo's spec can't give `permissions`
 or a `thread`: folio names each thread's bottle's thread itself, and never
@@ -206,7 +213,8 @@ gives it permissions. A repo with no spec gets `tools`, which has the
 shpool every thread runs in, and 2G of memory; add `claude` for Claude.
 
 ```sh
-folio configure set --feature tools --feature claude --feature jvm:version=21 --memory 8G --disk 50G
+folio configure --feature claude --feature jvm:version=21 --memory 8G --disk 50G
+folio configure --no-feature jvm
 ```
 
 ## Development
