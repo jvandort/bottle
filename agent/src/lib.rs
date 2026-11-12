@@ -416,7 +416,8 @@ fn spawn(start: &Start, reaper: &Reaper) -> Result<Running, String> {
         command
             .env("HOME", &user.home)
             .env("USER", &user.name)
-            .env("LOGNAME", &user.name);
+            .env("LOGNAME", &user.name)
+            .env("SHELL", &user.shell);
         // SAFETY: geteuid has no preconditions.
         let euid = unsafe { libc::geteuid() };
         if user.uid != euid {

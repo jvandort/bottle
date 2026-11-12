@@ -112,7 +112,11 @@ impl Agent {
     /// `bottle-cli exec`, for this agent, with `args` after the socket.
     fn exec(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bottle-cli"));
-        command.arg("exec").arg(self.socket()).args(args);
+        command
+            .arg("exec")
+            .arg("--socket")
+            .arg(self.socket())
+            .args(args);
         command
     }
 
@@ -212,18 +216,18 @@ fn exits_255_saying_why_when_the_command_cant_run() {
     );
 
     let out = Command::new(env!("CARGO_BIN_EXE_bottle-cli"))
-        .args(["exec", "/no/such/socket", "true"])
+        .args(["exec", "--socket", "/no/such/socket", "true"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(255));
     assert!(text(&out.stderr).starts_with("bottle-cli: "));
 
     let out = Command::new(env!("CARGO_BIN_EXE_bottle-cli"))
-        .args(["exec", "/s"])
+        .args(["exec", "--socket", "/s"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(255));
-    assert!(text(&out.stderr).contains("usage: bottle-cli exec"));
+    assert!(text(&out.stderr).contains("bottle-cli exec --socket SOCKET"));
 }
 
 #[test]

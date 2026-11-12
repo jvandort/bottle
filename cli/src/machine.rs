@@ -2,7 +2,8 @@
 //! stopped any number of times, their disks kept between.
 //!
 //!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
-//!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]...
+//!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
+//!                               [--workdir DIR] [--label NAME=VALUE]...
 //!     bottle-cli machine start --name NAME [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
@@ -20,7 +21,20 @@
 //! try this without VMs); start returns once its agent answers. Its network is boot's options:
 //! with --decider, every connection is asked of bottled's decider, as the bottle whose token is in
 //! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection's allowed; without either, it has none. A machine is "created" until it's
-//! first started, then "running" or "stopped".
+//! first started, then "running" or "stopped". --user and --workdir are who and where `exec` runs a
+//! command unless it says; labels are its creator's, shown by `ls`.
+//!
+//! The same, machine-wide and by name, at the top level (what `bottle` will be):
+//!
+//!     bottle-cli ls [--json]
+//!     bottle-cli status NAME [--json]
+//!     bottle-cli stop NAME
+//!     bottle-cli exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
+//!     bottle-cli shell NAME
+//!
+//! `shell` is a login shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
+//! terminal; a machine that isn't running isn't started (bottle starts its bottles, with their
+//! network).
 
 use std::env;
 use std::fs;
@@ -38,6 +52,8 @@ use crate::FAILED;
 
 pub const USAGE: &str =
     "machine create|start|stop|delete|ls|status|exec ... (see cli/src/machine.rs)";
+pub const TOP_USAGE: &str = "ls [--json] | status NAME [--json] | stop NAME | shell NAME \
+    | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// How long a stopped machine's VM gets to end, before it's killed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -55,6 +71,14 @@ struct Config {
     /// What its image runs, its entrypoint and command, from its top stage.
     #[serde(default)]
     run: Option<Vec<String>>,
+    /// Who `exec` runs a command as, and where, unless it says.
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    workdir: Option<String>,
+    /// What its creator says of it, shown by `ls`.
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -339,6 +363,9 @@ fn create(args: &[String]) -> io::Result<()> {
         env: Vec::new(),
         mounts: Vec::new(),
         run: None,
+        user: None,
+        workdir: None,
+        labels: Default::default(),
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -363,6 +390,15 @@ fn create(args: &[String]) -> io::Result<()> {
                     .split_once('=')
                     .ok_or_else(|| other(format!("-e {pair}: not NAME=VALUE")))?;
                 config.env.push((k.into(), v.into()));
+            }
+            "--user" => config.user = Some(value()?),
+            "--workdir" => config.workdir = Some(value()?),
+            "--label" => {
+                let pair = value()?;
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| other(format!("--label {pair}: not NAME=VALUE")))?;
+                config.labels.insert(k.into(), v.into());
             }
             "-v" => {
                 let spec = value()?;
@@ -494,23 +530,97 @@ fn ls(args: &[String]) -> io::Result<()> {
             if let Ok(machine) = Machine::new(&name)
                 && let Some(state) = machine.state()
             {
-                found.push((name, state));
+                found.push((name, state, machine.config().ok()));
             }
         }
     }
-    found.sort();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let rows: Vec<_> = found
+        .iter()
+        .map(|(name, state, config)| {
+            let mut row = serde_json::json!({"name": name, "state": state});
+            if let Some(config) = config {
+                row["cpus"] = config.cpus.into();
+                row["mem_mib"] = config.mem_mib.into();
+                row["storage_gib"] = config.storage_gib.into();
+                row["image"] = image_name(&config.image).into();
+                row["labels"] = serde_json::to_value(&config.labels).unwrap();
+            }
+            row
+        })
+        .collect();
     if json {
-        let list: Vec<_> = found
+        println!("{}", serde_json::Value::Array(rows));
+        return Ok(());
+    }
+    let text = |row: &serde_json::Value, key: &str| match &row[key] {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let mut table = vec![[
+        "NAME".to_string(),
+        "STATE".into(),
+        "CPUS".into(),
+        "MEMORY".into(),
+        "IMAGE".into(),
+        "LABELS".into(),
+    ]];
+    for row in &rows {
+        let labels = row["labels"].as_object().map_or(String::new(), |labels| {
+            labels
+                .iter()
+                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("")))
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let memory = row["mem_mib"]
+            .as_u64()
+            .map_or(String::new(), |m| format!("{m}M"));
+        table.push([
+            text(row, "name"),
+            text(row, "state"),
+            text(row, "cpus"),
+            memory,
+            text(row, "image"),
+            labels,
+        ]);
+    }
+    let widths: Vec<usize> = (0..6)
+        .map(|i| table.iter().map(|r| r[i].len()).max().unwrap_or(0))
+        .collect();
+    for row in table {
+        let line: Vec<String> = row
             .iter()
-            .map(|(name, state)| serde_json::json!({"name": name, "state": state}))
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:width$}"))
             .collect();
-        println!("{}", serde_json::Value::Array(list));
-    } else {
-        for (name, state) in found {
-            println!("{name} {state}");
-        }
+        println!("{}", line.join("  ").trim_end());
     }
     Ok(())
+}
+
+/// What a machine's image is called: a tag of its top stage in its store, else the stage's name.
+fn image_name(disks: &[PathBuf]) -> String {
+    let Some(top) = disks.last() else {
+        return String::new();
+    };
+    let stage = top
+        .file_stem()
+        .map_or(String::new(), |s| s.to_string_lossy().into_owned());
+    let store = Store {
+        dir: top.parent().map(Path::to_path_buf).unwrap_or_default(),
+        mke2fs: PathBuf::new(),
+    };
+    store
+        .tags()
+        .ok()
+        .and_then(|tags| {
+            tags.into_iter()
+                .find(|(_, name)| *name == stage)
+                .map(|(tag, _)| tag)
+        })
+        .unwrap_or(stage)
 }
 
 fn status(args: &[String]) -> io::Result<()> {
@@ -557,8 +667,58 @@ fn exec(args: Vec<String>) -> ExitCode {
         eprintln!("bottle-cli: {} isn't running", machine.name);
         return ExitCode::from(FAILED);
     }
+    // Its creator's user and directory, unless the command says.
+    let options = &rest[..rest.iter().position(|a| a == "--").unwrap_or(rest.len())];
+    let given = |flag: &str| options.iter().any(|a| a == flag);
+    let mut defaults = Vec::new();
+    if let Ok(config) = machine.config() {
+        if let Some(user) = config.user.filter(|_| !given("-u")) {
+            defaults.extend(["-u".to_string(), user]);
+        }
+        if let Some(dir) = config.workdir.filter(|_| !given("-w")) {
+            defaults.extend(["-w".to_string(), dir]);
+        }
+    }
     let socket = machine.socket().to_string_lossy().into_owned();
-    crate::exec::main(std::iter::once(socket).chain(rest))
+    crate::exec::main(std::iter::once(socket).chain(defaults).chain(rest))
+}
+
+/// The machine-wide commands, by name (see the module's doc): `ls`, `status`, `stop`, `exec`,
+/// `shell`.
+pub fn top(command: &str, args: Vec<String>) -> ExitCode {
+    let (name, rest) = match args.split_first() {
+        Some((name, rest)) if command != "ls" && !name.starts_with('-') => {
+            (name.clone(), rest.to_vec())
+        }
+        _ if command == "ls" => (String::new(), args),
+        _ => return crate::usage_error(&format!("{command} needs a machine's name")),
+    };
+    let named = |rest: Vec<String>| [vec!["--name".to_string(), name.clone()], rest].concat();
+    let result = match command {
+        "ls" => ls(&rest),
+        "status" => status(&named(rest)),
+        "stop" => Machine::new(&name).and_then(|m| m.stop()),
+        "exec" => return exec(named(rest)),
+        "shell" => {
+            if !rest.is_empty() {
+                return crate::usage_error("shell takes a machine's name alone");
+            }
+            let login = r#"exec "${SHELL:-/bin/sh}" -l"#;
+            return exec(named(
+                ["-t", "--", "/bin/sh", "-c", login]
+                    .map(String::from)
+                    .to_vec(),
+            ));
+        }
+        _ => return crate::usage_error(TOP_USAGE),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("bottle-cli: {e}");
+            ExitCode::from(FAILED)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -24,7 +24,17 @@ fn main() -> ExitCode {
         Some("image") => build::image(args),
         Some("images") => build::images(args),
         Some("machine") => machine::main(args),
-        Some("exec") => exec::main(args),
+        Some("exec") => {
+            let args: Vec<String> = args.collect();
+            match args.split_first() {
+                // On an agent's socket: what `machine exec` and `exec NAME` come to.
+                Some((flag, rest)) if flag == "--socket" => exec::main(rest.iter().cloned()),
+                _ => machine::top("exec", args),
+            }
+        }
+        Some(command @ ("ls" | "status" | "stop" | "shell")) => {
+            machine::top(command, args.collect())
+        }
         Some(other) => usage_error(&format!("no command {other}")),
         None => usage_error("no command"),
     }
@@ -33,7 +43,8 @@ fn main() -> ExitCode {
 /// Says what's wrong with the command line, and how it goes.
 fn usage_error(problem: &str) -> ExitCode {
     eprintln!("bottle-cli: {problem}");
-    eprintln!("usage: bottle-cli {}", exec::USAGE);
+    eprintln!("usage: bottle-cli {}", machine::TOP_USAGE);
+    eprintln!("   or: bottle-cli {}", exec::USAGE);
     eprintln!("   or: bottle-cli {}", boot::USAGE);
     eprintln!("   or: bottle-cli {}", build::BUILD_USAGE);
     eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);

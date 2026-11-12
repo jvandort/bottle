@@ -183,12 +183,27 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         "GREETING=hello there",
         "-v",
         &share,
+        "--workdir",
+        "/mnt/share",
+        "--label",
+        "thread=fix-it",
     ]);
     assert_eq!(f.ok(&["machine", "status", "--name", "m1"]), "created\n");
+    let listed: serde_json::Value = serde_json::from_str(&f.ok(&["ls", "--json"])).unwrap();
     assert_eq!(
-        f.ok(&["machine", "ls", "--json"]),
-        "[{\"name\":\"m1\",\"state\":\"created\"}]\n"
+        (
+            &listed[0]["name"],
+            &listed[0]["state"],
+            &listed[0]["labels"]
+        ),
+        (
+            &serde_json::json!("m1"),
+            &serde_json::json!("created"),
+            &serde_json::json!({"thread": "fix-it"})
+        )
     );
+    assert_eq!(listed[0]["image"], "host"); // its top stage: no tag names it
+    assert!(f.ok(&["ls"]).contains("thread=fix-it"));
     assert!(
         !f.cli(&["machine", "create", "--name", "m1", "--image", &image])
             .status
@@ -226,10 +241,17 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(exec("cat /run/ran"), "hello there\n");
+    // By name, at the top level, in its creator's directory unless the command says.
+    assert_eq!(f.ok(&["exec", "m1", "--", "pwd"]), "/mnt/share\n");
+    assert_eq!(f.ok(&["exec", "m1", "-w", "/", "--", "pwd"]), "/\n");
+    assert_eq!(f.ok(&["status", "m1"]), "running\n");
     exec("echo kept > /kept");
 
-    f.ok(&["machine", "stop", "--name", "m1"]);
+    f.ok(&["stop", "m1"]);
     assert_eq!(f.ok(&["machine", "status", "--name", "m1"]), "stopped\n");
+    let out = f.cli(&["shell", "m1"]);
+    assert!(!out.status.success()); // not started for it: bottle starts bottles
+    assert!(String::from_utf8_lossy(&out.stderr).contains("m1 isn't running"));
     let disk = f.dir.join("home/krun/machines/m1/disk.ext4");
     let fsck = Command::new("e2fsck")
         .arg("-fn")

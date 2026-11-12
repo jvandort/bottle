@@ -2,7 +2,7 @@
 //! and exits with its status (128 and the signal for one a signal killed), or 255 if it couldn't be
 //! run.
 //!
-//!     bottle-cli exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
+//!     bottle-cli exec --socket SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!
 //! With -t the command gets a terminal, as big as this one; this terminal, if stdin is one, is
 //! raw while it runs, and set back after. SIGINT, SIGTERM and SIGHUP sent here are passed on to
@@ -20,7 +20,7 @@ use bottle_agent_client::{Control, Start, WinSize, run, status};
 use crate::FAILED;
 
 pub const USAGE: &str =
-    "exec SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
+    "exec --socket SOCKET [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// The size of a terminal that can't be asked.
 const DEFAULT_SIZE: WinSize = WinSize { rows: 24, cols: 80 };

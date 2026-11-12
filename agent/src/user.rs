@@ -9,6 +9,8 @@ pub struct User {
     pub uid: u32,
     pub gid: u32,
     pub home: String,
+    /// Its login shell; /bin/sh if its entry names none, as login(1) has it.
+    pub shell: String,
     /// Every group the user is in: its own, then those that list it as a member.
     pub groups: Vec<u32>,
 }
@@ -48,6 +50,10 @@ pub fn lookup(root: &Path, name: &str) -> Result<User, String> {
         uid,
         gid,
         home: entry[5].to_string(),
+        shell: Some(entry[6])
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/bin/sh")
+            .to_string(),
         groups,
     })
 }
@@ -85,9 +91,16 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
                 home: "/home/genie".into(),
+                shell: "/bin/bash".into(),
                 groups: vec![1000, 27, 100],
             }
         );
+    }
+
+    #[test]
+    fn an_entry_without_a_shell_has_sh() {
+        let dir = root("svc:x:5:5::/:\n", None);
+        assert_eq!(lookup(dir.path(), "svc").unwrap().shell, "/bin/sh");
     }
 
     #[test]
