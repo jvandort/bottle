@@ -12,7 +12,8 @@
 //!                             COMMAND [ARG]...
 //!
 //! DISK is a stage's disk in a store (as `build` and `import` print them, the last): the image is
-//! it and the stages below it. Mounts are read-only, whatever they say. A machine is a directory,
+//! it and the stages below it, and what it runs, its entrypoint and command, is started at each
+//! start, as smolvm starts a container's. Mounts are read-only, whatever they say. A machine is a directory,
 //! $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at most), and,
 //! while it runs, its pid, its agent's socket and its console's log. Started, it runs in the
 //! background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's arguments, to
@@ -51,6 +52,9 @@ struct Config {
     storage_gib: u64,
     env: Vec<(String, String)>,
     mounts: Vec<(PathBuf, String)>,
+    /// What its image runs, its entrypoint and command, from its top stage.
+    #[serde(default)]
+    run: Option<Vec<String>>,
 }
 
 pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -244,6 +248,9 @@ impl Machine {
             boot.arg("--mount")
                 .arg(format!("{}:{target}", source.display()));
         }
+        if let Some(run) = &config.run {
+            boot.arg("--run").arg(serde_json::to_string(run).unwrap());
+        }
         boot.stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -327,6 +334,7 @@ fn create(args: &[String]) -> io::Result<()> {
         storage_gib: 64,
         env: Vec::new(),
         mounts: Vec::new(),
+        run: None,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -370,7 +378,7 @@ fn create(args: &[String]) -> io::Result<()> {
     if machine.exists() {
         return Err(other(format!("there's a machine {} already", machine.name)));
     }
-    config.image = image_disks(&image)?;
+    (config.image, config.run) = image_of(&image)?;
     let mke2fs = crate::disk::mke2fs()?;
     fs::create_dir_all(&machine.dir)?;
     let made = (|| {
@@ -386,21 +394,29 @@ fn create(args: &[String]) -> io::Result<()> {
     made
 }
 
-/// The disks of the image whose top stage's disk is `disk`, bottom first: its store says which,
-/// if it's in one; else it's an image of one stage.
-fn image_disks(disk: &Path) -> io::Result<Vec<PathBuf>> {
+/// The disks of the image whose top stage's disk is `disk`, bottom first, and what it runs (its
+/// entrypoint, then its command): its store says, if it's in one; else it's an image of one stage
+/// that runs nothing.
+fn image_of(disk: &Path) -> io::Result<(Vec<PathBuf>, Option<Vec<String>>)> {
     let disk = fs::canonicalize(disk).map_err(|e| other(format!("{}: {e}", disk.display())))?;
     let (Some(dir), Some(name)) = (disk.parent(), disk.file_stem().and_then(|s| s.to_str())) else {
-        return Ok(vec![disk]);
+        return Ok((vec![disk], None));
     };
     if !dir.join(format!("{name}.json")).exists() {
-        return Ok(vec![disk]);
+        return Ok((vec![disk], None));
     }
     let store = Store {
         dir: dir.to_path_buf(),
         mke2fs: PathBuf::new(),
     };
-    store.disks(name)
+    let stage = store.stage(name)?;
+    let run: Vec<String> = stage
+        .entrypoint
+        .into_iter()
+        .flatten()
+        .chain(stage.cmd.into_iter().flatten())
+        .collect();
+    Ok((store.disks(name)?, Some(run).filter(|r| !r.is_empty())))
 }
 
 /// `machine start --name NAME [--decider ADDRESS:PORT | --net-direct]`: the network is the start's,

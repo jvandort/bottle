@@ -8,7 +8,8 @@
 //!
 //! A disk is named by its virtio serial (the block id libkrun was given for it), or by a path to
 //! its device; a lower may also be a directory, used as it is (out of a VM, to try this on). With
-//! `--config FILE`, the bottle's environment and read-only mounts come too (see Config). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
+//! `--config FILE`, the bottle's environment, read-only mounts, network and what its image runs come
+//! too (see Config). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
 //! is a stage.
 
 use std::ffi::CString;
@@ -48,6 +49,10 @@ pub struct Config {
     /// The bottle's network; none if None.
     #[serde(default)]
     pub net: Option<crate::net::Config>,
+    /// What its image runs, its entrypoint and command: started once the bottle's up, in the
+    /// background, as root, in /.
+    #[serde(default)]
+    pub run: Option<Vec<String>>,
 }
 
 /// A directory of the host's, read-only in the bottle at `target`.
@@ -154,7 +159,31 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
             return Err(failed("sethostname", io::Error::last_os_error()));
         }
     }
+    if let Some(argv) = stack.config.run.as_deref().filter(|a| !a.is_empty()) {
+        run(argv);
+    }
     Ok(upper)
+}
+
+/// Starts the image's entrypoint and command, in a session of its own: its output to the console,
+/// its end its own (the reaper reaps it); a failure to start it is said there, not fatal.
+fn run(argv: &[String]) {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .current_dir("/")
+        .stdin(std::process::Stdio::null());
+    // SAFETY: setsid between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Err(e) = command.spawn() {
+        eprintln!("bottle-agent init: running {argv:?}: {e}");
+    }
 }
 
 /// Makes `root` the root, of this process and of all whose root was the old one (init.krun too),

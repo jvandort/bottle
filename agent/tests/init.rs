@@ -65,6 +65,7 @@ impl Bottle {
         let json = serde_json::json!({
             "env": [["GREETING", "hello there"]],
             "mounts": [{"source": share, "target": "/mnt/share"}],
+            "run": ["sh", "-c", "echo \"$GREETING\" > /run/ran; exec sleep 1000"],
         });
         fs::write(&config, json.to_string()).unwrap();
         let unshare = Command::new("unshare")
@@ -261,6 +262,13 @@ fn stacks_unpacks_and_stops_clean() {
         bottle.ok(&["sh", "-c", "echo $GREETING"], b""),
         "hello there\n"
     );
+    // What the image runs is running, with the bottle's environment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while bottle.exec(&["test", "-e", "/run/ran"], b"").1 != Exit::Code(0) {
+        assert!(Instant::now() < deadline, "the image's command didn't run");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(bottle.ok(&["cat", "/run/ran"], b""), "hello there\n");
     assert_eq!(bottle.ok(&["cat", "/mnt/share/f"], b""), "shared\n");
     let (_, exit) = bottle.exec(&["touch", "/mnt/share/g"], b"");
     assert_ne!(exit, Exit::Code(0), "a mount is read-only");

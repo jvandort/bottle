@@ -11,6 +11,8 @@
 //! host directory, read-only at TARGET (virtio-fs). With --decider, the bottle has a network,
 //! every connection it makes asked of bottled's decider there, as the bottle whose token is
 //! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection allowed; without either, none.
+//! --run's JSON array of strings is what its image runs (entrypoint and command), started once
+//! it's up.
 //!
 //! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
 //! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
@@ -31,7 +33,8 @@ use crate::krun::{self, Krun, check};
 
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
-                         [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct]";
+                         [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct] \
+                         [--run JSON]";
 
 /// The vsock port the agent listens on.
 const AGENT_PORT: u32 = 1024;
@@ -59,6 +62,8 @@ struct Args {
     /// Host directories, read-only in the bottle at their targets.
     mounts: Vec<(PathBuf, String)>,
     net: Net,
+    /// What the image runs, started once the bottle's up.
+    run: Option<Vec<String>>,
 }
 
 /// The bottle's network: every connection asked of a decider (bottled's), every connection
@@ -116,6 +121,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut hostname, mut console) = (None, None);
     let (mut env, mut mounts) = (Vec::new(), Vec::new());
     let mut net = Net::None;
+    let mut run = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if let Some(taken) = net.take(&arg, || args.next()) {
@@ -135,6 +141,12 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
                     .split_once('=')
                     .ok_or(format!("--env {pair}: not NAME=VALUE"))?;
                 env.push((name.into(), val.into()));
+            }
+            "--run" => {
+                let json = value("--run")?;
+                let argv: Vec<String> = serde_json::from_str(&json)
+                    .map_err(|_| format!("--run {json}: not a JSON array of strings"))?;
+                run = Some(argv);
             }
             "--mount" => {
                 let pair = value("--mount")?;
@@ -162,6 +174,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         env,
         mounts,
         net,
+        run,
     })
 }
 
@@ -239,6 +252,9 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     });
     if net_socket.is_some() {
         config["net"] = serde_json::json!({"address": ADDRESS, "host": "vsock"});
+    }
+    if let Some(run) = &args.run {
+        config["run"] = serde_json::json!(run);
     }
     let config: &'static [u8] = Box::leak(config.to_string().into_bytes().into_boxed_slice());
     init.extend(["--config".into(), format!("/{}", CONFIG.to_string_lossy())]);

@@ -16,7 +16,7 @@ use std::process::{Command, Output};
 const STAND_IN: &str = r#"#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 args = sys.argv[1:]
-positional, opts, env, mounts = [], {}, [], []
+positional, opts, env, mounts, run = [], {}, [], [], None
 i = 0
 while i < len(args):
     a = args[i]
@@ -24,6 +24,8 @@ while i < len(args):
         opts[a] = args[i + 1]; i += 2
     elif a == "--env":
         k, v = args[i + 1].split("=", 1); env.append([k, v]); i += 2
+    elif a == "--run":
+        run = json.loads(args[i + 1]); i += 2
     elif a == "--mount":
         s, t = args[i + 1].rsplit(":", 1); mounts.append({"source": s, "target": t}); i += 2
     else:
@@ -31,7 +33,7 @@ while i < len(args):
 sock, upper, disks = positional[0], positional[1], positional[2:]
 here = os.path.dirname(upper)
 config = os.path.join(here, "stand-in.json")
-json.dump({"env": env, "mounts": mounts}, open(config, "w"))
+json.dump({"env": env, "mounts": mounts, "run": run}, open(config, "w"))
 loops = []
 def attach(path, *flags):
     dev = subprocess.check_output(["losetup", "-f", "--show", *flags, path], text=True).strip()
@@ -106,7 +108,7 @@ impl Fixture {
         fs::write(dir.join("store/host.ext4"), "").unwrap();
         fs::write(
             dir.join("store/host.json"),
-            r#"{"lowers":[],"env":{},"entrypoint":null,"cmd":null,"labels":{}}"#,
+            r#"{"lowers":[],"env":{},"entrypoint":["sh","-c"],"cmd":["echo $GREETING > /run/ran; exec sleep 1000"],"labels":{}}"#,
         )
         .unwrap();
         fs::create_dir_all(dir.join("share")).unwrap();
@@ -207,6 +209,22 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         exec("cat /proc/sys/kernel/hostname; echo $GREETING; cat /mnt/share/f"),
         "m1\nhello there\nshared\n"
     );
+    // What the image runs is running: its entrypoint and command, with the machine's env.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !f
+        .cli(&[
+            "machine", "exec", "--name", "m1", "--", "test", "-e", "/run/ran",
+        ])
+        .status
+        .success()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the image's command didn't run"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(exec("cat /run/ran"), "hello there\n");
     exec("echo kept > /kept");
 
     f.ok(&["machine", "stop", "--name", "m1"]);
