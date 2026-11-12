@@ -205,7 +205,10 @@ impl Store {
         let mut tags = self.tags()?;
         change(&mut tags);
         let partial = self.dir.join(".tags.json.partial");
-        fs::write(&partial, serde_json::to_vec_pretty(&tags).map_err(io::Error::other)?)?;
+        fs::write(
+            &partial,
+            serde_json::to_vec_pretty(&tags).map_err(io::Error::other)?,
+        )?;
         fs::rename(&partial, self.tags_path())
     }
 
@@ -566,10 +569,16 @@ mod tests {
         }
         assert!(store.tags().unwrap().is_empty());
         store.tag("localhost/bottle/base:latest", "aaaa").unwrap();
-        assert_eq!(store.resolve("localhost/bottle/base:latest").unwrap(), "aaaa");
+        assert_eq!(
+            store.resolve("localhost/bottle/base:latest").unwrap(),
+            "aaaa"
+        );
         assert_eq!(store.resolve("bbbb").unwrap(), "bbbb"); // a stage by its own name
         store.tag("localhost/bottle/base:latest", "bbbb").unwrap();
-        assert_eq!(store.resolve("localhost/bottle/base:latest").unwrap(), "bbbb");
+        assert_eq!(
+            store.resolve("localhost/bottle/base:latest").unwrap(),
+            "bbbb"
+        );
         assert!(store.tag("t", "cccc").is_err()); // no such stage
         assert!(store.tag("a\nb", "aaaa").is_err());
         assert!(store.untag("localhost/bottle/base:latest").unwrap());
