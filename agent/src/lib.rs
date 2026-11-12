@@ -120,7 +120,15 @@ fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()>
         Some(other) => return refuse(&conn, incoming, format!("expected a Start, got {other:?}")),
         None => return Ok(()),
     };
-    let running = match spawn(&start, reaper) {
+    // Nothing starts once a stop has begun: it would hold the upper disk the stop makes clean.
+    let stopping = STOPPING.read().unwrap_or_else(|e| e.into_inner());
+    if *stopping {
+        drop(stopping);
+        return refuse(&conn, incoming, "stopping".into());
+    }
+    let spawned = spawn(&start, reaper);
+    drop(stopping);
+    let running = match spawned {
         Ok(running) => running,
         Err(message) => return refuse(&conn, incoming, message),
     };
@@ -177,7 +185,11 @@ const RELEASE: std::time::Duration = std::time::Duration::from_secs(5);
 /// `upper`, the root of the bottle's disk, read-only: ext4 is then clean on the disk, nothing left
 /// in its journal to recover. (Freezing would do as well, but a frozen filesystem outlives its
 /// mounts, holding its disk, until thawed.)
+/// Whether a stop has begun: held for reading while a command starts, so none starts after.
+static STOPPING: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
+
 fn stop(upper: Option<&File>) -> io::Result<()> {
+    *STOPPING.write().unwrap_or_else(|e| e.into_inner()) = true;
     for (signal, wait) in [(libc::SIGTERM, GRACE), (libc::SIGKILL, GRACE)] {
         // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
         unsafe { libc::kill(-1, signal) };
@@ -196,7 +208,9 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
     // A process gone can still have files open for writing a while: those of its io_uring (Node's
     // libuv uses one) are let go by a kernel worker after it ends. Until then it's EBUSY.
     let deadline = std::time::Instant::now() + RELEASE;
+    let mut tries = 0;
     loop {
+        tries += 1;
         // SAFETY: sync has no preconditions; mount with a C string path, the rest NULL.
         let ret = unsafe {
             libc::sync();
@@ -209,11 +223,17 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
             )
         };
         if ret == 0 {
+            if tries > 1 {
+                eprintln!("bottle-agent: stop: the upper disk read-only after {tries} tries");
+            }
             return Ok(());
         }
         let e = io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::EBUSY) || std::time::Instant::now() > deadline {
             let left = still_running();
+            eprintln!(
+                "bottle-agent: stop: the upper disk still busy after {tries} tries: {e}; running: {left:?}"
+            );
             return Err(if left.is_empty() {
                 e
             } else {
@@ -222,6 +242,14 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
                     format!("{e}, with {} still running", left.join(", ")),
                 )
             });
+        }
+        if tries == 1 {
+            // Busy with no one left (it has been, after a bottle ran a while): what the kernel
+            // still holds of it, cached, deleted files overlayfs or the dentry cache hasn't let go
+            // of among them, is let go of. What came of it is on the console (console.log.1,
+            // once the machine's started again).
+            eprintln!("bottle-agent: stop: the upper disk busy ({e}); dropping caches");
+            let _ = std::fs::write("/proc/sys/vm/drop_caches", "3");
         }
         thread::sleep(std::time::Duration::from_millis(50));
     }

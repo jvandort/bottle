@@ -314,6 +314,24 @@ fn stacks_unpacks_and_stops_clean() {
         "/y:\nb\n\n/z:\nnew\n"
     );
 
+    // Files deleted every way a bottle does (git, builds): open while deleted, copied up from a
+    // lower then deleted, directories, renames over, hard links. It still stops clean.
+    bottle.ok(
+        &[
+            "sh",
+            "-c",
+            "set -e; mkdir -p /w/a/b; cd /w
+             for i in $(seq 200); do echo x > f$i; done
+             for i in $(seq 100); do exec 3<f$i; rm f$i; exec 3<&-; done
+             for i in $(seq 101 150); do ln f$i h$i; rm f$i; done
+             for i in $(seq 151 200); do echo y > n$i; mv n$i f$i; done
+             echo z > a/b/c; mv a/b/c a/b/d; rm -r a
+             cp /etc/hostname /w/copied; rm /w/copied
+             ls -la /etc > /dev/null; rm -f /etc/hostname
+             cd /; rm -r /w",
+        ],
+        b"",
+    );
     // Something still running when it stops is stopped.
     bottle.exec(&["sh", "-c", "sleep 1000 > /dev/null 2>&1 &"], b"");
     bottle.stop();
