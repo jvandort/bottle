@@ -14,6 +14,7 @@ import pty
 import secrets
 import select
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -214,6 +215,37 @@ class TtyTest(unittest.TestCase):
                 resized = True
         os.waitpid(pid, 0)
         self.assertEqual(output.replace(b"\r", b"").split(b"\n")[:2], [b"40 100", b"30 90"])
+
+    def test_ctrl_c_typed_interrupts_the_command(self) -> None:
+        pid, terminal = pty.fork()
+        if pid == 0:  # the child, on the pty: never back into the test runner
+            try:
+                script = "trap 'echo interrupted; exit 3' INT; echo ready; while :; do sleep 0.1; done"
+                argv = krun.exec_command(machine, ["sh", "-c", script], tty=True)
+                os.execvp(argv[0], argv)
+            finally:
+                os._exit(127)
+        output = b""
+        typed = False
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and b"interrupted" not in output:
+            ready, _, _ = select.select([terminal], [], [], 1)
+            if ready:
+                try:
+                    chunk = os.read(terminal, 1024)
+                except OSError:  # the command ended
+                    break
+                if not chunk:
+                    break
+                output += chunk
+            if not typed and b"ready" in output:
+                os.write(terminal, b"\x03")  # raw here: the terminal in the machine makes it SIGINT
+                typed = True
+        if b"interrupted" not in output:
+            os.kill(pid, signal.SIGTERM)
+        _, status = os.waitpid(pid, 0)
+        self.assertIn(b"interrupted", output)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 3)
 
 
 class MountTest(unittest.TestCase):

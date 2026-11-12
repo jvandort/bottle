@@ -328,6 +328,40 @@ fn gives_the_command_this_terminal_raw_and_sized_and_sets_it_back() {
 }
 
 #[test]
+fn ctrl_c_typed_interrupts_the_command() {
+    let agent = Agent::start();
+    let (master, slave) = terminal(30, 100);
+    let mut command = agent.exec(&[
+        "-t",
+        "sh",
+        "-c",
+        "trap 'echo interrupted; exit 3' INT; echo ready; while :; do sleep 0.1; done",
+    ]);
+    let end = |fd: &OwnedFd| Stdio::from(fd.try_clone().unwrap());
+    command
+        .stdin(end(&slave))
+        .stdout(end(&slave))
+        .stderr(end(&slave));
+    // SAFETY: setsid and TIOCSCTTY between fork and exec: the terminal is bottle-cli's own.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let mut screen = File::from(master.try_clone().unwrap());
+    let mut seen = Vec::new();
+    read_until(&mut screen, &mut seen, "ready");
+    // Raw here, so it's the command's terminal that makes it SIGINT.
+    screen.write_all(b"\x03").unwrap();
+    read_until(&mut screen, &mut seen, "interrupted");
+    assert_eq!(child.wait().unwrap().code(), Some(3));
+}
+
+#[test]
 fn gives_a_terminal_even_when_stdin_isnt_one() {
     let agent = Agent::start();
     let out = agent.output(&["-t", "sh", "-c", "test -t 1 && stty size"], b"");
