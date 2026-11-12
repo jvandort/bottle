@@ -226,7 +226,8 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
                    [engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)], broker.CONTEXT + durable(mounts(thread)))
         return
     # Checked again each time: a feature can have changed since the spec was saved.
-    spec = check_repo_spec(engine.validate_spec(repo.spec() or DEFAULT_SPEC))
+    # Checked as saved: validating drops what bottle doesn't know.
+    spec = engine.validate_spec(check_repo_spec(repo.spec() or DEFAULT_SPEC))
     repo.remember()
     if repo.spec() != spec:
         repo.save_spec(spec)
@@ -247,7 +248,7 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
             ssh = {SIDECAR_HOST: thread.sidecar_bottle}
     try:
         # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
-        engine.new(thread.bottle, spec | {"thread": thread.name}, repos_,
+        engine.new(thread.bottle, spec | {"labels": {"thread": thread.name}}, repos_,
                    advice(thread.name, repo.name, mounts(thread), told), runner_of(repo, thread), ssh)
     except BaseException:
         if thread.sidecar is not None:

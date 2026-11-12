@@ -340,7 +340,8 @@ Its VM gets every core of the machine it runs on, up to 16.
 A spec can also give the bottle `permissions`, what bottled lets it do beyond
 what every bottle may: `message-any`, to send messages to a running bottle by
 its name rather than only answer one; and `list-bottles`, to list the other
-running bottles, each one's name, repo and `thread` (which a spec can name).
+running bottles, each one's name, repo and `labels` (which a spec can give,
+`{"labels": {"thread": "fix-it"}}`; folio's say which thread a bottle is for).
 bottled checks the bottle's spec, never the bottle; the bottle sees its
 permissions as `BOTTLE_PERMISSIONS`, so its tools know what to offer. Folio
 never gives a thread's bottle permissions.

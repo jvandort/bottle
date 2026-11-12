@@ -54,8 +54,10 @@ class CanonicalTest(unittest.TestCase):
             ({"memory": "lots"}, "invalid memory"),
             ({"memory": "2G", "permissions": "message-any"}, "permissions is a list"),
             ({"memory": "2G", "permissions": ["root"]}, "unknown permission root; there are list-bottles, message-any"),
-            ({"memory": "2G", "thread": "Fix It"}, "invalid thread"),
-            ({"memory": "2G", "thread": 1}, "invalid thread"),
+            ({"memory": "2G", "labels": ["thread"]}, "labels map names to values"),
+            ({"memory": "2G", "labels": {"Thread": "x"}}, "invalid label 'Thread'"),
+            ({"memory": "2G", "labels": {"thread": 1}}, "label thread's value must be printable text"),
+            ({"memory": "2G", "labels": {"thread": "a\nb"}}, "label thread's value must be printable text"),
         ):
             with self.subTest(data), self.assertRaisesRegex(BottleError, message):
                 specs.canonical(data)
@@ -66,9 +68,13 @@ class CanonicalTest(unittest.TestCase):
         self.assertNotIn("permissions", specs.canonical({"memory": "2G", "permissions": []}))
         self.assertEqual(specs.canonical(spec), spec)
 
-    def test_a_thread(self) -> None:
-        self.assertEqual(specs.canonical({"memory": "2G", "thread": "fix-it"})["thread"], "fix-it")
-        self.assertNotIn("thread", specs.canonical({"memory": "2G"}))
+    def test_labels_its_creators_and_one_saved_before_them(self) -> None:
+        spec = specs.canonical({"memory": "2G", "labels": {"thread": "fix-it", "repo": "app"}})
+        self.assertEqual(spec["labels"], {"repo": "app", "thread": "fix-it"})
+        self.assertNotIn("labels", specs.canonical({"memory": "2G"}))
+        self.assertEqual(specs.labels(spec), {"repo": "app", "thread": "fix-it"})
+        self.assertEqual(specs.labels({"memory": "2G", "thread": "old"}), {"thread": "old"})
+        self.assertEqual(specs.labels({"memory": "2G"}), {})
 
     def test_a_disk_in_whole_g_or_none(self) -> None:
         spec = specs.canonical({"memory": "2G", "disk": "50g"})

@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from bottle import auth, ca, cache, decider as decider_, egress, link, messages, ssh
+from bottle import auth, ca, cache, decider as decider_, egress, link, messages, specs, ssh
 from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log, read_json, write_json
@@ -347,14 +347,14 @@ class Controller:
         log.info("%s: delivered a message from %s", target, sender)
 
     async def peers(self, asker: str) -> list[dict]:
-        """The running bottles but `asker`, for a bottle with list-bottles: each one's name, repo and thread."""
+        """The running bottles but `asker`, for a bottle with list-bottles: each one's name, repo and labels."""
         from bottle import bottles  # bottles imports this module
 
         registry = await asyncio.to_thread(bottles.load)
         if "list-bottles" not in _permissions(registry.get(asker)):
             raise ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
         return [{"name": name, "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
-                 "thread": bottle.spec.get("thread")}
+                 "labels": specs.labels(bottle.spec)}
                 for name, bottle in sorted(registry.items()) if name != asker and self.running(name)]
 
 

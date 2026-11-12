@@ -28,8 +28,8 @@ DEFAULT_SPEC = {"features": list(REQUIRED_FEATURES), "memory": DEFAULT_MEMORY}
 # Under folio's home, the repos folio owns (owned_path).
 OWNED = "repos"
 # What a repo's spec can't say: a thread's bottle never has permissions, and
-# folio names its thread itself.
-NOT_IN_A_REPOS_SPEC = ("permissions", "thread")
+# folio labels each with its thread itself.
+NOT_IN_A_REPOS_SPEC = ("permissions", "labels", "thread")
 
 
 def check_repo_spec(spec: dict, sidecar: bool = False) -> dict:
@@ -38,7 +38,7 @@ def check_repo_spec(spec: dict, sidecar: bool = False) -> dict:
     given = [key for key in NOT_IN_A_REPOS_SPEC if key in spec]
     if given:
         raise FolioError(f"a repo's spec can't give {' or '.join(given)}: its threads' bottles never have permissions, "
-                         "and each one's thread is its own")
+                         "and each one's labels are folio's, saying which thread it is")
     there = {feature.split(":", 1)[0] for feature in spec.get("features", [])}
     for feature, why in REQUIRED_FEATURES.items():
         if feature not in there and not sidecar:

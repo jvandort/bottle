@@ -3,10 +3,11 @@
     {"features": ["claude", "jvm:version=25", "tools"], "memory": "8G"}
 
 A spec can also give the bottle permissions, what bottled lets it do beyond
-what every bottle may (see PERMISSIONS), and the thread it's for, which
-bottles with list-bottles see beside its name:
+what every bottle may (see PERMISSIONS), and labels: its creator's names for
+it, which bottle doesn't read (folio's say which thread it's for), shown with
+its machine (`bottle-cli ls`) and to bottles with list-bottles:
 
-    {"features": ["claude"], "memory": "4G", "permissions": ["message-any"], "thread": "fix-it"}
+    {"features": ["claude"], "memory": "4G", "permissions": ["message-any"], "labels": {"thread": "fix-it"}}
 
 Bottle keeps no specs. Whoever creates a bottle owns the file and passes it to
 `bottle new --spec`; `bottle spec validate` checks one the same way, and gives
@@ -25,17 +26,19 @@ from pathlib import Path
 
 from bottle.errors import BottleError
 
-KEYS = ("features", "memory", "disk", "permissions", "thread")
+KEYS = ("features", "memory", "disk", "permissions", "labels")
 # What a bottle may be allowed beyond answering messages (see messages.py), and
 # what its agent is told it can do with each (bottles.context).
 PERMISSIONS = {
     "list-bottles": "You can list the other running bottles: `GET http://bottle.host/bottles` "
-                    "gives each one's name, repo and thread.",
+                    "gives each one's name, repo and labels (its creator's: a folio thread's says which thread).",
     "message-any": "You can send a message to any running bottle by its name, not only answer one: "
                    'its session gets it as an event from you. `POST http://bottle.host/messages` '
                    'with `{"to": NAME, "text": ...}`.',
 }
-THREAD_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# A label's name, and its value: anything printable, as long as a line.
+LABEL_PATTERN = re.compile(r"[a-z][a-z0-9.-]*")
+LABEL_VALUE_MAX = 200
 MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
 # The disk a bottle writes to, in whole G: bottle-cli sizes it in GiB.
 DISK_PATTERN = re.compile(r"([1-9][0-9]*)G", re.IGNORECASE)
@@ -97,12 +100,24 @@ def canonical(data: object, memory_mib: int | None = None, where: str = "this ma
                           f"there are {', '.join(PERMISSIONS)}")
     if permissions:
         spec["permissions"] = sorted(set(permissions))
-    thread = data.get("thread")
-    if thread is not None:
-        if not isinstance(thread, str) or not THREAD_PATTERN.fullmatch(thread):
-            raise BottleError(f"invalid thread {thread!r}: lowercase words joined by '-', e.g. fix-it")
-        spec["thread"] = thread
+    given = data.get("labels", {})
+    if not isinstance(given, dict):
+        raise BottleError('labels map names to values, e.g. {"thread": "fix-it"}')
+    for name, value in given.items():
+        if not LABEL_PATTERN.fullmatch(name):
+            raise BottleError(f"invalid label {name!r}: lowercase letters, digits, '.' and '-', starting with a letter")
+        if not isinstance(value, str) or len(value) > LABEL_VALUE_MAX or not value.isprintable():
+            raise BottleError(f"label {name}'s value must be printable text, at most {LABEL_VALUE_MAX} characters")
+    if given:
+        spec["labels"] = dict(sorted(given.items()))
     return spec
+
+
+def labels(spec: dict) -> dict[str, str]:
+    """A spec's labels; one saved before labels, a thread's, as the label thread."""
+    if "labels" in spec:
+        return dict(spec["labels"])
+    return {"thread": spec["thread"]} if spec.get("thread") else {}
 
 
 def canonical_features(specs: list[str]) -> tuple[str, ...]:

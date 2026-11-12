@@ -300,8 +300,9 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(504, (await self.refused("broker", "app-1a2b3c4d-foo")).status)
 
     async def test_list_bottles_shows_the_other_running_bottles_without_host_paths(self) -> None:
-        self.assertEqual([{"name": "app-1a2b3c4d-bar", "repo": "app", "thread": "bar"},
-                          {"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}],
+        # Their labels; one recorded before labels, its thread as the label thread.
+        self.assertEqual([{"name": "app-1a2b3c4d-bar", "repo": "app", "labels": {"thread": "bar"}},
+                          {"name": "app-1a2b3c4d-foo", "repo": "app", "labels": {"thread": "foo"}}],
                          await self.daemon.controller.peers("broker"))
 
     async def test_listing_bottles_needs_list_bottles(self) -> None:

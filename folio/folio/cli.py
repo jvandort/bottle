@@ -371,7 +371,7 @@ def _configure(args: argparse.Namespace) -> int:
         return 0
     if _changes_spec(args):
         # Checked before anything's saved, the runner included.
-        spec = repos.check_repo_spec(engine.validate_spec(_changed(dict(repo.spec() or repos.DEFAULT_SPEC), args)))
+        spec = engine.validate_spec(repos.check_repo_spec(_changed(dict(repo.spec() or repos.DEFAULT_SPEC), args)))
     if args.runner is not None or args.no_runner:
         repo.save_runner(args.runner)
     if _changes_spec(args):

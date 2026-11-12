@@ -59,7 +59,7 @@ where it came from: bottled knows which bottle is asking, and the event's from
 is its address, issued to the recipient.
 
 With the list-bottles permission, GET http://bottle.host/bottles lists the
-other running bottles, as JSON: each one's name, repo and thread.
+other running bottles, as JSON: each one's name, repo and labels.
 """
 
 import asyncio

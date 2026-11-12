@@ -46,7 +46,7 @@ class NewTest(FolioTestCase):
     def test_the_repos_spec_is_checked_and_saved_first(self) -> None:
         self.ok("new", "fix-it")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
-        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G", "thread": "fix-it"})
+        self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G", "labels": {"thread": "fix-it"}})
 
     def test_refuses_a_bad_name_or_a_taken_one(self) -> None:
         for name in ("Fix", "fix_it", "fix-", "fix--it", "fix/it"):
@@ -313,8 +313,8 @@ class ConfigureTest(FolioTestCase):
         self.ok("configure", "--feature", "claude")
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
-        self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "thread": "fix-it"})
-        self.assertNotIn("thread", repos.current(self.repo).spec())
+        self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "labels": {"thread": "fix-it"}})
+        self.assertNotIn("labels", repos.current(self.repo).spec())
 
     def test_a_threads_context_says_what_a_pause_keeps(self) -> None:
         self.ok("new", "fix-it")
@@ -326,7 +326,7 @@ class ConfigureTest(FolioTestCase):
         self.assertIn("could resume this thread from them alone", bottle["context"])
 
     def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
-        for key, value in (("permissions", ["message-any"]), ("thread", "other")):
+        for key, value in (("permissions", ["message-any"]), ("labels", {"thread": "other"}), ("thread", "other")):
             with self.subTest(key):
                 repos.current(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
                 for args in (("new", f"t-{key}"), ("configure", "--memory", "4G")):

@@ -426,7 +426,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),
         # What bottle-cli's exec and shell use unless told, and what its ls shows.
-        user=USER, workdir=bottle.workdir, labels={"thread": bottle.spec["thread"]} if "thread" in bottle.spec else {},
+        user=USER, workdir=bottle.workdir, labels=specs.labels(bottle.spec),
     )
     _start_machine(bottle)
     verify_contract(bottle)
