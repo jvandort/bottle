@@ -51,6 +51,12 @@ class FakeSmolvm:
         self.started[name] = (decider, token)
         self.machines[name] = "running"
 
+    def rename(self, name, new):
+        self.calls.append("rename")
+        if self.machines.get(name) == "running":
+            raise BottleError(f"{name} is running: stop it first")
+        self.machines[new] = self.machines.pop(name)
+
     def stop(self, name):
         self.calls.append("stop")
         self.machines[name] = "stopped"
@@ -117,7 +123,7 @@ class FakeSmolvm:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runners.krun, ("create", "start", "stop", "delete", "state", "exec_", "exec_command")),
+            (bottles.runners.krun, ("create", "start", "stop", "rename", "delete", "state", "exec_", "exec_command")),
             (bottles.daemon, ("bind_decider", "release_egress")),
         ):
             for name in names:
@@ -224,6 +230,22 @@ class CreateTest(BottleTestCase):
         bottles.registry_path().write_text(json.dumps(registry))
         self.assertEqual(bottles.get("old").machine, f"bottle-{bottles.namespace()}old")
         self.assertNotEqual(bottle.machine, bottles.get("old").machine)
+
+    def test_a_bottle_made_before_has_its_machine_renamed_when_it_next_starts(self) -> None:
+        fake = self.fake()
+        self.create(name="old")
+        registry = json.loads(bottles.registry_path().read_text())
+        del registry["bottles"]["old"]["machine_name"]
+        bottles.registry_path().write_text(json.dumps(registry))
+        legacy = f"bottle-{bottles.namespace()}old"
+        fake.machines = {legacy: "running"}
+        bottles.ensure_running("old")  # running: its name stays
+        self.assertEqual(fake.machines, {legacy: "running"})
+        fake.machines[legacy] = "stopped"
+        bottle = bottles.ensure_running("old")
+        self.assertEqual(bottle.machine, f"{bottles.namespace()}old")
+        self.assertEqual(fake.machines, {bottle.machine: "running"})
+        self.assertEqual(bottles.get("old").machine_name, bottle.machine)
 
     def test_started_with_its_token_at_the_decider(self) -> None:
         fake = self.fake()

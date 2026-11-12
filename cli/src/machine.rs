@@ -7,6 +7,7 @@
 //!     bottle-cli machine start --name NAME [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
+//!     bottle-cli machine rename --name NAME --to NEW
 //!     bottle-cli machine ls [--json]
 //!     bottle-cli machine status --name NAME [--json]
 //!     bottle-cli machine exec --name NAME [-i] [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--]
@@ -89,12 +90,13 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         Some("start") => start(&args),
         Some("stop") => named(&args).and_then(|m| m.stop()),
         Some("delete") => delete(&args),
+        Some("rename") => rename(&args),
         Some("ls") => ls(&args),
         Some("status") => status(&args),
         Some("exec") => return exec(args),
         _ => {
             return crate::usage_error(
-                "machine needs create, start, stop, delete, ls, status or exec",
+                "machine needs create, start, stop, delete, rename, ls, status or exec",
             );
         }
     };
@@ -517,6 +519,30 @@ fn delete(args: &[String]) -> io::Result<()> {
     }
     let _ = fs::remove_file(machine.socket());
     fs::remove_dir_all(&machine.dir)
+}
+
+/// `machine rename`: a stopped machine, under another name; its disk, config and logs with it.
+fn rename(args: &[String]) -> io::Result<()> {
+    let (mut name, mut to) = (None, None);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--name" => name = args.next(),
+            "--to" => to = args.next(),
+            other_arg => return Err(other(format!("unknown option {other_arg}"))),
+        }
+    }
+    let machine = Machine::new(name.ok_or_else(|| other("no --name"))?)?;
+    let new = Machine::new(to.ok_or_else(|| other("no --to"))?)?;
+    machine.must_exist()?;
+    if machine.running() {
+        return Err(other(format!("{} is running: stop it first", machine.name)));
+    }
+    if new.exists() || new.dir.exists() {
+        return Err(other(format!("there's a machine {} already", new.name)));
+    }
+    let _ = fs::remove_file(machine.dir.join("pid"));
+    fs::rename(&machine.dir, &new.dir)
 }
 
 fn ls(args: &[String]) -> io::Result<()> {

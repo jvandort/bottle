@@ -70,6 +70,8 @@ def _run(op: str, args: dict):
             local.ensure_deciding()
         case "stop":
             local.stop(args["machine"])
+        case "rename":
+            local.rename(args["machine"], args["new"])
         case "running":
             return local.running()
         case "delete":

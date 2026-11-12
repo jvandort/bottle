@@ -104,6 +104,9 @@ class Runner(Protocol):
 
     def stop(self, machine: str) -> None: ...
 
+    def rename(self, machine: str, new: str) -> None:
+        """Rename a stopped machine."""
+
     def running(self) -> list[str]:
         """Every machine running there, bottles' or not (a builder, say)."""
 
@@ -182,6 +185,9 @@ class LocalRunner:
 
     def stop(self, machine: str) -> None:
         krun.stop(machine)
+
+    def rename(self, machine: str, new: str) -> None:
+        krun.rename(machine, new)
 
     def running(self) -> list[str]:
         return krun.running()
@@ -310,6 +316,9 @@ class RemoteRunner:
 
     def stop(self, machine: str) -> None:
         self._call("stop", machine=machine)
+
+    def rename(self, machine: str, new: str) -> None:
+        self._call("rename", machine=machine, new=new)
 
     def running(self) -> list[str]:
         return self._call("running")

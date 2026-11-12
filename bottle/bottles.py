@@ -736,6 +736,7 @@ def ensure_running(name: str) -> Bottle:
         raise BottleError(f"{bottle.name}'s machine is gone; `bottle delete {bottle.name}`, then `bottle new` again")
     if state != "running":
         runner.ensure_ready()
+        bottle = _named_machine(bottle, runner)
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
         verify_contract(bottle)
@@ -745,6 +746,21 @@ def ensure_running(name: str) -> Bottle:
         # Running, so its token is kept: the decider, if it had stopped, binds it again as it starts.
         runner.ensure_deciding()
     return bottle
+
+
+def _named_machine(bottle: Bottle, runner: runners.Runner) -> Bottle:
+    """`bottle`, its stopped machine renamed for it if it was made with bottle-'s prefix (see Bottle.machine)."""
+    if bottle.machine_name:
+        return bottle
+    named = replace(bottle, machine_name=f"{namespace()}{bottle.name}")
+    try:
+        runner.rename(bottle.machine, named.machine)
+    except BottleError as e:
+        log.warning("%s: its machine keeps its name %s (%s)", bottle.name, bottle.machine, e)
+        return bottle
+    _save(named)
+    log.info("%s: its machine %s is %s now", bottle.name, bottle.machine, named.machine)
+    return named
 
 
 def trust_egress_ca(bottle: Bottle) -> None:

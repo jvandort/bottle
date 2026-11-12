@@ -252,6 +252,15 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     let out = f.cli(&["shell", "m1"]);
     assert!(!out.status.success()); // not started for it: bottle starts bottles
     assert!(String::from_utf8_lossy(&out.stderr).contains("m1 isn't running"));
+    // Stopped, it can be renamed, all of it; running, it can't.
+    f.ok(&["machine", "rename", "--name", "m1", "--to", "m2"]);
+    assert!(
+        !f.cli(&["machine", "status", "--name", "m1"])
+            .status
+            .success()
+    );
+    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "stopped\n");
+    f.ok(&["machine", "rename", "--name", "m2", "--to", "m1"]);
     let disk = f.dir.join("home/krun/machines/m1/disk.ext4");
     let fsck = Command::new("e2fsck")
         .arg("-fn")

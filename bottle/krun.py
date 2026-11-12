@@ -83,6 +83,11 @@ def stop(name: str) -> None:
     _run("machine", "stop", "--name", name)
 
 
+def rename(name: str, new: str) -> None:
+    """Rename a stopped machine."""
+    _run("machine", "rename", "--name", name, "--to", new)
+
+
 def delete(name: str) -> None:
     """Delete a machine; a no-op if there's none."""
     if state(name) is not None:
