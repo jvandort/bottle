@@ -108,7 +108,7 @@ impl Fixture {
         fs::write(dir.join("store/host.ext4"), "").unwrap();
         fs::write(
             dir.join("store/host.json"),
-            r#"{"lowers":[],"env":{},"entrypoint":["sh","-c"],"cmd":["echo $GREETING > /run/ran; exec sleep 1000"],"labels":{}}"#,
+            r#"{"lowers":[],"env":{"GREETING":"the image's","IMAGE_ONLY":"from the image"},"entrypoint":["sh","-c"],"cmd":["echo $GREETING > /run/ran; exec sleep 1000"],"labels":{}}"#,
         )
         .unwrap();
         fs::create_dir_all(dir.join("share")).unwrap();
@@ -206,9 +206,10 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         ])
     };
     assert_eq!(
-        exec("cat /proc/sys/kernel/hostname; echo $GREETING; cat /mnt/share/f"),
-        "m1\nhello there\nshared\n"
+        exec("cat /proc/sys/kernel/hostname; echo $GREETING; echo $IMAGE_ONLY; cat /mnt/share/f"),
+        "m1\nhello there\nfrom the image\nshared\n"
     );
+    // The image's environment, the machine's -e over it.
     // What the image runs is running: its entrypoint and command, with the machine's env.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !f

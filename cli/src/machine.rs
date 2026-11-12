@@ -12,8 +12,8 @@
 //!                             COMMAND [ARG]...
 //!
 //! DISK is a stage's disk in a store (as `build` and `import` print them, the last): the image is
-//! it and the stages below it, and what it runs, its entrypoint and command, is started at each
-//! start, as smolvm starts a container's. Mounts are read-only, whatever they say. A machine is a directory,
+//! it and the stages below it; its environment is everything's in the machine, under -e's; and what
+//! it runs, its entrypoint and command, is started at each start, as smolvm starts a container's. Mounts are read-only, whatever they say. A machine is a directory,
 //! $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at most), and,
 //! while it runs, its pid, its agent's socket and its console's log. Started, it runs in the
 //! background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's arguments, to
@@ -378,7 +378,10 @@ fn create(args: &[String]) -> io::Result<()> {
     if machine.exists() {
         return Err(other(format!("there's a machine {} already", machine.name)));
     }
-    (config.image, config.run) = image_of(&image)?;
+    let (disks, image_env, run) = image_of(&image)?;
+    // The image's environment first: a machine's own -e overrides it.
+    config.env.splice(0..0, image_env);
+    (config.image, config.run) = (disks, run);
     let mke2fs = crate::mke2fs()?;
     fs::create_dir_all(&machine.dir)?;
     let made = (|| {
@@ -394,16 +397,19 @@ fn create(args: &[String]) -> io::Result<()> {
     made
 }
 
-/// The disks of the image whose top stage's disk is `disk`, bottom first, and what it runs (its
-/// entrypoint, then its command): its store says, if it's in one; else it's an image of one stage
-/// that runs nothing.
-fn image_of(disk: &Path) -> io::Result<(Vec<PathBuf>, Option<Vec<String>>)> {
+/// An image's disks, environment and what it runs (see image_of).
+type Image = (Vec<PathBuf>, Vec<(String, String)>, Option<Vec<String>>);
+
+/// The disks of the image whose top stage's disk is `disk`, bottom first, its environment, and what
+/// it runs (its entrypoint, then its command): its store says, if it's in one; else it's an image
+/// of one stage, with no environment, that runs nothing.
+fn image_of(disk: &Path) -> io::Result<Image> {
     let disk = fs::canonicalize(disk).map_err(|e| other(format!("{}: {e}", disk.display())))?;
     let (Some(dir), Some(name)) = (disk.parent(), disk.file_stem().and_then(|s| s.to_str())) else {
-        return Ok((vec![disk], None));
+        return Ok((vec![disk], Vec::new(), None));
     };
     if !dir.join(format!("{name}.json")).exists() {
-        return Ok((vec![disk], None));
+        return Ok((vec![disk], Vec::new(), None));
     }
     let store = Store {
         dir: dir.to_path_buf(),
@@ -416,7 +422,11 @@ fn image_of(disk: &Path) -> io::Result<(Vec<PathBuf>, Option<Vec<String>>)> {
         .flatten()
         .chain(stage.cmd.into_iter().flatten())
         .collect();
-    Ok((store.disks(name)?, Some(run).filter(|r| !r.is_empty())))
+    Ok((
+        store.disks(name)?,
+        stage.env.into_iter().collect(),
+        Some(run).filter(|r| !r.is_empty()),
+    ))
 }
 
 /// `machine start --name NAME [--decider ADDRESS:PORT | --net-direct]`: the network is the start's,
