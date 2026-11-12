@@ -37,6 +37,11 @@ pub struct Config {
     pub host: String,
 }
 
+/// Brings loopback up: everything has it, network or not.
+pub fn loopback_up() -> io::Result<()> {
+    link_up(&mut Netlink::open(libc::NETLINK_ROUTE)?, index("lo")?)
+}
+
 /// Sets the network up, and serves it, on threads of its own, for as long as this process runs.
 pub fn start(config: &Config) -> io::Result<()> {
     let (address, prefix) = parse_address(&config.address)?;

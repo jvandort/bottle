@@ -9,5 +9,6 @@ publish.workspace = true
 bottle-agent-client.workspace = true
 bottle-disk.workspace = true
 libc.workspace = true
+libkrun.workspace = true
 serde.workspace = true
 serde_json.workspace = true

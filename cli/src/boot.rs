@@ -14,12 +14,12 @@
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
 //! it's up.
 //!
-//! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
-//! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
-//! this program, else `bottle-agent` beside it), which stacks the disks and moves into them (bottle-agent init). libkrun is
-//! $BOTTLE_LIBKRUN, else beside this program, else wherever the dynamic loader finds it, and
-//! libkrunfw, the kernel, is found beside it; on macOS this program needs the hypervisor
-//! entitlement (cli/hypervisor.entitlements).
+//! libkrun is linked in. The VM's first root is in memory: the mount points the agent needs, and
+//! the agent itself, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
+//! this program, else `bottle-agent` beside it), as /init.krun, the init the kernel starts: it
+//! mounts what an init does, stacks the disks and moves into them (bottle-agent init). The kernel
+//! is $BOTTLE_KERNEL, else `kernel` beside this program, else libkrunfw, loaded by libkrun. On
+//! macOS this program needs the hypervisor entitlement (cli/hypervisor.entitlements).
 
 use std::env;
 use std::ffi::{CString, c_char};
@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::FAILED;
-use crate::krun::{self, Krun, check};
 
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
@@ -42,10 +41,44 @@ const AGENT_PORT: u32 = 1024;
 /// What the agent runs commands with, before a command's own environment.
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+const DISK_FORMAT_RAW: u32 = 0;
+const KERNEL_FORMAT_RAW: u32 = 0;
+const FREE_PAGE_REPORTING_MODE_REPLACE: u32 = 1;
+/// The tag of the first root's virtio-fs device.
+const ROOT_TAG: &std::ffi::CStr = c"/dev/root";
+
+/// `ret`, a libkrun return value, as a result: what failed, and its errno.
+fn check(what: &str, ret: i32) -> io::Result<i32> {
+    if ret < 0 {
+        Err(io::Error::other(format!(
+            "{what}: {}",
+            io::Error::from_raw_os_error(-ret)
+        )))
+    } else {
+        Ok(ret)
+    }
+}
+
+/// The kernel the VM boots, an arm64 Image: $BOTTLE_KERNEL, else `kernel` beside this program
+/// (see `cargo xtask dist`). Without one, libkrun loads libkrunfw, as it would anyway (on Linux,
+/// the distribution's).
+fn kernel() -> io::Result<Option<CString>> {
+    let path = match env::var_os("BOTTLE_KERNEL") {
+        Some(path) => PathBuf::from(path),
+        None => env::current_exe()?.with_file_name("kernel"),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    CString::new(path.as_os_str().as_encoded_bytes())
+        .map(Some)
+        .map_err(|_| io::Error::other("a NUL in the kernel's path"))
+}
+
 /// The bottle's environment and mounts, for the agent, in the first root.
 const CONFIG: &std::ffi::CStr = c"bottle-init.json";
 
-/// The mount points libkrun's init and the agent need in the first root, which is read-only.
+/// The mount points the agent needs in the first root, which is read-only.
 const MOUNT_POINTS: [&std::ffi::CStr; 4] = [c"dev", c"proc", c"sys", c"run"];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -191,14 +224,11 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
-    let libkrun = krun::locate();
-    #[cfg(target_os = "macos")]
-    libkrunfw_beside(&libkrun)?;
     let agent = guest_agent()?;
+    let kernel = kernel()?;
     let mke2fs = crate::mke2fs()?;
     bottle_disk::mke2fs::empty(&mke2fs, &args.upper, args.size_gib << 30)
         .map_err(|e| io::Error::other(format!("making {}: {e}", args.upper.display())))?;
-    let krun = Krun::load(&libkrun)?;
 
     let c = |s: &str| CString::new(s).map_err(|_| io::Error::other(format!("{s:?}: a NUL")));
     let path = |p: &Path| -> io::Result<CString> {
@@ -282,35 +312,32 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             .ok()
             .and_then(|l| l.parse().ok())
             .unwrap_or(1);
-        (krun.set_log_level)(level);
-        let ctx = check("creating libkrun's context", (krun.create_ctx)())? as u32;
+        krun::krun_set_log_level(level);
+        let ctx = check("creating libkrun's context", krun::krun_create_ctx())? as u32;
         check(
             "setting cpus and memory",
-            (krun.set_vm_config)(ctx, args.cpus, args.mem_mib),
+            krun::krun_set_vm_config(ctx, args.cpus, args.mem_mib),
         )?;
         // Memory the guest frees goes back to the host, really, on macOS too.
         check(
             "setting free page reporting",
-            (krun.set_balloon_free_page_reporting_mode)(
-                ctx,
-                krun::FREE_PAGE_REPORTING_MODE_REPLACE,
-            ),
+            krun::krun_set_balloon_free_page_reporting_mode(ctx, FREE_PAGE_REPORTING_MODE_REPLACE),
         )?;
         // vsock for the agent alone: no TSI, which would give the guest sockets of the host's.
         check(
             "disabling the implicit vsock",
-            (krun.disable_implicit_vsock)(ctx),
+            krun::krun_disable_implicit_vsock(ctx),
         )?;
-        check("adding vsock", (krun.add_vsock)(ctx, 0))?;
+        check("adding vsock", krun::krun_add_vsock(ctx, 0))?;
         check(
             "adding the agent's port",
-            (krun.add_vsock_port2)(ctx, AGENT_PORT, socket.as_ptr(), true),
+            krun::krun_add_vsock_port2(ctx, AGENT_PORT, socket.as_ptr(), true),
         )?;
         if let Some(net_socket) = &net_socket {
             // The guest connects; libkrun connects here for it.
             check(
                 "adding the network's port",
-                (krun.add_vsock_port2)(
+                krun::krun_add_vsock_port2(
                     ctx,
                     bottle_agent_client::net::PORT,
                     net_socket.as_ptr(),
@@ -318,23 +345,23 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
                 ),
             )?;
         }
-        // The first root: no host directory, read-only, libkrun's init added to it by libkrun.
+        // The first root: no host directory, read-only.
         check(
             "adding the root",
-            (krun.add_virtiofs3)(ctx, krun::ROOT_TAG.as_ptr(), std::ptr::null(), 0, true),
+            krun::krun_add_virtiofs3(ctx, ROOT_TAG.as_ptr(), std::ptr::null(), 0, true),
         )?;
         for dir in MOUNT_POINTS {
             check(
                 &format!("adding /{}", dir.to_string_lossy()),
-                (krun.fs_add_overlay_dir)(ctx, krun::ROOT_TAG.as_ptr(), dir.as_ptr(), 0o040755),
+                krun::krun_fs_add_overlay_dir(ctx, ROOT_TAG.as_ptr(), dir.as_ptr(), 0o040755),
             )?;
         }
         check(
             "adding the agent",
-            (krun.fs_add_overlay_file)(
+            krun::krun_fs_add_overlay_file(
                 ctx,
-                krun::ROOT_TAG.as_ptr(),
-                c"bottle-agent".as_ptr(),
+                ROOT_TAG.as_ptr(),
+                c"init.krun".as_ptr(),
                 agent.as_ptr(),
                 agent.len(),
                 0o100755,
@@ -343,9 +370,9 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         )?;
         check(
             "adding the bottle's config",
-            (krun.fs_add_overlay_file)(
+            krun::krun_fs_add_overlay_file(
                 ctx,
-                krun::ROOT_TAG.as_ptr(),
+                ROOT_TAG.as_ptr(),
                 CONFIG.as_ptr(),
                 config.as_ptr(),
                 config.len(),
@@ -356,67 +383,44 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         for (tag, source) in &mounts {
             check(
                 "adding a mount",
-                (krun.add_virtiofs3)(ctx, tag.as_ptr(), source.as_ptr(), 0, true),
+                krun::krun_add_virtiofs3(ctx, tag.as_ptr(), source.as_ptr(), 0, true),
             )?;
         }
         for (id, disk) in ids.iter().zip(&disks) {
             check(
                 "adding a stage disk",
-                (krun.add_disk2)(ctx, id.as_ptr(), disk.as_ptr(), krun::DISK_FORMAT_RAW, true),
+                krun::krun_add_disk2(ctx, id.as_ptr(), disk.as_ptr(), DISK_FORMAT_RAW, true),
             )?;
         }
         check(
             "adding the bottle's disk",
-            (krun.add_disk2)(
-                ctx,
-                c"rw".as_ptr(),
-                upper.as_ptr(),
-                krun::DISK_FORMAT_RAW,
-                false,
-            ),
+            krun::krun_add_disk2(ctx, c"rw".as_ptr(), upper.as_ptr(), DISK_FORMAT_RAW, false),
         )?;
         check(
             "setting what the VM runs",
-            (krun.set_exec)(ctx, c"/bottle-agent".as_ptr(), argv.as_ptr(), envp.as_ptr()),
+            krun::krun_set_exec(ctx, c"/init.krun".as_ptr(), argv.as_ptr(), envp.as_ptr()),
         )?;
         if let Some(console) = &console {
             check(
                 "setting the console",
-                (krun.set_console_output)(ctx, console.as_ptr()),
+                krun::krun_set_console_output(ctx, console.as_ptr()),
             )?;
         }
-        check("starting the VM", (krun.start_enter)(ctx))?;
+        if let Some(kernel) = &kernel {
+            check(
+                "setting the kernel",
+                krun::krun_set_kernel(
+                    ctx,
+                    kernel.as_ptr(),
+                    KERNEL_FORMAT_RAW,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                ),
+            )?;
+        }
+        check("starting the VM", krun::krun_start_enter(ctx))?;
     }
     Err(io::Error::other("libkrun returned from starting the VM"))
-}
-
-/// Makes sure libkrun finds libkrunfw beside it, when it's there. libkrun loads it by its name
-/// alone, which macOS looks for only on DYLD_LIBRARY_PATH: read once, as a program starts, and
-/// dropped on the way through protected programs, /bin/bash among them. So this program starts
-/// again, with libkrun's directory first on it, unless it's there already.
-#[cfg(target_os = "macos")]
-fn libkrunfw_beside(libkrun: &Path) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let Some(dir) = libkrun.parent().filter(|d| !d.as_os_str().is_empty()) else {
-        return Ok(());
-    };
-    if !dir.join("libkrunfw.5.dylib").exists() {
-        return Ok(());
-    }
-    let current = env::var_os("DYLD_LIBRARY_PATH").unwrap_or_default();
-    if env::split_paths(&current).any(|p| p == dir) {
-        return Ok(());
-    }
-    let paths = std::iter::once(dir.to_path_buf()).chain(env::split_paths(&current));
-    let path = env::join_paths(paths).map_err(io::Error::other)?;
-    let err = std::process::Command::new(env::current_exe()?)
-        .args(env::args_os().skip(1))
-        .env("DYLD_LIBRARY_PATH", path)
-        .exec();
-    Err(io::Error::other(format!(
-        "starting again for libkrunfw: {err}"
-    )))
 }
 
 /// The bottle's address, on an interface of its own with nothing behind it: what leaves it is the

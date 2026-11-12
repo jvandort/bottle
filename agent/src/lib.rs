@@ -85,7 +85,7 @@ fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()>
             };
             let _ = send(exit);
             conn.shutdown_write();
-            std::process::exit(0);
+            end(0);
         }
         Some(ToGuest::Start(start)) => start,
         Some(other) => return refuse(&conn, incoming, format!("expected a Start, got {other:?}")),
@@ -122,6 +122,21 @@ fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()>
     let _ = feeder.join();
     drop(running.pidfd);
     sent
+}
+
+/// Whether this is the VM's init (see main): then its end is the VM's.
+pub static BOOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ends this process, with `code`; as the VM's init, the VM, powered off, everything synced.
+pub fn end(code: i32) -> ! {
+    if BOOTED.load(std::sync::atomic::Ordering::Relaxed) {
+        // SAFETY: sync, then reboot, which doesn't return when it works.
+        unsafe {
+            libc::sync();
+            libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
+        }
+    }
+    std::process::exit(code)
 }
 
 /// How long what's running gets to end after SIGTERM, before SIGKILL.

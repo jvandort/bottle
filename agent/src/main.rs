@@ -1,7 +1,11 @@
 //! bottle-agent: runs commands for the host, listening on a vsock port in a VM (--vsock PORT), or
-//! on a unix socket (--unix PATH) to try it out of one. As `bottle-agent init`, run by libkrun's
-//! init, it first stacks the bottle's disks into its root and moves into it (see init.rs). As
-//! `bottle-agent unpack`, run through it, it extracts a tar into the bottle (see unpack.rs).
+//! on a unix socket (--unix PATH) to try it out of one. As `bottle-agent init` it first stacks the
+//! bottle's disks into its root and moves into it (see init.rs). As `bottle-agent unpack`, run
+//! through it, it extracts a tar into the bottle (see unpack.rs).
+//!
+//! In a VM it's the init the kernel starts, as /init.krun (where libkrun's own init would be):
+//! then it mounts what an init mounts before anything, and powers the VM off when it's done,
+//! rather than exit, which would panic the kernel.
 
 use std::process::ExitCode;
 
@@ -10,6 +14,24 @@ use bottle_agent::reaper::Reaper;
 use bottle_agent::socket::Listener;
 
 fn main() -> ExitCode {
+    let booted = std::env::args()
+        .next()
+        .is_some_and(|a| a.ends_with("init.krun"));
+    if booted {
+        bottle_agent::BOOTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = init::early() {
+            eprintln!("bottle-agent: {e}");
+            bottle_agent::end(1);
+        }
+    }
+    let code = run();
+    if booted {
+        bottle_agent::end(1);
+    }
+    code
+}
+
+fn run() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("unpack") {
         return match bottle_agent::unpack::main(&args[1..]) {

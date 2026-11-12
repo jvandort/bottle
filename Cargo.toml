@@ -13,6 +13,9 @@ bottle-agent-proto = { path = "agent-proto" }
 bottle-disk = { path = "disk" }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
+# libkrun, linked: its C API, called directly. Its own init is ours instead (bottle-agent), so not
+# its init-blob; disks, not its network devices (bottle's network is the agent's, over vsock).
+libkrun = { git = "https://github.com/containers/libkrun", tag = "v1.19.8", default-features = false, features = ["blk"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

@@ -7,7 +7,6 @@ use std::process::ExitCode;
 mod boot;
 mod build;
 mod exec;
-mod krun;
 mod machine;
 
 /// A failure of bottle-cli's own, not a command's: as ssh has it.

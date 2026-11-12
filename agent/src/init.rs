@@ -89,6 +89,19 @@ pub fn parse(args: &mut Vec<String>) -> Result<Stack, String> {
     Ok(stack)
 }
 
+/// What an init does before anything, as the VM's (see main): /dev, /proc and /sys mounted,
+/// which finding the disks takes, and loopback up.
+pub fn early() -> io::Result<()> {
+    for (source, target, fstype) in [
+        ("devtmpfs", "/dev", "devtmpfs"),
+        ("proc", "/proc", "proc"),
+        ("sysfs", "/sys", "sysfs"),
+    ] {
+        mount(source, target, fstype, 0, "")?;
+    }
+    crate::net::loopback_up()
+}
+
 /// Stacks the disks and moves into them: after this, `/` is the bottle's root. Returns the
 /// bottle's own disk's root, open, for a Stop to make clean: unreachable by path once moved.
 pub fn stack(stack: &Stack) -> io::Result<fs::File> {

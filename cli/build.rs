@@ -7,6 +7,11 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    // On Linux, libkrun (linked in) loads libkrunfw, the kernel, beside this program, where the
+    // distribution has it.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo::rustc-link-arg-bins=-Wl,-rpath,$ORIGIN");
+    }
     println!("cargo::rustc-check-cfg=cfg(embedded_agent)");
     println!("cargo::rerun-if-env-changed=BOTTLE_EMBED_AGENT");
     let Some(agent) = env::var_os("BOTTLE_EMBED_AGENT") else {
