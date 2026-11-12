@@ -11,6 +11,33 @@ use std::path::Path;
 pub struct Socket(OwnedFd);
 
 impl Socket {
+    /// A stream to vsock `port` of `cid` (the host is VMADDR_CID_HOST).
+    pub fn connect_vsock(cid: u32, port: u32) -> io::Result<Socket> {
+        // SAFETY: socket and connect on a descriptor this creates; the address is zeroed, then
+        // filled in.
+        unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let fd = OwnedFd::from_raw_fd(fd);
+            let mut addr: libc::sockaddr_vm = zeroed();
+            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            addr.svm_port = port;
+            addr.svm_cid = cid;
+            let len = size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+            if libc::connect(
+                fd.as_raw_fd(),
+                (&addr as *const libc::sockaddr_vm).cast(),
+                len,
+            ) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Socket(fd))
+        }
+    }
+
     pub fn try_clone(&self) -> io::Result<Socket> {
         Ok(Socket(self.0.try_clone()?))
     }

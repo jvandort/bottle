@@ -3,12 +3,14 @@
 //!
 //!     bottle-cli boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB]
 //!                     [--hostname NAME] [--console FILE] [--env NAME=VALUE]...
-//!                     [--mount SOURCE:TARGET]...
+//!                     [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct]
 //!
 //! DISKs are the bottle's stage disks, bottom first, as `bottle-cli disk` prints them; UPPER is its
 //! own, read-write, made (--size GIB, sparse) if it isn't there. SOCKET is where the agent is
 //! reached, for `bottle-cli exec`. Everything run in it gets --env's variables; each --mount is a
-//! host directory, read-only at TARGET (virtio-fs).
+//! host directory, read-only at TARGET (virtio-fs). With --decider, the bottle has a network,
+//! every connection it makes asked of bottled's decider there, as the bottle whose token is
+//! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection allowed; without either, none.
 //!
 //! The VM's first root is libkrun's, in memory: libkrun's init, the mount points it and the agent
 //! need, and the agent, a Linux build of bottle-agent ($BOTTLE_GUEST_AGENT, else the one built into
@@ -29,7 +31,7 @@ use crate::krun::{self, Krun, check};
 
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
-                         [--mount SOURCE:TARGET]...";
+                         [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct]";
 
 /// The vsock port the agent listens on.
 const AGENT_PORT: u32 = 1024;
@@ -56,6 +58,52 @@ struct Args {
     env: Vec<(String, String)>,
     /// Host directories, read-only in the bottle at their targets.
     mounts: Vec<(PathBuf, String)>,
+    net: Net,
+}
+
+/// The bottle's network: every connection asked of a decider (bottled's), every connection
+/// allowed (for trying a machine out without bottled), or none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Net {
+    Decider(std::net::SocketAddr),
+    Direct,
+    None,
+}
+
+impl Net {
+    /// The network options of `boot`, `machine start` and `build`, taken from `arg` and what
+    /// follows it, if they're one: Some(Ok(())) if taken.
+    pub fn take(
+        &mut self,
+        arg: &str,
+        mut next: impl FnMut() -> Option<String>,
+    ) -> Option<Result<(), String>> {
+        match arg {
+            "--decider" => Some(
+                next()
+                    .ok_or("--decider needs ADDRESS:PORT".to_string())
+                    .and_then(|a| {
+                        a.parse()
+                            .map_err(|_| format!("--decider {a}: not ADDRESS:PORT"))
+                    })
+                    .map(|a| *self = Net::Decider(a)),
+            ),
+            "--net-direct" => {
+                *self = Net::Direct;
+                Some(Ok(()))
+            }
+            _ => None,
+        }
+    }
+
+    /// As options again, for a `boot` to come.
+    pub fn args(&self) -> Vec<String> {
+        match self {
+            Net::Decider(a) => vec!["--decider".into(), a.to_string()],
+            Net::Direct => vec!["--net-direct".into()],
+            Net::None => Vec::new(),
+        }
+    }
 }
 
 fn number<T: std::str::FromStr>(flag: &str, v: String) -> Result<T, String> {
@@ -67,8 +115,13 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut cpus, mut mem_mib, mut size_gib) = (2, 2048, 64);
     let (mut hostname, mut console) = (None, None);
     let (mut env, mut mounts) = (Vec::new(), Vec::new());
+    let mut net = Net::None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if let Some(taken) = net.take(&arg, || args.next()) {
+            taken?;
+            continue;
+        }
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
         match arg.as_str() {
             "--cpus" => cpus = number("--cpus", value("--cpus")?)?,
@@ -108,6 +161,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         console,
         env,
         mounts,
+        net,
     })
 }
 
@@ -158,13 +212,34 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     if let Some(name) = &args.hostname {
         init.extend(["--hostname".into(), name.clone()]);
     }
-    // The bottle's environment and mounts, as a file in the first root (see bottle-agent init).
-    let config = serde_json::json!({
+    // The bottle's network: served here, on a unix socket libkrun carries the agent's vsock
+    // connections to (see bottle-agent-client's net).
+    let net_socket = match &args.net {
+        Net::None => None,
+        net => {
+            let decider = match net {
+                Net::Decider(address) => Some(decider(*address)?),
+                _ => None,
+            };
+            let path = net_socket_beside(&args.socket);
+            let _ = fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path)
+                .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
+            std::thread::spawn(move || bottle_agent_client::net::serve(listener, decider));
+            Some(c(&path.to_string_lossy())?)
+        }
+    };
+    // The bottle's environment, mounts and network, as a file in the first root (see
+    // bottle-agent init).
+    let mut config = serde_json::json!({
         "env": args.env,
         "mounts": args.mounts.iter().enumerate()
             .map(|(i, (_, target))| serde_json::json!({"source": format!("m{i}"), "target": target}))
             .collect::<Vec<_>>(),
     });
+    if net_socket.is_some() {
+        config["net"] = serde_json::json!({"address": ADDRESS, "host": "vsock"});
+    }
     let config: &'static [u8] = Box::leak(config.to_string().into_bytes().into_boxed_slice());
     init.extend(["--config".into(), format!("/{}", CONFIG.to_string_lossy())]);
     init.extend(["--vsock".into(), AGENT_PORT.to_string()]);
@@ -215,6 +290,18 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             "adding the agent's port",
             (krun.add_vsock_port2)(ctx, AGENT_PORT, socket.as_ptr(), true),
         )?;
+        if let Some(net_socket) = &net_socket {
+            // The guest connects; libkrun connects here for it.
+            check(
+                "adding the network's port",
+                (krun.add_vsock_port2)(
+                    ctx,
+                    bottle_agent_client::net::PORT,
+                    net_socket.as_ptr(),
+                    false,
+                ),
+            )?;
+        }
         // The first root: no host directory, read-only, libkrun's init added to it by libkrun.
         check(
             "adding the root",
@@ -316,6 +403,48 @@ fn libkrunfw_beside(libkrun: &Path) -> io::Result<()> {
     )))
 }
 
+/// The bottle's address, on an interface of its own with nothing behind it: what leaves it is the
+/// agent's to carry (see bottle-agent's net). smolvm's, as the bottle had it.
+const ADDRESS: &str = "100.96.0.2/30";
+
+/// The unix socket the bottle's network is served on: beside the agent's, unless that makes too
+/// long a path for one (104 bytes, on macOS).
+fn net_socket_beside(socket: &Path) -> PathBuf {
+    let mut beside = socket.as_os_str().to_owned();
+    beside.push(".net");
+    if beside.len() < 100 {
+        return beside.into();
+    }
+    env::temp_dir().join(format!("bottle-net-{}.sock", std::process::id()))
+}
+
+/// The decider at `address`, asked as the bottle whose token is $BOTTLE_DECIDER_TOKEN (hex, not
+/// an argument, which anyone can read in ps), as a machine of its own, this launch.
+fn decider(address: std::net::SocketAddr) -> io::Result<bottle_agent_client::net::Decider> {
+    let hex = env::var("BOTTLE_DECIDER_TOKEN").map_err(|_| {
+        io::Error::other("--decider needs the bottle's token, in $BOTTLE_DECIDER_TOKEN")
+    })?;
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            hex.get(i..i + 2)
+                .and_then(|b| u8::from_str_radix(b, 16).ok())
+        })
+        .collect::<Option<_>>()
+        .unwrap_or_default();
+    let token: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| io::Error::other("$BOTTLE_DECIDER_TOKEN: not 32 bytes in hex"))?;
+    let mut machine = [0; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut machine))?;
+    Ok(bottle_agent_client::net::Decider {
+        address,
+        token,
+        machine,
+    })
+}
+
 /// Pointers to `strings`, then NULL, as C wants an array of strings.
 fn nul_terminated(strings: &[CString]) -> Vec<*const c_char> {
     strings
@@ -378,6 +507,19 @@ mod tests {
         assert_eq!((a.cpus, a.mem_mib, a.size_gib), (4, 4096, 8));
         assert_eq!(a.hostname.as_deref(), Some("b"));
         assert_eq!(a.console, None);
+    }
+
+    #[test]
+    fn the_network_is_a_decider_direct_or_none() {
+        assert_eq!(args("/s /rw").unwrap().net, Net::None);
+        assert_eq!(args("/s /rw --net-direct").unwrap().net, Net::Direct);
+        let a = args("/s --decider 127.0.0.1:47329 /rw").unwrap();
+        assert_eq!(a.net, Net::Decider("127.0.0.1:47329".parse().unwrap()));
+        assert_eq!(a.net.args(), ["--decider", "127.0.0.1:47329"]);
+        assert_eq!(
+            args("/s /rw --decider nope").unwrap_err(),
+            "--decider nope: not ADDRESS:PORT"
+        );
     }
 
     #[test]

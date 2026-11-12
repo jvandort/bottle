@@ -2,6 +2,7 @@
 //! bottle-agent-proto), and, as PID 1, reaps every orphan in the VM.
 
 pub mod init;
+pub mod net;
 pub mod reaper;
 pub mod socket;
 pub mod unpack;

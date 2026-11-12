@@ -45,6 +45,9 @@ pub struct Config {
     pub env: Vec<(String, String)>,
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    /// The bottle's network; none if None.
+    #[serde(default)]
+    pub net: Option<crate::net::Config>,
 }
 
 /// A directory of the host's, read-only in the bottle at `target`.
@@ -141,6 +144,9 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
     for (name, value) in &stack.config.env {
         // SAFETY: before any thread: the reaper and the connections start after init.
         unsafe { std::env::set_var(name, value) };
+    }
+    if let Some(net) = &stack.config.net {
+        crate::net::start(net).map_err(|e| failed("the network", e))?;
     }
     if let Some(name) = &stack.hostname {
         // SAFETY: sethostname reads `len` bytes of `name`.

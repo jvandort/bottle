@@ -1,12 +1,13 @@
 //! `bottle-cli build` and `bottle-cli import`: stages made in VMs, in a store (see bottle-disk's
 //! build): each prints the disks of the image it made, bottom first, as `boot` takes them.
 //!
-//!     bottle-cli build RECIPE STORE
-//!     bottle-cli import ARCHIVE STORE
+//!     bottle-cli build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]
 //!
 //! RECIPE is a JSON file, steps run on the stage it's `from` (see bottle_disk::build::Recipe);
 //! ARCHIVE an OCI layout archive of one image. Each VM is `bottle-cli boot`, this program again,
-//! its console kept for when it fails; libkrun and the rest are found as boot finds them.
+//! its console kept for when it fails; libkrun and the rest are found as boot finds them, and the
+//! network options are boot's: a build's VM has the network they say.
 
 use std::env;
 use std::fs;
@@ -19,37 +20,61 @@ use bottle_disk::Archive;
 use bottle_disk::build::{Launch, Recipe, Store, Vm, wait_for_agent};
 
 use crate::FAILED;
+use crate::boot::Net;
 
-pub const BUILD_USAGE: &str = "build RECIPE STORE";
-pub const IMPORT_USAGE: &str = "import ARCHIVE STORE";
+pub const BUILD_USAGE: &str = "build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]";
+pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]";
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";
 const MEM_MIB: &str = "4096";
 
-pub fn build(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let (Some(recipe), Some(store), None) = (args.next(), args.next(), args.next()) else {
-        return crate::usage_error("build needs RECIPE and STORE");
+/// Two arguments, and the network options (see boot's Net), in any order.
+fn two_and_net(
+    args: impl Iterator<Item = String>,
+    what: &str,
+) -> Result<(String, String, Net), ExitCode> {
+    let mut positional = Vec::new();
+    let mut net = Net::None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match net.take(&arg, || args.next()) {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(crate::usage_error(&e)),
+            None => positional.push(arg),
+        }
+    }
+    match <[String; 2]>::try_from(positional) {
+        Ok([a, b]) => Ok((a, b, net)),
+        Err(_) => Err(crate::usage_error(what)),
+    }
+}
+
+pub fn build(args: impl Iterator<Item = String>) -> ExitCode {
+    let (recipe, store, net) = match two_and_net(args, "build needs RECIPE and STORE") {
+        Ok(args) => args,
+        Err(code) => return code,
     };
     report((|| {
         let store = store_at(Path::new(&store))?;
         let json = fs::read(&recipe).map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
         let recipe: Recipe = serde_json::from_slice(&json)
             .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
-        let name = store.build(&recipe, &Boot)?;
+        let name = store.build(&recipe, &Boot { net })?;
         store.disks(&name)
     })())
 }
 
-pub fn import(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let (Some(archive), Some(store), None) = (args.next(), args.next(), args.next()) else {
-        return crate::usage_error("import needs ARCHIVE and STORE");
+pub fn import(args: impl Iterator<Item = String>) -> ExitCode {
+    let (archive, store, net) = match two_and_net(args, "import needs ARCHIVE and STORE") {
+        Ok(args) => args,
+        Err(code) => return code,
     };
     report((|| {
         let store = store_at(Path::new(&store))?;
         let archive = Archive::open(Path::new(&archive))?;
         let image = archive.image()?;
-        let name = store.import(&archive, &image, &Boot)?;
+        let name = store.import(&archive, &image, &Boot { net })?;
         store.disks(&name)
     })())
 }
@@ -78,7 +103,9 @@ fn report(disks: io::Result<Vec<PathBuf>>) -> ExitCode {
 }
 
 /// Boots build VMs with `bottle-cli boot`.
-struct Boot;
+struct Boot {
+    net: Net,
+}
 
 struct Booted {
     child: Child,
@@ -103,6 +130,7 @@ impl Launch for Boot {
             .arg(&socket)
             .arg(upper)
             .args(lowers)
+            .args(self.net.args())
             .args(["--cpus", CPUS, "--mem", MEM_MIB, "--console"])
             .arg(&console)
             .stdin(Stdio::null())

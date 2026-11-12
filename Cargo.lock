@@ -15,6 +15,7 @@ dependencies = [
 name = "bottle-agent"
 version = "0.1.0"
 dependencies = [
+ "bottle-agent-client",
  "bottle-agent-proto",
  "libc",
  "serde",

@@ -284,3 +284,175 @@ mod tests {
         assert!(ToGuest::read(&mut wire.as_slice()).is_err());
     }
 }
+
+/// What the agent and the host say to each other about the bottle's network: one stream per
+/// connection the bottle makes, or per name it looks up, from the agent to the host (over vsock,
+/// which libkrun carries to a unix socket of the VM's process).
+///
+/// A connection's stream starts with [`net::Request::Connect`]; then everything the bottle sends
+/// on it follows, as it is, from which the host takes the first bytes to decide by. The host
+/// answers one byte, [`net::CONNECTED`] or [`net::REFUSED`], and then, connected, what the far end
+/// sends. A lookup's stream is [`net::Request::Resolve`], answered by [`net::Resolved`].
+pub mod net {
+    use std::io::{self, Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// The vsock port the host takes the bottle's network on.
+    pub const PORT: u32 = 1025;
+
+    pub const CONNECTED: u8 = 0;
+    pub const REFUSED: u8 = 1;
+
+    const CONNECT: u8 = 1;
+    const RESOLVE: u8 = 2;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Request {
+        /// A connection to there.
+        Connect(SocketAddr),
+        /// The addresses of a name.
+        Resolve(String),
+    }
+
+    impl Request {
+        pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
+            let mut out = Vec::new();
+            match self {
+                Request::Connect(addr) => {
+                    out.push(CONNECT);
+                    put_ip(&mut out, addr.ip());
+                    out.extend_from_slice(&addr.port().to_be_bytes());
+                }
+                Request::Resolve(name) => {
+                    let len = u8::try_from(name.len()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "a name too long")
+                    })?;
+                    out.extend_from_slice(&[RESOLVE, len]);
+                    out.extend_from_slice(name.as_bytes());
+                }
+            }
+            w.write_all(&out)?;
+            w.flush()
+        }
+
+        pub fn read(r: &mut impl Read) -> io::Result<Request> {
+            match byte(r)? {
+                CONNECT => {
+                    let ip = get_ip(r)?;
+                    let mut port = [0; 2];
+                    r.read_exact(&mut port)?;
+                    Ok(Request::Connect(SocketAddr::new(
+                        ip,
+                        u16::from_be_bytes(port),
+                    )))
+                }
+                RESOLVE => {
+                    let mut name = vec![0; byte(r)? as usize];
+                    r.read_exact(&mut name)?;
+                    String::from_utf8(name)
+                        .map(Request::Resolve)
+                        .map_err(|_| super::invalid("a name that isn't UTF-8"))
+                }
+                other => Err(super::invalid(format!("a network request of kind {other}"))),
+            }
+        }
+    }
+
+    /// The answer to a [`Request::Resolve`]: the name's addresses, or None if it has none.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Resolved(pub Option<Vec<IpAddr>>);
+
+    impl Resolved {
+        pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
+            let mut out = Vec::new();
+            match &self.0 {
+                None => out.push(0xff),
+                Some(addrs) => {
+                    let addrs = &addrs[..addrs.len().min(32)];
+                    out.push(addrs.len() as u8);
+                    for &ip in addrs {
+                        put_ip(&mut out, ip);
+                    }
+                }
+            }
+            w.write_all(&out)?;
+            w.flush()
+        }
+
+        pub fn read(r: &mut impl Read) -> io::Result<Resolved> {
+            let count = byte(r)?;
+            if count == 0xff {
+                return Ok(Resolved(None));
+            }
+            (0..count)
+                .map(|_| get_ip(r))
+                .collect::<io::Result<_>>()
+                .map(|addrs| Resolved(Some(addrs)))
+        }
+    }
+
+    fn byte(r: &mut impl Read) -> io::Result<u8> {
+        let mut b = [0];
+        r.read_exact(&mut b)?;
+        Ok(b[0])
+    }
+
+    fn put_ip(out: &mut Vec<u8>, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => {
+                out.push(4);
+                out.extend_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                out.push(6);
+                out.extend_from_slice(&v6.octets());
+            }
+        }
+    }
+
+    fn get_ip(r: &mut impl Read) -> io::Result<IpAddr> {
+        match byte(r)? {
+            4 => {
+                let mut o = [0; 4];
+                r.read_exact(&mut o)?;
+                Ok(IpAddr::V4(Ipv4Addr::from(o)))
+            }
+            6 => {
+                let mut o = [0; 16];
+                r.read_exact(&mut o)?;
+                Ok(IpAddr::V6(Ipv6Addr::from(o)))
+            }
+            other => Err(super::invalid(format!("an address of family {other}"))),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn requests_and_answers_round_trip() {
+            for request in [
+                Request::Connect("93.184.216.34:443".parse().unwrap()),
+                Request::Connect("[2001:db8::1]:80".parse().unwrap()),
+                Request::Resolve("example.com".into()),
+            ] {
+                let mut wire = Vec::new();
+                request.write(&mut wire).unwrap();
+                assert_eq!(Request::read(&mut wire.as_slice()).unwrap(), request);
+            }
+            for answer in [
+                Resolved(None),
+                Resolved(Some(vec![])),
+                Resolved(Some(vec![
+                    "1.2.3.4".parse().unwrap(),
+                    "::1".parse().unwrap(),
+                ])),
+            ] {
+                let mut wire = Vec::new();
+                answer.write(&mut wire).unwrap();
+                assert_eq!(Resolved::read(&mut wire.as_slice()).unwrap(), answer);
+            }
+        }
+    }
+}

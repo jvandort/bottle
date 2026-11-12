@@ -3,7 +3,7 @@
 //!
 //!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
 //!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]...
-//!     bottle-cli machine start --name NAME
+//!     bottle-cli machine start --name NAME [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
 //!     bottle-cli machine ls [--json]
@@ -16,7 +16,9 @@
 //! $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at most), and,
 //! while it runs, its pid, its agent's socket and its console's log. Started, it runs in the
 //! background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's arguments, to
-//! try this without VMs); start returns once its agent answers. A machine is "created" until it's
+//! try this without VMs); start returns once its agent answers. Its network is boot's options:
+//! with --decider, every connection is asked of bottled's decider, as the bottle whose token is in
+//! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection's allowed; without either, it has none. A machine is "created" until it's
 //! first started, then "running" or "stopped".
 
 use std::env;
@@ -56,7 +58,7 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.collect();
     let result = match command.as_deref() {
         Some("create") => create(&args),
-        Some("start") => named(&args).and_then(|m| m.start()),
+        Some("start") => start(&args),
         Some("stop") => named(&args).and_then(|m| m.stop()),
         Some("delete") => delete(&args),
         Some("ls") => ls(&args),
@@ -195,7 +197,7 @@ impl Machine {
         }
     }
 
-    fn start(&self) -> io::Result<()> {
+    fn start(&self, net: &crate::boot::Net) -> io::Result<()> {
         self.must_exist()?;
         if self.running() {
             return Err(other(format!("{} is running already", self.name)));
@@ -217,7 +219,8 @@ impl Machine {
                 c
             }
         };
-        boot.arg(&socket)
+        boot.args(net.args())
+            .arg(&socket)
             .arg(self.disk())
             .args(&config.image)
             .args([
@@ -398,6 +401,21 @@ fn image_disks(disk: &Path) -> io::Result<Vec<PathBuf>> {
         mke2fs: PathBuf::new(),
     };
     store.disks(name)
+}
+
+/// `machine start --name NAME [--decider ADDRESS:PORT | --net-direct]`: the network is the start's,
+/// as a decider and token are a launch's (the token in $BOTTLE_DECIDER_TOKEN, which boot gets).
+fn start(args: &[String]) -> io::Result<()> {
+    let mut net = crate::boot::Net::None;
+    let mut rest = Vec::new();
+    let mut given = args.iter();
+    while let Some(arg) = given.next() {
+        match net.take(arg, || given.next().cloned()) {
+            Some(taken) => taken.map_err(other)?,
+            None => rest.push(arg.clone()),
+        }
+    }
+    named(&rest)?.start(&net)
 }
 
 fn delete(args: &[String]) -> io::Result<()> {
