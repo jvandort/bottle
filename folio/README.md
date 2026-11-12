@@ -209,8 +209,10 @@ alone, `--memory` and `--disk` set them (`--no-disk`: the default again), and
 before folio saves it: that it's valid, while whether its memory fits is
 checked against the runner each bottle is made on. A repo's spec can't give `permissions`
 or a `thread`: folio names each thread's bottle's thread itself, and never
-gives it permissions. A repo with no spec gets `tools`, which has the
-shpool every thread runs in, and 2G of memory; add `claude` for Claude.
+gives it permissions. Every repo's spec has `tools`, which has the shpool
+every thread's sessions run in: it can't be taken away, and a spec saved
+without it gets it. A repo with no spec gets just that, and 2G of memory; add
+`claude` for Claude.
 
 ```sh
 folio configure --feature claude --feature jvm:version=21 --memory 8G --disk 50G

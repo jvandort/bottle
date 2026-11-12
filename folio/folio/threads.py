@@ -260,7 +260,7 @@ def _make_sidecar(repo: Repo, thread: Thread, repos_: list[engine.Mount]) -> Non
     included, which bottle allows as the thread's bottle may ssh to it."""
     if not _delete_sidecar(thread):   # scratch: whatever's left of one is no use
         raise FolioError(f"its old one is on runner {thread.sidecar['runner']}, which is off")
-    spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]))
+    spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]), sidecar=True)
     engine.new(thread.sidecar_bottle, spec, repos_, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
 
 
@@ -321,7 +321,7 @@ def set_sidecar(repo: Repo, thread: Thread, sidecar: dict | None) -> Thread:
     if thread.broker:
         raise FolioError("the broker has no sidecar")
     if sidecar is not None:
-        sidecar = {**sidecar, "spec": check_repo_spec(engine.validate_spec(sidecar["spec"]))}
+        sidecar = {**sidecar, "spec": check_repo_spec(engine.validate_spec(sidecar["spec"]), sidecar=True)}
     changed = Thread(**{**asdict(thread), "sidecar": sidecar})
     _save(repo, changed)
     return changed

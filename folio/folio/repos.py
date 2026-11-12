@@ -18,10 +18,13 @@ from . import store
 from .errors import FolioError
 from .git import git
 
-# What a new repo's bottles get until `folio configure` says otherwise: tools
-# has shpool, which every thread runs in; and memory, which every spec gives.
+# What folio needs in every thread's bottle, by feature, and what for: every repo's spec has them, one saved
+# before they were needed too, and none can be taken away.
+REQUIRED_FEATURES = {"tools": "shpool, which every thread's sessions run in"}
+# What a new repo's bottles get until `folio configure` says otherwise: what folio needs, and memory, which every
+# spec gives.
 DEFAULT_MEMORY = "2G"
-DEFAULT_SPEC = {"features": ["tools"], "memory": DEFAULT_MEMORY}
+DEFAULT_SPEC = {"features": list(REQUIRED_FEATURES), "memory": DEFAULT_MEMORY}
 # Under folio's home, the repos folio owns (owned_path).
 OWNED = "repos"
 # What a repo's spec can't say: a thread's bottle never has permissions, and
@@ -29,13 +32,24 @@ OWNED = "repos"
 NOT_IN_A_REPOS_SPEC = ("permissions", "thread")
 
 
-def check_repo_spec(spec: dict) -> dict:
-    """`spec`, if it's one a repo's threads can be made from."""
+def check_repo_spec(spec: dict, sidecar: bool = False) -> dict:
+    """`spec`, if it's one a repo's threads (or, with `sidecar`, their sidecars, which run no sessions) can be made
+    from."""
     given = [key for key in NOT_IN_A_REPOS_SPEC if key in spec]
     if given:
         raise FolioError(f"a repo's spec can't give {' or '.join(given)}: its threads' bottles never have permissions, "
                          "and each one's thread is its own")
+    there = {feature.split(":", 1)[0] for feature in spec.get("features", [])}
+    for feature, why in REQUIRED_FEATURES.items():
+        if feature not in there and not sidecar:
+            raise FolioError(f"folio's threads need the {feature} feature: {why}")
     return spec
+
+
+def with_required(features: list[str]) -> list[str]:
+    """`features`, and any of folio's REQUIRED_FEATURES they lack."""
+    there = {feature.split(":", 1)[0] for feature in features}
+    return [*features, *(f for f in REQUIRED_FEATURES if f not in there)]
 
 
 @dataclass(frozen=True)
@@ -59,11 +73,14 @@ class Repo:
         """The repo's bottle spec, as last saved; None until it has one.
 
         One saved before every spec had to give its memory (none, or "all")
-        gets the default.
+        gets the default, and one saved before folio needed a feature
+        (REQUIRED_FEATURES) has it.
         """
         spec = store.read_json(self.spec_path)
         if spec is not None and spec.get("memory", "all") == "all":
             spec = {**spec, "memory": DEFAULT_MEMORY}
+        if spec is not None:
+            spec = {**spec, "features": with_required(list(spec.get("features", [])))}
         return spec
 
     def save_spec(self, spec: dict) -> None:

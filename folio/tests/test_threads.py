@@ -260,11 +260,11 @@ class ConfigureTest(FolioTestCase):
                          "Set project's spec: features [jvm:version=17, tools], memory 8G\n")
         self.ok("configure", "--feature", "jvm:version=21", "--feature", "claude")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
-        self.ok("configure", "--no-feature", "jvm", "--no-feature", "tools", "--feature", "python")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "python"], "memory": "8G"})
+        self.ok("configure", "--no-feature", "jvm", "--feature", "python")
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "python", "tools"], "memory": "8G"})
         self.assertEqual(self.ok("configure", "--disk", "50G"),
-                         "Set project's spec: features [claude, python], memory 8G, disk 50G\n")
-        self.assertEqual(self.ok("configure"), "features [claude, python], memory 8G, disk 50G\n")
+                         "Set project's spec: features [claude, python, tools], memory 8G, disk 50G\n")
+        self.assertEqual(self.ok("configure"), "features [claude, python, tools], memory 8G, disk 50G\n")
         self.ok("configure", "--no-disk")
         self.assertNotIn("disk", repos.current(self.repo).spec())
 
@@ -289,6 +289,18 @@ class ConfigureTest(FolioTestCase):
         self.assertEqual(result.stderr, "bottle: error: no feature named 'nope'\n"
                                         "folio: error: `bottle spec validate` failed (exit 1)\n")
         self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+
+    def test_what_folio_needs_cant_be_taken_away_and_a_spec_saved_without_it_has_it(self) -> None:
+        result = self.folio("configure", "--no-feature", "tools")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("folio's threads need the tools feature: shpool, which every thread's sessions run in",
+                      result.stderr)
+        self.assertIsNone(repos.current(self.repo).spec())
+        repos.current(self.repo).save_spec({"features": ["claude"], "memory": "4G"})
+        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "tools"], "memory": "4G"})
+        self.ok("new", "fix-it")
+        [bottle] = self.fake()["bottles"].values()
+        self.assertEqual(bottle["spec"]["features"], ["claude", "tools"])
 
     def test_a_spec_saved_before_memory_was_needed_gets_the_default(self) -> None:
         repo = repos.current(self.repo)
