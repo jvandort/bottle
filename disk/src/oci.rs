@@ -130,56 +130,14 @@ impl Archive {
                 descriptor.media_type
             )));
         }
-        let manifest: Manifest = parse("its manifest", &self.small_blob(&descriptor.digest)?)?;
-        let config: Config = parse("its config", &self.small_blob(&manifest.config.digest)?)?;
-        let run = config.config.unwrap_or_default();
-        let diff_ids = config.rootfs.diff_ids;
-        if diff_ids.len() != manifest.layers.len() {
-            return Err(other(format!(
-                "the image's config has {} layers and its manifest {}",
-                diff_ids.len(),
-                manifest.layers.len()
-            )));
-        }
-        let layers = manifest
-            .layers
-            .into_iter()
-            .zip(diff_ids)
-            .map(|(d, diff_id)| Layer {
-                digest: d.digest,
-                media_type: d.media_type,
-                diff_id,
-            })
-            .collect();
-        Ok(Image {
-            layers,
-            config: run,
-        })
+        let manifest = self.small_blob(&descriptor.digest)?;
+        let config_digest = parse::<Manifest>("its manifest", &manifest)?.config.digest;
+        image_of(&manifest, &self.small_blob(&config_digest)?)
     }
 
     /// A layer's tar, uncompressed: its end is an error if it isn't what the layer's diff_id says.
     pub fn layer(&self, layer: &Layer) -> io::Result<Box<dyn Read + Send + '_>> {
-        let blob = BufReader::with_capacity(1 << 20, self.blob(&layer.digest)?);
-        let tar: Box<dyn Read + Send> = match layer.media_type.as_str() {
-            "application/vnd.oci.image.layer.v1.tar"
-            | "application/vnd.docker.image.rootfs.diff.tar" => Box::new(blob),
-            "application/vnd.oci.image.layer.v1.tar+gzip"
-            | "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
-                Box::new(MultiGzDecoder::new(blob))
-            }
-            other_type => {
-                return Err(other(format!(
-                    "layer {}: can't read a {other_type}",
-                    layer.digest
-                )));
-            }
-        };
-        Ok(Box::new(Checked {
-            inner: tar,
-            hash: Sha256::new(),
-            want: layer.diff_id.clone(),
-            checked: false,
-        }))
+        decode(self.blob(&layer.digest)?, layer)
     }
 
     fn blob(&self, digest: &str) -> io::Result<Blob<'_>> {
@@ -203,6 +161,64 @@ impl Archive {
         }
         Ok(data)
     }
+}
+
+/// The image a manifest and its config say: its layers, and how it runs.
+pub fn image_of(manifest: &[u8], config: &[u8]) -> io::Result<Image> {
+    let manifest: Manifest = parse("the image's manifest", manifest)?;
+    let config: Config = parse("the image's config", config)?;
+    let run = config.config.unwrap_or_default();
+    let diff_ids = config.rootfs.diff_ids;
+    if diff_ids.len() != manifest.layers.len() {
+        return Err(other(format!(
+            "the image's config has {} layers and its manifest {}",
+            diff_ids.len(),
+            manifest.layers.len()
+        )));
+    }
+    let layers = manifest
+        .layers
+        .into_iter()
+        .zip(diff_ids)
+        .map(|(d, diff_id)| Layer {
+            digest: d.digest,
+            media_type: d.media_type,
+            diff_id,
+        })
+        .collect();
+    Ok(Image {
+        layers,
+        config: run,
+    })
+}
+
+/// `blob`, a layer as stored, as its tar, uncompressed: its end is an error if it isn't what the
+/// layer's diff_id says.
+pub fn decode<'a>(
+    blob: impl Read + Send + 'a,
+    layer: &Layer,
+) -> io::Result<Box<dyn Read + Send + 'a>> {
+    let blob = BufReader::with_capacity(1 << 20, blob);
+    let tar: Box<dyn Read + Send> = match layer.media_type.as_str() {
+        "application/vnd.oci.image.layer.v1.tar"
+        | "application/vnd.docker.image.rootfs.diff.tar" => Box::new(blob),
+        "application/vnd.oci.image.layer.v1.tar+gzip"
+        | "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
+            Box::new(MultiGzDecoder::new(blob))
+        }
+        other_type => {
+            return Err(other(format!(
+                "layer {}: can't read a {other_type}",
+                layer.digest
+            )));
+        }
+    };
+    Ok(Box::new(Checked {
+        inner: tar,
+        hash: Sha256::new(),
+        want: layer.diff_id.clone(),
+        checked: false,
+    }))
 }
 
 fn parse<'a, T: Deserialize<'a>>(what: &str, json: &'a [u8]) -> io::Result<T> {

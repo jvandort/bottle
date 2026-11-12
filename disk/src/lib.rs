@@ -12,6 +12,7 @@ use std::io;
 pub mod build;
 pub mod mke2fs;
 pub mod oci;
+pub mod registry;
 
 pub use oci::{Archive, Image, Layer};
 

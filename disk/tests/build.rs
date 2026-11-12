@@ -261,7 +261,10 @@ impl Fixture {
     fn new() -> Fixture {
         // On the root filesystem, which the builds' bottles see as their lower, so the recipe's
         // mount can be bound from there; short, as overlayfs wants lowerdir.
-        let dir = PathBuf::from(format!("/var/tmp/bdb{}", std::process::id()));
+        // One per test: tests run at once.
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = PathBuf::from(format!("/var/tmp/bdb{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("host.ext4"), "").unwrap();
@@ -354,7 +357,10 @@ fn imports_an_image_then_builds_on_a_stage() {
     );
     let archive = Archive::open(&path).unwrap();
     let image = archive.image().unwrap();
-    let imported = f.store.import(&archive, &image, &Namespaces).unwrap();
+    let imported = f
+        .store
+        .import(&image, |l| archive.layer(l), &Namespaces)
+        .unwrap();
     let stage = f.store.stage(&imported).unwrap();
     assert_eq!(stage.lowers, Vec::<String>::new());
     assert_eq!(stage.env.get("LANG").map(String::as_str), Some("C.UTF-8"));
@@ -368,7 +374,9 @@ fn imports_an_image_then_builds_on_a_stage() {
     });
     // Imported again, it's the stage there.
     assert_eq!(
-        f.store.import(&archive, &image, &Namespaces).unwrap(),
+        f.store
+            .import(&image, |l| archive.layer(l), &Namespaces)
+            .unwrap(),
         imported
     );
 
@@ -442,4 +450,40 @@ fn imports_an_image_then_builds_on_a_stage() {
     let start = Instant::now();
     assert_eq!(f.store.build(&recipe, &Namespaces).unwrap(), built);
     assert!(start.elapsed().as_secs() < 2);
+}
+
+#[test]
+fn pulls_an_image_from_a_registry() {
+    if !root() || std::env::var_os("BOTTLE_TEST_NETWORK").is_none() {
+        eprintln!("skipped: needs root and BOTTLE_TEST_NETWORK=1 (pulls debian from Docker Hub)");
+        return;
+    }
+    use bottle_disk::registry::{Reference, Registry};
+    let f = Fixture::new();
+    let cache = f.store.dir.join("registry");
+    let mut registry = Registry::new(Reference::parse("debian:trixie-slim").unwrap(), &cache);
+    let image = registry.image().unwrap();
+    let name = f
+        .store
+        .import(&image, |l| registry.layer(l), &Namespaces)
+        .unwrap();
+    f.look(&name, |root| {
+        let version = fs::read_to_string(root.join("etc/debian_version")).unwrap();
+        assert!(
+            version.starts_with("13") || version.contains("trixie"),
+            "{version}"
+        );
+        assert!(root.join("usr/bin/apt-get").exists());
+    });
+    let stage = f.store.stage(&name).unwrap();
+    assert!(stage.env.contains_key("PATH"), "{:?}", stage.env);
+
+    // By digest, from what's kept: the same image, and the same stage, made already.
+    let manifests: Vec<_> = fs::read_dir(&cache).unwrap().flatten().collect();
+    assert!(
+        manifests.len() >= 2,
+        "the index, the manifest and the config are kept"
+    );
+    let digest = image.layers[0].digest.clone();
+    assert!(digest.starts_with("sha256:"));
 }

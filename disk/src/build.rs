@@ -20,7 +20,7 @@ use bottle_agent_client::{Exit, Start, run, stop};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::oci::{Archive, Image};
+use crate::oci::{Image, Layer};
 use crate::other;
 
 /// What the names of stages made here are made of, after their inputs: a stage made differently
@@ -121,6 +121,30 @@ impl Store {
         self.dir.join(format!("{name}.ext4"))
     }
 
+    /// The names of the stages in the store.
+    pub fn names(&self) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            if let Some(name) = file.strip_suffix(".json")
+                && !name.starts_with('.')
+                && self.disk(name).exists()
+            {
+                names.push(name.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Deletes stage `name`: its disk, then its json.
+    pub fn remove(&self, name: &str) -> io::Result<()> {
+        fs::remove_file(self.disk(name))?;
+        fs::remove_file(self.dir.join(format!("{name}.json")))
+    }
+
     pub fn stage(&self, name: &str) -> io::Result<Stage> {
         let path = self.dir.join(format!("{name}.json"));
         let json = fs::read(&path).map_err(|e| other(format!("{}: {e}", path.display())))?;
@@ -204,12 +228,13 @@ impl Store {
         Ok(name)
     }
 
-    /// Imports the image in `archive`: one stage, its layers applied on nothing. Its name is the
-    /// image's, by its layers.
-    pub fn import(
+    /// Imports `image`, each of its layers' tars as `layer` reads it (from an archive, or a
+    /// registry): one stage, its layers applied on nothing. Its name is the image's, by its layers:
+    /// one there already is the stage, and no layer is read.
+    pub fn import<'a>(
         &self,
-        archive: &Archive,
         image: &Image,
+        layer: impl Fn(&Layer) -> io::Result<Box<dyn Read + Send + 'a>> + Sync,
         launch: &dyn Launch,
     ) -> io::Result<String> {
         let diff_ids = image.diff_ids();
@@ -220,12 +245,13 @@ impl Store {
         if self.disk(&name).exists() {
             return Ok(name);
         }
+        let open = &layer;
         self.make(&name, &[], launch, None, |socket| {
             for layer in &image.layers {
                 thread::scope(|scope| -> io::Result<()> {
                     let (reader, mut writer) = io::pipe()?;
                     let feeding = scope.spawn(move || -> io::Result<()> {
-                        io::copy(&mut archive.layer(layer)?, &mut writer)?;
+                        io::copy(&mut open(layer)?, &mut writer)?;
                         Ok(())
                     });
                     let unpacked = unpack_from(socket, "/", true, reader);

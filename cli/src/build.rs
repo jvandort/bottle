@@ -1,13 +1,19 @@
-//! `bottle-cli build` and `bottle-cli import`: stages made in VMs, in a store (see bottle-disk's
-//! build): each prints the disks of the image it made, bottom first, as `boot` takes them.
+//! `bottle-cli build`, `import` and `pull`: stages made in VMs, in a store (see bottle-disk's
+//! build), each printing the disks of the image it made, bottom first, as `boot` takes them; and
+//! `gc`, which deletes the stages nothing needs.
 //!
 //!     bottle-cli build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli gc STORE [IMAGE]...
 //!
 //! RECIPE is a JSON file, steps run on the stage it's `from` (see bottle_disk::build::Recipe);
-//! ARCHIVE an OCI layout archive of one image. Each VM is `bottle-cli boot`, this program again,
-//! its console kept for when it fails; libkrun and the rest are found as boot finds them, and the
-//! network options are boot's: a build's VM has the network they say.
+//! ARCHIVE an OCI layout archive of one image; REFERENCE an image in a registry
+//! (`debian:trixie-slim`, `name@sha256:...`), fetched by curl, streamed into the import (see
+//! bottle_disk::registry). gc keeps every machine's stages, running or not, and IMAGEs'. Each VM
+//! is `bottle-cli boot`, this program again, its console kept for when it fails; libkrun and the
+//! rest are found as boot finds them, and the network options are boot's: a build's VM has the
+//! network they say.
 
 use std::env;
 use std::fs;
@@ -18,12 +24,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bottle_disk::Archive;
 use bottle_disk::build::{Launch, Mount, Recipe, Store, Vm, wait_for_agent};
+use bottle_disk::registry::{Reference, Registry};
 
 use crate::FAILED;
 use crate::boot::Net;
 
 pub const BUILD_USAGE: &str = "build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]";
 pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]";
+pub const PULL_USAGE: &str = "pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]";
+pub const GC_USAGE: &str = "gc STORE [IMAGE]...";
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";
@@ -74,9 +83,73 @@ pub fn import(args: impl Iterator<Item = String>) -> ExitCode {
         let store = store_at(Path::new(&store))?;
         let archive = Archive::open(Path::new(&archive))?;
         let image = archive.image()?;
-        let name = store.import(&archive, &image, &Boot { net })?;
+        let name = store.import(&image, |l| archive.layer(l), &Boot { net })?;
         store.disks(&name)
     })())
+}
+
+pub fn pull(args: impl Iterator<Item = String>) -> ExitCode {
+    let (reference, store, net) = match two_and_net(args, "pull needs REFERENCE and STORE") {
+        Ok(args) => args,
+        Err(code) => return code,
+    };
+    report((|| {
+        let store = store_at(Path::new(&store))?;
+        let mut registry =
+            Registry::new(Reference::parse(&reference)?, &store.dir.join("registry"));
+        let image = registry.image()?;
+        let name = store.import(&image, |l| registry.layer(l), &Boot { net })?;
+        store.disks(&name)
+    })())
+}
+
+/// `gc STORE [IMAGE]...`: deletes the stages in STORE no machine uses, and none of IMAGEs (top
+/// stages' names, or disks) is made of. What a machine uses is safe whether it runs or not.
+pub fn gc(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(store) = args.next() else {
+        return crate::usage_error("gc needs STORE");
+    };
+    let keep: Vec<String> = args.collect();
+    let result = (|| -> io::Result<Vec<String>> {
+        let store = store_at(Path::new(&store))?;
+        let mut kept = std::collections::BTreeSet::new();
+        let in_use = crate::machine::disks_in_use()?;
+        let named = keep.iter().map(|k| {
+            let name = Path::new(k)
+                .file_stem()
+                .map_or(k.clone(), |s| s.to_string_lossy().into_owned());
+            store.disks(&name)
+        });
+        for disks in named {
+            kept.extend(disks?);
+        }
+        kept.extend(in_use);
+        let kept: std::collections::BTreeSet<PathBuf> = kept
+            .into_iter()
+            .map(|d| fs::canonicalize(&d).unwrap_or(d))
+            .collect();
+        let mut deleted = Vec::new();
+        for name in store.names()? {
+            let disk = fs::canonicalize(store.disk(&name)).unwrap_or(store.disk(&name));
+            if !kept.contains(&disk) {
+                store.remove(&name)?;
+                deleted.push(name);
+            }
+        }
+        Ok(deleted)
+    })();
+    match result {
+        Ok(deleted) => {
+            for name in deleted {
+                println!("deleted {name}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("bottle-cli: {e}");
+            ExitCode::from(FAILED)
+        }
+    }
 }
 
 fn store_at(dir: &Path) -> io::Result<Store> {

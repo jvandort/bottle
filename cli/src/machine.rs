@@ -434,6 +434,25 @@ fn start(args: &[String]) -> io::Result<()> {
     named(&rest)?.start(&net)
 }
 
+/// The disks of every machine's image, running or not: what `gc` keeps.
+pub fn disks_in_use() -> io::Result<Vec<PathBuf>> {
+    let mut disks = Vec::new();
+    let Ok(entries) = fs::read_dir(machines()) else {
+        return Ok(disks);
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if let Ok(machine) = Machine::new(&name)
+            && machine.exists()
+        {
+            disks.extend(machine.config()?.image);
+        }
+    }
+    Ok(disks)
+}
+
 fn delete(args: &[String]) -> io::Result<()> {
     let machine = named(args)?;
     machine.must_exist()?;

@@ -251,6 +251,21 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     assert_eq!(exec("cat /kept"), "kept\n");
     f.ok(&["machine", "stop", "--name", "m1"]);
 
+    // gc: what a machine uses stays, stopped or not, as does what's named; the rest goes.
+    let store = f.dir.join("store");
+    for name in ["named", "unused"] {
+        fs::write(store.join(format!("{name}.ext4")), "").unwrap();
+        fs::write(
+            store.join(format!("{name}.json")),
+            r#"{"lowers":[],"env":{},"entrypoint":null,"cmd":null,"labels":{}}"#,
+        )
+        .unwrap();
+    }
+    let store_arg = store.display().to_string();
+    assert_eq!(f.ok(&["gc", &store_arg, "named"]), "deleted unused\n");
+    assert!(store.join("host.ext4").exists() && store.join("named.ext4").exists());
+    assert!(!store.join("unused.ext4").exists() && !store.join("unused.json").exists());
+
     f.ok(&["machine", "delete", "--name", "m1"]);
     assert!(!f.dir.join("home/krun/machines/m1").exists());
     assert!(
