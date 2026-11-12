@@ -7,3 +7,8 @@ publish.workspace = true
 
 [dependencies]
 sha2.workspace = true
+
+# The x86_64 kernel's ELF, checked by the loader libkrun loads it with (x86_64 only, as libkrun's is).
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+linux-loader = { version = "0.13.2", features = ["elf"] }
+vm-memory = { version = "=0.17.1", features = ["backend-mmap"] }

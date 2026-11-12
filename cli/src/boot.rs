@@ -44,7 +44,12 @@ const AGENT_PORT: u32 = 1024;
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const DISK_FORMAT_RAW: u32 = 0;
-const KERNEL_FORMAT_RAW: u32 = 0;
+/// How the kernel file is: on arm64 an Image (libkrun's raw format); on x86_64 an ELF, which
+/// libkrun loads by its segments' addresses (`cargo xtask dist` wraps libkrunfw's kernel in one).
+#[cfg(target_arch = "aarch64")]
+const KERNEL_FORMAT: u32 = 0;
+#[cfg(target_arch = "x86_64")]
+const KERNEL_FORMAT: u32 = 1;
 const FREE_PAGE_REPORTING_MODE_REPLACE: u32 = 1;
 /// The tag of the first root's virtio-fs device.
 const ROOT_TAG: &std::ffi::CStr = c"/dev/root";
@@ -61,9 +66,9 @@ fn check(what: &str, ret: i32) -> io::Result<i32> {
     }
 }
 
-/// The kernel the VM boots, an arm64 Image: $BOTTLE_KERNEL, else `kernel` beside this program
-/// (see `cargo xtask dist`). Without one, libkrun loads libkrunfw, as it would anyway (on Linux,
-/// the distribution's).
+/// The kernel the VM boots (see KERNEL_FORMAT): $BOTTLE_KERNEL, else `kernel` beside this program
+/// (see `cargo xtask dist`). Without one, libkrun loads libkrunfw, as it would anyway, if it can
+/// (a static bottle-cli can't load a library).
 fn kernel() -> io::Result<Option<CString>> {
     let path = match env::var_os("BOTTLE_KERNEL") {
         Some(path) => PathBuf::from(path),
@@ -419,7 +424,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
                 krun::krun_set_kernel(
                     ctx,
                     kernel.as_ptr(),
-                    KERNEL_FORMAT_RAW,
+                    KERNEL_FORMAT,
                     std::ptr::null(),
                     std::ptr::null(),
                 ),
