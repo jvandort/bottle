@@ -130,6 +130,26 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.host for i in binding.gateway.injections], ["ci.test"])
         self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test"])
 
+    async def test_a_build_keeps_its_features_downloads_and_gets_none_of_their_credentials(self) -> None:
+        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
+        caches = [daemon.cache.Cached("ci.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=caches), \
+                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
+            await self.request({"op": "bind", "bottle": "builder", "features": ["f"], "credentials": False})
+        [binding] = self.daemon.decider.bindings.values()
+        self.assertEqual(binding.gateway.injections, ())
+        self.assertEqual(binding.gateway.hand_off.__self__.injections, ())
+        self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test", "deb.test"])
+
+    async def test_plain_http_is_kept_whatever_the_bottles_ca_covers(self) -> None:
+        caches = [daemon.cache.Cached("files.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=[]), \
+                mock.patch.object(daemon.cache, "cached_for", return_value=caches):
+            await self.request({"op": "bind", "bottle": "b", "features": []})
+        [binding] = self.daemon.decider.bindings.values()
+        self.assertEqual([c.host for c in binding.gateway.caches], ["deb.test"])
+
     async def test_binding_again_reads_the_credentials_again(self) -> None:
         for value in ("Bearer old", "Bearer new"):
             injections = [daemon.egress.Injection("ci.test", "Authorization", value)]
@@ -304,6 +324,18 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         await d.restore([("b", (), ()), ("other", (), ())])
         self.assertEqual([binding.bottle for binding in d.decider.bindings.values()], ["b"])
         self.assertEqual(d.decider.tokens["b"], token)
+
+    async def test_a_build_is_restored_without_credentials(self) -> None:
+        saved = Decider(self.tmp / "tokens.json")
+        for bottle in ("builder", "b"):
+            saved.bind(bottle, gateway=None)
+        d = Daemon(decider=Decider(self.tmp / "tokens.json"))
+        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer x")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
+            await d.restore([("builder", (), ("f",), False), ("b", (), ("f",))])
+        hosts = {b.bottle: [i.host for i in b.gateway.injections] for b in d.decider.bindings.values()}
+        self.assertEqual(hosts, {"builder": [], "b": ["ci.test"]})
 
     async def test_one_failure_doesnt_stop_the_rest(self) -> None:
         saved = Decider(self.tmp / "tokens.json")

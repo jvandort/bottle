@@ -110,14 +110,16 @@ class LinkController:
             raise BottleError(f"the controller: {answer.get('error', 'failed')}")
         return answer, data
 
-    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...]):
+    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], credentials: bool = True):
         answer, _ = await self._ask({"op": "bind", "bottle": bottle, "repos": served_to_json(repos),
-                                     "features": list(features)})
+                                     "features": list(features), "credentials": credentials})
         from bottle import mirrors
 
         injections = tuple(egress.Injection(i["host"], i["header"], "", i["port"], feature=i.get("feature", ""))
                            for i in answer["injections"])
-        caches = tuple(cache.Cached(c["host"], tuple(c.get("exclude", ()))) for c in answer.get("caches", ()))
+        caches = tuple(cache.Cached(c["host"], tuple(c.get("exclude", ())), tuple(c.get("include", ())),
+                                    tuple(c.get("ports", (cache.HTTPS_PORT,))))
+                       for c in answer.get("caches", ()))
         # Its repos as this runner has them: their mirrors.
         here = tuple(Served(mirrors.path(mirrors.key(r.git_dir)) if r.git_dir else None, r.remotes, r.at)
                      for r in repos)
@@ -295,12 +297,14 @@ class LinkServer:
         match op:
             case "bind":
                 where, caches, services, gateway = await self.controller.egress(
-                    bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())))
+                    bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())),
+                    message.get("credentials", True))
                 self.bottles[bottle] = (services, gateway)
                 log.info("%s: bound from runner %s", bottle, self.runner)
                 return {"ok": True, "injections": [{"host": i.host, "header": i.header, "port": i.port,
                                                     "feature": i.feature} for i in where],
-                        "caches": [{"host": c.host, "exclude": list(c.exclude)} for c in caches]}, b""
+                        "caches": [{"host": c.host, "exclude": list(c.exclude), "include": list(c.include),
+                                    "ports": list(c.ports)} for c in caches]}, b""
             case "release":
                 self.bottles.pop(bottle, None)
                 return {"ok": True}, b""

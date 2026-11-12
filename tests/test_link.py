@@ -156,7 +156,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         echoing = Echoing()
         controller = mock.Mock()
 
-        async def egress_for(bottle, repos, features):
+        async def egress_for(bottle, repos, features, credentials=True):
             return (), (), host.HostServices(), echoing
 
         controller.egress = egress_for
@@ -195,6 +195,19 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runner.decider.bound("b"))
         await runner.release("b")
         self.assertEqual(runner.remembered_bindings(), [])
+
+
+    async def test_a_builds_binding_has_no_credentials_and_is_remembered_so(self):
+        runner = self.runner()
+        runner.remembered = self.tmp / "bindings.json"
+        injections = [egress.Injection("ci.test", "Authorization", "Bearer x")]
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
+                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
+            await self.link_up(self.controller())
+            await runner.bind("builder", (), ("f",), credentials=False)
+            [binding] = runner.decider.bindings.values()
+            self.assertEqual(binding.gateway.injections, ())
+            self.assertEqual(runner.remembered_bindings(), [("builder", (), ("f",), False)])
 
 
 class LinksTest(GitTestCase, unittest.IsolatedAsyncioTestCase):

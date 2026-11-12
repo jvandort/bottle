@@ -395,8 +395,9 @@ class Gateway:
         self.ssh = ssh
         self.injections = tuple(injections) if certificates or hand_off else ()
         self.certificates = certificates
-        # Hosts whose downloads are kept, in `store`: also only with certificates to read them by.
-        self.caches = tuple(caches) if certificates and store else ()
+        # Hosts whose downloads are kept, in `store`: over https, only with certificates to read them by.
+        self.caches = tuple(
+            c for c in caches if certificates or cache.HTTPS_PORT not in c.ports) if store else ()
         self.store = store
 
     def log_flow(self, target: str, ip: str | None, outcome: str, status: str | None, up: list[int], down: list[int],
@@ -430,7 +431,8 @@ class Gateway:
             if flow.port == host.SSH_PORT and (self.ssh or self.hand_off):
                 return Redirect(SSH)
             raise Refused(403, "Forbidden: no such bottle service", "denied")
-        terminated_here = any(i.port == flow.port for i in self.injections) or (self.caches and flow.port == CACHE_PORT)
+        terminated_here = (any(i.port == flow.port for i in self.injections)
+                           or (flow.port == CACHE_PORT and any(CACHE_PORT in c.ports for c in self.caches)))
         if name is None and not opening_read and _opening_unread(flow.first) and terminated_here:
             # smolvm asks with what arrived in its first 100ms, and a busy guest's
             # ClientHello can come later: let through unread, a credential's host
@@ -445,7 +447,9 @@ class Gateway:
             # Sent to the name, never to the address the bottle chose: the
             # credential goes only where its host's name leads.
             return Redirect(CREDENTIAL, injection, tuple(await self._allowed(name, flow.port, private=True)))
-        cached = self._cached_at(name, flow.port) if name and flow.first[:1] == b"\x16" else None
+        # Over https, the name a ClientHello claims; over plain http, an HTTP request's Host.
+        tls = flow.first[:1] == b"\x16"
+        cached = self._cached_at(name, flow.port) if name and tls == (flow.port != cache.HTTP_PORT) else None
         if cached is not None:
             # Sent to the name too: what's kept under a host's name must be what that host serves.
             return Redirect(CACHE, addresses=tuple(await self._allowed(name, flow.port, private=False)), cached=cached)
@@ -490,6 +494,12 @@ class Gateway:
                 ip, outcome = "controller", "handed-off"
                 await self.hand_off(flow, reader, writer)
                 return
+            if decision.service == CACHE and flow.port == cache.HTTP_PORT:
+                # Plain http: its requests read as they are, nothing to terminate.
+                target += " cached"
+                ip, status = await self._serve_cached(name, decision, _Reader(reader.read, flow.first), writer, up,
+                                                      down, scheme="http")
+                return
             context = await self._certificate(name)
             reader, tls = await self._accept_tls(context, flow.first, reader, writer)
             writer = tls
@@ -511,8 +521,9 @@ class Gateway:
             self._log_request(request.method, name, request.path, "credential" if request.injected else "passed", status)
         except Refused as e:
             outcome = e.outcome
-            # A bottle speaking TLS can only be answered inside it.
-            if e.status is not None and (tls is not None or decision.service == GIT):
+            # A bottle speaking TLS can only be answered inside it; plain http, as it is.
+            plain = decision.service == GIT or (decision.service == CACHE and flow.port == cache.HTTP_PORT)
+            if e.status is not None and (tls is not None or plain):
                 await _respond(writer, e.status, e.reason, e.body, e.content_type)
         except Exception:
             outcome = "error"
@@ -581,11 +592,12 @@ class Gateway:
         return next((i for i in self.injections if i.matches(host, port)), None)
 
     def _cached_at(self, host: str, port: int) -> cache.Cached | None:
-        """How this host's downloads are kept, if they are."""
-        return next((c for c in self.caches if c.matches(host)), None) if port == CACHE_PORT else None
+        """How this host's downloads are kept, if they are, asked on `port`."""
+        return next((c for c in self.caches if c.matches(host) and port in c.ports), None)
 
     async def _serve_cached(
-        self, name: str, decision: Redirect, reader: "_Reader", writer: "_Tls", up: list[int], down: list[int],
+        self, name: str, decision: Redirect, reader: "_Reader", writer: "_Tls | asyncio.StreamWriter",
+        up: list[int], down: list[int], scheme: str = "https",
     ) -> tuple[str | None, str | None]:
         """Answer the requests a bottle sends a cached host over one connection, from the store where it can.
 
@@ -594,6 +606,8 @@ class Gateway:
         answered from here. Anything else, or anything with a body, is the
         connection's last request, relayed as it was sent. Returns the
         address last connected to and the last status, for the flow's log.
+        Asked over plain http (`scheme`), it's answered over https from the
+        host all the same.
         """
         ip, status, keep = None, None, True
         while keep:
@@ -605,7 +619,7 @@ class Gateway:
                     break
             method, target, version, header_lines = await _read_head(reader)
             url = urlsplit(target)
-            if method == "CONNECT" or (url.scheme and url.scheme != "https") or (url.netloc and url.hostname != name.lower()):
+            if method == "CONNECT" or (url.scheme and url.scheme != scheme) or (url.netloc and url.hostname != name.lower()):
                 raise Refused(400, "Bad Request", "bad-request")
             headers = _parsed(header_lines)
             path = url.path or "/"

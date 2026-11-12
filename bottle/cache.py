@@ -41,25 +41,38 @@ PARTIAL_EXPIRY = 24 * 60 * 60
 EXPIRY = 7 * 24 * 60 * 60
 
 
+# Where a cached host is asked: over https, whose TLS bottled terminates (see ca.py), or plain http, which
+# it reads as it is.
+HTTPS_PORT = 443
+HTTP_PORT = 80
+
+
 @dataclass(frozen=True)
 class Cached:
-    """A host whose downloads bottled keeps, but for paths matching `exclude`."""
+    """A host whose downloads bottled keeps, asked on `ports`: those at paths matching `include`, if it says any,
+    but for paths matching `exclude`."""
 
     host: str  # a name, or `*.` and a name
     exclude: tuple[str, ...] = ()  # fnmatch patterns over the path, e.g. "*/index.json"
+    include: tuple[str, ...] = ()  # fnmatch patterns over the path, e.g. "/debian/*.deb"; none: every path
+    ports: tuple[int, ...] = (HTTPS_PORT,)
 
     def matches(self, host: str) -> bool:
         return fnmatch.fnmatch(host.lower(), self.host)
 
     def excludes(self, path: str) -> bool:
+        if self.include and not any(fnmatch.fnmatchcase(path, pattern) for pattern in self.include):
+            return True
         return any(fnmatch.fnmatchcase(path, pattern) for pattern in self.exclude)
 
 
 def cached_for(specs: tuple[str, ...] | list[str]) -> list[Cached]:
-    """The hosts a bottle with these features has its downloads kept for."""
-    from bottle import features  # which imports this module
+    """The hosts a bottle with these features has its downloads kept for: those its features name, and the apt
+    repositories every bottle's image has (see apt.py)."""
+    from bottle import apt, features  # which import this module
 
-    return [Cached(host.lower(), f.cache.exclude) for f in features.resolve(list(specs)) if f.cache for host in f.cache.hosts]
+    named = [Cached(host.lower(), f.cache.exclude) for f in features.resolve(list(specs)) if f.cache for host in f.cache.hosts]
+    return named + apt.cached(apt.DEBIAN)
 
 
 class Store:

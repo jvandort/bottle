@@ -316,10 +316,10 @@ def intercepted_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
 
     Every host a credential names, logged in or not, so a bottle's egress CA
     (see ca.py) doesn't change with a login, and every host whose downloads
-    are cached (see cache.py).
+    are cached over https (see cache.py).
     """
     credentials = {destination(host)[0].lower() for c in credentials_for(specs) for host in c.inject.hosts}
-    return sorted(credentials | {c.host for c in cache.cached_for(specs)})
+    return sorted(credentials | {c.host for c in cache.cached_for(specs) if cache.HTTPS_PORT in c.ports})
 
 
 def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:

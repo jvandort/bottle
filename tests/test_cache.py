@@ -176,7 +176,7 @@ class CachingTest(unittest.IsolatedAsyncioTestCase):
         self.gateway = Gateway(
             "test", LoopbackPolicy(), fake_resolve,
             certificates=functools.partial(ca.server_context, "test", ("upstream.test",)),
-            caches=(Cached("upstream.test", ("*/index.json",)),), store=self.store,
+            caches=(Cached("upstream.test", ("*/index.json",), ports=(self.upstream_port,)),), store=self.store,
         )
         server = await asyncio.start_server(self.decider, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, server)
@@ -245,6 +245,45 @@ class CachingTest(unittest.IsolatedAsyncioTestCase):
                 return self.kept(path).read_bytes()
             await asyncio.sleep(0.01)
         self.fail(f"{path} wasn't kept")
+
+    async def plain(self, include: tuple[str, ...]) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """A connection to a gateway that keeps upstream.test's downloads at paths matching `include`, asked over
+        plain http (an apt repository's, say): with no certificates, which plain http needs none of."""
+        plain = 8080  # http's port, as far as this test's bottle and its gateway know
+        patcher = mock.patch.object(cache, "HTTP_PORT", plain)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        gateway = Gateway("test", LoopbackPolicy(), fake_resolve,
+                          caches=(Cached("upstream.test", include=include, ports=(plain,)),), store=self.store)
+
+        async def decider(reader, writer) -> None:
+            flow = Flow(CONNECTED_TO, plain, await reader.read(64 * 1024))
+            await gateway.serve(flow, await gateway.decide(flow), reader, writer)
+
+        server = await asyncio.start_server(decider, "127.0.0.1", 0)
+        self.addAsyncCleanup(Upstream.close, server)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+        self.addCleanup(writer.close)
+        return reader, writer
+
+    async def test_over_plain_http_downloads_are_kept_too_fetched_over_https(self) -> None:
+        reader, writer = await self.plain(("/pool/*.tgz",))
+        for _ in range(2):
+            status, _, body = await self.exchange(reader, writer, "GET", "/pool/main/a/a-1.0.tgz")
+            self.assertEqual((status, body), (200, FILE))
+            await self.stored("/pool/main/a/a-1.0.tgz")
+        self.assertEqual(len(self.received), 1)  # the second from the store; the first over the upstream's TLS
+        # Only what `include` says: an index is fetched every time.
+        for _ in range(2):
+            status, _, body = await self.exchange(reader, writer, "GET", "/dists/stable/index.json")
+            self.assertEqual((status, body), (200, FILE))
+        self.assertFalse(self.kept("/dists/stable/index.json").exists())
+        self.assertEqual(len(self.received), 3)
+
+    async def test_over_plain_http_a_request_for_https_is_refused(self) -> None:
+        reader, writer = await self.plain(("/*",))
+        status, _, _ = await self.exchange(reader, writer, "GET", "https://upstream.test/a.tgz")
+        self.assertEqual(status, 400)
 
     async def test_a_download_is_kept_and_the_next_one_answered_from_it(self) -> None:
         first = await self.get("/pkg/a/1.0/a-1.0.tgz")
