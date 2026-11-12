@@ -104,6 +104,11 @@ subjectAltName = {san}
 """
 
 
+# The CA every image's build has, for its apt step (see apt.py): constrained to the https apt repositories every
+# feature declares, so it's the same for every build, and a stage built again from the same is named the same.
+BUILDS = "bottle-builds"
+
+
 def hosts_dir(bottle: str) -> Path:
     """Where `bottle`'s CA is kept, one directory below for each set of hosts it has had."""
     if not BOTTLE_NAME.fullmatch(bottle):

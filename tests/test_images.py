@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import daemon, images
+from bottle import ca, daemon, features, images
 from bottle.errors import BottleError
 from tests.support import GitTestCase
 
@@ -78,6 +78,7 @@ class StoreTest(GitTestCase):
 
         def bind(bottle, *args, **kwargs):
             self.calls.append(("bind", bottle))
+            self.bound = kwargs
             return "127.0.0.1:47329", "token"
 
         for target, name, fake in (
@@ -85,6 +86,8 @@ class StoreTest(GitTestCase):
             (daemon, "release_egress", lambda bottle: self.calls.append(("release", bottle))),
             (images.subprocess, "run", self.cli),
             (images.prereqs, "ensure_cli", lambda: None),
+            (ca, "certificate", lambda bottle, hosts: f"PEM for {bottle} of {','.join(hosts)}" if hosts else None),
+            (features, "apt_https_hosts", lambda: ["apt.example"]),
         ):
             patcher = mock.patch.object(target, name, fake)
             patcher.start()
@@ -136,6 +139,21 @@ class StoreTest(GitTestCase):
         self.build("localhost/bottle/base:with-tools", "bbbb" * 16,
                    {"from": "localhost/bottle/base:latest", "steps": []})
         self.assertEqual(self.recipes[-1]["from"], "aaaaaaaa")
+
+    def test_a_build_is_decided_as_a_build_of_its_features_and_its_apt_step_gets_the_builds_ca(self) -> None:
+        recipe = {"pull": "debian:13", "features": ["claude"], "steps": [
+            {"run": ["sh", "-c", "apt-get ..."], "env": {"HOME": "/root", images.BUILD_CA: ""}},
+            {"run": ["./install.sh"], "env": {"HOME": "/root"}},
+        ]}
+        self.build("localhost/bottle/base:with-claude", "aaaa" * 16, recipe)
+        self.assertEqual(self.bound, {"features": ["claude"], "build": True})
+        apt_step, install = self.recipes[-1]["steps"]
+        self.assertEqual(apt_step["env"][images.BUILD_CA], "PEM for bottle-builds of apt.example")
+        self.assertNotIn(images.BUILD_CA, install["env"])
+        self.assertNotIn("features", self.recipes[-1])  # bottle's, not bottle-cli's
+        # The same CA for every build: built again from the same, the same stage.
+        self.build("localhost/bottle/base:with-claude", "aaaa" * 16, recipe)
+        self.assertEqual(self.recipes[-1]["steps"], self.recipes[-2]["steps"])
 
     def test_a_build_is_kept_under_its_tag(self) -> None:
         disk = self.build("localhost/bottle/base:latest", "aaaa" * 16)

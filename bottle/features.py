@@ -17,8 +17,8 @@ error, so a feature never silently loses behavior it asked for:
   installsAfter (local feature ids); customizations.bottle (below).
 
 customizations.bottle declares what a feature needs from bottle itself:
-credentials, downloads to cache, options a user has to set, and what to tell
-the agent.
+credentials, downloads to cache, what it installs with apt, options a user has
+to set, and what to tell the agent.
 
 A credential is a secret bottle keeps on the controller and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
@@ -110,6 +110,22 @@ they're published, which are never kept.
   "customizations": {"bottle": {"cache": {
       "hosts": ["files.example.com"], "exclude": ["*/index.json"]}}}
 
+apt is what the feature installs with apt (see bottle/apt.py): packages, from
+Debian's repositories and any the feature declares. An image's build installs
+every repository its features declare, then all their packages, in one step
+before any install.sh, which is left with what's the feature's own to do. A
+repository stays installed in the image, its key (a file in the feature's
+directory) in /etc/apt/keyrings, so a bottle can install more from it. A
+package is a name, with ${option} for an option's value: one holding a
+comma-separated list is a package for each value, and none for an empty one.
+bottled keeps every repository's packages for builds and bottles alike, so a
+feature's cache needn't name its repositories' hosts.
+
+  "customizations": {"bottle": {"apt": {
+      "repositories": [{"uri": "https://apt.example.com/stable", "suite": "stable",
+                        "components": ["main"], "key": "example.asc"}],
+      "packages": ["example-cli", "jq"]}}}
+
 requiredOptions names options a user has to set, for the ones with no sensible
 default (the teamcity feature's server). The format has no way to say this --
 an option must declare a default, of its own type, so there is no null to mean
@@ -136,7 +152,7 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from bottle import cache as cache_module, egress, images
+from bottle import apt as apt_module, cache as cache_module, egress, images
 from bottle.errors import BottleError
 
 FEATURES = Path(__file__).resolve().parent.parent / "containers" / "features"
@@ -149,8 +165,12 @@ REMOTE_USER = "genie"
 
 METADATA_KEYS = {"name", "description", "documentationURL", "licenseURL", "keywords"}
 SUPPORTED_KEYS = {"id", "version", "options", "containerEnv", "dependsOn", "installsAfter", "customizations"} | METADATA_KEYS
-BOTTLE_KEYS = {"credentials", "cache", "requiredOptions", "context"}
+BOTTLE_KEYS = {"credentials", "cache", "requiredOptions", "context", "apt"}
 CACHE_KEYS = {"hosts", "exclude"}
+APT_KEYS = {"repositories", "packages"}
+REPOSITORY_KEYS = {"uri", "suite", "components", "key"}
+# An apt package's name (Debian policy 5.6.1), and ${option} where an option's value goes.
+PACKAGE = re.compile(r"(?:[a-z0-9+.-]|\$\{[A-Za-z0-9_]+\})+(?::[a-z0-9-]+)?")
 CREDENTIAL_KEYS = {"description", "login", "inject", "properties"}
 LOGIN_KEYS = {"command", "capture"}
 INJECT_KEYS = {"hosts", "header", "value", "standin", "forbid", "allow", "rewrite"}
@@ -214,6 +234,14 @@ class Cache:
 
 
 @dataclass(frozen=True)
+class Apt:
+    """What a feature installs with apt: from Debian's repositories and `repositories`, `packages`."""
+
+    repositories: tuple[apt_module.Repository, ...] = ()
+    packages: tuple[str, ...] = ()  # names, with ${option} where an option's value goes
+
+
+@dataclass(frozen=True)
 class Feature:
     id: str
     version: str
@@ -224,6 +252,7 @@ class Feature:
     installs_after: tuple[str, ...]
     credentials: tuple[Credential, ...] = ()
     cache: Cache | None = None
+    apt: Apt = Apt()
     required_options: tuple[str, ...] = ()
     # What to tell the agent about it, with ${option} where an option's value goes.
     context: str = ""
@@ -306,6 +335,21 @@ class Feature:
             raise BottleError(f"{where}: {filled!r} must be a host, reached over https, with no path")
         return filled
 
+    def apt_packages(self) -> tuple[str, ...]:
+        """The packages it installs, its options filled in: a name with an option holding a comma-separated list is
+        a package for each of its values, and none for an empty one (the jvm feature's additional versions)."""
+        packages = []
+        for package in self.apt.packages:
+            names = [package]
+            for option in dict.fromkeys(OPTION_REFERENCE.findall(package)):
+                values = [v.strip() for v in _option_value(self.values[option]).split(",") if v.strip()]
+                names = [name.replace(f"${{{option}}}", v) for name in names for v in values]
+            for name in names:
+                if not PACKAGE.fullmatch(name) or "$" in name:
+                    raise BottleError(f"{self.id}: {name!r}, from its options, isn't an apt package's name")
+            packages += names
+        return tuple(packages)
+
     def agent_context(self) -> str:
         """What to tell the agent about this feature, with its options filled in; "" for nothing."""
         return OPTION_REFERENCE.sub(lambda m: _option_value(self.values[m.group(1)]), self.context).strip()
@@ -365,6 +409,10 @@ def load(feature_id: str) -> Feature:
         raise fail("install.sh is missing")
 
     options = _options(spec.get("options", {}), fail)
+    customizations = _customizations(spec.get("customizations", {}), options, fail)
+    for repository in customizations["apt"].repositories:
+        if not (path / repository.key).is_file():
+            raise fail(f"customizations.bottle.apt.repositories: {repository.uri}'s key {repository.key!r} is missing")
     return Feature(
         id=feature_id,
         version=spec["version"],
@@ -373,7 +421,7 @@ def load(feature_id: str) -> Feature:
         container_env=_container_env(spec.get("containerEnv", {}), fail),
         depends_on=_depends_on(spec.get("dependsOn", {}), fail),
         installs_after=_id_list(spec.get("installsAfter", []), "installsAfter", fail),
-        **_customizations(spec.get("customizations", {}), options, fail),
+        **customizations,
     )
 
 
@@ -434,6 +482,7 @@ def _customizations(customizations, options, fail) -> dict:
     return {
         "credentials": tuple(_credential(name, spec, options, fail) for name, spec in credentials.items()),
         "cache": _cache(bottle["cache"], fail) if "cache" in bottle else None,
+        "apt": _apt(bottle["apt"], options, fail) if "apt" in bottle else Apt(),
         "required_options": tuple(required),
         "context": context,
     }
@@ -568,6 +617,42 @@ def _cache(cache, fail) -> Cache:
     return Cache(tuple(hosts), tuple(exclude))
 
 
+def _apt(spec, options, fail) -> Apt:
+    where = "customizations.bottle.apt"
+    if not isinstance(spec, dict):
+        raise fail(f"{where} must be an object")
+    unsupported = sorted(set(spec) - APT_KEYS)
+    if unsupported:
+        raise fail(f"{where}: unsupported: {', '.join(unsupported)}")
+    repositories = spec.get("repositories", [])
+    if not isinstance(repositories, list):
+        raise fail(f"{where}.repositories must be a list")
+    parsed = []
+    for repository in repositories:
+        if not isinstance(repository, dict) or set(repository) != REPOSITORY_KEYS:
+            raise fail(f"{where}.repositories: each is an object of {', '.join(sorted(REPOSITORY_KEYS))}")
+        uri, suite, components, key = (repository[k] for k in ("uri", "suite", "components", "key"))
+        if not isinstance(uri, str) or not re.fullmatch(r"https?://[a-z0-9.-]+(/[A-Za-z0-9._~/-]*)?", uri):
+            raise fail(f"{where}.repositories: uri {uri!r} must be an http:// or https:// URL")
+        if not isinstance(suite, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", suite):
+            raise fail(f"{where}.repositories: suite {suite!r} must be a suite's name, e.g. stable")
+        if not isinstance(components, list) or not components or not all(
+                isinstance(c, str) and re.fullmatch(r"[A-Za-z0-9._-]+", c) for c in components):
+            raise fail(f"{where}.repositories: components must be a non-empty list of names, e.g. [\"main\"]")
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
+            raise fail(f"{where}.repositories: key {key!r} must be the name of a file in the feature's directory")
+        parsed.append(apt_module.Repository(uri, suite, tuple(components), key))
+    packages = spec.get("packages", [])
+    if not isinstance(packages, list) or not all(isinstance(p, str) and PACKAGE.fullmatch(p) for p in packages):
+        raise fail(f"{where}.packages must be a list of package names, with ${{option}} for an option's value")
+    for package in packages:
+        for name in OPTION_REFERENCE.findall(package):
+            if name not in options:
+                known = ", ".join(sorted(options)) or "none"
+                raise fail(f"{where}.packages: ${{{name}}} names no option of this feature (options: {known})")
+    return Apt(tuple(parsed), tuple(packages))
+
+
 def _container_env(env, fail) -> dict[str, str]:
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise fail("containerEnv must map names to strings")
@@ -677,6 +762,11 @@ def image_tag(features: list[Feature]) -> str:
     return f"{images.REPOSITORY}/{images.BASE}:with-{'.'.join(parts)}"
 
 
+def apt_https_hosts() -> list[str]:
+    """Every host an https apt repository a feature declares is on: what the CA builds have covers (ca.BUILDS)."""
+    return sorted({r.host for f in [base(), *(load(i) for i in available())] for r in f.apt.repositories if r.https})
+
+
 def base() -> Feature:
     """The base feature: the bottle contract, under every bottle's other features."""
     return load(BASE)
@@ -690,14 +780,22 @@ def base_recipe() -> dict:
 
 def recipe(features: list[Feature]) -> dict:
     """What installs `features`, in order, on top of the base image."""
-    return {"from": images.tag(images.BASE), "steps": _steps(features),
+    return {"from": images.tag(images.BASE), "steps": _steps(features), "features": [f.spec for f in features],
             "labels": {FEATURES_LABEL: " ".join(sorted(f.spec for f in features))}}
 
 
 def _steps(features: list[Feature]) -> list[dict]:
-    """Each feature's install.sh, run in its own directory, the features directory mounted read-only in the build
-    (see images.build_recipe), the way the Dev Container tooling runs it; then its containerEnv."""
+    """What the features install with apt, together; then each feature's install.sh, run in its own directory, the
+    features directory mounted read-only in the build (see images.build_recipe), the way the Dev Container tooling
+    runs it; then its containerEnv."""
     steps: list[dict] = []
+    # What they install with apt, first and all at once (see apt.py): their repositories, then their packages.
+    repositories = [(f"{images.MOUNT}/{f.id}/{r.key}", r) for f in features for r in f.apt.repositories]
+    packages = list(dict.fromkeys(p for f in features for p in f.apt_packages()))
+    if repositories or packages:
+        # BOTTLE_BUILD_CA is filled in by the build (see images.build_recipe).
+        steps.append({"run": ["/bin/sh", "-c", apt_module.install_script(repositories, packages)],
+                      "env": {**images.STEP_ENV, images.BUILD_CA: ""}})
     for f in features:
         # The spec's variables telling install.sh who the container's user is, plus the options.
         env = {

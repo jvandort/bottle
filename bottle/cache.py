@@ -74,7 +74,7 @@ def cached_for(specs: tuple[str, ...] | list[str], build: bool = False) -> list[
 
     resolved = features.resolve(list(specs))
     named = [] if build else [Cached(host.lower(), f.cache.exclude) for f in resolved if f.cache for host in f.cache.hosts]
-    return named + apt.cached(apt.DEBIAN)
+    return named + apt.cached((*apt.DEBIAN, *(r for f in resolved for r in f.apt.repositories)))
 
 
 class Store:

@@ -580,10 +580,12 @@ class Daemon:
             injections, cached, services, controller_gateway = await self.controller.egress(
                 bottle, repos, features, build)
             # Kept over https only for the hosts this machine's CA for the bottle covers, which bottle made when
-            # it started the bottle: what its cached hosts are answered behind. Plain http needs none.
-            intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
+            # it started the bottle (a build: the CA builds have): what its cached hosts are answered behind.
+            # Plain http needs none.
+            owner = ca.BUILDS if build else bottle
+            intercepted = tuple(await asyncio.to_thread(ca.hosts, owner))
             caches = tuple(c for c in cached if c.host in intercepted or cache.HTTPS_PORT not in c.ports)
-            certificates = functools.partial(ca.server_context, bottle, intercepted)
+            certificates = functools.partial(ca.server_context, owner, intercepted)
             gateway = egress.Gateway(
                 bottle, self.policy, services=services, injections=injections, certificates=certificates,
                 caches=caches, store=self.store, hand_off=controller_gateway.serve_handed_off,

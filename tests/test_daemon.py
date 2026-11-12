@@ -135,13 +135,18 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         caches = [daemon.cache.Cached("ci.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
                 mock.patch.object(daemon.cache, "cached_for", return_value=caches) as cached_for, \
-                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
+                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]) as hosts, \
+                mock.patch.object(daemon.ca, "server_context") as server_context:
             await self.request({"op": "bind", "bottle": "builder", "features": ["f"], "build": True})
+        # Answered behind the CA builds have, which their apt steps trust.
+        self.assertIn(mock.call(daemon.ca.BUILDS), hosts.call_args_list)
         cached_for.assert_called_once_with(("f",), True)  # its apt repositories alone (see cache.cached_for)
         [binding] = self.daemon.decider.bindings.values()
         self.assertEqual(binding.gateway.injections, ())
         self.assertEqual(binding.gateway.hand_off.__self__.injections, ())
         self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test", "deb.test"])
+        binding.gateway.certificates("ci.test")
+        server_context.assert_called_once_with(daemon.ca.BUILDS, ("ci.test",), "ci.test")
 
     async def test_plain_http_is_kept_whatever_the_bottles_ca_covers(self) -> None:
         caches = [daemon.cache.Cached("files.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]

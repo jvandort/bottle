@@ -47,6 +47,8 @@ REPOSITORY = "localhost/bottle"
 MOUNT = "/run/bottle-build"
 # What a build's steps run with, as a Dockerfile's RUN would: root's home, and no debconf prompts.
 STEP_ENV = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
+# A step with this in its environment gets the certificate of the CA builds have (ca.BUILDS) in it: the apt step.
+BUILD_CA = "BOTTLE_BUILD_CA"
 
 
 # Every image bottle builds records a hash of what it was built from. An image
@@ -99,11 +101,13 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     bottle-cli's; return its disk.
 
     `recipe` is on a registry's image (pull: its reference) or on one of bottle's built here (from: its tag);
-    its steps, entrypoint, cmd and labels are bottle-cli's (see bottle_disk::build::Recipe). `inputs` is the
-    hash of what the image is built from, recorded as a label, with `labels`. With `no_cache`, the stage is
-    made again even if one was made from the same.
+    its steps, entrypoint, cmd and labels are bottle-cli's (see bottle_disk::build::Recipe); its features, the
+    specs of those it installs, are bottle's: the build's connections are decided as those of a build of them
+    (see daemon.bind_decider), their apt repositories kept, and a step asking for BUILD_CA gets the CA it's
+    answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
+    With `no_cache`, the stage is made again even if one was made from the same.
     """
-    from bottle import daemon  # daemon's auth imports features, which imports this module
+    from bottle import ca, daemon, features  # daemon's auth imports features, which imports this module
 
     prereqs.ensure_cli()
     store().mkdir(parents=True, exist_ok=True)
@@ -119,16 +123,19 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     if no_cache:
         # A stage is named for what it's made from: something new in it makes it anew.
         image_labels["bottle.build"] = uuid.uuid4().hex
+    certificate = ca.certificate(ca.BUILDS, features.apt_https_hosts()) or ""
+    steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step
+             for step in recipe.get("steps", [])]
     made = {"from": base.stem, "mount": {"source": str(context.resolve()), "target": MOUNT},
-            "steps": recipe.get("steps", []), "labels": image_labels,
+            "steps": steps, "labels": image_labels,
             **{k: recipe[k] for k in ("entrypoint", "cmd") if k in recipe}}
     builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file:
             json.dump(made, file)
             file.flush()
-            # Bound with no features: the public network, no credentials, as a bottle would have it.
-            decider, token = daemon.bind_decider(builder)
+            # The public network, with none of its features' credentials; their apt repositories kept.
+            decider, token = daemon.bind_decider(builder, features=recipe.get("features", []), build=True)
             disk = _cli("build", file.name, str(store()), "--decider", decider, env={"BOTTLE_DECIDER_TOKEN": token})
     finally:
         try:

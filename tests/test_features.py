@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -673,6 +674,84 @@ class ImageTest(FeatureTestCase):
         self.feature("a", options={"flags": {"type": "string", "default": "a b; rm -rf /"}})
         [step] = features.recipe(features.resolve(["a"]))["steps"]
         self.assertEqual(step["env"]["FLAGS"], "a b; rm -rf /")  # an environment, not a shell line
+
+
+class AptTest(FeatureTestCase):
+    """What features install with apt: their repositories and packages, declared, installed in one step first."""
+
+    def repository(self, **overrides) -> dict:
+        return {"uri": "https://apt.example/stable", "suite": "stable", "components": ["main"], "key": "example.asc",
+                **overrides}
+
+    def apt_feature(self, feature_id: str, apt: dict, **spec) -> None:
+        self.feature(feature_id, customizations={"bottle": {"apt": apt}}, **spec)
+        for repository in apt.get("repositories", []):
+            (self.root / feature_id / repository["key"]).write_text("a key")
+
+    def test_one_step_first_every_repository_then_every_package_once(self) -> None:
+        self.apt_feature("tools", {"packages": ["curl", "jq"]})
+        self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code", "jq"]},
+                         dependsOn={"tools": {}})
+        steps = features.recipe(features.resolve(["claude"]))["steps"]
+        apt_step, tools, claude = steps
+        script = apt_step["run"][2]
+        self.assertIn(f"install -D -m 0644 {features.images.MOUNT}/claude/example.asc /etc/apt/keyrings/example.asc",
+                      script)
+        self.assertIn("deb [signed-by=/etc/apt/keyrings/example.asc] https://apt.example/stable stable main", script)
+        self.assertIn("apt-get $options install -y --no-install-recommends curl jq claude-code\n", script)
+        self.assertEqual(script.count("apt-get $options update"), 1)
+        self.assertIn("Acquire::https::apt.example::CaInfo", script)
+        self.assertEqual(apt_step["env"][features.images.BUILD_CA], "")  # the build's to fill in
+        self.assertEqual((tools["cwd"], claude["cwd"]), (f"{features.images.MOUNT}/tools", f"{features.images.MOUNT}/claude"))
+
+    def test_without_any_theres_no_apt_step(self) -> None:
+        self.feature("tools")
+        [step] = features.recipe(features.resolve(["tools"]))["steps"]
+        self.assertEqual(step["cwd"], f"{features.images.MOUNT}/tools")
+
+    def test_a_package_from_options_is_one_for_each_value(self) -> None:
+        self.apt_feature("jvm", {"packages": ["temurin-${version}-jdk", "temurin-${additionalVersions}-jdk"]},
+                         options={"version": {"type": "string", "default": "25"},
+                                  "additionalVersions": {"type": "string", "default": ""}})
+        self.assertEqual(features.resolve(["jvm"])[0].apt_packages(), ("temurin-25-jdk",))
+        [jvm] = features.resolve(["jvm:version=21,additionalVersions=17, 11"])
+        self.assertEqual(jvm.apt_packages(), ("temurin-21-jdk", "temurin-17-jdk", "temurin-11-jdk"))
+        [bad] = features.resolve(["jvm:version=21 && curl x"])
+        with self.assertRaisesRegex(BottleError, "isn't an apt package's name"):
+            bad.apt_packages()
+
+    def test_a_feature_says_its_apt_as_bottle_takes_it(self) -> None:
+        for apt, error in (
+            ({"packages": "jq"}, "packages must be a list"),
+            ({"packages": ["jq; rm"]}, "packages must be a list"),
+            ({"packages": ["${nope}"]}, r"\$\{nope\} names no option"),
+            ({"repositories": [{"uri": "https://apt.example"}]}, "each is an object of"),
+            ({"repositories": [self.repository(uri="ftp://apt.example")]}, "http:// or https://"),
+            ({"repositories": [self.repository(components=[])]}, "components must be a non-empty list"),
+            ({"repositories": [self.repository(key="../key.asc")]}, "the name of a file"),
+            ({"sources": []}, "unsupported: sources"),
+        ):
+            with self.subTest(apt):
+                self.feature("bad", customizations={"bottle": {"apt": apt}})
+                with self.assertRaisesRegex(BottleError, error):
+                    features.load("bad")
+                shutil.rmtree(self.root / "bad")
+        self.feature("keyless", customizations={"bottle": {"apt": {"repositories": [self.repository()]}}})
+        with self.assertRaisesRegex(BottleError, "key 'example.asc' is missing"):
+            features.load("keyless")
+
+    def test_its_repositories_are_kept_for_its_bottles_and_builds(self) -> None:
+        self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code"]})
+        for build in (False, True):
+            kept = {c.host: c for c in features.cache_module.cached_for(["claude"], build)}
+            self.assertEqual(kept["apt.example"].include, ("/stable/*.deb",))
+            self.assertIn("deb.debian.org", kept)
+        self.feature("base")
+        self.assertEqual(features.apt_https_hosts(), ["apt.example"])
+
+    def test_the_recipe_says_its_features_for_the_build(self) -> None:
+        self.feature("tools")
+        self.assertEqual(features.recipe(features.resolve(["tools"]))["features"], ["tools"])
 
 
 class BuildTest(FeatureTestCase):
