@@ -316,7 +316,8 @@ subset of the format: `id`, `version`, metadata, `options` (string and boolean),
 `customizations.bottle` (the credentials a feature needs, the hosts each one is
 attached to, the stand-in it wants and the routes it's refused, allowed or
 rewritten on, `cache`, the hosts whose downloads are
-kept, `requiredOptions`, the options a user
+kept, `apt`, the repositories and packages it installs, all features' together
+in one step before their `install.sh`, `requiredOptions`, the options a user
 has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
@@ -589,6 +590,17 @@ with `Cache-Control: no-cache` fetches it again. A file no bottle has used for
 a week is removed, when bottled starts and every 6 hours after; delete the
 directory to empty it sooner. bottled logs each request to a cached host, and
 whether it was a `hit`, `stored`, or `passed` on.
+
+**apt's packages are kept too**, with nothing for a feature to name: bottle
+knows Debian's repositories and those features declare, and keeps their
+packages (each repository's `.deb` files, whose names carry their versions;
+never its indexes), for every image built and every bottle, whatever the
+server says about keeping them, since apt checks each against the signed
+index. Debian's are asked over plain http, which bottled answers without
+terminating anything and fetches over https. An https repository at build
+time is answered behind a CA builds share (`bottle-builds`), which the build's
+apt step trusts for those hosts alone; a bottle trusts its own egress CA for
+them, as for any cached host.
 
 bottled starts automatically when a command needs it, and when it starts it
 picks up the bottles that were running. While it's stopped, running bottles
