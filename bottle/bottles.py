@@ -1,7 +1,9 @@
 """Bottles: a sandbox, in its own VM, made from a spec and served the git remotes it's given.
 
-The registry at $BOTTLE_HOME/bottles.json is written before anything is
-created, so a failure at any point leaves a record of what may exist.
+A bottle's record is written before anything is created, so a failure at any
+point leaves a record of what may exist. It's kept with what the bottle is for,
+in folio's home: a thread's in its directory, <repo key>/<thread>/bottles/<name>.json,
+and one no thread has in bottles/<name>.json (see records()).
 Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
@@ -34,6 +36,7 @@ its commits (after git's grace periods, weeks to months), that checkout
 breaks, and the bottle has to be made again.
 """
 
+import fcntl
 import logging
 import os
 import re
@@ -52,7 +55,7 @@ from typing import NoReturn
 from bottle import auth, cache, daemon, features as features_, host, images, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
-from bottle.store import bottle_home, namespace, read_json, write_json
+from bottle.store import bottle_home, folio_home, namespace, read_json, write_json
 
 log = logging.getLogger("bottle.bottles")
 
@@ -199,16 +202,60 @@ class Bottle:
         return self.machine_name or f"bottle-{namespace()}{self.name}"
 
 
-def registry_path():
-    return bottle_home() / "bottles.json"
+# Where a bottle no thread has keeps its record, in folio's home; a thread's has bottles/ in its directory.
+UNOWNED = "bottles"
+
+
+def records() -> dict[str, Path]:
+    """Each bottle's record, by name: in its owner's bottles/ (a thread's directory, <repo key>/<thread>), or in
+    UNOWNED. bottle's own registry, $BOTTLE_HOME/bottles.json, from before folio kept them, is moved in first."""
+    home = folio_home()
+    if legacy_registry().exists():
+        _move_registry()
+    paths = [*home.glob(f"*/*/{UNOWNED}/*.json"), *(home / UNOWNED).glob("*.json")]
+    return {p.stem: p for p in sorted(paths)}
 
 
 def load() -> dict[str, Bottle]:
-    data = read_json(registry_path()) or {"bottles": {}}
     known = {f.name for f in fields(Bottle)}
-    # Keys a record from an older bottle may have (its driver, say) are left out.
-    return {name: Bottle(**{k: v for k, v in _mounted(entry).items() if k in known})
-            for name, entry in data["bottles"].items()}
+    bottles = {}
+    for name, path in records().items():
+        entry = read_json(path)
+        # Keys a record from an older bottle may have (its driver, say) are left out.
+        if entry is not None:
+            bottles[name] = Bottle(**{k: v for k, v in _mounted(entry).items() if k in known})
+    return bottles
+
+
+def legacy_registry() -> Path:
+    return bottle_home() / "bottles.json"
+
+
+def _move_registry() -> None:
+    """bottles.json's bottles, each to its thread's directory (the thread whose bottle, or sidecar, it is), else to
+    UNOWNED, said on stderr; then bottles.json is gone. Once, whichever process gets there first."""
+    home = folio_home()
+    home.mkdir(parents=True, exist_ok=True)
+    with (home / ".registry.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = read_json(legacy_registry())
+        if data is None:
+            return
+        owners: dict[str, Path] = {}
+        for record in home.glob("*/*/current/thread.json"):
+            thread = read_json(record) or {}
+            if thread.get("bottle"):
+                owners[thread["bottle"]] = owners[f"{thread['bottle']}-sidecar"] = record.parent.parent
+        unowned = []
+        for name, entry in data.get("bottles", {}).items():
+            if name not in owners:
+                unowned.append(name)
+            write_json(owners.get(name, home) / UNOWNED / f"{name}.json", entry)
+        legacy_registry().unlink()
+    log.info("bottles.json moved into %s; no thread has %s", home, ", ".join(unowned) or "none")
+    if unowned:
+        print(f"bottle: bottles.json is moved into folio's threads; no thread has {', '.join(sorted(unowned))}: "
+              f"their records are in {home / UNOWNED}", file=sys.stderr)
 
 
 def _mounted(entry: dict) -> dict:
@@ -235,20 +282,21 @@ def runner_of(bottle: Bottle) -> runners.Runner:
     return runners.get(bottle.runner)
 
 
-def _save(bottle: Bottle) -> None:
-    bottles = load()
-    bottles[bottle.name] = bottle
-    _write(bottles)
+def _save(bottle: Bottle, owner: Path | None = None) -> None:
+    """Write the bottle's record where it is, else in `owner`'s bottles/ (folio's home's, without one)."""
+    path = records().get(bottle.name) or (owner or folio_home()) / UNOWNED / f"{bottle.name}.json"
+    write_json(path, asdict(bottle))
 
 
 def _forget(name: str) -> None:
-    bottles = load()
-    bottles.pop(name, None)
-    _write(bottles)
-
-
-def _write(bottles: dict[str, Bottle]) -> None:
-    write_json(registry_path(), {"version": 1, "bottles": {b.name: asdict(b) for b in bottles.values()}})
+    path = records().get(name)
+    if path is not None:
+        path.unlink(missing_ok=True)
+        if path.parent.name == UNOWNED and path.parent.parent != folio_home():
+            try:
+                path.parent.rmdir()   # a thread's bottles/, with none left
+            except OSError:
+                pass
 
 
 # What a flow to a bottle it may ssh to is joined to, there: sshd, for that one connection.
@@ -273,7 +321,7 @@ def sshd_command(name: str, address: str) -> list[str]:
 
 def create(
     spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "",
-    runner: str = runners.LOCAL, ssh: dict[str, str] | None = None,
+    runner: str = runners.LOCAL, ssh: dict[str, str] | None = None, owner: Path | None = None,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
@@ -283,7 +331,8 @@ def create(
     mounted and whose remotes are served, checked out at its path; without
     any, the bottle has no repo. Nothing is registered in a repo: the bottle's
     creator reads what it pushes, from the namespaces it chose. Its machine is
-    on `runner`. It may ssh to each bottle `ssh` gives, by the name given: {name: bottle}.
+    on `runner`. It may ssh to each bottle `ssh` gives, by the name given: {name: bottle}. Its record is kept
+    in `owner`'s bottles/ (its thread's directory), else with those no thread has.
     """
     on = runners.get(runner)
     # Ready first: what it's asked next is its bottle-cli's to answer, as this repo's sources are now.
@@ -307,7 +356,7 @@ def create(
         mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
         machine_name=f"{namespace()}{name}",
     )
-    bottle = _bring_up(bottle, [repo for _, repo in planned], tag)
+    bottle = _bring_up(bottle, [repo for _, repo in planned], tag, owner)
     log.info("%s: created, %s, features %s", name,
              ", ".join(f"{m.repo} at {m.checkout} on {m.path}" for m in bottle.mounts) or "no repo",
              ", ".join(installed) or "none")
@@ -349,12 +398,13 @@ def _plan_ssh(ssh: dict[str, str], existing: dict[str, Bottle]) -> tuple[SshGran
     return tuple(grants)
 
 
-def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
-    """Create the bottle's machine from `tag`, and set it up; roll it all back on failure."""
+def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str, owner: Path | None = None) -> Bottle:
+    """Create the bottle's machine from `tag`, and set it up, its record in `owner`'s; roll it all back on
+    failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if runner_of(bottle).state(bottle.machine) is not None:
         raise BottleError(f"a machine named {bottle.machine} already exists; choose another name with --name")
-    _save(bottle)
+    _save(bottle, owner)
     try:
         bottle = _run_machine(bottle, mounted, tag)
     except BaseException as failure:

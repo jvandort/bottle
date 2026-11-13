@@ -26,6 +26,7 @@ class GitTestCase(unittest.TestCase):
             os.environ,
             {
                 "BOTTLE_HOME": str(self.bottle_home),
+                "FOLIO_HOME": str(self.tmp / "folio-home"),
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "Test",
@@ -98,3 +99,13 @@ def built_cli() -> Path:
     target = Path(os.environ.get("CARGO_TARGET_DIR") or repo / "target")
     _BUILT_CLI.append(target / "debug" / "bottle-cli")
     return _BUILT_CLI[0]
+
+
+def write_bottles(bottles_: dict) -> None:
+    """Every bottle's record, replaced by `bottles_`'s ({name: Bottle}), as no thread's."""
+    from bottle import bottles
+
+    for path in bottles.records().values():
+        path.unlink()
+    for bottle in bottles_.values():
+        bottles._save(bottle)

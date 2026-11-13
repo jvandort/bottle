@@ -15,6 +15,12 @@ def bottle_home() -> Path:
     return Path(os.environ.get("BOTTLE_HOME") or Path.home() / ".bottle")
 
 
+def folio_home() -> Path:
+    """folio's home, $FOLIO_HOME (else ~/.folio): its threads, with their bottles' records (bottles.py), and folio
+    serve's sockets and log."""
+    return Path(os.environ.get("FOLIO_HOME") or Path.home() / ".folio")
+
+
 def log_path(name: str = "bottle", home: Path | None = None) -> Path:
     """A log in `home`/logs ($BOTTLE_HOME's, else): "bottle" for commands; folio serve's is "serve", in folio's."""
     return (home or bottle_home()) / "logs" / f"{name}.log"

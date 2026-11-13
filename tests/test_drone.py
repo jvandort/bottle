@@ -24,7 +24,7 @@ from unittest import mock
 from bottle import bottles, daemon, features, host, images, prereqs, repos, runners, services
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
-from tests.support import GitTestCase, built_cli, run
+from tests.support import GitTestCase, built_cli, run, write_bottles
 from tests.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -162,7 +162,7 @@ class DroneTest(DroneCase):
         repo = self.tmp / "repo"
         run("git", "clone", "-q", upstream, repo)
         remotes = (Remote("origin", "upstream"),)
-        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
             bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
         box = runners.get("box")
 
@@ -226,7 +226,7 @@ class DroneTest(DroneCase):
         repo = self.tmp / "repo"
         run("git", "clone", "-q", upstream, repo)
         remotes = (Remote("origin", "upstream"), Remote("work", "ns/w", "ns/w"))
-        bottles._write({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
             bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
         box = runners.get("box")
         box.objects(repos.Repo("repo", repo))
@@ -271,7 +271,7 @@ class DetachTest(DroneCase):
         (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
         self.machines = self.remote / "machines"
         self.machines.mkdir()
-        bottles._write({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box")
+        write_bottles({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box")
                         for name in ("a", "b")})
         self.a = self.machines / bottles.get("a").machine
         self.a.write_text("running\n")

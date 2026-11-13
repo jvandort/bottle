@@ -35,7 +35,7 @@ from pathlib import Path
 from bottle import auth, cache, egress, messages, services as services_, specs
 from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
-from bottle.store import log_path, open_log
+from bottle.store import folio_home, log_path, open_log
 
 log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
@@ -75,8 +75,8 @@ def code_hash() -> str:
 
 
 def home() -> Path:
-    """folio's home, $FOLIO_HOME (else ~/.folio): where folio serve keeps its sockets and its log."""
-    return Path(os.environ.get("FOLIO_HOME") or Path.home() / ".folio")
+    """folio's home: where folio serve keeps its sockets and its log."""
+    return folio_home()
 
 
 def socket_path(name: str = "serve.sock") -> Path:

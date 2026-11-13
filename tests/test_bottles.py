@@ -10,7 +10,7 @@ from unittest import mock
 from bottle.store import write_json
 from bottle import bottles, features as features_, host, repos
 from bottle.errors import BottleError
-from tests.support import GitTestCase, run
+from tests.support import GitTestCase, run, write_bottles
 from tests.test_host import serve_bottle_host
 
 
@@ -236,18 +236,18 @@ class CreateTest(BottleTestCase):
     def test_a_bottle_made_before_keeps_its_machine(self) -> None:
         self.fake()
         bottle = self.create(name="old")
-        registry = json.loads(bottles.registry_path().read_text())
-        del registry["bottles"]["old"]["machine_name"]
-        bottles.registry_path().write_text(json.dumps(registry))
+        record = json.loads(bottles.records()["old"].read_text())
+        del record["machine_name"]
+        bottles.records()["old"].write_text(json.dumps(record))
         self.assertEqual(bottles.get("old").machine, f"bottle-{bottles.namespace()}old")
         self.assertNotEqual(bottle.machine, bottles.get("old").machine)
 
     def test_a_bottle_made_before_has_its_machine_renamed_when_it_next_starts(self) -> None:
         fake = self.fake()
         self.create(name="old")
-        registry = json.loads(bottles.registry_path().read_text())
-        del registry["bottles"]["old"]["machine_name"]
-        bottles.registry_path().write_text(json.dumps(registry))
+        record = json.loads(bottles.records()["old"].read_text())
+        del record["machine_name"]
+        bottles.records()["old"].write_text(json.dumps(record))
         legacy = f"bottle-{bottles.namespace()}old"
         fake.machines = {legacy: "running"}
         bottles.ensure_running("old")  # running: its name stays
@@ -377,17 +377,17 @@ class CreateTest(BottleTestCase):
     def test_old_records_without_features_load(self) -> None:
         self.fake()
         self.create()
-        data = json.loads(bottles.registry_path().read_text())
-        del data["bottles"]["example"]["features"]
-        bottles.registry_path().write_text(json.dumps(data))
+        data = json.loads(bottles.records()["example"].read_text())
+        del data["features"]
+        bottles.records()["example"].write_text(json.dumps(data))
         self.assertEqual(bottles.get("example").features, ())
 
     def test_records_with_keys_from_an_older_bottle_load(self) -> None:
         self.fake()
         self.create()
-        data = json.loads(bottles.registry_path().read_text())
-        data["bottles"]["example"] |= {"driver": "container", "network": "bottle-net-example"}
-        bottles.registry_path().write_text(json.dumps(data))
+        data = json.loads(bottles.records()["example"].read_text())
+        data |= {"driver": "container", "network": "bottle-net-example"}
+        bottles.records()["example"].write_text(json.dumps(data))
         self.assertEqual(bottles.get("example").name, "example")
 
     def test_unknown_branch(self) -> None:
@@ -731,7 +731,7 @@ class UnreachableRunnerTest(BottleTestCase):
         records = bottles.load()
         for bottle in (there, also):
             records[bottle.name] = dataclasses.replace(bottle, runner="box")
-        bottles._write(records)
+        write_bottles(records)
         self.asked = []
         off = mock.Mock()
 
@@ -771,7 +771,7 @@ class DroneCertificatesTest(BottleTestCase):
         bottle = self.create(name="there")
         records = bottles.load()
         records["there"] = dataclasses.replace(bottle, runner="box")
-        bottles._write(records)
+        write_bottles(records)
         self.box = mock.Mock()
         self.box.name = "box"
         self.box.cache_certificate.return_value = "the runner's CA's certificate"
@@ -1162,12 +1162,32 @@ class MountsTest(BottleTestCase):
                                [bottles.MountRequest(p, self.repo_path) for p in paths])
         self.assertEqual(bottles.load(), {})
 
+    def test_bottles_json_moves_into_folios_threads(self) -> None:
+        """Each bottle to the thread whose bottle or sidecar it is; one no thread has, kept, and said."""
+        home = Path(os.environ["FOLIO_HOME"])
+        thread = home / "app-1234" / "t"
+        (thread / "20260101T000000.000Z").mkdir(parents=True)
+        (thread / "20260101T000000.000Z" / "thread.json").write_text(json.dumps({"name": "t", "bottle": "app-t"}))
+        (thread / "current").symlink_to("20260101T000000.000Z")
+        record = lambda name: {"name": name, "id": name, "image": "base", "created": 0.0, "status": "ready"}
+        write_json(bottles.legacy_registry(), {"version": 1, "bottles": {
+            n: record(n) for n in ("app-t", "app-t-sidecar", "lone")}})
+        with mock.patch("sys.stderr") as stderr:
+            self.assertEqual(set(bottles.load()), {"app-t", "app-t-sidecar", "lone"})
+        self.assertIn("no thread has lone", "".join(c.args[0] for c in stderr.write.call_args_list))
+        self.assertFalse(bottles.legacy_registry().exists())
+        self.assertEqual(bottles.records(), {
+            "app-t": thread / "bottles" / "app-t.json", "app-t-sidecar": thread / "bottles" / "app-t-sidecar.json",
+            "lone": home / "bottles" / "lone.json"})
+        bottles._forget("app-t")
+        bottles._forget("app-t-sidecar")
+        self.assertFalse((thread / "bottles").exists())   # none left there
+
     def test_a_record_from_before_mounts_is_its_one_repo_at_workspace(self) -> None:
-        bottles._write({})
         record = {"name": "old", "id": "i", "image": "base", "branch": "main", "commit": "c" * 40, "created": 0.0,
                   "status": "ready", "git_repo": str(self.repo_path),
                   "remotes": [{"name": "agent", "fetch": "ns/a", "push": "ns/a", "advance": "main"}]}
-        write_json(bottles.registry_path(), {"version": 1, "bottles": {"old": record}})
+        write_json(bottles.legacy_registry(), {"version": 1, "bottles": {"old": record}})
         [mount] = bottles.get("old").mounts
         # Where its machine has them: objects at the old place, remotes straight under /git.
         self.assertEqual((mount.path, mount.repo, mount.branch, mount.objects, mount.at),
