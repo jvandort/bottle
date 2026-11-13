@@ -197,6 +197,11 @@ class Bottle:
         # bottle- and it.
         return self.machine_name or f"bottle-{namespace()}{self.name}"
 
+    @property
+    def qualified(self) -> str:
+        """Its machine, as bottle-cli on the controller names it: RUNNER/NAME for one on a runner."""
+        return self.machine if self.runner == runners.LOCAL else f"{self.runner}/{self.machine}"
+
 
 # Where a bottle no thread has keeps its record, in folio's home; a thread's has bottles/ in its directory.
 UNOWNED = "bottles"
@@ -648,7 +653,7 @@ def context(bottle: Bottle) -> str:
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     lines.append(f"- To hand the user a file or a directory, give them the command that copies it out of this\n"
-                 f"  bottle to their current directory: `bottle cp {bottle.machine}:<path> .`")
+                 f"  bottle to their current directory: `bottle cp {bottle.qualified}:<path> .`")
     resolved = features_.resolve(list(bottle.features))
     if any(f.credentials for f in resolved):
         lines.append("- A credential the host attaches goes only where its feature allows: a request it refuses\n"
@@ -921,7 +926,7 @@ def status(names: list[str] = ()) -> list[dict]:
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
             # Its machine, as bottle-cli here names it (`bottle shell MACHINE`).
-            "machine": bottle.machine if bottle.runner == runners.LOCAL else f"{bottle.runner}/{bottle.machine}",
+            "machine": bottle.qualified,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
             "ssh": {g.name: g.bottle for g in bottle.ssh},
             # Where its objects and remotes are, as a checkout restored into it has to point.
