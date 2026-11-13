@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// boot's arguments taken, bottle-agent serving its socket in the VM's place.
 const FAKE_BOOT: &str = r#"#!/usr/bin/env bash
@@ -43,19 +43,27 @@ impl Fixture {
         Fixture { dir }
     }
 
-    fn cli(&self, args: &[&str]) -> Output {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bottle-cli"));
+        command.args(args).envs(self.env());
+        command
+    }
+
+    fn env(&self) -> Vec<(&'static str, PathBuf)> {
         let mke2fs = ["/usr/sbin/mke2fs", "/sbin/mke2fs"]
             .into_iter()
             .find(|p| Path::new(p).exists())
             .unwrap_or("mke2fs");
-        Command::new(env!("CARGO_BIN_EXE_bottle-cli"))
-            .args(args)
-            .env("BOTTLE_HOME", self.dir.join("home"))
-            .env("BOTTLE_BOOT", self.dir.join("boot"))
-            .env("BOTTLE_TEST_AGENT", agent())
-            .env("BOTTLE_MKE2FS", mke2fs)
-            .output()
-            .unwrap()
+        vec![
+            ("BOTTLE_HOME", self.dir.join("home")),
+            ("BOTTLE_BOOT", self.dir.join("boot")),
+            ("BOTTLE_TEST_AGENT", agent()),
+            ("BOTTLE_MKE2FS", mke2fs.into()),
+        ]
+    }
+
+    fn cli(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -147,6 +155,36 @@ fn cp_copies_into_out_of_and_between_machines() {
         2,
         "nothing left beside it"
     );
+
+    // As a tar, on stdout and stdin: what another machine's cp, over ssh, makes or takes.
+    let streamed = |src: &str, dst: &str| {
+        let mut out = f
+            .command(&["cp", src, "-"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let taken = f
+            .command(&["cp", "-", dst])
+            .stdin(out.stdout.take().unwrap())
+            .output()
+            .unwrap();
+        assert!(out.wait().unwrap().success(), "cp {src} -");
+        taken
+    };
+    let taken = streamed("there:b/f", &format!("{to}/h"));
+    assert!(
+        taken.status.success(),
+        "{}",
+        String::from_utf8_lossy(&taken.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&taken.stdout), format!("{to}/h\n"));
+    assert_eq!(fs::read_to_string(back.join("h")).unwrap(), "a file");
+    let taken = streamed(&tree, "here:c");
+    assert_eq!(String::from_utf8_lossy(&taken.stdout), "here:c\n");
+    assert_eq!(fs::read_to_string(work.join("c/sub/f")).unwrap(), "a file");
+    fs::remove_file(back.join("h")).unwrap();
+    let failed = f.cli(&["cp", "-", "-"]);
+    assert!(!failed.status.success());
 
     // Failures leave things as they were, saying why.
     let failed = f.cli(&["cp", "here:nope", &to]);
