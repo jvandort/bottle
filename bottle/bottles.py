@@ -1,9 +1,8 @@
 """Bottles: a sandbox, in its own VM, made from a spec and served the git remotes it's given.
 
 A bottle's record is written before anything is created, so a failure at any
-point leaves a record of what may exist. It's kept with what the bottle is for,
-in folio's home: a thread's in its directory, <repo key>/<thread>/bottles/<name>.json,
-and one no thread has in bottles/<name>.json (see records()).
+point leaves a record of what may exist. It's kept with the thread it's for, in
+its directory in folio's home: <repo key>/<thread>/bottles/<name>.json.
 Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
@@ -40,7 +39,6 @@ import fcntl
 import logging
 import re
 import shlex
-import subprocess
 import sys
 import time
 import uuid
@@ -48,7 +46,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 
-from bottle import auth, cache, daemon, features as features_, host, images, repos, runners, services, specs
+from bottle import auth, cache, features as features_, host, images, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, folio_home, namespace, read_json, write_json
@@ -203,18 +201,16 @@ class Bottle:
         return self.machine if self.runner == runners.LOCAL else f"{self.runner}/{self.machine}"
 
 
-# Where a bottle no thread has keeps its record, in folio's home; a thread's has bottles/ in its directory.
-UNOWNED = "bottles"
+# Where a thread's directory has its bottles' records.
+RECORDS = "bottles"
 
 
 def records() -> dict[str, Path]:
-    """Each bottle's record, by name: in its owner's bottles/ (a thread's directory, <repo key>/<thread>), or in
-    UNOWNED. bottle's own registry, $BOTTLE_HOME/bottles.json, from before folio kept them, is moved in first."""
-    home = folio_home()
+    """Each bottle's record, by name: in its thread's directory, <repo key>/<thread>/bottles/. bottle's own
+    registry, $BOTTLE_HOME/bottles.json, from before folio kept them, is moved in first."""
     if legacy_registry().exists():
         _move_registry()
-    paths = [*home.glob(f"*/*/{UNOWNED}/*.json"), *(home / UNOWNED).glob("*.json")]
-    return {p.stem: p for p in sorted(paths)}
+    return {p.stem: p for p in sorted(folio_home().glob(f"*/*/{RECORDS}/*.json"))}
 
 
 def load() -> dict[str, Bottle]:
@@ -233,8 +229,9 @@ def legacy_registry() -> Path:
 
 
 def _move_registry() -> None:
-    """bottles.json's bottles, each to its thread's directory (the thread whose bottle, or sidecar, it is), else to
-    UNOWNED, said on stderr; then bottles.json is gone. Once, whichever process gets there first."""
+    """bottles.json's bottles, each to its thread's directory: the thread whose bottle, or sidecar, it is. One no
+    thread has is said, and left to its machine, bottle-cli's. Then bottles.json is gone. Once, whichever process
+    gets there first."""
     home = folio_home()
     home.mkdir(parents=True, exist_ok=True)
     with (home / ".registry.lock").open("w") as lock:
@@ -247,16 +244,18 @@ def _move_registry() -> None:
             thread = read_json(record) or {}
             if thread.get("bottle"):
                 owners[thread["bottle"]] = owners[f"{thread['bottle']}-sidecar"] = record.parent.parent
-        unowned = []
+        orphans = []
         for name, entry in data.get("bottles", {}).items():
-            if name not in owners:
-                unowned.append(name)
-            write_json(owners.get(name, home) / UNOWNED / f"{name}.json", entry)
+            if name in owners:
+                write_json(owners[name] / RECORDS / f"{name}.json", entry)
+            else:
+                orphans.append(entry.get("machine_name") or f"bottle-{namespace()}{name}")
         legacy_registry().unlink()
-    log.info("bottles.json moved into %s; no thread has %s", home, ", ".join(unowned) or "none")
-    if unowned:
-        print(f"bottle: bottles.json is moved into folio's threads; no thread has {', '.join(sorted(unowned))}: "
-              f"their records are in {home / UNOWNED}", file=sys.stderr)
+    log.info("bottles.json moved into %s; no thread had %s", home, ", ".join(orphans) or "none")
+    if orphans:
+        print(f"bottle: bottles.json is moved into folio's threads; no thread had the bottles whose machines are "
+              f"{', '.join(sorted(orphans))}: they're bottle-cli's now (`bottle machine delete --name MACHINE`)",
+              file=sys.stderr)
 
 
 def _mounted(entry: dict) -> dict:
@@ -284,8 +283,12 @@ def runner_of(bottle: Bottle) -> runners.Runner:
 
 
 def _save(bottle: Bottle, owner: Path | None = None) -> None:
-    """Write the bottle's record where it is, else in `owner`'s bottles/ (folio's home's, without one)."""
-    path = records().get(bottle.name) or (owner or folio_home()) / UNOWNED / f"{bottle.name}.json"
+    """Write the bottle's record where it is, else in thread directory `owner`'s."""
+    path = records().get(bottle.name)
+    if path is None:
+        if owner is None:
+            raise BottleError(f"bottle {bottle.name} has no record, and no thread to keep one")
+        path = owner / RECORDS / f"{bottle.name}.json"
     write_json(path, asdict(bottle))
 
 
@@ -293,11 +296,10 @@ def _forget(name: str) -> None:
     path = records().get(name)
     if path is not None:
         path.unlink(missing_ok=True)
-        if path.parent.name == UNOWNED and path.parent.parent != folio_home():
-            try:
-                path.parent.rmdir()   # a thread's bottles/, with none left
-            except OSError:
-                pass
+        try:
+            path.parent.rmdir()   # a thread's bottles/, with none left
+        except OSError:
+            pass
 
 
 # What a flow to a bottle it may ssh to is joined to, there: sshd, for that one connection.
@@ -321,8 +323,8 @@ def sshd_command(name: str, address: str) -> list[str]:
 
 
 def create(
-    spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "",
-    runner: str = runners.LOCAL, ssh: dict[str, str] | None = None, owner: Path | None = None,
+    owner: Path, spec: dict, name: str, mounts: list[MountRequest] | None = None, context: str = "",
+    runner: str = runners.LOCAL, ssh: dict[str, str] | None = None,
 ) -> Bottle:
     """Create a bottle from a spec: its features and memory, from a file its creator owns (see specs.py).
 
@@ -333,7 +335,7 @@ def create(
     any, the bottle has no repo. Nothing is registered in a repo: the bottle's
     creator reads what it pushes, from the namespaces it chose. Its machine is
     on `runner`. It may ssh to each bottle `ssh` gives, by the name given: {name: bottle}. Its record is kept
-    in `owner`'s bottles/ (its thread's directory), else with those no thread has.
+    in `owner`, its thread's directory.
     """
     on = runners.get(runner)
     # Ready first: what it's asked next is its bottle-cli's to answer, as this repo's sources are now.
@@ -399,7 +401,7 @@ def _plan_ssh(ssh: dict[str, str], existing: dict[str, Bottle]) -> tuple[SshGran
     return tuple(grants)
 
 
-def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str, owner: Path | None = None) -> Bottle:
+def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str, owner: Path) -> Bottle:
     """Create the bottle's machine from `tag`, and set it up, its record in `owner`'s; roll it all back on
     failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
@@ -746,48 +748,15 @@ def stop(name: str) -> None:
     runner.release(bottle.name)
 
 
-def shutdown() -> tuple[list[str], bool]:
-    """Stop every running bottle, then bottled. Returns the stopped bottles and whether bottled was running.
-
-    Bottles on a runner that can't be reached are left as they are: see stop_all.
-    """
-    stopped, _ = stop_all()
-    return stopped, daemon.stop()
-
-
-def stop_all(runner: str | None = None) -> tuple[list[str], dict[str, str]]:
-    """Stop every running bottle, or every one on `runner`. Returns those stopped, and the runners that
-    couldn't be reached, with why: their bottles are left as they are."""
-    stopped: list[str] = []
-    unreachable: dict[str, str] = {}
-    for bottle in load().values():
-        if runner is not None and bottle.runner != runner:
-            continue
-        if bottle.runner in unreachable or runners.is_detached(bottle.runner):
-            continue  # a detached runner runs nothing
-        on = runner_of(bottle)
-        try:
-            if on.state(bottle.machine) == "running":
-                on.stop(bottle.machine)
-                on.release(bottle.name)
-                log.info("%s: stopped", bottle.name)
-                stopped.append(bottle.name)
-        except BottleError as e:
-            if bottle.runner == runners.LOCAL:
-                raise
-            unreachable[bottle.runner] = str(e)
-    return stopped, unreachable
-
-
 def ensure_running(name: str) -> Bottle:
     """Start the bottle's machine if it isn't running, bottled answering it."""
     bottle = get(name)
     if bottle.status != "ready":
-        raise BottleError(f"{name} is {bottle.status}; remove it with `folio bottle rm {name}`")
+        raise BottleError(f"{name} is {bottle.status}; delete its thread to remove it (`folio delete`)")
     runner = runner_of(bottle)
     state = runner.state(bottle.machine)
     if state is None:
-        raise BottleError(f"{bottle.name}'s machine is gone; `folio bottle rm {bottle.name}`, and make it again")
+        raise BottleError(f"{bottle.name}'s machine is gone; delete its thread (`folio delete`)")
     if state != "running":
         runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
@@ -959,7 +928,7 @@ def delete(name: str) -> None:
     if failures:
         log.warning("%s: deleting left parts behind: %s", name, "; ".join(failures))
         _save(replace(bottle, status="broken"))
-        raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `folio bottle rm {name}`")
+        raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); try again, and what's left is deleted")
     _forget(name)
     log.info("%s: deleted", name)
     _remove_stale_images(runner)

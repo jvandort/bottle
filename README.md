@@ -55,8 +55,8 @@ folio claude fix-it       # A thread: a bottle, a lane for its commits, and Clau
 ```
 
 `bottle` itself is bottle-cli, which runs every bottle's VM, its *machine*, here and on your
-runners: `bottle ls` lists them, and `bottle shell MACHINE` opens a shell in one (`folio bottle ls`
-says which is whose).
+runners: `bottle ls` lists them (a thread's say which, as a label), and `bottle shell MACHINE`
+opens a shell in one.
 
 ## Prerequisites
 
@@ -98,10 +98,8 @@ sidecar). What's left is a machine's, by its name, and bottle's parts:
 | `bottle cp SRC DST` | Copy into, out of, or between machines |
 | `bottle start` / `stop MACHINE` | Start or stop a machine |
 | `folio auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
-| `folio runner add` / `ls` / `stop` / `detach` / `attach` / `rm` | The machines bottles run on: this one, and others over ssh |
-| `folio bottle ls` / `rm` | Every bottle, whose it is, and its machine; delete one no thread has |
+| `bottle runner add` / `ls` / `check` / `detach` / `attach` / `rm` | The machines bottles run on: this one, and others over ssh |
 | `folio serve start` / `stop` | `folio serve`, which answers what bottles' machines route to it |
-| `folio shutdown` | Stop every running bottle, then `folio serve` |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
@@ -317,8 +315,7 @@ Folio makes each bottle (bottle/bottles.py, in folio's process) from a
 **spec**: its features and memory (`folio configure` sets a repo's). Its name
 is its identity, and its thread's: a name that's taken is refused. Its
 record is kept with its thread, in folio's home
-(`~/.folio/<repo>/<thread>/bottles/<name>.json`); one no thread has is in
-`~/.folio/bottles`, and `folio bottle rm` deletes it.
+(`~/.folio/<repo>/<thread>/bottles/<name>.json`), and it goes with its thread.
 
 ```json
 {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
@@ -384,7 +381,7 @@ A repo given none gets `origin` (`upstream`) and `host` (`heads`), both read-onl
 after that, what its maker adds: folio's say how to work in a thread.
 
 Its machine runs on a runner: `local`, this machine, by default, or one added
-with `folio runner add`. The image is built there if it isn't yet, and the
+with `bottle runner add`. The image is built there if it isn't yet, and the
 spec's memory must fit that machine.
 
 A bottle can be let ssh to another (folio's thread, to its sidecar), which must
@@ -400,37 +397,35 @@ bottle-cli keeps its state (machines, images, the HTTP cache, runners) in
 `~/.bottle`, and folio its own in `~/.folio`; `BOTTLE_HOME` and `FOLIO_HOME`
 name others.
 
-### `folio runner add RUNNER --ssh DESTINATION` / `ls` / `stop` / `detach` / `attach` / `rm`
+### `bottle runner add RUNNER --ssh DESTINATION` / `ls` / `check` / `detach` / `attach` / `rm`
 
 A **runner** is a machine bottles run on. `local` is this Mac; another is a
 Linux machine reached over ssh, and a bottle on one is a **drone**. Your Mac
-stays the **controller**: the registry, your credentials and your repos are
-here, and what a drone needs of them comes here.
+stays the **controller**: your credentials and your repos are here, and what
+a drone needs of them comes here. A repo's threads run on any runner
+bottle-cli has (`folio configure --runner RUNNER`).
 
-- **`folio runner add RUNNER --ssh DESTINATION`** checks a machine and adds
+- **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
   it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
   can't set up itself, and copies bottle-cli's distribution for the
-  machine's architecture over, built here (see above).
-  Whenever bottle-cli's sources change, it's built and copied again before
-  the runner's next bottle is made.
-- **`folio runner ls [RUNNER]...`** (also `list`, `status`) shows each runner, whether it can be
-  reached, what it lacks, and its bottles.
-- **`folio runner stop RUNNER`** stops every bottle on a runner, so the
-  machine can be shut down. Their disks stay there; each starts again when it's next used.
-- **`folio runner detach RUNNER [--offline]`** is for turning a runner off:
-  it names the bottles running there and asks before stopping them (in a
+  machine's architecture over, built here (see above): in a checkout,
+  whenever bottle-cli's sources change, it's built (`bin/bottle-dist`) and
+  copied again before the runner's next use.
+- **`bottle runner ls`** lists them; **`bottle runner check RUNNER`** says
+  what one is and lacks.
+- **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
+  it names the machines running there and asks before stopping them (in a
   terminal; told no, or with no one to ask, it stops nothing and leaves the
-  runner attached, so you can have their agents wrap up first), checks that nothing else runs there (an image build,
-  say; if something does, it says what, and leaves the runner attached), and
-  lets it go, then says it's safe to turn off. Until it's attached again,
-  nothing asks it anything: its bottles show as `detached`, at once. Using one of its bottles again
-  (folio's `claude`, `shell`, and the like) attaches it again if
-  it answers, and says it's still off if it doesn't. `--offline` marks one
-  that's off already, unasked.
-- **`folio runner attach RUNNER`** attaches a detached runner again, once it
-  answers, and names the bottles detaching it stopped.
-- **`folio runner rm RUNNER`** forgets a runner with no bottles. Nothing
+  runner attached, so you can have their agents wrap up first), and lets it
+  go, then says it's safe to turn off. Until it's attached again, nothing
+  asks it anything: `bottle ls` shows its machines as `detached`, at once.
+  Using one of them again (a `bottle` command for it, or folio's `claude`,
+  `shell`, and the like) attaches it again if it answers, and says it's still
+  off if it doesn't. `--offline` marks one that's off already, unasked.
+- **`bottle runner attach RUNNER`** attaches a detached runner again, once it
+  answers, and names the machines detaching it stopped.
+- **`bottle runner rm RUNNER`** forgets a runner with no machines. Nothing
   on the machine is touched.
 
 On a runner, everything bottle keeps is in `~/.bottle`: bottle-cli's
@@ -461,7 +456,7 @@ A drone works as a local bottle does, with these differences:
   until it's back: it connects again, waiting up to a minute between tries,
   and ends when the drone stops.
 
-A runner that's off is unreachable, not broken: `folio bottle ls` shows its
+A runner that's off is unreachable, not broken: folio shows its
 bottles as `unreachable`, a command for one fails at once, saying so, and
 nothing else waits on it.
 
@@ -511,21 +506,6 @@ bottle cp foo:build/libs/app.jar desktop/foo-sidecar:
 Starts or stops a machine's VM, without folio: what its policy routes to
 folio serve is refused while it isn't running. Stopping keeps its disk.
 
-### `folio bottle ls [--json]` / `folio bottle rm BOTTLE`
-
-Every bottle, its thread (`REPO/THREAD`), its state, its runner and its
-machine; a bottle on a runner that can't be reached shows as `unreachable`.
-`rm` deletes one no thread has (a thread's goes with it: `folio delete`, or
-`folio pause`), and everything it created; if making or deleting one was
-interrupted, `rm` cleans up whatever is left. Whatever it pushed is kept, in
-your repo's namespaces, and its image, so the next bottle with the same
-features starts without a build.
-
-### `folio shutdown`
-
-Stops every running bottle, then `folio serve`. Bottles on a runner that can't be
-reached are left as they are, and it says so.
-
 ### `folio serve start` / `folio serve stop`
 
 Starts or stops `folio serve`, the background process that serves what bottles'
@@ -573,7 +553,8 @@ build's apt step trusts for those hosts alone; a bottle trusts its machine's
 CA for them, as for any cached host.
 
 folio serve starts automatically when a command needs it, and when it starts it
-picks up the bottles there are. While it's stopped, a running bottle's
+picks up the bottles there are. It stops itself once there's no bottle left to
+answer: when the last is deleted, or its thread paused. While it's stopped, a running bottle's
 connections go on as its policy says, but for what it routes to folio serve
 (`bottle.host`, ssh, credentials' hosts), which is refused. A command that finds it running other code (another
 checkout's, or this one's before it changed) restarts it first, and says so.

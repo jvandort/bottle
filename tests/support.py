@@ -102,10 +102,23 @@ def built_cli() -> Path:
 
 
 def write_bottles(bottles_: dict) -> None:
-    """Every bottle's record, replaced by `bottles_`'s ({name: Bottle}), as no thread's."""
+    """Every bottle's record, replaced by `bottles_`'s ({name: Bottle}), in thread_dir()."""
     from bottle import bottles
 
     for path in bottles.records().values():
         path.unlink()
     for bottle in bottles_.values():
-        bottles._save(bottle)
+        bottles._save(bottle, thread_dir())
+
+
+def register_runner(name: str, destination: str) -> None:
+    """Runner `name` added, at ssh `destination`, as `bottle runner add` records it (unchecked)."""
+    from bottle import runners
+    from bottle.store import write_json
+
+    write_json(runners.registry_path(), {"version": 1, "runners": {**runners.registered(), name: {"ssh": destination}}})
+
+
+def thread_dir() -> "Path":
+    """A thread's directory in folio's home, for the bottles a test makes: where their records are kept."""
+    return Path(os.environ["FOLIO_HOME"]) / "repo-0" / "thread"

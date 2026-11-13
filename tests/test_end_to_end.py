@@ -21,7 +21,7 @@ from unittest import mock
 
 from bottle import bottles, daemon
 from bottle.errors import BottleError
-from tests.support import requires_krun
+from tests.support import requires_krun, thread_dir
 
 REPO = Path(__file__).resolve().parent.parent
 BOTTLE = REPO / "bin" / "bottle"
@@ -46,7 +46,7 @@ class EndToEndTest(unittest.TestCase):
         cls.addClassCleanup(daemon.stop)
         cls.repo = cls.work / "repo"
         subprocess.run(["git", "clone", "-q", str(REPO), str(cls.repo)], check=True)
-        bottles.create({"features": ["tools"], "memory": "8G"}, NAME, [bottles.MountRequest(
+        bottles.create(thread_dir(), {"features": ["tools"], "memory": "8G"}, NAME, [bottles.MountRequest(
             "/workspace", cls.repo, remotes=["origin:fetch=upstream", "agent:fetch=ns/e2e-out,push=ns/e2e-out"])])
         cls.addClassCleanup(cls.delete)
         cls.machine = bottles.get(NAME).machine

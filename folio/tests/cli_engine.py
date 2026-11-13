@@ -60,8 +60,8 @@ class Mount:
     remotes: list[str]
 
 
-def new(name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None,
-        ssh: dict[str, str] | None = None, owner: Path | None = None) -> None:
+def new(owner: Path, name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None,
+        ssh: dict[str, str] | None = None) -> None:
     """Create a bottle, on `runner` (None: bottle's default, this machine), that may ssh to each bottle `ssh`
     gives, by the name given: {name: bottle}. Attached to this terminal: an image build shows, and a login can
     ask."""

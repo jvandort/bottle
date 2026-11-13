@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from . import admin, broker, engine, notes, obsidian, picker, repos, threads
+from . import broker, engine, notes, obsidian, picker, repos, threads
 from .errors import FolioError
 
 
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         "Threads get it in their next bottle; a bottle already running keeps what it has.",
     )
     _configure_arguments(configure, runner_help="the runner the repo's threads' bottles are made on, unless a "
-                         "thread is given its own (`folio runner ls` lists them; default: this machine)")
+                         "thread is given its own (`bottle runner ls` lists them; default: this machine)")
     configure.set_defaults(run=_configure, parser=configure, command="configure")
 
     sidecar = commands.add_parser(
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "saved.",
     )
     command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-    _configure_arguments(command, runner_help="the runner it's made on (`folio runner ls` lists them)")
+    _configure_arguments(command, runner_help="the runner it's made on (`bottle runner ls` lists them)")
     command.set_defaults(run=_sidecar_configure, parser=command, command="sidecar configure")
     for name, help_, run in (("remove", "take the thread's sidecar away", _sidecar_remove),
                              ("shell", "a shell in the running thread's sidecar, at /workspace, for as long as you're "
@@ -144,7 +144,23 @@ def main(argv: list[str] | None = None) -> int:
     serve_stop = serve_commands.add_parser("stop", help="stop it; bottles' machines go on, but for what they route")
     serve_stop.set_defaults(run=_serve_stop)
 
-    admin.add(commands)
+    auth_ = commands.add_parser("auth", help="credentials: set once; bottles get those their features need")
+    auth_commands = auth_.add_subparsers(required=True)
+    command = auth_commands.add_parser("list", help="list credentials features declare, and which are set")
+    command.set_defaults(run=_auth_list)
+    command = auth_commands.add_parser(
+        "login", help="log in, with the credential's own login flow",
+        description="Log in and store the credential in the Keychain. Runs the declaring feature's login "
+        "command in a throwaway bottle, attached to this terminal, and captures the credential it prints.")
+    command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    command.set_defaults(run=_auth_login)
+    command = auth_commands.add_parser("set", help="store a credential read from stdin",
+                                       description="Store a credential read from stdin.")
+    command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    command.set_defaults(run=_auth_set)
+    command = auth_commands.add_parser("logout", help="remove a stored credential")
+    command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
+    command.set_defaults(run=_auth_logout)
 
     args = parser.parse_args(argv)
     try:
@@ -492,6 +508,57 @@ def _serve_start(args: argparse.Namespace) -> int:
 
 def _serve_stop(args: argparse.Namespace) -> int:
     print("Stopped folio serve" if _daemon().stop() else "folio serve isn't running")
+    return 0
+
+
+def _auth_list(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    # Every credential is held by folio serve, so what's worth showing is where it's spent: the hosts it's attached
+    # to, as the feature declares them (${option} is filled in from a bottle's own options).
+    rows = [("CREDENTIAL", "FEATURE", "STATUS", "ATTACHED TO", "DESCRIPTION")]
+    rows += [(d.credential.name, d.feature, _credential_status(d, is_set),
+              ", ".join(d.credential.inject.hosts), d.credential.description)
+             for d, is_set in auth.status()]
+    _table(rows)
+    return 0
+
+
+def _credential_status(declared, is_set: bool) -> str:
+    """Whether the Keychain has it, and the file read before the Keychain, if the credential has one."""
+    from bottle import features
+
+    status = "set" if is_set else "not set"
+    if declared.credential.properties:
+        values = features.load(declared.feature).values
+        path = features.OPTION_REFERENCE.sub(lambda m: str(values[m.group(1)]), declared.credential.properties)
+        status = f"{path}, else {status}"
+    return status
+
+
+def _auth_login(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    auth.login(args.name)
+    print(f"Logged in: {args.name}. Bottles with it get it when they next start.")
+    return 0
+
+
+def _auth_set(args: argparse.Namespace) -> int:
+    import getpass
+
+    from bottle import auth
+
+    value = getpass.getpass(f"{args.name}: ") if sys.stdin.isatty() else sys.stdin.read()
+    auth.set_value(args.name, value)
+    print(f"Stored {args.name}. Bottles with it get it when they next start.")
+    return 0
+
+
+def _auth_logout(args: argparse.Namespace) -> int:
+    from bottle import auth
+
+    print(f"Removed {args.name}" if auth.logout(args.name) else f"{args.name} wasn't set")
     return 0
 
 

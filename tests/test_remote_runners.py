@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import subprocess
@@ -8,7 +7,7 @@ from unittest import mock
 
 from bottle import prereqs, runners
 from bottle.errors import BottleError
-from tests.support import GitTestCase, built_cli
+from tests.support import GitTestCase, built_cli, register_runner
 
 # ssh, as far as bottle-cli uses it: options up to --, the destination, and a command for its shell, run here as
 # if at the destination, in a home of its own. "down" can't be reached. The destination is Linux, on what this
@@ -63,11 +62,6 @@ class RemoteRunnerTestCase(GitTestCase):
         })
         env.start()
         self.addCleanup(env.stop)
-        # Building bottle-cli for a runner is the dev shim's (prereqs.ensure_dist): built "already".
-        self.built: list[str] = []
-        patcher = mock.patch.object(prereqs, "ensure_dist", side_effect=lambda target: self.built.append(target))
-        patcher.start()
-        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(prereqs, "ensure_cli")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -79,41 +73,13 @@ class RemoteRunnerTestCase(GitTestCase):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
 
-class AddTest(RemoteRunnerTestCase):
-    def test_add_checks_it_and_bottle_cli_copies_itself_there(self) -> None:
-        self.has_kvm()
-        check = runners.add("box", "box")
-        self.assertEqual((check.os, check.missing), ("Linux", ()))
-        self.assertEqual(runners.registered(), {"box": {"ssh": "box"}})
-        self.assertEqual((self.remotes / "box" / ".bottle" / "dist" / "bottle-cli").read_text(), FAKE_CLI)
-        self.assertEqual(self.built, [self.dist.name.removeprefix("dist-")])
-        self.assertIsInstance(runners.get("box"), runners.RemoteRunner)
-
-    def test_add_refuses_what_bottle_cant_set_up(self) -> None:
-        with self.assertRaisesRegex(BottleError, r"box can't be a runner yet; it needs: access to /dev/kvm"):
-            runners.add("box", "box")
-        self.assertEqual(runners.registered(), {})
-
-    def test_unreachable_isnt_added(self) -> None:
-        with self.assertRaisesRegex(BottleError, r"unreachable \(ssh: connect to host down"):
-            runners.add("box", "down")
-        self.assertEqual(runners.registered(), {})
-
-    def test_status_says_what_each_has(self) -> None:
-        self.has_kvm()
-        runners.register("box", "box")
-        runners.register("gone", "down")
-        rows = {row["name"]: row for row in runners.status()}
-        self.assertEqual((rows["box"]["reachable"], rows["box"]["os"], rows["box"]["missing"]), (True, "Linux", []))
-        self.assertEqual(rows["gone"]["reachable"], False)
-        self.assertIn("unreachable", rows["gone"]["error"])
-
-
 class RemoteRunnerTest(RemoteRunnerTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.has_kvm()
-        runners.add("box", "box")
+        added = subprocess.run([os.environ["BOTTLE_CLI"], "runner", "add", "box", "--ssh", "box"],
+                               capture_output=True, text=True)
+        self.assertEqual(added.returncode, 0, added.stderr)
         self.box = runners.get("box")
 
     def test_its_bottle_cli_runs_there_and_nothing_else_of_bottles(self) -> None:
@@ -150,7 +116,6 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
         self.assertIsNone(self.box.state("bottle-b"))
 
     def test_one_it_cant_reach_is_unreachable(self) -> None:
-        runners.forget("box")
-        runners.register("box", "down")
+        register_runner("box", "down")
         with self.assertRaisesRegex(BottleError, r"runner box is unreachable \(ssh: connect to host down"):
             runners.get("box").memory_mib()

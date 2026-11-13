@@ -14,17 +14,15 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import tempfile
 import time
-import unittest
 from pathlib import Path
 from unittest import mock
 
 from bottle import bottles, daemon, features, host, images, prereqs, repos, runners, services
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
-from tests.support import GitTestCase, built_cli, run, write_bottles
+from tests.support import GitTestCase, built_cli, register_runner, run, thread_dir, write_bottles
 from tests.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -120,7 +118,7 @@ class DroneCase(GitTestCase):
             patcher = mock.patch.object(prereqs, name)
             patcher.start()
             self.addCleanup(patcher.stop)
-        runners.register("box", "box")
+        register_runner("box", "box")
 
     def stop_both(self) -> None:
         daemon.stop()
@@ -196,7 +194,7 @@ class DroneTest(DroneCase):
             "labels": {images.INPUTS_LABEL: features.base_inputs()}}]))
         repo = self.make_repo("app")
 
-        bottle = bottles.create({"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],
+        bottle = bottles.create(thread_dir(), {"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],
                                 runner="box")
 
         self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.ext4"))
@@ -289,58 +287,38 @@ class DetachTest(DroneCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_detaching_stops_its_bottles_and_asks_it_nothing_more(self) -> None:
-        asked = []
-        self.assertEqual(runners.detach("box", ask=lambda running: asked.append(running) or True), ["a"])
+    def bottle_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([os.environ["BOTTLE_CLI"], *args], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
 
-        self.assertEqual(asked, [["a"]])
+    def test_with_its_bottles_running_and_no_one_to_ask_it_stops_nothing_and_stays_attached(self) -> None:
+        detached = self.bottle_cli("runner", "detach", "box")
+        self.assertNotEqual(detached.returncode, 0)
+        self.assertIn("box is still attached, and box/" + self.a.name + " still running", detached.stderr)
+        self.assertEqual(self.a.read_text().strip(), "running")
+        self.assertFalse(runners.is_detached("box"))
 
-        self.assertEqual(self.a.read_text().strip(), "stopped")
+    def test_detached_its_bottles_are_detached_and_it_isnt_asked(self) -> None:
+        self.a.write_text("stopped\n")
+        self.assertEqual(self.bottle_cli("runner", "detach", "box").returncode, 0)
         self.assertTrue(runners.is_detached("box"))
         self.turn_off()
         self.assertEqual({row["name"]: row["state"] for row in bottles.status()}, {"a": "detached", "b": "detached"})
-        self.assertEqual(runners.status(["box"])[0]["detached"], True)
-        self.assertEqual(bottles.stop_all(), ([], {}))
-
-    def test_told_no_it_stops_nothing_and_stays_attached(self) -> None:
-        for ask in (lambda running: False, None):
-            with self.assertRaisesRegex(BottleError, "box is still attached, and a still running"):
-                runners.detach("box", ask=ask)
-            self.assertEqual(self.a.read_text().strip(), "running")
-            self.assertFalse(runners.is_detached("box"))
-
-    def test_with_nothing_running_it_asks_nothing(self) -> None:
-        self.a.write_text("stopped\n")
-        self.assertEqual(runners.detach("box"), [])
-        self.assertTrue(runners.is_detached("box"))
-
-    def test_a_machine_no_bottle_stops_keeps_it_attached(self) -> None:
-        (self.machines / "builder-1").write_text("running\n")
-
-        with self.assertRaisesRegex(BottleError, "still runs builder-1"):
-            runners.detach("box", ask=lambda running: True)
-        self.assertFalse(runners.is_detached("box"))
 
     def test_one_that_cant_be_reached_is_detached_only_offline(self) -> None:
         self.turn_off()
-
-        with self.assertRaisesRegex(BottleError, "unreachable.*--offline"):
-            runners.detach("box", ask=lambda running: True)
+        self.assertIn("--offline", self.bottle_cli("runner", "detach", "box").stderr)
         self.assertFalse(runners.is_detached("box"))
-        self.assertEqual(runners.detach("box", offline=True), [])
+        self.assertEqual(self.bottle_cli("runner", "detach", "box", "--offline").returncode, 0)
         self.assertTrue(runners.is_detached("box"))
 
     def test_using_it_again_attaches_it_once_its_back(self) -> None:
-        runners.detach("box", ask=lambda running: True)
+        self.bottle_cli("runner", "detach", "box", "--offline")
         with self.off():
             with self.assertRaisesRegex(BottleError, "box is detached, and doesn't answer yet.*turn it on"):
                 bottles.ensure_running("a")
             self.assertTrue(runners.is_detached("box"))
 
-        self.assertEqual(runners.get("box").state(self.a.name), "stopped")
+        self.assertEqual(runners.get("box").state(self.a.name), "running")
         self.assertFalse(runners.is_detached("box"))
 
-    def test_attaching_names_the_bottles_detaching_stopped(self) -> None:
-        runners.detach("box", ask=lambda running: True)
-        self.assertEqual(runners.attach("box"), ["a"])
-        self.assertFalse(runners.is_detached("box"))

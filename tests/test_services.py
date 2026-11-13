@@ -116,6 +116,7 @@ class ServicesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.routed(header("93.184.216.34", 443, "example.com", tls=True)), b"")
 
     async def test_released_its_machine_is_no_bottles(self) -> None:
+        await self.daemon.bind("other", "other-m")   # one left, so folio serve stays
         await self.daemon.release("b")
         with self.assertLogs("bottle.services", "WARNING"):
             self.assertEqual(await self.routed(header(host.ADDRESS, 80), b"GET / HTTP/1.1\r\n\r\n"), b"")

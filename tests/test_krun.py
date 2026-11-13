@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, host, krun
+from bottle import bottles, daemon, host, krun
 from bottle.errors import BottleError
-from tests.support import GitTestCase
+from tests.support import GitTestCase, thread_dir
 
 
 def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -155,8 +155,8 @@ class KrunBottleTest(GitTestCase):
             (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),
             (bottles.runners.krun, "state", lambda name, cli=None: self.machines.get(name)),
             (bottles.images, "archive_of", lambda tag, cli=None: archive),
-            (bottles.daemon, "bind", bind),
-            (bottles.daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
+            (daemon, "bind", bind),
+            (daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
             (bottles.runners.prereqs, "ensure_cli", lambda: None),
             (bottles.features_, "ensure_built", lambda specs, runner=None: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda runner=None: []),
@@ -172,7 +172,7 @@ class KrunBottleTest(GitTestCase):
     def create(self, memory: str | None = "8G", mac_mib: int = 16384) -> bottles.Bottle:
         spec = {"features": [], **({"memory": memory} if memory else {})}
         with mock.patch.object(bottles.specs, "host_memory_mib", return_value=mac_mib):
-            return bottles.create(spec, "b", [bottles.MountRequest("/workspace", self.repo_path)])
+            return bottles.create(thread_dir(), spec, "b", [bottles.MountRequest("/workspace", self.repo_path)])
 
     def test_a_new_bottle_is_a_machine_bound_to_the_decider(self) -> None:
         bottle = self.create()
@@ -212,7 +212,7 @@ class KrunBottleTest(GitTestCase):
     def test_a_running_bottle_keeps_its_binding_and_has_bottled_running(self) -> None:
         self.create()
         self.calls.clear()
-        with mock.patch.object(bottles.daemon, "start", side_effect=lambda: self.calls.append("bottled")):
+        with mock.patch.object(daemon, "start", side_effect=lambda: self.calls.append("bottled")):
             bottles.ensure_running("b")
         self.assertEqual(self.calls, ["bottled"])
 
@@ -235,12 +235,6 @@ class KrunBottleTest(GitTestCase):
                 self.create()
         self.assertEqual(self.machines, {})
         self.assertNotIn("b", bottles.load())
-
-    def test_shutdown_stops_its_machines(self) -> None:
-        self.create()
-        with mock.patch.object(bottles.daemon, "stop", return_value=True):
-            self.assertEqual(bottles.shutdown(), (["b"], True))
-
 
 
 if __name__ == "__main__":

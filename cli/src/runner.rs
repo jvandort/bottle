@@ -5,6 +5,8 @@
 //!     bottle-cli runner rm NAME
 //!     bottle-cli runner ssh NAME [COMMAND]...
 //!     bottle-cli runner check NAME|DESTINATION [--json]
+//!     bottle-cli runner detach NAME [--offline]
+//!     bottle-cli runner attach NAME
 //!     bottle-cli on NAME COMMAND [ARG]...
 //!
 //! A runner is a Linux machine with /dev/kvm, reached as the user's own ssh reaches it: a
@@ -14,7 +16,8 @@
 //! use. A runner has this program and nothing else of bottle's: in ~/.bottle/dist there, copied
 //! from the distribution for its architecture beside this one's (`dist-TARGET`, as `cargo xtask
 //! dist --target TARGET` makes it; in $BOTTLE_RUNNER_DISTS instead, if it's set) whenever that's
-//! another build. Its machines are named
+//! another build ($BOTTLE_DIST_BUILD, if it's set, is run with TARGET first: a checkout's dev shim,
+//! which brings it up to date with the checkout's sources). Its machines are named
 //! `NAME/MACHINE` here (see machine.rs). `runner ssh` is its shared connection, for a command
 //! there: what git's GIT_SSH_COMMAND can be, with a URL `NAME:PATH` and GIT_SSH_VARIANT=simple.
 //! `runner check` says what a machine (a runner's, or one to add) is and what it lacks, and adds
@@ -23,8 +26,16 @@
 //! but for `image build`, whose recipe and what it mounts, and its --network file, are this
 //! machine's, sent there with it.
 //!
+//! `runner detach` is for turning a runner off: it stops its running machines (asking first, on a
+//! terminal; told no, or with no one to ask, it stops nothing and stays attached), and marks it
+//! detached; `--offline` marks one that's off already, unasked. A detached runner isn't asked
+//! anything: `ls` shows its machines as detached, from what's known here. Using one again (any
+//! command for a machine of its, or `on`) attaches it again if it answers, and says it's off if it
+//! doesn't; `runner attach` does that alone, and names the machines detaching it stopped.
+//!
 //! Runners are listed in $BOTTLE_HOME/runners.json, `{"version": 1, "runners": {NAME: {"ssh":
-//! DESTINATION, ...}}}`; what else an entry says (bottle's "detached") is kept as it is.
+//! DESTINATION, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an entry says
+//! is kept as it is.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -40,6 +51,7 @@ use crate::FAILED;
 
 pub const USAGE: &str = "runner add NAME --ssh DESTINATION | runner ls [--json] | runner rm NAME \
                          | runner ssh NAME [COMMAND]... | runner check NAME|DESTINATION [--json] \
+                         | runner detach NAME [--offline] | runner attach NAME \
                          | on NAME COMMAND [ARG]...";
 
 /// ssh's own failures, connecting or authenticating, exit 255.
@@ -145,18 +157,26 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// Runner `name`, as added; refused if there's none, or it's detached (turned off).
+    /// Runner `name`, as added; refused if there's none. One detached is attached again, if it
+    /// answers; refused if it doesn't.
     pub fn named(name: &str) -> io::Result<Runner> {
         let entry = registered()?
             .remove(name)
             .ok_or_else(|| other(format!("no runner named {name}")))?;
-        if entry.detached() {
-            return Err(other(format!("runner {name} is detached")));
-        }
-        Ok(Runner {
+        let runner = Runner {
             name: name.to_string(),
-            destination: entry.ssh,
-        })
+            destination: entry.ssh.clone(),
+        };
+        if entry.detached() {
+            runner.found().map_err(|e| {
+                other(format!(
+                    "runner {name} is detached, and doesn't answer yet ({e}): turn it on, then try again"
+                ))
+            })?;
+            mark(name, None)?;
+            eprintln!("bottle-cli: runner {name} is back, and attached again");
+        }
+        Ok(runner)
     }
 
     fn control_path(&self) -> PathBuf {
@@ -241,7 +261,14 @@ impl Runner {
         if output.status.code() == Some(SSH_FAILED)
             && !said.lines().any(|l| l.starts_with("bottle-cli: "))
         {
-            let why = said.lines().last().unwrap_or("ssh failed").to_string();
+            let mut why = said.lines().last().unwrap_or("ssh failed").to_string();
+            // What macOS says to a process it doesn't let reach the local network.
+            if cfg!(target_os = "macos") && why.contains("No route to host") {
+                why.push_str(
+                    "; on macOS, often the Local Network permission (System Settings > Privacy & \
+                     Security > Local Network) of whatever started this",
+                );
+            }
             return Err(other(format!(
                 "runner {} is unreachable ({why})",
                 self.name
@@ -296,6 +323,17 @@ impl Runner {
                 .to_path_buf(),
         };
         let dist = dists.join(format!("dist-{target}"));
+        // A checkout's: its dev shim brings the distribution up to date with its sources first.
+        if let Some(build) = env::var_os("BOTTLE_DIST_BUILD").filter(|b| !b.is_empty()) {
+            let built = Command::new(&build)
+                .arg(target)
+                .stdout(Stdio::from(io::stderr()))
+                .status()
+                .map_err(|e| other(format!("{}: {e}", PathBuf::from(&build).display())))?;
+            if !built.success() {
+                return Err(other(format!("building bottle-cli for {target} failed")));
+            }
+        }
         let ours = fs::read_to_string(dist.join(STAMP)).map_err(|_| {
             other(format!(
                 "no bottle-cli for {target} at {} (cargo xtask dist --target {target})",
@@ -377,6 +415,9 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         (Some("rm"), [name]) => rm(name),
         (Some("check"), [target]) => check(target, false),
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
+        (Some("detach"), [name]) => detach(name, false),
+        (Some("detach"), [name, flag]) if flag == "--offline" => detach(name, true),
+        (Some("attach"), [name]) => attach(name),
         (Some("ssh"), [name, command @ ..]) => {
             return match Runner::named(name) {
                 // Its stdin, stdout and terminal this process's: git's, say.
@@ -463,6 +504,154 @@ fn ls(json: bool) -> io::Result<()> {
             let detached = if e.detached() { "  (detached)" } else { "" };
             println!("{name}  {}{detached}", e.ssh);
         }
+    }
+    Ok(())
+}
+
+/// Marks runner `name` detached, having stopped `detached` (Some), or attached (None).
+fn mark(name: &str, detached: Option<&[String]>) -> io::Result<()> {
+    let mut registry = registry()?;
+    let entry = registry
+        .runners
+        .get_mut(name)
+        .ok_or_else(|| other(format!("no runner named {name}")))?;
+    match detached {
+        Some(stopped) => {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            entry.rest.insert(
+                "detached".into(),
+                serde_json::json!({"at": at, "stopped": stopped}),
+            );
+        }
+        None => {
+            entry.rest.remove("detached");
+        }
+    }
+    write_registry(&registry)
+}
+
+/// The machines running on `runner`, by their names there.
+fn running(runner: &Runner) -> io::Result<Vec<String>> {
+    let output = runner
+        .cli(
+            &["machine".into(), "ls".into(), "--json".into()],
+            Some(false),
+        )
+        .stdin(Stdio::null())
+        .output()?;
+    runner.reached(&output)?;
+    if !output.status.success() {
+        return Err(other(String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+    Ok(listed
+        .iter()
+        .filter(|m| m["state"] == "running")
+        .filter_map(|m| m["name"].as_str().map(String::from))
+        .collect())
+}
+
+/// `runner detach NAME [--offline]` (see the module's doc).
+fn detach(name: &str, offline: bool) -> io::Result<()> {
+    let entry = registered()?
+        .remove(name)
+        .ok_or_else(|| other(format!("no runner named {name}")))?;
+    if entry.detached() {
+        println!("Runner {name} is detached already: it's safe to turn off");
+        return Ok(());
+    }
+    let mut stopped = Vec::new();
+    if !offline {
+        let runner = Runner {
+            name: name.to_string(),
+            destination: entry.ssh,
+        };
+        let off = |e: io::Error| {
+            other(format!(
+                "{e}; if it's off already, `bottle runner detach {name} --offline`"
+            ))
+        };
+        let up = running(&runner).map_err(off)?;
+        if !up.is_empty() {
+            let named: Vec<String> = up.iter().map(|m| format!("{name}/{m}")).collect();
+            if !ask(&format!(
+                "Running on {name}: {}. Stopping one ends whatever runs in it, its agent's work \
+                 included: tell them to wrap up first, if they're busy.\nStop them now? [y/N] ",
+                named.join(", ")
+            )) {
+                return Err(other(format!(
+                    "runner {name} is still attached, and {} still running: `bottle runner detach \
+                     {name}` again when they can be stopped",
+                    named.join(", ")
+                )));
+            }
+            for machine in &named {
+                let args = ["--name".to_string(), machine.clone()];
+                if crate::remote::machine("stop", &args) != Some(ExitCode::SUCCESS) {
+                    return Err(other(format!("couldn't stop {machine}")));
+                }
+                println!("Stopped {machine}");
+                stopped.push(machine.clone());
+            }
+            let still = running(&runner).map_err(off)?;
+            if !still.is_empty() {
+                return Err(other(format!(
+                    "runner {name} still runs {}: `bottle runner detach {name}` again",
+                    still.join(", ")
+                )));
+            }
+        }
+    }
+    mark(name, Some(&stopped))?;
+    if offline {
+        println!("Runner {name} detached, unasked: nothing was stopped or checked");
+    } else {
+        println!("Runner {name} detached: nothing runs on it, so it's safe to turn off");
+    }
+    Ok(())
+}
+
+/// Whether the user, asked `question` on a terminal, says yes; no, without one.
+fn ask(question: &str) -> bool {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        return false;
+    }
+    print!("{question}");
+    let _ = io::stdout().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// `runner attach NAME`: attached again, once it answers.
+fn attach(name: &str) -> io::Result<()> {
+    let entry = registered()?
+        .remove(name)
+        .ok_or_else(|| other(format!("no runner named {name}")))?;
+    let stopped: Vec<String> = entry
+        .rest
+        .get("detached")
+        .and_then(|d| d["stopped"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.as_str().map(String::from))
+        .collect();
+    Runner {
+        name: name.to_string(),
+        destination: entry.ssh,
+    }
+    .found()?;
+    mark(name, None)?;
+    println!("Runner {name} attached");
+    if !stopped.is_empty() {
+        println!(
+            "Running when it was detached: {}. Start one with `bottle start MACHINE`.",
+            stopped.join(", ")
+        );
     }
     Ok(())
 }

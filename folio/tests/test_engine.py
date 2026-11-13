@@ -49,10 +49,10 @@ class EngineTest(unittest.TestCase):
 
     def test_a_bottle_is_made_with_its_record_where_its_owner_says(self) -> None:
         with mock.patch.object(engine.bottles, "create") as create, mock.patch("sys.stderr"):
-            engine.new("b", {"features": []}, [engine.Mount("/workspace", "/r", None, [])], "", owner="/t")
-        self.assertEqual(create.call_args.kwargs["owner"], "/t")
+            engine.new("/t", "b", {"features": []}, [engine.Mount("/workspace", "/r", None, [])], "")
+        self.assertEqual(create.call_args.args[0], "/t")
         self.assertEqual(create.call_args.kwargs["runner"], "local")
-        [mount] = create.call_args.args[2]
+        [mount] = create.call_args.args[3]
         self.assertEqual((mount.path, mount.remotes), ("/workspace", None))   # no remotes: bottle's default
 
 

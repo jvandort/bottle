@@ -1,16 +1,15 @@
 import dataclasses
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from bottle.store import write_json
-from bottle import bottles, features as features_, host, repos
+from bottle import bottles, daemon, features as features_, host, repos
 from bottle.errors import BottleError
-from tests.support import GitTestCase, run, write_bottles
+from tests.support import GitTestCase, run, thread_dir, write_bottles
 from tests.test_host import serve_bottle_host
 
 
@@ -133,7 +132,7 @@ class FakeSmolvm:
         for module, names in (
             (bottles.runners.krun, ("create", "configure", "start", "stop", "rename", "delete", "state", "exec_",
                                     "exec_command", "ca_certificate")),
-            (bottles.daemon, ("bind", "release_egress")),
+            (daemon, ("bind", "release_egress")),
         ):
             for name in names:
                 patcher = mock.patch.object(module, name, getattr(self, name))
@@ -141,8 +140,8 @@ class FakeSmolvm:
                 test.addCleanup(patcher.stop)
         for patcher in (
             mock.patch.object(bottles.images, "archive_of", self.archive),
-            mock.patch.object(bottles.daemon, "start", self.daemon_start),
-            mock.patch.object(bottles.daemon, "stop", self.daemon_stop),
+            mock.patch.object(daemon, "start", self.daemon_start),
+            mock.patch.object(daemon, "stop", self.daemon_stop),
             mock.patch.object(bottles.runners.prereqs, "ensure_cli"),
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
             mock.patch.object(bottles.cache, "cached_for",
@@ -170,7 +169,7 @@ class BottleTestCase(GitTestCase):
         taken = set(bottles.load())
         name = name or next(n for n in ("example", *(f"example-{i}" for i in range(2, 100))) if n not in taken)
         spec = {"features": list(features), "memory": memory, **({"disk": disk} if disk else {})}
-        return bottles.create(spec, name, [bottles.MountRequest("/workspace", self.repo_path, branch, remotes)],
+        return bottles.create(thread_dir(), spec, name, [bottles.MountRequest("/workspace", self.repo_path, branch, remotes)],
                               context)
 
     def fake(self, **kwargs) -> FakeSmolvm:
@@ -262,7 +261,7 @@ class CreateTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         network = fake.create_args["network"]
-        sockets = bottles.daemon.services_sockets()
+        sockets = daemon.services_sockets()
         self.assertIn({"address": bottles.host.ADDRESS, "port": 80, "socket": str(sockets["host"])}, network["routes"])
         self.assertIn({"network": bottles.host.SSH_NETWORK, "port": bottles.host.SSH_PORT,
                        "socket": str(sockets["ssh"])}, network["routes"])
@@ -441,7 +440,7 @@ class DeleteTest(BottleTestCase):
     def test_retry_after_a_failed_delete(self) -> None:
         fake = self.fake(fail_cleanup="machine")
         self.create()
-        with self.assertRaisesRegex(BottleError, "rerun `folio bottle rm example`"):
+        with self.assertRaisesRegex(BottleError, "try again, and what.s left is deleted"):
             bottles.delete("example")
         self.assertEqual(bottles.get("example").status, "broken")
         self.assertEqual(fake.bound, set())  # the other steps still ran
@@ -519,7 +518,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         self.create()
         fake.machines.clear()
-        with self.assertRaisesRegex(BottleError, "machine is gone; `folio bottle rm example`, and make it again"):
+        with self.assertRaisesRegex(BottleError, "machine is gone; delete its thread"):
             bottles.ensure_running("example")
 
     def test_unfinished_bottle(self) -> None:
@@ -698,23 +697,9 @@ class StartStopTest(BottleTestCase):
         self.assertEqual(fake.machines[bottle.machine], "running")
         self.assertEqual(fake.bound, {"example"})
 
-    def test_shutdown_stops_running_bottles_then_bottled(self) -> None:
-        fake = self.fake()
-        a = self.create()
-        b = self.create()
-        bottles.stop(b.name)
-        fake.calls.clear()
-
-        stopped, daemon_was_running = bottles.shutdown()
-
-        self.assertEqual((stopped, daemon_was_running), (["example"], True))
-        self.assertEqual(fake.machines, {a.machine: "stopped", b.machine: "stopped"})
-        self.assertEqual(fake.calls, ["stop", "daemon_stop"])
-        self.assertEqual(fake.bound, set())
-
 
 class UnreachableRunnerTest(BottleTestCase):
-    """Bottles on a runner that's off: listed as unreachable, left alone by what stops bottles, everything else as usual."""
+    """Bottles on a runner that's off: listed as unreachable, everything else as usual."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -743,17 +728,6 @@ class UnreachableRunnerTest(BottleTestCase):
         self.assertEqual([(b.name, state) for b, state in bottles.list_all()],
                          [("here", "running"), ("there", "unreachable"), ("also-there", "unreachable")])
         self.assertEqual(len(self.asked), 1)
-
-    def test_stopping_everything_stops_what_it_can_and_says_what_it_couldnt(self) -> None:
-        stopped, unreachable = bottles.stop_all()
-        self.assertEqual(stopped, ["here"])
-        self.assertEqual(list(unreachable), ["box"])
-        self.assertIn("Operation timed out", unreachable["box"])
-        self.assertEqual(bottles.shutdown(), ([], True))
-
-    def test_stopping_one_runners_bottles_leaves_the_rest(self) -> None:
-        self.assertEqual(bottles.stop_all("local"), (["here"], {}))
-        self.assertEqual(self.asked, [])
 
 
 class DroneCertificatesTest(BottleTestCase):
@@ -874,7 +848,7 @@ class SpecBottleTest(BottleTestCase):
 
     def create(self, name: str = "t", git_repo=None, remotes=None, checkout=None, **kwargs) -> bottles.Bottle:
         mounts = [bottles.MountRequest("/workspace", git_repo, checkout, remotes)] if git_repo else []
-        return bottles.create(dict(self.SPEC), name, mounts, **kwargs)
+        return bottles.create(thread_dir(), dict(self.SPEC), name, mounts, **kwargs)
 
     def test_with_no_repo_there_is_nothing_to_mount_or_serve(self) -> None:
         fake = self.fake()
@@ -924,7 +898,7 @@ class SpecBottleTest(BottleTestCase):
     def test_memory_and_features_come_from_the_spec(self) -> None:
         fake = self.fake()
         with mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-tools"):
-            bottle = bottles.create({"features": ["tools"], "memory": "8G"}, "t")
+            bottle = bottles.create(thread_dir(), {"features": ["tools"], "memory": "8G"}, "t")
         self.assertEqual((bottle.features, bottle.memory, fake.create_args["memory_mib"]), (("tools",), "8G", 8192))
         self.assertEqual(bottle.spec, {"features": ["tools"], "memory": "8G"})
 
@@ -1006,7 +980,7 @@ class MountsTest(BottleTestCase):
         self.notes = self.make_repo("notes")
 
     def two(self, fake: "FakeSmolvm") -> bottles.Bottle:
-        return bottles.create({"features": [], "memory": "2G"}, "two", [
+        return bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "two", [
             bottles.MountRequest("/work/app", self.repo_path),
             bottles.MountRequest("/notes", self.notes, remotes=["agent:fetch=ns/n-out,push=ns/n-out"]),
         ])
@@ -1043,27 +1017,29 @@ class MountsTest(BottleTestCase):
         for paths, why in ((["notes"], "invalid mount path"), (["/a b"], "invalid mount path"),
                            (["/work", "/work/app"], "overlap"), (["/notes", "/notes"], "overlap")):
             with self.subTest(paths), self.assertRaisesRegex(BottleError, why):
-                bottles.create({"features": [], "memory": "2G"}, "x",
+                bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "x",
                                [bottles.MountRequest(p, self.repo_path) for p in paths])
         self.assertEqual(bottles.load(), {})
 
     def test_bottles_json_moves_into_folios_threads(self) -> None:
-        """Each bottle to the thread whose bottle or sidecar it is; one no thread has, kept, and said."""
+        """Each bottle to the thread whose bottle or sidecar it is; one no thread has is left to its machine, and
+        said."""
         home = Path(os.environ["FOLIO_HOME"])
         thread = home / "app-1234" / "t"
         (thread / "20260101T000000.000Z").mkdir(parents=True)
         (thread / "20260101T000000.000Z" / "thread.json").write_text(json.dumps({"name": "t", "bottle": "app-t"}))
         (thread / "current").symlink_to("20260101T000000.000Z")
-        record = lambda name: {"name": name, "id": name, "image": "base", "created": 0.0, "status": "ready"}
+        record = lambda name: {"name": name, "id": name, "image": "base", "created": 0.0, "status": "ready",
+                               "machine_name": f"m-{name}"}
         write_json(bottles.legacy_registry(), {"version": 1, "bottles": {
             n: record(n) for n in ("app-t", "app-t-sidecar", "lone")}})
         with mock.patch("sys.stderr") as stderr:
-            self.assertEqual(set(bottles.load()), {"app-t", "app-t-sidecar", "lone"})
-        self.assertIn("no thread has lone", "".join(c.args[0] for c in stderr.write.call_args_list))
+            self.assertEqual(set(bottles.load()), {"app-t", "app-t-sidecar"})
+        said = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("no thread had the bottles whose machines are m-lone", said)
         self.assertFalse(bottles.legacy_registry().exists())
         self.assertEqual(bottles.records(), {
-            "app-t": thread / "bottles" / "app-t.json", "app-t-sidecar": thread / "bottles" / "app-t-sidecar.json",
-            "lone": home / "bottles" / "lone.json"})
+            "app-t": thread / "bottles" / "app-t.json", "app-t-sidecar": thread / "bottles" / "app-t-sidecar.json"})
         bottles._forget("app-t")
         bottles._forget("app-t-sidecar")
         self.assertFalse((thread / "bottles").exists())   # none left there
@@ -1072,7 +1048,7 @@ class MountsTest(BottleTestCase):
         record = {"name": "old", "id": "i", "image": "base", "branch": "main", "commit": "c" * 40, "created": 0.0,
                   "status": "ready", "git_repo": str(self.repo_path),
                   "remotes": [{"name": "agent", "fetch": "ns/a", "push": "ns/a", "advance": "main"}]}
-        write_json(bottles.legacy_registry(), {"version": 1, "bottles": {"old": record}})
+        write_json(thread_dir() / "bottles" / "old.json", record)
         [mount] = bottles.get("old").mounts
         # Where its machine has them: objects at the old place, remotes straight under /git.
         self.assertEqual((mount.path, mount.repo, mount.branch, mount.objects, mount.at),
@@ -1090,7 +1066,7 @@ class MountsTest(BottleTestCase):
     def test_a_runner_there_isnt_is_refused_before_anything_is_made(self) -> None:
         fake = self.fake()
         with self.assertRaisesRegex(BottleError, "no runner named 'box'"):
-            bottles.create({"features": [], "memory": "2G"}, "x", [bottles.MountRequest("/workspace", self.repo_path)],
+            bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "x", [bottles.MountRequest("/workspace", self.repo_path)],
                            runner="box")
         self.assertEqual((bottles.load(), fake.calls), ({}, []))
 
@@ -1104,12 +1080,12 @@ class SshTest(BottleTestCase):
         self.big = self.create(name="big", memory="8G")
 
     def granted(self, **ssh) -> bottles.Bottle:
-        return bottles.create({"features": [], "memory": "2G"}, "main",
+        return bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "main",
                               [bottles.MountRequest("/workspace", self.repo_path)], ssh=ssh)
 
     def test_each_is_a_name_at_an_address_of_its_own(self) -> None:
         self.create(name="other")
-        main = bottles.create({"features": [], "memory": "2G"}, "main", ssh={"sidecar.host": "big", "o": "other"})
+        main = bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "main", ssh={"sidecar.host": "big", "o": "other"})
         self.assertEqual([(g.name, g.bottle, g.id, g.address) for g in main.ssh],
                          [("sidecar.host", "big", self.big.id, "192.0.2.2"), ("o", "other", bottles.get("other").id, "192.0.2.3")])
         self.assertEqual(bottles.get("main").ssh, main.ssh)   # survives the JSON round trip
@@ -1161,7 +1137,7 @@ class StatusTest(BottleTestCase):
     def test_every_bottle_or_those_named(self) -> None:
         fake = self.fake()
         a = self.create()
-        b = bottles.create({"features": [], "memory": "2G"}, "spec", [bottles.MountRequest(
+        b = bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "spec", [bottles.MountRequest(
             "/workspace", self.repo_path, remotes=["work:fetch=ns/t-in,push=ns/t-out"])])
         fake.machines[b.machine] = "stopped"
         self.assertEqual([(r["name"], r["state"]) for r in bottles.status()], [("example", "running"), ("spec", "stopped")])
@@ -1186,7 +1162,7 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
         self.fake_smolvm = self.fake()
         run("git", "-C", self.repo_path, "branch", "feature")
         self.bottle = bottles.create(
-            {"features": [], "memory": "2G"}, "t", [bottles.MountRequest(
+            thread_dir(), {"features": [], "memory": "2G"}, "t", [bottles.MountRequest(
                 "/workspace", self.repo_path, "feature",
                 ["origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/t-in,push=ns/t-out"])],
             context="Extra.\n",

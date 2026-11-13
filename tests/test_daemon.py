@@ -273,6 +273,14 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({m: b.bottle for m, b in d.services.bindings.items()}, {"b-m": "b", "other-m": "other"})
         self.assertIs(d.services.bindings["b-m"], bound)
 
+    async def test_it_stops_once_no_bottle_is_left_to_answer(self) -> None:
+        d = Daemon()
+        await d.restore([("a", "a-m", (), ()), ("b", "b-m", (), ())])
+        await d.release("a")
+        self.assertFalse(d.stopping.is_set())
+        await d.release("b")
+        self.assertTrue(d.stopping.is_set())
+
     async def test_one_failure_doesnt_stop_the_rest(self) -> None:
         d = Daemon()
         real = d.controller.egress

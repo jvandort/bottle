@@ -29,8 +29,8 @@ def ensure_cli() -> None:
     """bottle-cli built (see krun.py), from this repo's sources as they are now, or the one $BOTTLE_CLI names.
 
     Built by `cargo xtask dist` when it's missing, or was built from sources
-    other than these; its progress is on stderr. One named by $BOTTLE_CLI is
-    used as it is.
+    other than these; its progress is on stderr; and a runner's, built the same way when bottle-cli copies it
+    there. One named by $BOTTLE_CLI is used as it is.
     """
     if platform.system() == "Darwin" and platform.machine() != "arm64":
         raise BottleError("bottle runs on macOS on Apple silicon")
@@ -39,6 +39,8 @@ def ensure_cli() -> None:
             raise BottleError(f"BOTTLE_CLI is {krun.binary()}, which isn't there")
         return
     ensure_dist()
+    # And a runner's, as bottle-cli's about to copy it there (bin/bottle-dist): every bottle-cli this process runs.
+    os.environ.setdefault("BOTTLE_DIST_BUILD", str(krun.REPO / "bin" / "bottle-dist"))
 
 
 # What a Linux runner's distribution is built for, by its architecture (uname -m): static, so any distribution's.

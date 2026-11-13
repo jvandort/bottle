@@ -55,15 +55,15 @@ class Mount:
     remotes: list[str]
 
 
-def new(name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None,
-        ssh: dict[str, str] | None = None, owner: Path | None = None) -> None:
-    """Create a bottle, on `runner` (None: this machine), that may ssh to each bottle `ssh` gives, by the name
-    given: {name: bottle}; its record kept in `owner` (its thread's directory). On this terminal: an image build
+def new(owner: Path, name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None,
+        ssh: dict[str, str] | None = None) -> None:
+    """Create a bottle for the thread whose directory is `owner`, where its record is kept, on `runner` (None:
+    this machine), that may ssh to each bottle `ssh` gives, by the name given: {name: bottle}. On this terminal: an image build
     shows, and a login can ask."""
     print(f"Creating bottle {name}...", file=sys.stderr)
     requests = [bottles.MountRequest(m.path, m.repo, m.checkout, m.remotes or None) for m in mounts]
     with _said():
-        bottles.create(spec, name, requests, context, runner=runner or runners.LOCAL, ssh=ssh, owner=owner)
+        bottles.create(owner, spec, name, requests, context, runner=runner or runners.LOCAL, ssh=ssh)
 
 
 def status(names: list[str]) -> dict[str, dict]:

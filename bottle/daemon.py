@@ -422,10 +422,14 @@ class Daemon:
             self.services.bind(bottle, machine, gateway)
 
     async def release(self, bottle: str) -> None:
-        """Stop answering `bottle`'s machine: it's stopped, or gone."""
+        """Stop answering `bottle`'s machine: it's gone (deleted, or its thread paused). With none left to answer,
+        folio serve stops: the next bottle made starts it again."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             self.services.release(bottle)
         await self.controller.release(bottle)
+        if not self.services.bindings:
+            log.info("no bottle left to answer: stopping")
+            self.stopping.set()
 
     async def restore(self, bound: list[tuple]) -> list[tuple]:
         """Answer the machines of bottles there were before bottled started.

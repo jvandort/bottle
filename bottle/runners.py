@@ -1,4 +1,4 @@
-"""Runners: the machines bottles run on, behind one interface (see `folio runner`).
+"""Runners: the machines bottles run on, behind one interface (bottle-cli's: `bottle runner`).
 
 A runner holds bottles' machines, the images they boot, and the bottled their
 machines route connections to. Everything else -- the registry, credentials,
@@ -16,14 +16,9 @@ images it's built and builds those it's sent.
 
 import functools
 import hashlib
-import json
 import os
-import platform
-import re
 import shlex
 import subprocess
-import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -31,7 +26,7 @@ from typing import Protocol
 from bottle import daemon, images, krun, prereqs, repos, services
 from bottle.errors import BottleError
 from bottle.host import Served
-from bottle.store import bottle_home, read_json, write_json
+from bottle.store import bottle_home, read_json
 
 
 LOCAL = "local"
@@ -260,16 +255,6 @@ class RemoteRunner(LocalRunner):
         self.cli = krun.RunnerCli(name)
         self._info: dict | None = None
 
-    def ensure_ready(self) -> None:
-        # Its bottle-cli as this repo's sources are now, built here for its architecture (bottle-cli copies it
-        # there when it's another build).
-        prereqs.ensure_cli()
-        arch = check(self.name).arch
-        target = prereqs.LINUX_TARGETS.get(arch)
-        if target is None:
-            raise BottleError(f"runner {self.name} is {arch or 'unknown'}: bottle-cli is built for x86_64 and arm64")
-        prereqs.ensure_dist(target)
-
     def _host(self) -> dict:
         if self._info is None:
             self._info = krun.info(cli=self.cli)
@@ -313,43 +298,7 @@ def mirror_key(git_dir: Path) -> str:
     return f"{name}-{hashlib.sha256(str(git_dir).encode()).hexdigest()[:8]}"
 
 
-@dataclass(frozen=True)
-class Check:
-    """What a machine has, of what it needs to run machines (`bottle-cli runner check`)."""
-
-    os: str
-    arch: str
-    kvm: bool
-    git: bool
-    missing: tuple[str, ...]
-
-
-def check(target: str) -> Check:
-    """What runner `target`, or the machine at ssh destination `target`, has and lacks; refused, saying so, if it
-    can't be reached."""
-    result = subprocess.run([krun.binary(), "runner", "check", target, "--json"], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise BottleError(explained(krun._error(result.stderr)))
-    found = json.loads(result.stdout)
-    return Check(found["os"], found["arch"], found["kvm"], found["git"], tuple(found["missing"]))
-
-
-# What macOS says to a process it doesn't let reach the local network, whatever the network is doing.
-NO_ROUTE = "No route to host"
-LOCAL_NETWORK = ("on macOS, often the Local Network permission (System Settings > Privacy & Security > Local "
-                 "Network) of whatever started this: bottled has the permission of the process that started it")
-
-
-def explained(why: str) -> str:
-    """What ssh said, with the likeliest reason on a Mac when it's that there's no route."""
-    if NO_ROUTE in why and platform.system() == "Darwin":
-        return f"{why}; {LOCAL_NETWORK}"
-    return why
-
-
 _LOCAL = LocalRunner()
-# A runner's name: like a bottle's, so it's safe in a path and a shell.
-NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def registry_path() -> Path:
@@ -357,176 +306,21 @@ def registry_path() -> Path:
 
 
 def registered() -> dict[str, dict]:
-    """Every remote runner added, by name: each one's {"ssh": destination}, and "detached" if it is (see detach)."""
+    """Every remote runner added (`bottle runner add`), by name: each one's {"ssh": destination}, and "detached"
+    if it is."""
     return (read_json(registry_path()) or {}).get("runners", {})
 
 
 def is_detached(name: str) -> bool:
-    """Whether `name` was detached, to be turned off: nothing asks it anything until it's attached again."""
+    """Whether `name` was detached (`bottle runner detach`), to be turned off: nothing asks it anything until it's
+    used again, which attaches it."""
     return "detached" in registered().get(name, {})
 
 
-def _mark(name: str, detached: dict | None) -> None:
-    runners = registered()
-    runners[name].pop("detached", None)
-    if detached is not None:
-        runners[name]["detached"] = detached
-    write_json(registry_path(), {"version": 1, "runners": runners})
-
-
-def register(name: str, destination: str) -> None:
-    if name == LOCAL or not NAME_PATTERN.fullmatch(name):
-        raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
-    runners = registered()
-    runners[name] = {"ssh": destination}
-    write_json(registry_path(), {"version": 1, "runners": runners})
-
-
-def forget(name: str) -> None:
-    runners = registered()
-    if runners.pop(name, None) is not None:
-        write_json(registry_path(), {"version": 1, "runners": runners})
-
-
 def get(name: str = LOCAL) -> Runner:
-    """The runner named `name`: this machine, or one added with `folio runner add`."""
+    """The runner named `name`: this machine, or one added with `bottle runner add`."""
     if name == LOCAL:
         return _LOCAL
-    entry = registered().get(name)
-    if entry is None:
-        raise BottleError(f"no runner named {name!r}; add one with `folio runner add {name} --ssh DESTINATION`")
-    if "detached" in entry:
-        # Used again: it's attached again if it's back, and if it isn't, that's what's said.
-        try:
-            attach(name)
-        except BottleError as e:
-            raise BottleError(f"runner {name} is detached, and doesn't answer yet ({e}): "
-                              "turn it on, then try again") from None
-        print(f"bottle: runner {name} is back, and attached again", file=sys.stderr)
-    return RemoteRunner(name)
-
-
-def add(name: str, destination: str) -> Check:
-    """Add a remote runner: check it over ssh, and have bottle-cli add it, copying itself there.
-
-    What bottle can't set up itself refuses it, saying what's missing.
-    bottle-cli, built here for its architecture (on a Mac, in a Linux VM: see
-    xtask), is copied there before it's recorded: all a runner has of bottle.
-    """
-    if name == LOCAL or not NAME_PATTERN.fullmatch(name):
-        raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
-    known = registered().get(name)
-    if known is not None and known["ssh"] != destination:
-        raise BottleError(f"runner {name} is already {known['ssh']}; `folio runner rm {name}` first")
-    found = check(destination)
-    if found.missing:
-        raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(found.missing)}")
-    prereqs.ensure_cli()
-    target = prereqs.LINUX_TARGETS.get(found.arch)
-    if target is not None:
-        prereqs.ensure_dist(target)
-    result = subprocess.run([krun.binary(), "runner", "add", name, "--ssh", destination], text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        raise BottleError(krun._error(result.stderr))
-    return found
-
-
-def detach(name: str, offline: bool = False, ask=None) -> list[str]:
-    """Stop everything on remote runner `name`, so it can be turned off, and mark it detached: until it's attached
-    again, it isn't asked anything (its bottles show as detached), and its link and shared connection are let go.
-    Returns the bottles stopped, which attach names to start again.
-
-    `ask` is asked, given the bottles running there, whether to stop them; without it, or told no, nothing is
-    stopped and it stays attached, so their agents can be told to wrap up first. Refused too, and left attached,
-    if it can't be reached, or if a machine that isn't a bottle's (a build, say) still runs there: it isn't safe
-    to turn off yet. `offline`: it's off already; mark it without asking it.
-    """
-    from bottle import bottles
-
-    entry = registered().get(name)
-    if name == LOCAL:
-        raise BottleError("the local runner is this machine; it can't be detached")
-    if entry is None:
-        raise BottleError(f"no runner named {name!r}")
-    if "detached" in entry:
-        return []
-    stopped: list[str] = []
-    if not offline:
-        runner = get(name)
-        try:
-            running = [b.name for b in bottles.load().values()
-                       if b.runner == name and b.status == "ready" and runner.state(b.machine) == "running"]
-        except BottleError as e:
-            raise BottleError(f"{e}; if it's off already, `folio runner detach {name} --offline`") from None
-        if running and (ask is None or not ask(running)):
-            raise BottleError(f"runner {name} is still attached, and {', '.join(running)} still running: "
-                              f"`folio runner detach {name}` again when they can be stopped")
-        stopped, unreachable = bottles.stop_all(name)
-        if unreachable:
-            raise BottleError(f"{unreachable[name]}; if it's off already, `folio runner detach {name} --offline`")
-        still = get(name).running()
-        if still:
-            raise BottleError(f"runner {name} still runs {', '.join(still)}, which no bottle here stops: "
-                              f"wait for it to finish, then `folio runner detach {name}` again")
-    _mark(name, {"at": time.time(), "stopped": stopped})
-    return stopped
-
-
-def attach(name: str) -> list[str]:
-    """Attach a detached runner again, once it answers; the bottles detaching it stopped, still there to start."""
-    from bottle import bottles
-
-    entry = registered().get(name)
-    if entry is None:
-        raise BottleError(f"no runner named {name!r}")
-    check(entry["ssh"])
-    stopped = entry.get("detached", {}).get("stopped", [])
-    if "detached" in entry:
-        _mark(name, None)
-    there = bottles.load()
-    return [b for b in stopped if b in there and there[b].runner == name]
-
-
-def status(names: list[str] = ()) -> list[dict]:
-    """Each runner, or those named: where it is, whether it can be reached and run bottles, and its bottles."""
-    from bottle import bottles
-
-    on: dict[str, list[str]] = {}
-    for bottle in bottles.load().values():
-        on.setdefault(bottle.runner, []).append(bottle.name)
-    remotes = registered()
-    rows = []
-    for name in names or [LOCAL, *sorted(remotes)]:
-        row: dict = {"name": name, "bottles": sorted(on.get(name, []))}
-        if name == LOCAL:
-            rows.append(row | {"ssh": None, "reachable": True})
-            continue
-        if name not in remotes:
-            rows.append(row | {"state": "missing"})
-            continue
-        row["ssh"] = remotes[name]["ssh"]
-        if "detached" in remotes[name]:
-            rows.append(row | {"detached": True, "reachable": None})
-            continue
-        try:
-            found = check(row["ssh"])
-        except BottleError as e:
-            rows.append(row | {"reachable": False, "error": str(e)})
-            continue
-        rows.append(row | {"reachable": True, "os": found.os, "arch": found.arch, "missing": list(found.missing)})
-    return rows
-
-
-def remove(name: str) -> None:
-    """Forget a remote runner with no bottles. Nothing on it is touched."""
-    from bottle import bottles
-
-    if name == LOCAL:
-        raise BottleError("the local runner is this machine; it can't be removed")
     if name not in registered():
-        raise BottleError(f"no runner named {name!r}")
-    on = sorted(b.name for b in bottles.load().values() if b.runner == name)
-    if on:
-        raise BottleError(f"runner {name} has bottles: {', '.join(on)}; delete them first")
-    forget(name)
+        raise BottleError(f"no runner named {name!r}; add one with `bottle runner add {name} --ssh DESTINATION`")
+    return RemoteRunner(name)

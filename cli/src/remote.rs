@@ -406,6 +406,12 @@ pub fn listed() -> Vec<serde_json::Value> {
     };
     for (name, entry) in runners {
         if entry.detached() {
+            // Not asked: what's known of its machines here.
+            for machine in records(&name).unwrap_or_default() {
+                rows.push(
+                    serde_json::json!({"name": format!("{name}/{machine}"), "state": "detached"}),
+                );
+            }
             continue;
         }
         let runner = Runner {

@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+# bottle-cli's dev hook for a runner's distribution ($BOTTLE_DIST_BUILD, which bin/bottle and folio set): the one
+# for TARGET (a Rust target triple), built from this checkout's sources if they've changed since it was.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bottle import prereqs
+from bottle.errors import BottleError
+
+try:
+    prereqs.ensure_dist(sys.argv[1])
+except BottleError as e:
+    sys.exit(f"bottle: error: {e}")

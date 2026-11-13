@@ -242,6 +242,12 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
         log().matches("forwarding box/m").count() >= 2
     });
 
+    // Detached while it runs, with no one to ask: nothing's stopped, and it stays attached.
+    let refused = f.cli(&["runner", "detach", "box"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("box/m still running"));
+    assert_eq!(f.ok(&["status", "box/m"]), "running\n");
+
     // Stopped, its forward ends with it.
     let pid: i32 = pid.trim().parse().unwrap();
     f.ok(&["stop", "box/m"]);
@@ -255,6 +261,43 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
             .unwrap();
         left.stdout.is_empty()
     });
+
+    // Detached, it isn't asked: its machines are listed as detached. Used again, it's attached.
+    assert!(
+        f.ok(&["runner", "detach", "box"])
+            .contains("safe to turn off")
+    );
+    assert!(f.ok(&["runner", "ls"]).contains("(detached)"));
+    let asked = fs::read_to_string(f.dir.join("ssh.log"))
+        .unwrap()
+        .lines()
+        .count();
+    let listed: serde_json::Value = serde_json::from_str(&f.ok(&["ls", "--json"])).unwrap();
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "box/m" && m["state"] == "detached")
+    );
+    assert_eq!(
+        fs::read_to_string(f.dir.join("ssh.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        asked
+    );
+    let used = f.cli(&["status", "box/m"]);
+    assert!(
+        String::from_utf8_lossy(&used.stderr).contains("runner box is back, and attached again")
+    );
+    assert_eq!(String::from_utf8_lossy(&used.stdout), "stopped\n");
+    f.ok(&["runner", "detach", "box", "--offline"]);
+    assert!(
+        f.ok(&["runner", "attach", "box"])
+            .contains("Runner box attached")
+    );
+    assert!(!f.ok(&["runner", "ls"]).contains("(detached)"));
 
     assert!(
         !f.cli(&["runner", "rm", "box"]).status.success(),

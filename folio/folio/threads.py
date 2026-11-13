@@ -222,9 +222,8 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     if thread.broker:
         repo.remember()
         notes_path = notes.ensure(notes_dir(repo, thread.name), "The broker's notes")
-        engine.new(thread.bottle, engine.validate_spec(broker.SPEC),
-                   [engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)], broker.CONTEXT + durable(mounts(thread)),
-                   owner=directory(repo, thread.name))
+        engine.new(directory(repo, thread.name), thread.bottle, engine.validate_spec(broker.SPEC),
+                   [engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)], broker.CONTEXT + durable(mounts(thread)))
         return
     # Checked again each time: a feature can have changed since the spec was saved.
     # Checked as saved: validating drops what bottle doesn't know.
@@ -249,9 +248,8 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
             ssh = {SIDECAR_HOST: thread.sidecar_bottle}
     try:
         # The thread's name goes with its bottle, so a bottle that lists the others sees which thread each is.
-        engine.new(thread.bottle, spec | {"labels": {"thread": thread.name}}, repos_,
-                   advice(thread.name, repo.name, mounts(thread), told), runner_of(repo, thread), ssh,
-                   owner=directory(repo, thread.name))
+        engine.new(directory(repo, thread.name), thread.bottle, spec | {"labels": {"thread": thread.name}}, repos_,
+                   advice(thread.name, repo.name, mounts(thread), told), runner_of(repo, thread), ssh)
     except BaseException:
         if thread.sidecar is not None:
             _delete_sidecar(thread)
@@ -264,8 +262,8 @@ def _make_sidecar(repo: Repo, thread: Thread, repos_: list[engine.Mount]) -> Non
     if not _delete_sidecar(thread):   # scratch: whatever's left of one is no use
         raise FolioError(f"its old one is on runner {thread.sidecar['runner']}, which is off")
     spec = check_repo_spec(engine.validate_spec(thread.sidecar["spec"]), sidecar=True)
-    engine.new(thread.sidecar_bottle, spec, repos_, sidecar_itself(thread.name, repo.name), thread.sidecar["runner"],
-               owner=directory(repo, thread.name))
+    engine.new(directory(repo, thread.name), thread.sidecar_bottle, spec, repos_,
+               sidecar_itself(thread.name, repo.name), thread.sidecar["runner"])
 
 
 def _delete_sidecar(thread: Thread) -> bool:
@@ -276,8 +274,8 @@ def _delete_sidecar(thread: Thread) -> bool:
     row = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]
     if row["state"] in RUNNER_OFF:
         print(f"folio: thread {thread.name}'s sidecar, {thread.sidecar_bottle}, is left on runner {row['runner']}, "
-              f"which is off: it's deleted when the thread next gets one, or with `folio bottle rm "
-              f"{thread.sidecar_bottle}`", file=sys.stderr)
+              f"which is off: it's deleted when the thread next gets one, or with `bottle machine delete --name "
+              f"{row.get('machine', thread.sidecar_bottle)}`", file=sys.stderr)
         return False
     if row["state"] != "missing":
         engine.delete(thread.sidecar_bottle)
