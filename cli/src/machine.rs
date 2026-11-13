@@ -770,7 +770,7 @@ fn status(machine: &Machine, args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// `machine exec`: `exec` on the machine's socket. -i is taken and ignored, stdin being always
+/// `exec NAME`: `exec --socket` on the machine's socket. -i is taken and ignored, stdin being always
 /// passed on.
 fn exec(machine: &Machine, rest: Vec<String>) -> ExitCode {
     if !machine.running() {

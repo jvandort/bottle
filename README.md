@@ -99,7 +99,7 @@ one for each thread (and its sidecar), as are credentials, features, and `folio 
 | `bottle cp SRC DST` | Copy into, out of, or between machines |
 | `bottle start` / `stop MACHINE` | Start or stop a machine |
 | `bottle runner add` / `ls` / `check` / `detach` / `attach` / `rm` | The machines bottles run on: this one, and others over ssh |
-| `bottle machine create` / `configure` / `delete` / `rename` / ... | A machine itself, as folio makes one |
+| `bottle create` / `configure` / `rename` / `delete MACHINE` | A machine itself, as folio makes one |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>

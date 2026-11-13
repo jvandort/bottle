@@ -132,7 +132,7 @@ pub enum Net {
 }
 
 impl Net {
-    /// The network options of `boot`, `machine start` and `build`, taken from `arg` and what
+    /// The network options of `boot`, `start` and `image build`, taken from `arg` and what
     /// follows it, if they're one: Some(Ok(())) if taken.
     pub fn take(
         &mut self,
