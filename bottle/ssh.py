@@ -250,8 +250,9 @@ class RemoteCli(krun.Cli):
 
     def run(self, args: list[str], input: str | None = None) -> subprocess.CompletedProcess:
         result = subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
-        if result.returncode == SSH_FAILED:
-            why = result.stderr.strip().splitlines()
+        # bottle-cli's own failures exit 255 too, as ssh's do: told apart by what it says.
+        why = result.stderr.strip().splitlines()
+        if result.returncode == SSH_FAILED and not any(line.startswith("bottle-cli: ") for line in why):
             raise BottleError(f"runner {self.transport.runner} is unreachable "
                               f"({explained(why[-1] if why else 'ssh failed')})")
         return result
@@ -272,7 +273,6 @@ class RemoteCli(krun.Cli):
                   f'--tag {shlex.quote(tag)} --network "$d/network.json"')
         result = subprocess.run([*self.transport._ssh(tty=False), script], input=sent.getvalue(),
                                 stdout=subprocess.PIPE)
-        if result.returncode == SSH_FAILED:
-            raise BottleError(f"runner {self.transport.runner} is unreachable (see ssh's message above)")
+        # Failed, its own way or ssh's (both exit 255): whichever said so, above.
         return subprocess.CompletedProcess(result.args, result.returncode, result.stdout.decode(errors="replace"))
 

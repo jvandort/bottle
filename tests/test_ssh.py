@@ -104,6 +104,16 @@ class TransportTest(SshTestCase):
                 mock.patch("sys.stderr"), self.assertRaisesRegex(BottleError, "image build failed"):
             runner.build(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []})
 
+    def test_its_bottle_clis_failures_are_its_own_not_unreachable(self) -> None:
+        # bottle-cli exits 255 when it fails, as ssh does when it can't connect: what it says tells them apart.
+        cli = self.has_cli()
+        cli.write_text('#!/bin/sh\necho "bottle-cli: no machine $4" >&2\nexit 255\n')
+        runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
+        self.assertIsNone(runner.state("bottle-b"))
+        cli.write_text('#!/bin/sh\necho "bottle-cli: no command info" >&2\nexit 255\n')
+        with self.assertRaisesRegex(BottleError, "^no command info$"):
+            runner.memory_mib()
+
     def test_a_runner_it_cant_reach_is_unreachable(self) -> None:
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "down"))
         with self.assertRaisesRegex(BottleError, r"runner box is unreachable \(ssh: connect to host down"):

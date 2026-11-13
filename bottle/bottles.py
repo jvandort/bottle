@@ -283,6 +283,8 @@ def create(
     on `runner`. It may ssh to each bottle `ssh` gives, by the name given: {name: bottle}.
     """
     on = runners.get(runner)
+    # Ready first: what it's asked next is its bottle-cli's to answer, as this repo's sources are now.
+    on.ensure_ready()
     spec = specs.canonical(spec, on.memory_mib(), "this machine" if runner == runners.LOCAL else f"runner {runner}")
     installed = [f.spec for f in features_.resolve(list(spec["features"]))]
     existing = load()
@@ -293,7 +295,6 @@ def create(
     grants = _plan_ssh(ssh or {}, existing)
     # A bottle it may ssh to is one it works with: their lanes may be shared.
     planned = _plan_mounts(mounts or [], [b for b in existing.values() if b.id not in {g.id for g in grants}])
-    on.ensure_ready()
     tag = features_.ensure_built(installed, on)
     auth.ensure_logged_in(installed)
 
