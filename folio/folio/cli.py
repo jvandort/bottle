@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 import time
 
 from . import broker, engine, notes, obsidian, picker, repos, threads
@@ -130,6 +131,19 @@ def main(argv: list[str] | None = None) -> int:
     repo_commands = repo.add_subparsers(required=True)
     repo_list = repo_commands.add_parser("list", aliases=["ls"], help="every repo folio has state for, wherever you are")
     repo_list.set_defaults(run=_repo_list)
+
+    serve = commands.add_parser(
+        "serve", help="what bottles' machines route to folio: their git, credentials, ssh and messages",
+        description="Start or stop folio serve, which answers what bottles' machines route to it, on sockets in "
+        "$FOLIO_HOME/services: bottle.host (their repos' git, messages between bottles), ssh to bottles, and "
+        "credentials' hosts. bottle starts it when it's needed; its log is $FOLIO_HOME/logs/serve.log.",
+    )
+    serve_commands = serve.add_subparsers(required=True)
+    serve_start = serve_commands.add_parser("start", help="start it in the background")
+    serve_start.add_argument("--foreground", action="store_true", help="run it in this process instead")
+    serve_start.set_defaults(run=_serve_start)
+    serve_stop = serve_commands.add_parser("stop", help="stop it; bottles' machines go on, but for what they route")
+    serve_stop.set_defaults(run=_serve_stop)
 
     args = parser.parse_args(argv)
     try:
@@ -440,6 +454,47 @@ def _when(repo: repos.Repo, thread: threads.Thread) -> str:
 
 def _runner(repo: repos.Repo) -> str:
     return f", runner {repo.runner()}" if repo.runner() else ""
+
+
+def _daemon():
+    """bottle's daemon module, which folio serve is for now: shared, until it's folio's own."""
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from bottle import daemon
+
+    return daemon
+
+
+def _serve_start(args: argparse.Namespace) -> int:
+    daemon = _daemon()
+    if not args.foreground:
+        print("Started folio serve" if daemon.start() else "folio serve is already running")
+        return 0
+    import asyncio
+    import logging
+
+    from bottle import store
+
+    store.log_to_file(daemon.LOG, daemon.home())
+    # A terminal running it by hand sees what it logs, too.
+    if sys.stderr.isatty():
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(store.LOG_FORMAT))
+        logging.getLogger().addHandler(handler)
+    # A crash is logged, stamped, rather than left to a bare traceback on stderr.
+    sys.excepthook = lambda *exc_info: logging.getLogger("folio.serve").critical("folio serve crashed",
+                                                                                exc_info=exc_info)
+    try:
+        asyncio.run(daemon.serve())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def _serve_stop(args: argparse.Namespace) -> int:
+    print("Stopped folio serve" if _daemon().stop() else "folio serve isn't running")
+    return 0
 
 
 def _repo_list(args: argparse.Namespace) -> int:

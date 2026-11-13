@@ -197,19 +197,25 @@ def main(argv: list[str] | None = None) -> int:
 
     daemon = commands.add_parser(
         "daemon",
-        help="control bottled, which decides bottles' connections (started automatically when needed)",
+        help="control folio serve, which answers what bottles' machines route to it (started when needed): "
+        "the same as `folio serve`",
     )
     daemon_commands = daemon.add_subparsers(required=True)
-    daemon_start = daemon_commands.add_parser("start", help="start bottled in the background")
+    daemon_start = daemon_commands.add_parser("start", help="start folio serve in the background")
     daemon_start.add_argument("--foreground", action="store_true", help="run in this process instead")
     daemon_start.set_defaults(run=_daemon_start, parser=daemon_start)
     daemon_stop = daemon_commands.add_parser(
-        "stop", help="stop bottled; running bottles lose network access until it's started again"
+        "stop", help="stop folio serve; running bottles keep their network, but for what they route to it"
     )
     daemon_stop.set_defaults(run=_daemon_stop, parser=daemon_stop)
 
     args = parser.parse_args(argv)
-    store.log_to_file("bottled" if args.run is _daemon_start and args.foreground else "bottle")
+    if args.run is _daemon_start and args.foreground:
+        from bottle import daemon
+
+        store.log_to_file(daemon.LOG, daemon.home())   # folio serve's log, in folio's home
+    else:
+        store.log_to_file("bottle")
     command = " ".join(sys.argv[1:] if argv is None else argv)
     log.info("bottle %s", command)
     started = time.monotonic()
@@ -589,7 +595,7 @@ def _shutdown(args: argparse.Namespace) -> int:
 def _daemon_stop(args: argparse.Namespace) -> int:
     from bottle import daemon
 
-    print("Stopped bottled" if daemon.stop() else "bottled isn't running")
+    print("Stopped folio serve" if daemon.stop() else "folio serve isn't running")
     return 0
 
 
@@ -599,13 +605,13 @@ def _daemon_start(args: argparse.Namespace) -> int:
     from bottle import daemon
 
     if not args.foreground:
-        print("Started bottled" if daemon.start() else "bottled is already running")
+        print("Started folio serve" if daemon.start() else "folio serve is already running")
         return 0
-    # It logs to bottled.log; a terminal running it by hand sees that too.
+    # It's folio serve's (see bottle/daemon.py): run as folio runs it, logging where main has it log.
     if sys.stderr.isatty():
         _log_to_stderr(logging.INFO)
     # A crash is logged, stamped, rather than left to a bare traceback on stderr.
-    sys.excepthook = lambda *exc_info: log.critical("bottled crashed", exc_info=exc_info)
+    sys.excepthook = lambda *exc_info: log.critical("folio serve crashed", exc_info=exc_info)
     try:
         asyncio.run(daemon.serve())
     except KeyboardInterrupt:

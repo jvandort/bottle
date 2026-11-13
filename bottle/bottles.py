@@ -172,6 +172,9 @@ class Bottle:
     # Whether its machine has its network policy (see network); one made before machines had their own is given
     # it as it's next started.
     networked: bool = False
+    # Which of network()'s policies its machine has (NETWORK the current one); 0 for none, or one from before this
+    # was recorded (1 if it was networked). One behind is given the current one as it's next started.
+    network_version: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -433,7 +436,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         # What bottle-cli's exec and shell use unless told, and what its ls shows.
         user=USER, workdir=bottle.workdir, labels=specs.labels(bottle.spec), network=network(bottle),
     )
-    bottle = replace(bottle, networked=True)
+    bottle = replace(bottle, networked=True, network_version=NETWORK)
     _save(bottle)
     _start_machine(bottle)
     verify_contract(bottle)
@@ -470,6 +473,14 @@ def _start_machine(bottle: Bottle) -> None:
     now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, which trust_egress_ca
     installs once it's up."""
     runner_of(bottle).start(bottle.machine, bottle.name, served(bottle), bottle.features)
+
+
+# The version of the policy network() makes: 1, its routes to bottled's one socket; 2, folio serve's, by service.
+NETWORK = 2
+
+
+def _network_version(bottle: Bottle) -> int:
+    return bottle.network_version or (1 if bottle.networked else 0)
 
 
 def network(bottle: Bottle) -> dict:
@@ -729,11 +740,11 @@ def ensure_running(name: str) -> Bottle:
     if state != "running":
         runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
-        given = not bottle.networked
+        given = _network_version(bottle) < NETWORK
         if given:
-            # Made before machines had their own policy: given it now.
+            # Made before machines had their own policy, or this one: given it now.
             runner.configure(bottle.machine, network(bottle))
-            bottle = replace(bottle, networked=True)
+            bottle = replace(bottle, networked=True, network_version=NETWORK)
             _save(bottle)
         _start_machine(bottle)
         log.info("%s: started", bottle.name)

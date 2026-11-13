@@ -1,7 +1,9 @@
 import contextlib
 import io
 import logging
+import os
 import sys
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -49,8 +51,9 @@ class LogTest(CliTestCase):
     def test_the_daemon_logs_to_its_own_file(self) -> None:
         with mock.patch("bottle.daemon.serve", new=mock.AsyncMock()), mock.patch.object(sys, "excepthook"):
             self.run_cli("daemon", "start", "--foreground")
-        bottled = (self.bottle_home / "logs" / "bottled.log").read_text()
-        self.assertRegex(bottled, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ \d+ bottle.cli bottle daemon start --foreground\n")
+        # folio serve's, in folio's home.
+        served = (Path(os.environ["FOLIO_HOME"]) / "logs" / "serve.log").read_text()
+        self.assertRegex(served, r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ \d+ bottle.cli bottle daemon start --foreground\n")
         self.assertFalse((self.bottle_home / "logs" / "bottle.log").exists())
 
     def test_python_and_asyncio_reports_are_stamped_too(self) -> None:

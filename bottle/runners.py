@@ -196,11 +196,11 @@ class LocalRunner:
         # Its routes to bottled's socket here, wherever the machine is: bottle-cli forwards them to a runner's.
         krun.create(self.qualified(machine), str(archive), [krun.Mount(m.source, m.target) for m in mounts], env,
                     memory_mib, self.cpus(), disk_gib, user, workdir, labels,
-                    services.with_socket(network, str(daemon.services_socket())) if network else None)
+                    services.with_sockets(network, daemon.services_sockets()) if network else None)
 
     @_readied
     def configure(self, machine: str, network: dict) -> None:
-        krun.configure(self.qualified(machine), services.with_socket(network, str(daemon.services_socket())))
+        krun.configure(self.qualified(machine), services.with_sockets(network, daemon.services_sockets()))
 
     @_readied
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),

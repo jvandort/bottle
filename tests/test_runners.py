@@ -34,12 +34,12 @@ class LocalRunnerTest(GitTestCase):
         self.assertEqual(calls, [("bind", "b", "b-machine", (), ["tools"]), ("start", "b-machine")])
 
     def test_a_machines_routes_are_to_bottleds_socket_here(self) -> None:
-        policy = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80}]}
+        policy = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80, "service": "host"}]}
         with mock.patch.object(runners.krun, "create") as create, mock.patch.object(runners.krun, "configure") as configure:
             runners.get().create("m", Path("/stages/a.ext4"), [], {}, 512, network=policy)
             runners.get().configure("m", policy)
         routed = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80,
-                                            "socket": str(runners.daemon.services_socket())}]}
+                                            "socket": str(runners.daemon.services_sockets()["host"])}]}
         self.assertEqual(create.call_args.args[-1], routed)
         configure.assert_called_once_with("m", routed)
 

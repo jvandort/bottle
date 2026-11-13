@@ -15,26 +15,26 @@ def bottle_home() -> Path:
     return Path(os.environ.get("BOTTLE_HOME") or Path.home() / ".bottle")
 
 
-def log_path(name: str = "bottle") -> Path:
-    """A log in $BOTTLE_HOME/logs: "bottle" for commands, "bottled" for the daemon."""
-    return bottle_home() / "logs" / f"{name}.log"
+def log_path(name: str = "bottle", home: Path | None = None) -> Path:
+    """A log in `home`/logs ($BOTTLE_HOME's, else): "bottle" for commands; folio serve's is "serve", in folio's."""
+    return (home or bottle_home()) / "logs" / f"{name}.log"
 
 
-def open_log(name: str = "bottle") -> int:
+def open_log(name: str = "bottle", home: Path | None = None) -> int:
     """The log, opened for appending; only its owner can read it, or list $BOTTLE_HOME.
 
     The logs name every host the bottles reached, and $BOTTLE_HOME their repos.
     """
-    for directory in (bottle_home(), log_path(name).parent):
+    for directory in (home or bottle_home(), log_path(name, home).parent):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
-    fd = os.open(log_path(name), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    fd = os.open(log_path(name, home), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     os.fchmod(fd, 0o600)
     return fd
 
 
-def log_to_file(name: str = "bottle") -> None:
-    """Send log records, INFO and up, to log_path(name), each with a timestamp. Never fails a command.
+def log_to_file(name: str = "bottle", home: Path | None = None) -> None:
+    """Send log records, INFO and up, to log_path(name, home), each with a timestamp. Never fails a command.
 
     On the root logger, so what Python and asyncio report is stamped like bottle's own.
     """
@@ -43,7 +43,7 @@ def log_to_file(name: str = "bottle") -> None:
         root.removeHandler(handler)
         handler.close()
     try:
-        handler = _Log(name)
+        handler = _Log(name, home)
     except OSError:
         return
     handler.bottle_log = True
@@ -59,12 +59,12 @@ class _Log(logging.handlers.WatchedFileHandler):
     deleted under it, where no one can read it.
     """
 
-    def __init__(self, name: str) -> None:
-        self.log_name = name
-        super().__init__(log_path(name))
+    def __init__(self, name: str, home: Path | None = None) -> None:
+        self.log_name, self.log_home = name, home
+        super().__init__(log_path(name, home))
 
     def _open(self):
-        return os.fdopen(open_log(self.log_name), "a", encoding=self.encoding, errors=self.errors)
+        return os.fdopen(open_log(self.log_name, self.log_home), "a", encoding=self.encoding, errors=self.errors)
 
 
 def namespace() -> str:

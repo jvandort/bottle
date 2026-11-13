@@ -1,4 +1,7 @@
-"""bottled: the daemon that serves what bottles' machines route to it.
+"""folio serve (once bottled): the daemon that serves what bottles' machines route to it.
+
+It's folio's, run as `folio serve`, its sockets and log in folio's home (home()); its code is bottle's still,
+shared, until it moves with the rest of what's folio's.
 
 It runs on the controller alone, for every runner's bottles: the services
 socket and each bottle's gateway (Daemon), and what stays with the user
@@ -32,7 +35,7 @@ from pathlib import Path
 from bottle import auth, cache, egress, messages, services as services_, specs
 from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
-from bottle.store import bottle_home, log_path, open_log
+from bottle.store import log_path, open_log
 
 log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
@@ -56,6 +59,10 @@ MAX_SOCKET_PATH = 100
 OPEN_FILES = 65536
 
 
+# Its log, in folio's home.
+LOG = "serve"
+
+
 def code_hash() -> str:
     """A hash of bottle's code: every file of this package, less what Python caches. What a command checks a
     running bottled's against."""
@@ -67,21 +74,31 @@ def code_hash() -> str:
     return digest.hexdigest()[:16]
 
 
-def socket_path(name: str = "bottled.sock") -> Path:
-    path = bottle_home() / name
+def home() -> Path:
+    """folio's home, $FOLIO_HOME (else ~/.folio): where folio serve keeps its sockets and its log."""
+    return Path(os.environ.get("FOLIO_HOME") or Path.home() / ".folio")
+
+
+def socket_path(name: str = "serve.sock") -> Path:
+    path = home() / name
     if len(str(path)) <= MAX_SOCKET_PATH:
         return path
-    # A deep BOTTLE_HOME: use a short per-user directory, keyed by BOTTLE_HOME.
-    key = hashlib.sha256(str(bottle_home() / name).encode()).hexdigest()[:16]
+    # A deep home: a short per-user directory instead, keyed by where it would have been.
+    key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
     return Path(f"/tmp/bottle-{os.getuid()}/{key}.sock")
 
 
 # --- client -------------------------------------------------------------------
 
 
-def services_socket() -> Path:
-    """Where bottled answers what this runner's machines route to it: what their policies name."""
-    return socket_path("services.sock")
+# What it serves, each on a socket of its own, which a machine's routes name (services.network).
+SERVICES = ("host", "ssh", "credentials")
+
+
+def services_sockets() -> dict[str, Path]:
+    """Where folio serve answers what machines route to it, by service: bottle.host's (git, messages), ssh to
+    bottles, and credentials' hosts."""
+    return {name: socket_path(f"services/{name}.sock") for name in SERVICES}
 
 
 def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = ()) -> None:
@@ -121,7 +138,7 @@ def stop() -> bool:
     except (FileNotFoundError, ConnectionRefusedError):
         return False
     if not reply.get("ok"):
-        raise BottleError(f"bottled: {reply.get('error', 'shutdown failed')}")
+        raise BottleError(f"folio serve: {reply.get('error', 'shutdown failed')}")
     return True
 
 
@@ -152,7 +169,7 @@ def _ensure_current() -> bool:
     if reply.get("code") == code_hash():
         return False
     log.info("bottled is running other code (%s); restarting it", reply.get("code", "from before it said"))
-    print("bottle: bottled was running other code; restarting it", file=sys.stderr)
+    print("bottle: folio serve was running other code; restarting it", file=sys.stderr)
     _restart()
     return True
 
@@ -188,10 +205,10 @@ def _request(message: dict, start: bool, timeout: float = 30) -> dict:
             _start_daemon()
             reply = _send(message, timeout)
     except _Closed:
-        raise BottleError(f"bottled closed the connection without answering {message['op']}: "
-                          f"is it stopping? See {log_path('bottled')}") from None
+        raise BottleError(f"folio serve closed the connection without answering {message['op']}: "
+                          f"is it stopping? See {log_path(LOG, home())}") from None
     if not reply.get("ok"):
-        raise BottleError(f"bottled: {reply.get('error', 'request failed')}")
+        raise BottleError(f"folio serve: {reply.get('error', 'request failed')}")
     return reply
 
 
@@ -214,14 +231,14 @@ def _send(message: dict, timeout: float = 30) -> dict:
 
 
 def _start_daemon() -> None:
-    log.info("starting bottled")
-    command = [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "bottle")]
+    log.info("starting folio serve")
+    command = [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "folio")]
     # Its own records go to the log through logging, stamped; this catches anything else it prints.
-    with os.fdopen(open_log("bottled"), "a") as out:
+    with os.fdopen(open_log(LOG, home()), "a") as out:
         # A new session detaches it from this terminal, so it outlives the command. It runs in /, not the
         # command's directory: that may be deleted while it runs (a machine's), and then every git it runs fails.
         subprocess.Popen(
-            [*command, "daemon", "start", "--foreground"],
+            [*command, "serve", "start", "--foreground"],
             stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, cwd="/",
         )
     deadline = time.monotonic() + START_TIMEOUT
@@ -231,7 +248,7 @@ def _start_daemon() -> None:
             return
         except (FileNotFoundError, ConnectionRefusedError):
             time.sleep(0.05)
-    raise BottleError(f"bottled didn't start; see {log_path('bottled')}")
+    raise BottleError(f"folio serve didn't start; see {log_path(LOG, home())}")
 
 
 # --- server -------------------------------------------------------------------
@@ -347,11 +364,11 @@ class Daemon:
 
     def __init__(
         self, policy: egress.Policy | None = None, services: services_.Services | None = None,
-        services_path: Path | None = None, controller: Controller | None = None,
+        services_paths: dict[str, Path] | None = None, controller: Controller | None = None,
     ) -> None:
         self.policy = policy or egress.Policy()
         self.services = services or services_.Services()
-        self.services_path = services_path
+        self.services_paths = services_paths
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
@@ -474,24 +491,25 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
         try:
             _, writer = await asyncio.open_unix_connection(str(path))
             writer.close()
-            log.info("another bottled is already running; exiting")
+            log.info("another folio serve is already running; exiting")
             return
         except (ConnectionRefusedError, FileNotFoundError):
             path.unlink()  # left over from a daemon that died
-    services_path = daemon.services_path or services_socket()
-    routed = await daemon.services.start(services_path)
-    log.info("services listening on %s", services_path)
-    # Before answering anyone: whoever started bottled may be about to use a bottle whose machine
-    # is running, and what it routes here must find it bound.
+    services_paths = daemon.services_paths or services_sockets()
+    routed = [await daemon.services.start(p) for p in services_paths.values()]
+    log.info("services listening on %s", ", ".join(str(p) for p in services_paths.values()))
+    # Before answering anyone: whoever started it may be about to use a bottle whose machine is running, and what
+    # it routes here must find it bound.
     await daemon.restore(await asyncio.to_thread(bound_bottles))
     server = await asyncio.start_unix_server(daemon.handle, str(path))
     os.chmod(path, 0o600)
-    log.info("bottled %d listening on %s", os.getpid(), path)
+    log.info("folio serve %d listening on %s", os.getpid(), path)
     try:
         async with server:
             await daemon.stopping.wait()
     finally:
-        routed.close()
-        services_path.unlink(missing_ok=True)
+        for server, p in zip(routed, services_paths.values()):
+            server.close()
+            p.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
-        log.info("bottled %d stopped", os.getpid())
+        log.info("folio serve %d stopped", os.getpid())

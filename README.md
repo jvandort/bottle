@@ -15,10 +15,10 @@ over ssh. Let the agent run with full permissions inside. Take back only the com
   it's given. One that takes pushes writes its own [namespace](https://git-scm.com/docs/gitnamespaces)
   and nothing else, can't touch your branches, and can't rewrite what you've already read.
 - **Network on a leash.** No proxy to configure: every connection a bottle opens is made from
-  your machine (a drone's, from its runner), after `bottled` decides it, so a bottle gets your
+  your machine (a drone's, from its runner), after `folio serve` decides it, so a bottle gets your
   VPN routes but not your local network, even as root.
 - **Credentials that stay on your machine.** A feature can name the hosts its token belongs to, and
-  `bottled` attaches it there. The bottle never holds the token.
+  `folio serve` attaches it there. The bottle never holds the token.
 - **On another machine, too.** Add a Linux machine you reach over ssh as a *runner*, and a
   bottle there, a *drone*, works as one here does: its pushes, credentials and messages go
   through your Mac, which stays the one place your repo and tokens are.
@@ -38,7 +38,7 @@ it without you watching.
 A bottle is **not** a box for a hostile agent. Egress allows any public destination, so anything
 inside a bottle — the repo, and anything you put there — can leave. Treat a bottle's contents as
 the agent's to read and to send: don't put a secret in one you wouldn't hand to the agent
-directly. Credentials bottle itself manages stay out of the bottle: `bottled` attaches them
+directly. Credentials bottle itself manages stay out of the bottle: `folio serve` attaches them
 (see `bottle auth login`), so they're never there to leave, though the bottle can still spend them
 against the hosts they're attached to.
 
@@ -102,8 +102,8 @@ it's needed; the first time takes a while). (Untested on a real runner yet.)
 | `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
 | `bottle build` | Build an image with the given features |
 | `bottle runner add` / `status` / `stop` / `remove` | The machines bottles run on: this one, and others over ssh |
-| `bottle daemon start` / `stop` | Manage `bottled`, which decides bottles' connections |
-| `bottle shutdown` | Stop every running bottle, then `bottled` |
+| `bottle daemon start` / `stop` | Manage `folio serve`, which answers what bottles' machines route to it |
+| `bottle shutdown` | Stop every running bottle, then `folio serve` |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
@@ -119,7 +119,7 @@ command (`claude setup-token`) in a throwaway bottle, attached to your terminal,
 captures the credential it prints and stores it in the macOS Keychain; a
 credential with no such command is asked for instead.
 
-A credential never enters a bottle. bottled keeps it, and attaches it as a header to the bottle's requests to the hosts the
+A credential never enters a bottle. folio serve keeps it, and attaches it as a header to the bottle's requests to the hosts the
 feature named — `claude` names `api.anthropic.com`, `github` names `github.com`
 and its API, `teamcity` and `develocity` name their `server`. The agent can spend the credential
 against those hosts and can't read it, so an agent that sends everything it
@@ -128,7 +128,7 @@ holds to a stranger sends no token.
 Spending it is not a free-for-all, though. Some requests would turn the
 credential into one the bottle could hold: a token minted from it, an access
 key provisioned, an SSH key or a deploy key added, a runner registered, a
-codespace started. Each feature lists those routes (`forbid`), and bottled
+codespace started. Each feature lists those routes (`forbid`), and folio serve
 refuses them outright, with the credential or without. Beyond those, each
 attaches its credential only to the routes its tools were seen to use
 (`allow`): `github` to reads (gh's REST reads and GraphQL, clones and
@@ -143,11 +143,11 @@ fine-grained GitHub token without Workflows or Administration (or read-only),
 a Develocity user without administrative permissions.
 
 Tools in the bottle talk to those hosts over HTTPS as usual. TLS is opaque, so
-for those hosts only, the bottle's machine routes the connection to bottled:
+for those hosts only, the bottle's machine routes the connection to folio serve:
 bottle-cli, which carries the machine's connections, completes the bottle's TLS
-handshake with a certificate from the machine's **CA**, and gives bottled the
+handshake with a certificate from the machine's **CA**, and gives folio serve the
 plain request, after a PROXY protocol header saying where it was going and
-from which machine. bottled attaches the credential and makes its own verified
+from which machine. folio serve attaches the credential and makes its own verified
 HTTPS connection to the server. Every other connection goes straight to where
 it was headed, untouched. The host is also reachable when it's a private
 address, since configuring it is what naming it means; nothing else about that
@@ -241,7 +241,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   has a channel, `bottle-event`, an MCP server that brings events into a
   running session (`bottle exec NAME -- bottle-event send -f FROM TEXT`, which
   waits until the session takes it) and gives the agent a `send` tool for
-  messages to other bottles: bottled delivers each one as an event whose `from`
+  messages to other bottles: folio serve delivers each one as an event whose `from`
   is an address for answering the sender, issued to the recipient and good
   from no other bottle, and answers once that session has taken it (404 for no
   running bottle the sender may reach that way, 504 for no session that took it
@@ -299,7 +299,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   data via the API" permission, and should have no administrative ones. The
   bottle's own `~/.gradle/develocity/keys.properties` has a line for each
   server with the placeholder in place of its key, so Gradle needs nothing set:
-  bottled puts the key where the Develocity plugin presents it, for Build Scans,
+  folio serve puts the key where the Develocity plugin presents it, for Build Scans,
   the build cache, test distribution and predictive test selection, and refuses
   to mint tokens (`/api/auth/token`) or provision access keys. A server on a private address, as one behind a
   VPN often is, is reachable because the credential names it.
@@ -339,12 +339,12 @@ A spec can give the bottle's `disk`, in G (`"disk": "50G"`): the disk what
 it writes goes to, sparse, so it costs what it holds; 64G if it doesn't say.
 Its VM gets every core of the machine it runs on, up to 16.
 
-A spec can also give the bottle `permissions`, what bottled lets it do beyond
+A spec can also give the bottle `permissions`, what folio serve lets it do beyond
 what every bottle may: `message-any`, to send messages to a running bottle by
 its name rather than only answer one; and `list-bottles`, to list the other
 running bottles, each one's name, repo and `labels` (which a spec can give,
 `{"labels": {"thread": "fix-it"}}`; folio's say which thread a bottle is for).
-bottled checks the bottle's spec, never the bottle; the bottle sees its
+folio serve checks the bottle's spec, never the bottle; the bottle sees its
 permissions as `BOTTLE_PERMISSIONS`, so its tools know what to offer. Folio
 never gives a thread's bottle permissions.
 
@@ -360,7 +360,7 @@ bottle has no repo.
 
 Each `--git-remote PATH:REMOTE` serves the mount at PATH one remote,
 `NAME:fetch=VIEW[,push=ns/NAMESPACE]`, live, at
-`http://bottle.host/git/<PATH>/<NAME>`, which bottled answers. What a fetch
+`http://bottle.host/git/<PATH>/<NAME>`, which folio serve answers. What a fetch
 sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
@@ -381,7 +381,7 @@ cherry-pick, revert or bisect is left alone; so is a branch checked out
 nowhere, though one you're reading in curate comes along by curate's own hook:
 the fetch runs with your repo's hooks, as yours would. The push succeeds either way, and its
 output tells the bottle what moved and what didn't (`remote: bottle: ...`);
-bottled logs it too. `git config bottle.follow false` in your repo turns it
+folio serve logs it too. `git config bottle.follow false` in your repo turns it
 off. A namespace is what confines the
 bottle: every ref its `receive-pack` resolves is inside it, and your own refs
 aren't advertised to it at all. Pushes are append-only, refusing force-pushes
@@ -472,7 +472,7 @@ A drone works as a local bottle does, with these differences:
 - **What its policy routes comes to your Mac**: its git (fetches served from
   your repo, its `origin` fetched first for `upstream`; pushes into it, under
   the same rules as a local bottle's), its credentialed requests, ssh and
-  messages, to bottled here, through sockets of its own on the runner
+  messages, to folio serve here, through sockets of its own on the runner
   (`~/.bottle/routes`) that ssh forwards back. The runner never holds a
   credential.
 - **Those forwards are one ssh connection per drone**, kept by a process of
@@ -489,7 +489,7 @@ nothing else waits on it.
 On a Mac, ssh's "No route to host" for a machine on your network is often
 macOS refusing the local network to the process that asked: give the app you
 run bottle from the Local Network permission (System Settings > Privacy &
-Security > Local Network). bottled has the permission of whatever started it.
+Security > Local Network). folio serve has the permission of whatever started it.
 
 ### `bottle spec validate FILE [--json]`
 
@@ -563,24 +563,25 @@ one.
 
 ### `bottle shutdown`
 
-Stops every running bottle, then `bottled`. Bottles on a runner that can't be
+Stops every running bottle, then `folio serve`. Bottles on a runner that can't be
 reached are left as they are, and it says so.
 
 ### `bottle daemon start` / `bottle daemon stop`
 
-Starts or stops `bottled`, the background process that serves what bottles'
+Starts or stops `folio serve`, the background process that serves what bottles'
 machines route to it. A machine decides each TCP connection the bottle opens
 itself, by the network policy it was made with (`network.json` in its
 directory): public destinations go straight there; private addresses are
 refused, but for a name allowed private; `bottle.host`, ssh to other bottles
-and credentials' hosts are routed to bottled's socket (`~/.bottle/services.sock`),
+and credentials' hosts are routed to folio serve's sockets, one per service (`~/.folio/services`),
 which answers `bottle.host` with the bottle's git remotes. A refused
 connection is reset, and logged in the machine's `boot.log`. A bottle's names
 are looked up by the machine it runs on, with its resolver, as they're asked;
 a bottle has no UDP or IPv6. A machine starts with nothing but its name
-(`bottle-cli start NAME` works without bottled); what it routes to bottled is
-refused while bottled isn't running. bottled logs one line per connection it
-serves, in `~/.bottle/logs` (a drone's, in the runner's).
+(`bottle-cli start NAME` works without folio serve); what it routes to folio serve is
+refused while folio serve isn't running. folio serve logs one line per connection it
+serves, in `~/.folio/logs/serve.log`. It's folio's (`folio serve start|stop`); `bottle daemon` is the same,
+for now, while its code is still bottle's.
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
 one downloads every dependency again. A feature can name hosts whose
@@ -612,9 +613,9 @@ time is answered behind a caching CA builds share (`bottle-builds`), which the
 build's apt step trusts for those hosts alone; a bottle trusts its machine's
 CA for them, as for any cached host.
 
-bottled starts automatically when a command needs it, and when it starts it
+folio serve starts automatically when a command needs it, and when it starts it
 picks up the bottles there are. While it's stopped, a running bottle's
-connections go on as its policy says, but for what it routes to bottled
+connections go on as its policy says, but for what it routes to folio serve
 (`bottle.host`, ssh, credentials' hosts), which is refused. A command that finds it running other code (another
 checkout's, or this one's before it changed) restarts it first, and says so.
 

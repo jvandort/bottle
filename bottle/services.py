@@ -75,18 +75,18 @@ async def read_header(reader: asyncio.StreamReader) -> Header:
 
 
 def network(credentials: list[tuple[str, int]], caches: list[cache.Cached], allow_private: tuple[str, ...] = (),
-            socket: str | None = None) -> dict:
+            sockets: dict[str, str] | None = None) -> dict:
     """A machine's network policy, as bottle-cli takes it (agent-client's policy): what it caches, the private
-    names it may reach, and what it routes to bottled's `socket`: bottle.host's services, ssh to bottles, and
-    each credential's host pattern and port (auth.credential_destinations), logged in or not. Without a
-    socket, its routes have none yet: the runner's, filled in where the machine is made (with_socket)."""
+    names it may reach, and what it routes to folio serve's `sockets`, by service: bottle.host's (git, messages),
+    ssh to bottles, and each credential's host pattern and port (auth.credential_destinations), logged in or not.
+    Without sockets, its routes say their service instead, for with_sockets to fill in where it's made."""
     routes = [
-        {"address": host.ADDRESS, "port": 80},
-        {"network": host.SSH_NETWORK, "port": host.SSH_PORT},
-        *({"host": h, "port": p} for h, p in sorted(set(credentials))),
+        {"address": host.ADDRESS, "port": 80, "service": "host"},
+        {"network": host.SSH_NETWORK, "port": host.SSH_PORT, "service": "ssh"},
+        *({"host": h, "port": p, "service": "credentials"} for h, p in sorted(set(credentials))),
     ]
     policy = {"allow_private": list(allow_private), "cache": cache_rules(caches), "routes": routes}
-    return with_socket(policy, socket) if socket else policy
+    return with_sockets(policy, sockets) if sockets else policy
 
 
 def cache_rules(caches: list[cache.Cached]) -> list[dict]:
@@ -95,9 +95,11 @@ def cache_rules(caches: list[cache.Cached]) -> list[dict]:
              "immutable": c.immutable} for c in caches]
 
 
-def with_socket(policy: dict, socket: str) -> dict:
-    """`policy`, its routes to `socket`."""
-    return {**policy, "routes": [{**route, "socket": socket} for route in policy.get("routes", ())]}
+def with_sockets(policy: dict, sockets: dict[str, str]) -> dict:
+    """`policy`, each route to its service's socket among `sockets`."""
+    routes = [{**{k: v for k, v in route.items() if k != "service"}, "socket": str(sockets[route["service"]])}
+              for route in policy.get("routes", ())]
+    return {**policy, "routes": routes}
 
 
 @dataclass
@@ -125,6 +127,7 @@ class Services:
         return any(b.bottle == bottle for b in self.bindings.values())
 
     async def start(self, path: Path) -> asyncio.Server:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.unlink(missing_ok=True)
         server = await asyncio.start_unix_server(self.handle, str(path))
         path.chmod(0o600)

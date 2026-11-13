@@ -12,13 +12,15 @@ from bottle.daemon import Daemon
 
 
 class SocketPathTest(unittest.TestCase):
-    def test_lives_in_bottle_home(self) -> None:
-        with mock.patch.dict(os.environ, {"BOTTLE_HOME": "/Users/me/.bottle"}):
-            self.assertEqual(daemon.socket_path(), Path("/Users/me/.bottle/bottled.sock"))
+    def test_lives_in_folios_home(self) -> None:
+        with mock.patch.dict(os.environ, {"FOLIO_HOME": "/Users/me/.folio"}):
+            self.assertEqual(daemon.socket_path(), Path("/Users/me/.folio/serve.sock"))
+            self.assertEqual(daemon.services_sockets(), {name: Path(f"/Users/me/.folio/services/{name}.sock")
+                                                         for name in ("host", "ssh", "credentials")})
 
-    def test_deep_bottle_home_gets_a_short_path(self) -> None:
+    def test_deep_home_gets_a_short_path(self) -> None:
         deep = "/Users/me/" + "x" * 120
-        with mock.patch.dict(os.environ, {"BOTTLE_HOME": deep}):
+        with mock.patch.dict(os.environ, {"FOLIO_HOME": deep}):
             path = daemon.socket_path()
         self.assertLessEqual(len(str(path)), daemon.MAX_SOCKET_PATH)
         self.assertTrue(str(path).startswith(f"/tmp/bottle-{os.getuid()}/"))
@@ -66,8 +68,8 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         self.tmp = Path(tmp)
         self.path = self.tmp / "d.sock"
-        self.services = self.tmp / "s.sock"
-        self.daemon = Daemon(services_path=self.services)
+        self.services = self.tmp / "host.sock"
+        self.daemon = Daemon(services_paths={n: self.tmp / f"{n}.sock" for n in daemon.SERVICES})
         for patcher in (
             # The features these tests name aren't resolved: what a credential claims is mocked where it matters.
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
@@ -135,7 +137,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.request({"op": "nope"}), {"ok": False, "error": "unknown op 'nope'"})
 
     async def test_second_daemon_exits(self) -> None:
-        await asyncio.wait_for(daemon.serve(self.path, Daemon(services_path=self.tmp / "s2.sock")), 2)
+        await asyncio.wait_for(daemon.serve(self.path, Daemon(services_paths={"host": self.tmp / "s2.sock"})), 2)
 
 
 class DeliverTest(unittest.IsolatedAsyncioTestCase):

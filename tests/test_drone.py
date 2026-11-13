@@ -204,8 +204,9 @@ class DroneTest(DroneCase):
         self.assertEqual(machine.read_text().strip(), "running")
         # Its routes, to a socket of its own there, forwarded here.
         network = json.loads((self.remote / "machines" / f"{bottle.machine}.network").read_text())
-        [there] = {r["socket"] for r in network["routes"]}
-        self.assertTrue(there.startswith(str(self.remote / ".bottle" / "routes")), there)
+        theres = {r["socket"] for r in network["routes"]}
+        self.assertEqual(len(theres), 2)   # bottle.host's, ssh's: a socket there for each socket here
+        self.assertTrue(all(t.startswith(str(self.remote / ".bottle" / "routes")) for t in theres), theres)
         mirror = self.remote / ".bottle" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))

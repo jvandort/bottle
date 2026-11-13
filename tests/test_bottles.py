@@ -262,10 +262,10 @@ class CreateTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         network = fake.create_args["network"]
-        socket = str(bottles.daemon.services_socket())
-        self.assertIn({"address": bottles.host.ADDRESS, "port": 80, "socket": socket}, network["routes"])
-        self.assertIn({"network": bottles.host.SSH_NETWORK, "port": bottles.host.SSH_PORT, "socket": socket},
-                      network["routes"])
+        sockets = bottles.daemon.services_sockets()
+        self.assertIn({"address": bottles.host.ADDRESS, "port": 80, "socket": str(sockets["host"])}, network["routes"])
+        self.assertIn({"network": bottles.host.SSH_NETWORK, "port": bottles.host.SSH_PORT,
+                       "socket": str(sockets["ssh"])}, network["routes"])
         self.assertIn("deb.debian.org", [c["host"] for c in network["cache"]])
         self.assertTrue(bottles.get("example").networked)
         self.assertEqual(fake.bound_machines, {"example": bottle.machine})
@@ -472,7 +472,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         bottles.stop("example")
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
 
         bottles.ensure_running("example")
 
@@ -492,7 +492,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
         fake.calls.clear()
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["bind", "start", "verify_contract", "trust_egress_ca", "point_at_host"])
@@ -509,7 +509,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
         fake.trusted = None
         bottles.ensure_running("example")
         self.assertEqual(fake.cache_trusted, ("root", "the machine's CA's certificate"))
