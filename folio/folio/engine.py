@@ -1,24 +1,19 @@
-"""The sandbox engine: everything folio asks of bottle, through bottle's CLI.
+"""The sandbox engine: everything folio asks of bottles, in this process (see bottle/bottles.py).
 
-Folio never imports bottle. What it needs is small -- validate a spec, create
-a bottle, read its state, start and delete it, run commands in it with pipes
-or a terminal -- so another engine could stand in, if it can also serve git
-remotes the way bottle does (`bottle new --git-remote`).
+What it needs is small -- validate a spec, create a bottle, read its state,
+start and delete it, run commands in it with pipes or a terminal. A command
+runs as bottle-cli's exec, on the machine the bottle is; the rest is
+bottles.py's. A bottle's failures are FolioErrors, saying what bottle said.
 
-Bottle's errors are bottle's: its stderr reaches the user as bottle wrote
-it, never captured, reworded or parsed, and folio adds only which bottle
-command failed. What folio reads is bottle's stdout, from commands made to be
-read (`--json`).
-
-Which bottle: $FOLIO_BOTTLE if set, else the `bin/bottle` beside folio in this
-checkout, else `bottle` on PATH.
+$FOLIO_ENGINE, if it's set, is a file defining these functions instead, which
+stand in for bottle (folio's tests' does: tests/cli_engine.py).
 """
 
-import json
+import importlib.util
 import os
 import subprocess
-import tempfile
-from collections.abc import Iterator
+import sys
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,42 +21,28 @@ from typing import NoReturn
 
 from .errors import FolioError
 
-SIBLING = Path(__file__).resolve().parents[2] / "bin" / "bottle"
+# bottle's package, beside folio's in this checkout: shared, until what folio uses of it is folio's own.
+_ROOT = str(Path(__file__).resolve().parents[2])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from bottle import bottles, runners, specs  # noqa: E402
+from bottle.errors import BottleError  # noqa: E402
 
 
-def command() -> list[str]:
-    if os.environ.get("FOLIO_BOTTLE"):
-        return [os.environ["FOLIO_BOTTLE"]]
-    return [str(SIBLING)] if SIBLING.exists() else ["bottle"]
-
-
-def _run(*args: str, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run bottle, reading its stdout. Without `check`, a failure is the caller's to expect,
-    so its stderr is dropped rather than shown as if something went wrong."""
-    # Never this terminal for stdin: `bottle exec` passes it through to the
-    # bottle, which would read what's typed at folio's own prompts.
-    result = subprocess.run([*command(), *args], stdout=subprocess.PIPE, text=True,
-                            stderr=None if check else subprocess.DEVNULL,
-                            input=input, stdin=None if input is not None else subprocess.DEVNULL)
-    if check and result.returncode != 0:
-        raise failed(args, result.returncode)
-    return result
-
-
-def failed(args: tuple[str, ...] | list[str], returncode: int) -> FolioError:
-    """That a bottle command failed; bottle has already said why, on stderr."""
-    words = []
-    for arg in args:
-        if arg.startswith("-") or "/" in arg:
-            break
-        words.append(arg)
-    return FolioError(f"`bottle {' '.join(words)}` failed (exit {returncode})")
+@contextmanager
+def _said() -> Iterator[None]:
+    """A bottle's failure, as folio's."""
+    try:
+        yield
+    except BottleError as e:
+        raise FolioError(str(e)) from None
 
 
 def validate_spec(spec: dict) -> dict:
     """The spec in canonical form, or bottle's reason it isn't one."""
-    with _file(json.dumps(spec)) as path:
-        return json.loads(_run("spec", "validate", "--json", path).stdout)
+    with _said():
+        return specs.canonical(spec)
 
 
 @dataclass(frozen=True)
@@ -75,74 +56,85 @@ class Mount:
 
 
 def new(name: str, spec: dict, mounts: list[Mount], context: str, runner: str | None = None,
-        ssh: dict[str, str] | None = None) -> None:
-    """Create a bottle, on `runner` (None: bottle's default, this machine), that may ssh to each bottle `ssh`
-    gives, by the name given: {name: bottle}. Attached to this terminal: an image build shows, and a login can
-    ask."""
-    with _file(json.dumps(spec)) as spec_path, _file(context) as context_path:
-        argv = [*command(), "new", "--spec", spec_path, "--name", name, *(["--runner", runner] if runner else [])]
-        for m in mounts:
-            argv += ["--mount", f"{m.path}={m.repo}", *(["--checkout", f"{m.path}={m.checkout}"] if m.checkout else []),
-                     *[arg for remote in m.remotes for arg in ("--git-remote", f"{m.path}:{remote}")]]
-        argv += ["--context", context_path]
-        argv += [arg for host, bottle in (ssh or {}).items() for arg in ("--ssh", f"{host}={bottle}")]
-        result = subprocess.run(argv)
-        if result.returncode != 0:
-            raise failed(["new", name], result.returncode)
+        ssh: dict[str, str] | None = None, owner: Path | None = None) -> None:
+    """Create a bottle, on `runner` (None: this machine), that may ssh to each bottle `ssh` gives, by the name
+    given: {name: bottle}; its record kept in `owner` (its thread's directory). On this terminal: an image build
+    shows, and a login can ask."""
+    print(f"Creating bottle {name}...", file=sys.stderr)
+    requests = [bottles.MountRequest(m.path, m.repo, m.checkout, m.remotes or None) for m in mounts]
+    with _said():
+        bottles.create(spec, name, requests, context, runner=runner or runners.LOCAL, ssh=ssh, owner=owner)
 
 
 def status(names: list[str]) -> dict[str, dict]:
-    """Each named bottle's status row (see `bottle status --json`); state "missing" if there's no such bottle."""
+    """Each named bottle's status row (see bottles.status); state "missing" if there's no such bottle."""
     if not names:
         return {}
-    return {row["name"]: row for row in json.loads(_run("status", "--json", *names).stdout)}
+    with _said():
+        return {row["name"]: row for row in bottles.status(names)}
 
 
 def start(name: str) -> None:
-    """Start a stopped bottle. Attached to this terminal, as `new` is: starting can need a login."""
-    result = subprocess.run([*command(), "start", name], stdout=subprocess.DEVNULL)
-    if result.returncode != 0:
-        raise failed(["start", name], result.returncode)
+    """Start a stopped bottle. On this terminal, as `new` is: starting can need a login."""
+    with _said():
+        bottles.start(name)
 
 
 def delete(name: str) -> None:
-    _run("delete", name)
+    with _said():
+        bottles.delete(name)
+
+
+def _command(name: str, argv: list[str], tty: bool = False) -> list[str]:
+    with _said():
+        return bottles.exec_command(name, argv, tty)
+
+
+def failed(name: str, argv: list[str], returncode: int) -> FolioError:
+    """That a command in a bottle failed; what it said, it said on stderr."""
+    return FolioError(f"`{argv[0]}` in {name} failed (exit {returncode})")
 
 
 def run(name: str, argv: list[str], input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command in the bottle, with pipes."""
-    return _run("exec", name, "--", *argv, input=input, check=check)
+    """Run a command in the bottle, with pipes. Without `check`, a failure is the caller's to expect, so its stderr
+    is dropped rather than shown as if something went wrong."""
+    # Never this terminal for stdin: an exec passes it through to the bottle, which would read what's typed at
+    # folio's own prompts.
+    result = subprocess.run(_command(name, argv), stdout=subprocess.PIPE, text=True,
+                            stderr=None if check else subprocess.DEVNULL,
+                            input=input, stdin=None if input is not None else subprocess.DEVNULL)
+    if check and result.returncode != 0:
+        raise failed(name, argv, result.returncode)
+    return result
 
 
 def run_to_file(name: str, argv: list[str], path: Path) -> None:
     """Run a command in the bottle with its stdout, bytes and all, going to `path`."""
     with path.open("wb") as out:
-        result = subprocess.run([*command(), "exec", name, "--", *argv], stdin=subprocess.DEVNULL, stdout=out)
+        result = subprocess.run(_command(name, argv), stdin=subprocess.DEVNULL, stdout=out)
     if result.returncode != 0:
-        raise failed(["exec", name], result.returncode)
+        raise failed(name, argv, result.returncode)
 
 
 def run_from_file(name: str, argv: list[str], path: Path) -> None:
     """Run a command in the bottle with `path` as its stdin."""
     with path.open("rb") as in_:
-        result = subprocess.run([*command(), "exec", name, "--", *argv], stdin=in_, stdout=subprocess.DEVNULL)
+        result = subprocess.run(_command(name, argv), stdin=in_, stdout=subprocess.DEVNULL)
     if result.returncode != 0:
-        raise failed(["exec", name], result.returncode)
+        raise failed(name, argv, result.returncode)
 
 
 def attach(name: str, argv: list[str]) -> NoReturn:
     """Replace folio with a command in the bottle, on this terminal."""
-    cmd = [*command(), "exec", name, "--", *argv]
-    os.execvp(cmd[0], cmd)
+    command = _command(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
+    os.execvp(command[0], command)
 
 
-@contextmanager
-def _file(content: str) -> Iterator[str]:
-    """A temporary file holding `content`, for as long as bottle needs to read it."""
-    fd, path = tempfile.mkstemp(prefix="folio-")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        yield path
-    finally:
-        os.unlink(path)
+STANDS_IN = ("validate_spec", "new", "status", "start", "delete", "run", "run_to_file", "run_from_file", "attach")
+
+if os.environ.get("FOLIO_ENGINE"):
+    _spec = importlib.util.spec_from_file_location("folio_engine_stand_in", os.environ["FOLIO_ENGINE"])
+    _stand_in = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _functions: dict[str, Callable] = {name: getattr(_stand_in, name) for name in STANDS_IN}
+    globals().update(_functions)

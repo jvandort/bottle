@@ -958,10 +958,7 @@ def copy(src: CopySide, dst: CopySide) -> tuple[str, list[str]]:
 
 
 def _copy_command(name: str, argv: list[str]) -> list[str]:
-    """The command line that runs `argv` in the bottle as `genie`, at its first mount, started if stopped."""
-    auth.ensure_logged_in(get(name).features)
-    bottle = ensure_running(name)
-    return runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir)
+    return exec_command(name, argv)
 
 
 def _said(stderr: bytes) -> str:
@@ -1017,11 +1014,17 @@ def _copy_in(src: Path, dst: CopySide) -> str:
     return f"{dst.bottle}:{out.decode().strip()}"
 
 
-def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
-    """Replace this process with `argv` running in the bottle, starting it if stopped."""
+def exec_command(name: str, argv: list[str], tty: bool = False) -> list[str]:
+    """The command line, for this machine, that runs `argv` in the bottle as genie, at its first mount: started if
+    it's stopped, logged in first to what its features need."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
-    command = runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
+    return runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
+
+
+def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
+    """Replace this process with `argv` running in the bottle, starting it if stopped."""
+    command = exec_command(name, argv, tty)
     os.execvp(command[0], command)
 
 

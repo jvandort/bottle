@@ -9,6 +9,7 @@ from unittest import mock
 
 FOLIO = Path(__file__).resolve().parents[2] / "bin" / "folio"
 FAKE_BOTTLE = Path(__file__).resolve().parent / "fake_bottle.py"
+CLI_ENGINE = Path(__file__).resolve().parent / "cli_engine.py"
 
 
 class FolioTestCase(unittest.TestCase):
@@ -24,6 +25,7 @@ class FolioTestCase(unittest.TestCase):
         self.env = {
             **os.environ,
             "FOLIO_HOME": str(self.home),
+            "FOLIO_ENGINE": str(CLI_ENGINE),
             "FOLIO_BOTTLE": str(FAKE_BOTTLE),
             "FAKE_BOTTLE_STATE": str(self.state),
             "GIT_CONFIG_GLOBAL": os.devnull,
@@ -34,6 +36,13 @@ class FolioTestCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, self.env)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # And in this process, for what a test calls itself.
+        from folio import engine
+        from tests import cli_engine
+        for name in engine.STANDS_IN:
+            patcher = mock.patch.object(engine, name, getattr(cli_engine, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.repo = self.make_repo("project")
 
     def make_repo(self, name: str) -> Path:
