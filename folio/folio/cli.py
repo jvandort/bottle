@@ -472,7 +472,7 @@ def _runner(repo: repos.Repo) -> str:
 
 def _daemon():
     """bottle's daemon module, which folio serve is for now: shared, until it's folio's own."""
-    from bottle import daemon   # engine has put bottle's package where it's found
+    from .bottle import daemon   # engine has put bottle's package where it's found
 
     return daemon
 
@@ -485,7 +485,7 @@ def _serve_start(args: argparse.Namespace) -> int:
     import asyncio
     import logging
 
-    from bottle import store
+    from .bottle import store
 
     store.log_to_file(daemon.LOG, daemon.home())
     # A terminal running it by hand sees what it logs, too.
@@ -509,7 +509,7 @@ def _serve_stop(args: argparse.Namespace) -> int:
 
 
 def _auth_list(args: argparse.Namespace) -> int:
-    from bottle import auth
+    from .bottle import auth
 
     # Every credential is held by folio serve, so what's worth showing is where it's spent: the hosts it's attached
     # to, as the feature declares them (${option} is filled in from a bottle's own options).
@@ -523,7 +523,7 @@ def _auth_list(args: argparse.Namespace) -> int:
 
 def _credential_status(declared, is_set: bool) -> str:
     """Whether the Keychain has it, and the file read before the Keychain, if the credential has one."""
-    from bottle import features
+    from .bottle import features
 
     status = "set" if is_set else "not set"
     if declared.credential.properties:
@@ -536,7 +536,7 @@ def _credential_status(declared, is_set: bool) -> str:
 def _auth_set(args: argparse.Namespace) -> int:
     import getpass
 
-    from bottle import auth
+    from .bottle import auth
 
     value = getpass.getpass(f"{args.name}: ") if sys.stdin.isatty() else sys.stdin.read()
     auth.set_value(args.name, value)
@@ -545,7 +545,7 @@ def _auth_set(args: argparse.Namespace) -> int:
 
 
 def _auth_remove(args: argparse.Namespace) -> int:
-    from bottle import auth
+    from .bottle import auth
 
     print(f"Removed {args.name}" if auth.remove(args.name) else f"{args.name} wasn't set")
     return 0

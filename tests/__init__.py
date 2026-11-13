@@ -7,5 +7,5 @@ import tempfile
 _home = tempfile.mkdtemp(prefix="bottle-tests-")
 atexit.register(shutil.rmtree, _home, ignore_errors=True)
 os.environ["BOTTLE_HOME"] = _home
-# Nor the real ~/.folio, where folio serve keeps its sockets and log (see bottle/daemon.py).
+# Nor the real ~/.folio, where folio serve keeps its sockets and log (see folio/folio/bottle/daemon.py).
 os.environ["FOLIO_HOME"] = os.path.join(_home, "folio")

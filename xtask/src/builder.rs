@@ -146,7 +146,8 @@ fn build_in(
 /// read-only, where it runs). Labelled with a hash of all of that, so other scripts make another
 /// stage.
 fn recipe(arch: &str, debian: &str) -> Result<serde_json::Value> {
-    let features = root().join("containers/features");
+    // folio's features, borrowed: the same cc and rust a bottle gets.
+    let features = root().join("folio/features");
     let user = BTreeMap::from([
         ("_REMOTE_USER", "root"),
         ("_REMOTE_USER_HOME", "/root"),

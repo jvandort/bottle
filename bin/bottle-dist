@@ -7,9 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bottle import prereqs
-from bottle.errors import BottleError
 
 try:
     prereqs.ensure_dist(sys.argv[1])
-except BottleError as e:
+except prereqs.PrereqError as e:
     sys.exit(f"bottle: error: {e}")

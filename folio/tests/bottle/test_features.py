@@ -1,0 +1,846 @@
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from folio.bottle import egress, features, runners
+from folio.bottle.errors import BottleError
+
+
+class RealFeaturesTest(unittest.TestCase):
+    def test_every_shipped_feature_is_valid(self) -> None:
+        self.assertEqual(features.available(), ["cc", "chromium", "claude", "develocity", "github", "jvm", "python", "rust", "teamcity", "tools"])
+        for feature_id in features.available():
+            with self.subTest(feature_id):
+                features.load(feature_id)
+
+    def test_every_shipped_feature_tells_the_agent_about_itself(self) -> None:
+        for feature_id in features.available():
+            with self.subTest(feature_id):
+                [feature] = [f for f in features.resolve([f"{feature_id}:server=x" if feature_id in ("develocity", "teamcity") else feature_id])
+                             if f.id == feature_id]
+                self.assertTrue(feature.agent_context())
+                self.assertNotIn("${", feature.agent_context())
+
+    def test_chromium_brings_python(self) -> None:
+        self.assertEqual(["python", "chromium"], [f.id for f in features.resolve(["chromium"])])
+        [_, chromium] = features.resolve(["chromium:playwright=1.65.0"])
+        self.assertIn("Playwright 1.65.0", chromium.agent_context())
+
+    def test_claude_options(self) -> None:
+        self.assertEqual(
+            features.load("claude").option_env(),
+            {"PERMISSIONMODE": "bypassPermissions", "THEME": "dark", "TUI": "default"})
+        with self.assertRaisesRegex(BottleError, "option permissionMode must be one of"):
+            features.resolve(["claude:permissionMode=yolo"])
+
+    def test_claude_renders_without_capturing_the_mouse(self) -> None:
+        # Fullscreen would copy a selection to a clipboard a bottle hasn't got.
+        self.assertEqual(features.load("claude").option_env()["TUI"], "default")
+        [claude] = features.resolve(["claude:tui=fullscreen"])
+        self.assertEqual(claude.option_env()["TUI"], "fullscreen")
+        with self.assertRaisesRegex(BottleError, "option tui must be one of default, fullscreen"):
+            features.resolve(["claude:tui=full"])
+
+    def test_claude_talks_to_the_api_through_the_proxy_and_holds_no_token(self) -> None:
+        claude = features.load("claude")
+        [credential] = claude.resolved_credentials()
+        self.assertEqual(credential.inject.hosts, ("api.anthropic.com",))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        # The API's own https address, which the proxy terminates to attach the
+        # real token -- for every call, not just the ones ANTHROPIC_BASE_URL
+        # moves -- and a stand-in for the one Claude Code needs to believe it's
+        # logged in, which bottle sets per bottle, not in the image.
+        self.assertNotIn("ANTHROPIC_BASE_URL", claude.container_env)
+        self.assertEqual(credential.inject.standin, "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude.container_env)
+
+    def test_github_attaches_its_token_for_git_and_gh(self) -> None:
+        github = features.load("github")
+        [credential] = github.resolved_credentials()
+        # github.com for git, api.github.com for gh and the REST and GraphQL
+        # APIs, uploads.github.com for release assets.
+        self.assertEqual(credential.inject.hosts, ("github.com", "api.github.com", "uploads.github.com"))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        self.assertEqual(credential.inject.standin, "GH_TOKEN")
+        self.assertNotIn("GH_TOKEN", github.container_env)
+
+    def injection(self, feature_id: str) -> egress.Injection:
+        """The feature's credential as bottled attaches it, but for the host and the value."""
+        [credential] = features.load(feature_id).credentials
+        inject = credential.inject
+        return egress.Injection(host="x", header=inject.header, value="v", standin=features.STANDIN, credential="v",
+                                rewrites=inject.rewrites, forbid=inject.forbid, allow=inject.allow)
+
+    def test_routes_that_mint_export_or_grant_credentials_are_forbidden(self) -> None:
+        # The report's critical and high rows (2026-10-25), on each feature's hosts.
+        for feature_id, method, path in (
+            ("develocity", "POST", "/api/auth/token"),
+            ("develocity", "POST", "/api/auth/revoke-signing-keys"),
+            ("develocity", "POST", "/provision-access-key/init/gradle/4.6.1/host"),
+            ("develocity", "GET", "/provision-access-key/poll/abc"),
+            ("develocity", "GET", "/api/test-distribution/agent-pools/p/registration-keys"),
+            ("develocity", "POST", "/api/test-distribution/agent-pools/p/registration-keys"),
+            ("develocity", "PUT", "/api/test-distribution/agent-pools/p"),
+            ("develocity", "POST", "/api/build-cache/nodes/n/secret"),
+            ("develocity", "POST", "/api/build-cache/nodes/n/purge"),
+            ("develocity", "PUT", "/api/projects/p"),
+            ("github", "POST", "/user/keys"),
+            ("github", "POST", "/user/ssh_signing_keys"),
+            ("github", "POST", "/repos/o/r/keys"),
+            ("github", "POST", "/repos/o/r/actions/runners/registration-token"),
+            ("github", "POST", "/orgs/o/actions/runners/generate-jitconfig"),
+            ("github", "POST", "/user/codespaces"),
+            ("github", "POST", "/repos/o/r/pulls/1/codespaces"),
+            ("github", "POST", "/user/codespaces/c/exports"),
+            ("github", "GET", "/copilot_internal/v2/token"),
+            ("github", "POST", "/login/device/code"),
+            ("github", "POST", "/login/oauth/access_token"),
+            ("github", "POST", "/repos/o/r/dispatches"),
+            ("github", "POST", "/repos/o/r/actions/workflows/ci.yml/dispatches"),
+            ("github", "PUT", "/repos/o/r/collaborators/someone"),
+            ("github", "POST", "/orgs/o/personal-access-token-requests"),
+            ("github", "PUT", "/repos/o/r/actions/secrets/KEY"),
+            ("github", "PUT", "/user/codespaces/secrets/KEY"),
+            ("github", "PATCH", "/repos/o/r/environments/prod/variables/X"),
+            ("github", "PUT", "/orgs/o/actions/oidc/customization/sub"),
+            ("github", "POST", "/repos/o/r/hooks"),
+            ("github", "POST", "/app/installations/1/access_tokens"),
+            ("claude", "POST", "/api/oauth/claude_cli/create_api_key"),
+            ("claude", "POST", "/v1/oauth/token"),
+            ("claude", "POST", "/api/oauth/cri/token"),
+            ("claude", "POST", "/api/oauth/local_pairing/attest"),
+            ("claude", "POST", "/api/oauth/organizations/o/sync/github/auth"),
+            ("claude", "POST", "/api/oauth/organizations/o/prepaid/bundles"),
+            ("claude", "PATCH", "/api/oauth/account/settings"),
+            ("claude", "GET", "/v1/organizations/api_keys"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                self.assertTrue(self.injection(feature_id).forbids(method, egress._canonical(path)))
+
+    def test_what_the_tools_need_is_not_forbidden(self) -> None:
+        for feature_id, method, path in (
+            ("develocity", "POST", "/mcp"),
+            ("develocity", "GET", "/api/builds"),
+            ("develocity", "POST", "/scans/publish/gradle/4.6.1/token"),
+            ("develocity", "PUT", "/cache/0123abcd"),
+            # What gh, git and Claude Code were seen asking for with it (bottled's log, 2026-10-27).
+            ("github", "GET", "/"),
+            ("github", "GET", "/user"),
+            ("github", "GET", "/rate_limit"),
+            ("github", "GET", "/search/repositories"),
+            ("github", "GET", "/repos/o/r/pulls/1"),
+            ("github", "GET", "/repos/o/r/actions/runs/1/jobs"),
+            ("github", "GET", "/repos/o/r/contents/README.md"),
+            # A moved repo: GitHub redirects /repos/o/r to it by ID (gh api repos/containers/libkrunfw/..., 2026-11-12).
+            ("github", "GET", "/repositories/287064639/releases/tags/v5.6.2"),
+            ("github", "POST", "/graphql"),
+            ("github", "GET", "/o/r.git/info/refs"),
+            ("github", "POST", "/o/r/git-upload-pack"),
+            ("claude", "POST", "/v1/messages"),
+            ("claude", "POST", "/api/event_logging/v2/batch"),
+            ("claude", "POST", "/api/eval/sdk-abc"),
+            ("claude", "GET", "/api/claude_cli/bootstrap"),
+            ("claude", "GET", "/api/claude_code/settings"),
+            ("claude", "GET", "/api/claude_code/policy_limits"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                injection = self.injection(feature_id)
+                route = egress._canonical(path)
+                self.assertFalse(injection.forbids(method, route))
+                self.assertTrue(injection.allows(method, route))
+
+    def test_the_rest_doesnt_get_the_credential(self) -> None:
+        for feature_id, method, path in (
+            ("github", "POST", "/repos/o/r/pulls"),
+            ("github", "POST", "/repos/o/r/issues/1/comments"),
+            ("github", "PUT", "/repos/o/r/pulls/1/merge"),
+            ("github", "DELETE", "/repos/o/r"),
+            ("github", "POST", "/o/r.git/git-receive-pack"),
+            ("github", "POST", "/o/r.git/info/lfs/objects/batch"),
+            ("github", "GET", "/user/installations"),
+            ("github", "POST", "/repos/o/r/releases/1/assets"),
+            ("claude", "GET", "/api/oauth/usage"),
+            ("claude", "GET", "/api/oauth/organizations/o/sync/github/auth"),
+            ("claude", "POST", "/v1/code/github/import-token"),
+            ("claude", "GET", "/v1/vaults/v/credentials"),
+            ("claude", "POST", "/api/frame/upload"),
+        ):
+            with self.subTest(f"{feature_id} {method} {path}"):
+                self.assertFalse(self.injection(feature_id).allows(method, egress._canonical(path)))
+
+    def test_develocity_attaches_its_key_only_where_its_tools_use_it(self) -> None:
+        injection = self.injection("develocity")
+        for method, path in (("POST", "/api/builds"), ("GET", "/admin"), ("GET", "/scans/publish/gradle/4.6.1/token")):
+            with self.subTest(f"{method} {path}"):
+                self.assertFalse(injection.allows(method, egress._canonical(path)))
+        # Where Gradle's Develocity plugin presents it other than as a header's token.
+        self.assertEqual(
+            {(r.route.text, r.header, r.json, r.encoding) for r in injection.rewrites},
+            {("POST /scans/publish/*/*/token", "", "accessKey", "raw"),
+             ("GET /distribution-broker/**", "X-User-Access-Key", "", "base64")})
+
+    def test_github_installs_after_tools_which_owns_etc_gitconfig(self) -> None:
+        order = [f.id for f in features.resolve(["github", "tools"])]
+        self.assertEqual(order, ["tools", "github"])
+
+    def test_teamcity_needs_a_server_and_attaches_its_token_there(self) -> None:
+        [teamcity] = features.resolve(["teamcity:server=https://ci.corp.example.com"])
+        [credential] = teamcity.resolved_credentials()
+        self.assertEqual(credential.inject.hosts, ("ci.corp.example.com",))
+        self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
+        with self.assertRaisesRegex(BottleError, "feature teamcity needs its server option"):
+            features.resolve(["teamcity"])
+
+    def test_teamcity_is_read_only_until_asked_otherwise(self) -> None:
+        [teamcity] = features.resolve(["teamcity:server=ci.example.com"])
+        self.assertEqual(teamcity.option_env()["READONLY"], "true")
+        [writable] = features.resolve(["teamcity:server=ci.example.com,readOnly=false"])
+        self.assertEqual(writable.option_env()["READONLY"], "false")
+
+    def test_jvm_options(self) -> None:
+        self.assertEqual(features.load("jvm").option_env(), {"VERSION": "25", "ADDITIONALVERSIONS": ""})
+        [jvm] = features.resolve(["jvm:version=21,additionalVersions=17,11"])
+        self.assertEqual(jvm.option_env(), {"VERSION": "21", "ADDITIONALVERSIONS": "17,11"})
+
+    def test_python_options(self) -> None:
+        self.assertEqual(features.load("python").option_env(), {"EXTERNALLYMANAGED": "false"})
+        [python] = features.resolve(["python:externallyManaged=true"])
+        self.assertEqual(python.option_env(), {"EXTERNALLYMANAGED": "true"})
+        with self.assertRaisesRegex(BottleError, "option externallyManaged is true or false"):
+            features.resolve(["python:externallyManaged=yes"])
+
+
+class FeatureTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patcher = mock.patch.object(features, "FEATURES", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def feature(self, feature_id: str, install: bool = True, **spec) -> None:
+        (self.root / feature_id).mkdir()
+        spec = {"id": feature_id, "version": "1.0.0", **spec}
+        (self.root / feature_id / "devcontainer-feature.json").write_text(json.dumps(spec))
+        if install:
+            (self.root / feature_id / "install.sh").write_text("#!/bin/sh\n")
+
+
+class LoadTest(FeatureTestCase):
+    def test_minimal(self) -> None:
+        self.feature("a")
+        a = features.load("a")
+        self.assertEqual((a.id, a.version, a.options, a.container_env, a.depends_on), ("a", "1.0.0", {}, {}, ()))
+
+    def test_metadata_is_accepted(self) -> None:
+        self.feature("a", name="A", description="d", documentationURL="u", licenseURL="l", keywords=["k"])
+        features.load("a")
+
+    def test_options(self) -> None:
+        self.feature("a", options={
+            "version": {"type": "string", "default": "21", "proposals": ["17", "21"]},
+            "with-docs": {"type": "boolean", "default": False, "description": "d"},
+        })
+        self.assertEqual(features.load("a").option_env(), {"VERSION": "21", "WITH_DOCS": "false"})
+
+    def assert_invalid(self, pattern: str, install: bool = True, **spec) -> None:
+        self.feature("a", install=install, **spec)
+        with self.assertRaisesRegex(BottleError, pattern):
+            features.load("a")
+
+    def test_unsupported_keys_fail_loudly(self) -> None:
+        self.assert_invalid(r"a/devcontainer-feature.json: unsupported: mounts, privileged", mounts=[], privileged=True)
+
+    def test_lifecycle_hooks_are_unsupported(self) -> None:
+        self.assert_invalid("unsupported: postCreateCommand", postCreateCommand="echo hi")
+
+    def test_id_must_match_directory(self) -> None:
+        self.assert_invalid("id must be 'a'", id="b")
+
+    def test_version_is_required(self) -> None:
+        self.assert_invalid("version is required", version="")
+
+    def test_install_sh_is_required(self) -> None:
+        self.assert_invalid("install.sh is missing", install=False)
+
+    def test_option_types(self) -> None:
+        self.assert_invalid("type must be one of string, boolean", options={"x": {"type": "number", "default": 1}})
+
+    def test_option_default_must_match_its_type(self) -> None:
+        self.assert_invalid("needs a boolean default", options={"x": {"type": "boolean", "default": "true"}})
+
+    def test_option_default_is_required(self) -> None:
+        self.assert_invalid("needs a string default", options={"x": {"type": "string"}})
+
+    def test_option_default_in_enum(self) -> None:
+        self.assert_invalid("default isn't in its enum", options={"x": {"type": "string", "default": "c", "enum": ["a", "b"]}})
+
+    def test_unsupported_option_keys(self) -> None:
+        self.assert_invalid("option 'x': unsupported: format", options={"x": {"type": "string", "default": "", "format": "uri"}})
+
+    def test_container_env_values_are_strings(self) -> None:
+        self.assert_invalid("containerEnv must map names to strings", containerEnv={"X": 1})
+
+    def test_container_env_names(self) -> None:
+        self.assert_invalid("invalid variable name '1X'", containerEnv={"1X": "v"})
+
+    def test_container_env_values_are_as_they_are(self) -> None:
+        self.assert_invalid("references to other variables", containerEnv={"PATH": "/opt/bin:${PATH}"})
+
+    def test_remote_dependencies_are_unsupported(self) -> None:
+        self.assert_invalid("remote features aren't supported", dependsOn={"ghcr.io/devcontainers/features/node:1": {}})
+
+    def test_dependency_options_are_unsupported(self) -> None:
+        self.feature("b")
+        self.assert_invalid("options for dependencies aren't supported", dependsOn={"b": {"version": "2"}})
+
+    def test_unknown_dependency(self) -> None:
+        self.assert_invalid("dependsOn: no feature named 'ghost'", dependsOn={"ghost": {}})
+
+    def test_unknown_installs_after(self) -> None:
+        self.assert_invalid("installsAfter: no feature named 'ghost'", installsAfter=["ghost"])
+
+    def credential(self, **spec) -> dict:
+        """customizations for one credential, attached to ci.example.com unless it says otherwise."""
+        base = {"description": "A token", "inject": {"hosts": ["ci.example.com"], "value": "Bearer ${credential}"}}
+        return {"bottle": {"credentials": {"tok": {**base, **spec}}}}
+
+    def test_credentials(self) -> None:
+        self.feature("a", customizations=self.credential())
+        [c] = features.load("a").credentials
+        self.assertEqual((c.name, c.inject.hosts), ("tok", ("ci.example.com",)))
+
+    def test_credential_injected_at_a_hosts_option(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": "ci.example.com"}},
+            customizations=self.credential(inject={
+                "hosts": ["${server}", "*.mirror.example.com"], "value": "token ${credential}", "header": "X-Auth"}),
+        )
+        [c] = features.load("a").resolved_credentials()
+        self.assertEqual(c.inject.hosts, ("ci.example.com", "*.mirror.example.com"))
+        self.assertEqual((c.inject.header, c.inject.value), ("X-Auth", "token ${credential}"))
+        [configured] = features.resolve(["a:server=other.example.com"])
+        self.assertEqual(configured.resolved_credentials()[0].inject.hosts[0], "other.example.com")
+
+    def test_credential_read_from_a_properties_file_an_option_names(self) -> None:
+        self.feature(
+            "a",
+            options={"keys": {"type": "string", "default": "~/.tool/keys.properties"}},
+            customizations=self.credential(properties="${keys}"),
+        )
+        [c] = features.load("a").resolved_credentials()
+        self.assertEqual(c.properties, "~/.tool/keys.properties")
+        [configured] = features.resolve(["a:keys=/elsewhere/keys.properties"])
+        self.assertEqual(configured.resolved_credentials()[0].properties, "/elsewhere/keys.properties")
+
+    def test_a_host_that_is_only_an_option_is_each_server_it_lists(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        [several] = features.resolve(["a:server=https://one.example.com, two.example.com/,"])
+        self.assertEqual(several.resolved_credentials()[0].inject.hosts, ("one.example.com", "two.example.com"))
+        for spec in ("a:server=,", "a:server=one.example.com,x y"):
+            [bad] = features.resolve([spec])
+            with self.subTest(spec), self.assertRaises(BottleError):
+                bad.resolved_credentials()
+
+    def test_a_list_only_stands_for_a_whole_host(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}:8443"], "value": "Bearer ${credential}"}),
+        )
+        [bad] = features.resolve(["a:server=one.example.com,two.example.com"])
+        with self.assertRaisesRegex(BottleError, "must be a host"):
+            bad.resolved_credentials()
+
+    def test_an_option_holding_a_server_may_be_written_as_a_url(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        [https] = features.resolve(["a:server=https://ci.example.com/"])
+        self.assertEqual(https.resolved_credentials()[0].inject.hosts, ("ci.example.com",))
+        [plain] = features.resolve(["a:server=http://ci.example.com"])
+        with self.assertRaisesRegex(BottleError, "must be a host, reached over https"):
+            plain.resolved_credentials()
+
+    def test_a_credential_belongs_to_hosts_and_never_to_the_bottle(self) -> None:
+        for spec, message in (
+            ({}, "needs inject, the hosts the proxy attaches it to"),
+            ({"env": "TOKEN"}, "unsupported: env"),  # a bottle can't be handed one any more
+        ):
+            with self.subTest(spec):
+                self.feature("a", customizations={"bottle": {"credentials": {"tok": {"description": "d", **spec}}}})
+                with self.assertRaisesRegex(BottleError, message):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
+
+    def test_cache(self) -> None:
+        self.feature("a", customizations={"bottle": {"cache": {"hosts": ["repo.example.com", "*.cdn.example.com"],
+                                                               "exclude": ["*/index.json"]}}})
+        self.assertEqual(features.load("a").cache,
+                         features.Cache(("repo.example.com", "*.cdn.example.com"), ("*/index.json",)))
+        self.feature("b")
+        self.assertIsNone(features.load("b").cache)
+
+    def test_a_cache_is_hosts_and_paths(self) -> None:
+        for cache, message in (
+            ([], "cache must be an object"),
+            ({}, "cache.hosts must be a non-empty list"),
+            ({"hosts": []}, "cache.hosts must be a non-empty list"),
+            ({"hosts": ["https://repo.example.com"]}, "must be a lowercase host name"),
+            ({"hosts": ["repo.example.com:8443"]}, "must be a lowercase host name"),
+            ({"hosts": ["Repo.example.com"]}, "must be a lowercase host name"),
+            ({"hosts": ["${server}"]}, "must be a lowercase host name"),
+            ({"hosts": ["repo.example.com"], "exclude": ["index.json"]}, "starting with / or \\*"),
+            ({"hosts": ["repo.example.com"], "ttl": 60}, "cache: unsupported: ttl"),
+        ):
+            with self.subTest(cache):
+                self.assert_invalid(message, customizations={"bottle": {"cache": cache}})
+                __import__("shutil").rmtree(self.root / "a")
+
+    def test_required_options(self) -> None:
+        self.feature("a", options={"server": {"type": "string", "default": ""}},
+                     customizations={"bottle": {"requiredOptions": ["server"]}})
+        self.assertEqual(features.load("a").required_options, ("server",))
+        with self.assertRaisesRegex(BottleError, "feature a needs its server option: --feature a:server="):
+            features.resolve(["a"])
+        with self.assertRaisesRegex(BottleError, "its server option can't be empty"):
+            features.resolve(["a:server="])
+        self.assertEqual(features.resolve(["a:server=ci.example.com"])[0].values, {"server": "ci.example.com"})
+
+    def test_a_required_option_is_what_the_user_set_not_what_it_defaults_to(self) -> None:
+        # The placeholder default is never a value: setting the option to the
+        # same string is still setting it, and the feature says so.
+        self.feature("a", options={"server": {"type": "string", "default": "ci.example.com"}},
+                     customizations={"bottle": {"requiredOptions": ["server"]}})
+        [configured] = features.resolve(["a:server=ci.example.com"])
+        self.assertEqual(configured.spec, "a:server=ci.example.com")
+        with self.assertRaisesRegex(BottleError, "needs its server option"):
+            features.resolve(["a"])
+
+    def test_required_options_must_be_options(self) -> None:
+        self.assert_invalid("requiredOptions: no option 'ghost'", customizations={"bottle": {"requiredOptions": ["ghost"]}})
+
+    def test_credential_injected_at_an_option_nobody_set(self) -> None:
+        self.feature(
+            "a",
+            options={"server": {"type": "string", "default": ""}},
+            customizations=self.credential(inject={"hosts": ["${server}"], "value": "Bearer ${credential}"}),
+        )
+        with self.assertRaisesRegex(BottleError, "isn't set: use --feature a:server="):
+            features.load("a").resolved_credentials()
+
+    def test_inject_validation(self) -> None:
+        for spec, message in (
+            ({"hosts": [], "value": "Bearer ${credential}"}, "inject.hosts must be a non-empty list"),
+            ({"hosts": ["${nope}"], "value": "Bearer ${credential}"}, "names no option of this feature"),
+            ({"hosts": ["${flag}"], "value": "Bearer ${credential}"}, "option 'flag' is a boolean, not a host"),
+            ({"hosts": ["x"], "value": "Bearer"}, r"must be the header value, containing \$\{credential\}"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "header": "bad header"}, "must be a header name"),
+            ({"hosts": ["https://x"], "value": "Bearer ${credential}"}, "always reached over https"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "scheme": "http"}, "inject: unsupported: scheme"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": "POST /x"}, "inject.forbid must be a list of routes"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["/x"]}, r"inject.forbid: '/x' isn't METHOD"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "allow": ["GET x"]}, "inject.allow: 'GET x' isn't METHOD"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "allow": ["GET,PUT /x"]}, "methods are names separated by"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["GET /{x"]}, "a brace without its pair"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["* /api/auth/**"], "allow": ["GET /api/**"]},
+             r"'GET /api/\*\*' is allowed, but reaches '\* /api/auth/\*\*', which is forbidden: narrow it"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "forbid": ["POST /api/auth/token"],
+              "rewrite": [{"route": "POST /api/*/*", "json": "key"}]}, "'POST /api/\\*/\\*' is allowed, but reaches"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "rewrite": {}}, "inject.rewrite must be a list"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}", "rewrite": [{"route": "GET /x"}]},
+             "needs a header or a json field, not both"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "header": "X-Key", "json": "key"}]}, "needs a header or a json field, not both"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "header": "X Key"}]}, "isn't a header name"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "json": "key", "encoding": "hex"}]}, "encoding is raw or base64"),
+            ({"hosts": ["x"], "value": "Bearer ${credential}",
+              "rewrite": [{"route": "GET /x", "json": "key", "where": "body"}]}, "unsupported: where"),
+        ):
+            with self.subTest(message):
+                self.feature("a", options={"flag": {"type": "boolean", "default": False}},
+                             customizations=self.credential(inject=spec))
+                with self.assertRaisesRegex(BottleError, message):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
+
+    def test_context_fills_in_options(self) -> None:
+        self.feature("a", options={"server": {"type": "string", "default": ""}, "ro": {"type": "boolean", "default": True}},
+                     customizations={"bottle": {"context": "Talks to ${server}; read-only: ${ro}.\n"}})
+        [configured] = features.resolve(["a:server=ci.example.com"])
+        self.assertEqual(configured.agent_context(), "Talks to ci.example.com; read-only: true.")
+
+    def test_context_validation(self) -> None:
+        self.assert_invalid("context must be a string", customizations={"bottle": {"context": ["x"]}})
+        __import__("shutil").rmtree(self.root / "a")
+        self.assert_invalid(r"context: \$\{ghost\} names no option", customizations={"bottle": {"context": "${ghost}"}})
+
+    def test_no_context_says_nothing(self) -> None:
+        self.feature("a")
+        self.assertEqual(features.load("a").agent_context(), "")
+
+    def test_other_tools_customizations_fail_loudly(self) -> None:
+        self.assert_invalid("customizations: unsupported: vscode", customizations={"vscode": {"extensions": []}})
+
+    def test_unknown_bottle_customizations(self) -> None:
+        self.assert_invalid("customizations.bottle: unsupported: ports", customizations={"bottle": {"ports": []}})
+
+    def test_credential_validation(self) -> None:
+        for spec, message in (
+            ({"description": ""}, "needs a description"),
+            ({"file": "/x"}, "unsupported: file"),
+            ({"inject": {"hosts": ["x"], "value": "Bearer ${credential}", "standin": "1BAD"}},
+             "inject.standin must be an environment variable name"),
+            ({"login": {"command": ["x"], "capture": "(x)"}}, "unsupported: login"),
+            ({"properties": ""}, "properties must be the path of a properties file"),
+            ({"properties": "${nope}"}, "names no string option"),
+        ):
+            with self.subTest(message):
+                self.feature("a", customizations=self.credential(**spec))
+                with self.assertRaisesRegex(BottleError, message):
+                    features.load("a")
+                __import__("shutil").rmtree(self.root / "a")
+
+    def test_invalid_json(self) -> None:
+        (self.root / "a").mkdir()
+        (self.root / "a" / "devcontainer-feature.json").write_text("{nope")
+        with self.assertRaisesRegex(BottleError, "invalid JSON"):
+            features.load("a")
+
+    def test_unknown_feature(self) -> None:
+        self.feature("a")
+        with self.assertRaisesRegex(BottleError, "no feature named 'nope'; available: a"):
+            features.load("nope")
+
+
+class OptionTest(FeatureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.feature("f", options={
+            "version": {"type": "string", "default": "25"},
+            "docs": {"type": "boolean", "default": False},
+            "flavor": {"type": "string", "default": "a", "enum": ["a", "b"]},
+        })
+
+    def one(self, spec: str) -> features.Feature:
+        [feature] = features.resolve([spec])
+        return feature
+
+    def test_parse(self) -> None:
+        self.assertEqual(features.parse_spec("f"), ("f", {}))
+        self.assertEqual(features.parse_spec("f:version=17,docs=true"), ("f", {"version": "17", "docs": "true"}))
+        self.assertEqual(features.parse_spec("f:list=1,2,3,x=y"), ("f", {"list": "1,2,3", "x": "y"}))
+        self.assertEqual(features.parse_spec("f:url=a=b"), ("f", {"url": "a=b"}))
+
+    def test_bad_specs(self) -> None:
+        for spec in ("f:", "f:version", "f:=1", "f:,x=1", "f:version=1,version=2"):
+            with self.subTest(spec), self.assertRaises(BottleError):
+                features.parse_spec(spec)
+
+    def test_values_and_spec(self) -> None:
+        f = self.one("f:version=17,docs=true")
+        self.assertEqual(f.values, {"version": "17", "docs": True, "flavor": "a"})
+        self.assertEqual(f.spec, "f:docs=true,version=17")  # canonical: sorted
+        self.assertEqual(f.option_env(), {"VERSION": "17", "DOCS": "true", "FLAVOR": "a"})
+
+    def test_defaults_are_left_out_of_the_spec(self) -> None:
+        self.assertEqual(self.one("f:version=25,flavor=a").spec, "f")
+
+    def test_unknown_option(self) -> None:
+        with self.assertRaisesRegex(BottleError, "feature f has no option 'nope' \\(options: docs, flavor, version\\)"):
+            self.one("f:nope=1")
+
+    def test_boolean_values(self) -> None:
+        with self.assertRaisesRegex(BottleError, "option docs is true or false, not 'yes'"):
+            self.one("f:docs=yes")
+
+    def test_enum(self) -> None:
+        with self.assertRaisesRegex(BottleError, "option flavor must be one of a, b, not 'c'"):
+            self.one("f:flavor=c")
+
+    def test_same_feature_with_different_options(self) -> None:
+        with self.assertRaisesRegex(BottleError, "feature f requested twice with different options"):
+            features.resolve(["f:version=17", "f:version=21"])
+
+    def test_dependencies_take_defaults_unless_requested(self) -> None:
+        self.feature("g", dependsOn={"f": {}})
+        self.assertEqual([x.spec for x in features.resolve(["g"])], ["f", "g"])
+        self.assertEqual([x.spec for x in features.resolve(["g", "f:version=17"])], ["f:version=17", "g"])
+
+
+class ResolveTest(FeatureTestCase):
+    def ids(self, *requested: str) -> list[str]:
+        return [f.id for f in features.resolve(list(requested))]
+
+    def test_ties_break_by_id(self) -> None:
+        for name in ("c", "a", "b"):
+            self.feature(name)
+        self.assertEqual(self.ids("c", "a", "b"), ["a", "b", "c"])
+
+    def test_depends_on_pulls_in_and_orders_first(self) -> None:
+        self.feature("tools")
+        self.feature("jvm", dependsOn={"tools": {}})
+        self.assertEqual(self.ids("jvm"), ["tools", "jvm"])
+
+    def test_transitive_dependencies(self) -> None:
+        self.feature("c")
+        self.feature("b", dependsOn={"c": {}})
+        self.feature("a", dependsOn={"b": {}})
+        self.assertEqual(self.ids("a"), ["c", "b", "a"])
+
+    def test_installs_after_orders_only_when_present(self) -> None:
+        self.feature("z")
+        self.feature("a", installsAfter=["z"])
+        self.assertEqual(self.ids("a"), ["a"])
+        self.assertEqual(self.ids("a", "z"), ["z", "a"])
+
+    def test_cycle(self) -> None:
+        (self.root / "a").mkdir()
+        (self.root / "b").mkdir()
+        for me, other in (("a", "b"), ("b", "a")):
+            (self.root / me / "install.sh").write_text("")
+            (self.root / me / "devcontainer-feature.json").write_text(
+                json.dumps({"id": me, "version": "1", "dependsOn": {other: {}}}))
+        with self.assertRaisesRegex(BottleError, "cycle: a, b"):
+            features.resolve(["a"])
+
+    def test_duplicates_install_once(self) -> None:
+        self.feature("tools")
+        self.feature("jvm", dependsOn={"tools": {}})
+        self.assertEqual(self.ids("jvm", "tools", "jvm"), ["tools", "jvm"])
+
+
+class ImageTest(FeatureTestCase):
+    def test_tag_is_canonical(self) -> None:
+        self.feature("tools")
+        self.feature("claude")
+        tag = features.image_tag(features.resolve(["tools", "claude"]))
+        self.assertEqual(tag, "localhost/bottle/base:with-claude.tools")
+        self.assertEqual(features.image_tag(features.resolve(["claude", "tools"])), tag)
+        self.assertEqual(features.image_tag([]), "localhost/bottle/base:latest")
+
+    def test_tag_distinguishes_options(self) -> None:
+        self.feature("jvm", options={"version": {"type": "string", "default": "25"}})
+        default = features.image_tag(features.resolve(["jvm"]))
+        explicit_default = features.image_tag(features.resolve(["jvm:version=25"]))
+        other = features.image_tag(features.resolve(["jvm:version=17"]))
+        self.assertEqual(default, "localhost/bottle/base:with-jvm")
+        self.assertEqual(explicit_default, default)  # setting an option to its default changes nothing
+        self.assertRegex(other, r"^localhost/bottle/base:with-jvm-[0-9a-f]{8}$")
+
+    def test_recipe(self) -> None:
+        self.feature("tools", containerEnv={"EDITOR": "vim"})
+        self.feature("jvm", dependsOn={"tools": {}}, options={"version": {"type": "string", "default": "21"}},
+                     containerEnv={"JAVA_HOME": "/opt/jdk", "JDK": "21"})
+
+        recipe = features.recipe(features.resolve(["jvm"]))
+
+        self.assertEqual(recipe["from"], "localhost/bottle/base:latest")
+        self.assertEqual(recipe["labels"], {"bottle.features": "jvm tools"})
+        tools, editor, _, jvm, java_env, mirror = recipe["steps"]
+        # Each install.sh where it is, in the features directory mounted for the build: tools first.
+        self.assertEqual((tools["cwd"], jvm["cwd"]), (f"{features.images.MOUNT}/tools", f"{features.images.MOUNT}/jvm"))
+        self.assertEqual(jvm["run"], ["/bin/sh", "./install.sh"])
+        self.assertEqual(jvm["env"]["_REMOTE_USER"], "genie")
+        self.assertEqual(jvm["env"]["VERSION"], "21")
+        self.assertEqual(editor, {"env": {"EDITOR": "vim"}})
+        self.assertEqual(java_env, {"env": {"JAVA_HOME": "/opt/jdk", "JDK": "21"}})
+        self.assertIn("printf '%s\\n' \"JDK=$JDK\" >> /etc/environment", mirror["run"][-1])
+
+    def test_option_values_go_as_they_are(self) -> None:
+        self.feature("a", options={"flags": {"type": "string", "default": "a b; rm -rf /"}})
+        [step] = features.recipe(features.resolve(["a"]))["steps"]
+        self.assertEqual(step["env"]["FLAGS"], "a b; rm -rf /")  # an environment, not a shell line
+
+
+class AptTest(FeatureTestCase):
+    """What features install with apt: their repositories and packages, declared, installed in one step first."""
+
+    def repository(self, **overrides) -> dict:
+        return {"uri": "https://apt.example/stable", "suite": "stable", "components": ["main"], "key": "example.asc",
+                **overrides}
+
+    def apt_feature(self, feature_id: str, apt: dict, **spec) -> None:
+        self.feature(feature_id, customizations={"bottle": {"apt": apt}}, **spec)
+        for repository in apt.get("repositories", []):
+            (self.root / feature_id / repository["key"]).write_text("a key")
+
+    def test_one_step_first_every_repository_then_every_package_once(self) -> None:
+        self.apt_feature("tools", {"packages": ["curl", "jq"]})
+        self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code", "jq"]},
+                         dependsOn={"tools": {}})
+        steps = features.recipe(features.resolve(["claude"]))["steps"]
+        apt_step, tools, claude = steps
+        script = apt_step["run"][2]
+        self.assertIn(f"install -D -m 0644 {features.images.MOUNT}/claude/example.asc /etc/apt/keyrings/example.asc",
+                      script)
+        self.assertIn("deb [signed-by=/etc/apt/keyrings/example.asc] https://apt.example/stable stable main", script)
+        self.assertIn("apt-get $options install -y --no-install-recommends curl jq claude-code\n", script)
+        self.assertEqual(script.count("apt-get $options update"), 1)
+        self.assertIn("Acquire::https::apt.example::CaInfo", script)
+        self.assertEqual(apt_step["env"][features.images.BUILD_CA], "")  # the build's to fill in
+        self.assertEqual((tools["cwd"], claude["cwd"]), (f"{features.images.MOUNT}/tools", f"{features.images.MOUNT}/claude"))
+
+    def test_without_any_theres_no_apt_step(self) -> None:
+        self.feature("tools")
+        [step] = features.recipe(features.resolve(["tools"]))["steps"]
+        self.assertEqual(step["cwd"], f"{features.images.MOUNT}/tools")
+
+    def test_a_package_from_options_is_one_for_each_value(self) -> None:
+        self.apt_feature("jvm", {"packages": ["temurin-${version}-jdk", "temurin-${additionalVersions}-jdk"]},
+                         options={"version": {"type": "string", "default": "25"},
+                                  "additionalVersions": {"type": "string", "default": ""}})
+        self.assertEqual(features.resolve(["jvm"])[0].apt_packages(), ("temurin-25-jdk",))
+        [jvm] = features.resolve(["jvm:version=21,additionalVersions=17, 11"])
+        self.assertEqual(jvm.apt_packages(), ("temurin-21-jdk", "temurin-17-jdk", "temurin-11-jdk"))
+        [bad] = features.resolve(["jvm:version=21 && curl x"])
+        with self.assertRaisesRegex(BottleError, "isn't an apt package's name"):
+            bad.apt_packages()
+
+    def test_a_feature_says_its_apt_as_bottle_takes_it(self) -> None:
+        for apt, error in (
+            ({"packages": "jq"}, "packages must be a list"),
+            ({"packages": ["jq; rm"]}, "packages must be a list"),
+            ({"packages": ["${nope}"]}, r"\$\{nope\} names no option"),
+            ({"repositories": [{"uri": "https://apt.example"}]}, "each is an object of"),
+            ({"repositories": [self.repository(uri="ftp://apt.example")]}, "http:// or https://"),
+            ({"repositories": [self.repository(components=[])]}, "components must be a non-empty list"),
+            ({"repositories": [self.repository(key="../key.asc")]}, "the name of a file"),
+            ({"sources": []}, "unsupported: sources"),
+        ):
+            with self.subTest(apt):
+                self.feature("bad", customizations={"bottle": {"apt": apt}})
+                with self.assertRaisesRegex(BottleError, error):
+                    features.load("bad")
+                shutil.rmtree(self.root / "bad")
+        self.feature("keyless", customizations={"bottle": {"apt": {"repositories": [self.repository()]}}})
+        with self.assertRaisesRegex(BottleError, "key 'example.asc' is missing"):
+            features.load("keyless")
+
+    def test_its_repositories_are_kept_for_its_bottles_and_builds(self) -> None:
+        self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code"]})
+        self.feature("base")
+        for kept in (features.cache_module.cached_for(["claude"]), features.build_cached()):
+            kept = {c.host: c for c in kept}
+            self.assertEqual(kept["apt.example"].include, ("/stable/*.deb",))
+            self.assertIn("deb.debian.org", kept)
+
+    def test_the_recipe_says_its_features_for_the_build(self) -> None:
+        self.feature("tools")
+        self.assertEqual(features.recipe(features.resolve(["tools"]))["features"], ["tools"])
+
+
+class BuildTest(FeatureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.feature("base", containerEnv={"LANG": "C.UTF-8"})
+        self.feature("tools")
+        self.feature("jvm", dependsOn={"tools": {}})
+        self.built: list[str] = []
+        self.runner = mock.Mock()
+        self.runner.name = "local"
+        self.build = mock.Mock(side_effect=lambda context, tag, inputs, recipe, cli=None: self.built.append(tag))
+        for patcher in (
+            mock.patch.object(features.images, "build_recipe", self.build),
+            mock.patch.object(features, "remove_stale", side_effect=lambda runner: self.built.append("remove stale") or []),
+            mock.patch("sys.stderr"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def current(self, *tags: str):
+        return mock.patch.object(features.images, "is_current", side_effect=lambda tag, inputs, cli=None: tag in tags)
+
+    def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
+        with self.current():
+            self.assertEqual(features.ensure_built(["jvm"], self.runner), "localhost/bottle/base:with-jvm.tools")
+        self.assertEqual(self.built, ["localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools",
+                                      "remove stale"])
+
+    def test_ensure_built_skips_whats_current(self) -> None:
+        with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
+            features.ensure_built(["jvm"], self.runner)
+        self.assertEqual(self.built, [])
+        with self.current("localhost/bottle/base:latest"):
+            features.ensure_built(["jvm"], self.runner)
+        self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
+
+    def test_base_is_the_base_feature_on_debian_running_bottles_entrypoint(self) -> None:
+        with self.current():
+            features.ensure_built([], self.runner)
+        [(context, tag, inputs, recipe)] = [c.args for c in self.build.call_args_list]
+        self.assertEqual((context, tag, inputs), (self.root, "localhost/bottle/base:latest", features.base_inputs()))
+        self.assertEqual((recipe["pull"], recipe["entrypoint"], recipe["cmd"]),
+                         (features.images.DEBIAN, features.images.ENTRYPOINT, features.images.CMD))
+        self.assertEqual(recipe["steps"][0]["cwd"], f"{features.images.MOUNT}/base")
+        self.assertEqual(recipe["steps"][1], {"env": {"LANG": "C.UTF-8"}})
+
+    def test_feature_changes_make_the_combination_stale(self) -> None:
+        [jvm, tools] = features.resolve(["jvm"])[::-1]
+        before = features.inputs_hash([tools, jvm])
+        (self.root / "jvm" / "install.sh").write_text("#!/bin/sh\necho changed\n")
+        self.assertNotEqual(features.inputs_hash([tools, jvm]), before)
+
+    def test_base_changes_make_everything_stale(self) -> None:
+        [tools] = features.resolve(["tools"])
+        before = (features.base_inputs(), features.inputs_hash([tools]))
+        (self.root / "base" / "install.sh").write_text("#!/bin/sh\necho changed\n")
+        after = (features.base_inputs(), features.inputs_hash([tools]))
+        self.assertTrue(before[0] != after[0] and before[1] != after[1])
+
+    def test_no_features_is_just_base(self) -> None:
+        with self.current("localhost/bottle/base:latest"):
+            self.assertEqual(features.ensure_built([], self.runner), "localhost/bottle/base:latest")
+        self.assertEqual(self.built, [])
+
+    def test_base_isnt_a_feature_to_ask_for(self) -> None:
+        self.assertNotIn("base", features.available())
+        with self.assertRaisesRegex(BottleError, "base is in every bottle"):
+            features.resolve(["base"])
+        self.feature("needy", dependsOn={"base": {}})
+        with self.assertRaisesRegex(BottleError, "installed on base already"):
+            features.load("needy")
+
+
+class RemoveStaleTest(FeatureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.feature("tools")
+        [tools] = features.resolve(["tools"])
+        self.current = features.inputs_hash([tools])
+        self.deleted: list[str] = []
+
+    def run_with(self, images: dict[str, dict]) -> list[str]:
+        with mock.patch.object(features.images, "built", return_value=images), \
+                mock.patch.object(features.images, "forget", side_effect=lambda tag, cli=None: self.deleted.append(tag)), \
+                mock.patch.object(features.images, "remove_unused") as self.remove_unused:
+            return features.remove_stale(runners.Runner())
+
+    def test_forgets_stale_images_and_has_bottle_cli_delete_what_nothing_uses(self) -> None:
+        removed = self.run_with({
+            "localhost/bottle/base:with-tools": {"bottle.features": "tools", "bottle.inputs": self.current},
+            "localhost/bottle/base:with-old": {"bottle.features": "tools", "bottle.inputs": "outdated"},
+            "localhost/bottle/base:with-gone": {"bottle.features": "no-such-feature", "bottle.inputs": "x"},
+            "localhost/bottle/base:with-unlabeled": {"bottle.features": "tools"},
+        })
+        self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
+                                   "localhost/bottle/base:with-unlabeled"])
+        self.assertEqual(self.deleted, removed)
+        self.remove_unused.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

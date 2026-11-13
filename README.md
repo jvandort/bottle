@@ -274,29 +274,16 @@ CA for them, as for any cached host.
 
 ## Development
 
-Run the tests from the repo root:
-
-```sh
-python3 -m unittest
-```
-
-On a Mac with bottle-cli built (`cargo xtask dist`, or `BOTTLE_CLI` naming
-one), that includes two suites that run real machines, and take minutes the
-first time, while they pull and build images:
-
-- `tests/test_krun_contract.py`: what bottle relies on bottle-cli for. Run it
-  after changing bottle-cli, the agent or libkrun.
-- `tests/test_end_to_end.py`: a real bottle, made as folio makes one and run in through `bin/bottle`, in its own
-  `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
-
-Elsewhere they're skipped. Runners are tested here with a fake ssh, which
-runs each command on this machine, in a home of its own: `tests/test_drone.py`
-is a drone end to end, with only ssh and bottle-cli faked.
-
-bottle-cli's own tests are Rust's: `cargo test`. Those that need root (they
+bottle-cli's tests are Rust's: `cargo test`. Those that need root (they
 stack disks with loop devices, in namespaces) skip without it; to run them,
 as root but built as you:
 
 ```sh
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 ```
+
+`bin/bottle` builds bottle-cli from the checkout (`cargo xtask dist`, into
+`target/dist`) when its sources have changed since it was, then runs it:
+`bottle/prereqs.py`, tested by `python3 -m unittest` here. folio's tests,
+the suites that drive bottle-cli from folio's side among them, are in
+[folio](folio/README.md#development).

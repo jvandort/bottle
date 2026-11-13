@@ -1,5 +1,5 @@
 //! What the host's side of a bottle's network decides about each connection the bottle makes, by
-//! its machine's network policy (its network.json, given when it's made: see bottle/services.py's
+//! its machine's network policy (its network.json, given when it's made: see folio/folio/bottle/services.py's
 //! network): which hosts' downloads are kept here (cache.rs), which connections a service answers
 //! (routes, each to a unix socket: see net.rs), and the private addresses the bottle may reach by
 //! name.

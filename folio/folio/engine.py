@@ -19,15 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from .bottle import bottles, runners, specs
+from .bottle.errors import BottleError
 from .errors import FolioError
-
-# bottle's package, beside folio's in this checkout: shared, until what folio uses of it is folio's own.
-_ROOT = str(Path(__file__).resolve().parents[2])
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from bottle import bottles, runners, specs  # noqa: E402
-from bottle.errors import BottleError  # noqa: E402
 
 
 @contextmanager

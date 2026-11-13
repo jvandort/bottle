@@ -362,7 +362,7 @@ Anything else in a definition is an error. Remote features aren't supported.
 
 ## Bottles
 
-Folio makes each bottle (bottle/bottles.py, in folio's process) from a
+Folio makes each bottle (folio/bottle/bottles.py) from a
 **spec**: its features and memory (`folio configure` sets a repo's). Its name
 is its identity, and its thread's: a name that's taken is refused. Its
 record is kept with its thread, in folio's home
@@ -462,7 +462,7 @@ are looked up by the machine it runs on, with its resolver, as they're asked;
 a bottle has no UDP or IPv6. A machine starts with nothing but its name
 (`bottle start MACHINE` works without folio serve); what it routes to folio serve is
 refused while folio serve isn't running. folio serve logs one line per connection it
-serves, in `~/.folio/logs/serve.log`. Its code is still bottle's (bottle/daemon.py).
+serves, in `~/.folio/logs/serve.log` (folio/bottle/daemon.py).
 
 folio serve starts automatically when a command needs it, and when it starts it
 picks up the bottles there are. It stops itself once there's no bottle left to
@@ -530,7 +530,22 @@ cd folio && python3 -m unittest discover -s tests -t .
 ```
 
 Folio makes its bottles with bottle's code, in its own process (`folio/engine.py`,
-calling `bottle/bottles.py`). The tests stand `tests/fake_bottle.py` in for it, a
+calling `folio/bottle/bottles.py`). The tests stand `tests/fake_bottle.py` in for it, a
 bottle CLI that keeps its bottles in a JSON file and runs commands in a real
 clone of the repo, so they need no VM: `$FOLIO_ENGINE` names `tests/cli_engine.py`,
 which drives it.
+
+`tests/bottle/` tests the code folio makes and serves bottles with
+(`folio/bottle/`). On a Mac with bottle-cli built (`cargo xtask dist`, or
+`BOTTLE_CLI` naming one), that includes two suites that run real machines,
+and take minutes the first time, while they pull and build images:
+
+- `tests/bottle/test_krun_contract.py`: what folio relies on bottle-cli for.
+  Run it after changing bottle-cli, the agent or libkrun.
+- `tests/bottle/test_end_to_end.py`: a real bottle, made as folio makes one and
+  run in through `bin/bottle`, in its own `BOTTLE_HOME` (`BOTTLE_E2E_HOME`,
+  default `/tmp/bottle-e2e`).
+
+Elsewhere they're skipped. Runners are tested here with a fake ssh, which runs
+each command on this machine, in a home of its own: `tests/bottle/test_drone.py`
+is a drone end to end, with only ssh and bottle-cli faked.

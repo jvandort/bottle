@@ -12,11 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bottle import krun, prereqs
-from bottle.errors import BottleError
+from bottle import prereqs
 
 try:
     prereqs.ensure_cli()
-except BottleError as e:
+except prereqs.PrereqError as e:
     sys.exit(f"bottle: error: {e}")
-os.execv(krun.binary(), [krun.binary(), *sys.argv[1:]])
+os.execv(prereqs.binary(), [prereqs.binary(), *sys.argv[1:]])

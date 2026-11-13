@@ -1,0 +1,85 @@
+#!/bin/sh
+set -eu
+
+# Claude Code, from Anthropic's apt repository, and what bottle-event needs,
+# are its customizations.bottle.apt's, installed before this runs. The
+# repository's signing key is vendored, claude-code.asc (fingerprint 31DD DE24
+# DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE, per the Claude Code setup docs), so
+# builds don't trust a key fetched at build time.
+
+# The channel: bottle-event serve takes events into Claude's session, and gives
+# it a tool to send messages to other bottles; bottle-event send is how an event
+# gets in, run in the bottle by bottled, or by `bottle exec`. It needs jq,
+# inotify-tools and curl; flock is util-linux, already in the base image.
+install -m 0755 bottle-event /usr/local/bin/bottle-event
+
+# How this feature is authenticated, since JSON has no room for a comment:
+#
+#   Claude Code talks to https://api.anthropic.com as it always does. bottled
+#   terminates that TLS with a certificate from the egress CA,
+#   which the bottle trusts (NODE_EXTRA_CA_CERTS, set by the base image), and
+#   puts the subscription token in place of the stand-in Claude Code sends
+#   (see folio/folio/bottle/egress.py) -- on inference, and on the organization's managed
+#   settings and policy limits, which ignore ANTHROPIC_BASE_URL.
+#
+#   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
+#   a fake token there when it creates a bottle, and nowhere in the image. The
+#   real one is `claude setup-token`'s, run anywhere, stored with `folio auth
+#   set claude`. The stand-in is what puts Claude
+#   Code in subscription-token mode, so it sends the Authorization header (and
+#   the OAuth beta header the API wants with such a token) that bottled then
+#   replaces on the way out.
+
+# Settings for the bottle's user, so Claude starts working straight away:
+# the permission mode (bypassPermissions by default: the bottle is the
+# sandbox), no confirmation before bypass mode, Opus 5.5 at medium effort, a
+# theme, no spinner tips, and the renderer.
+#
+# attribution is empty for commits and pull requests, so Claude adds no
+# Co-Authored-By trailer or "Generated with" line. What a bottle commits is
+# reviewed and adopted by whoever integrates it, and the history is theirs.
+#
+# tui defaults to "default" rather than Claude Code's own "fullscreen".
+# Fullscreen captures the mouse and copies a selection to the system clipboard
+# instead of leaving it to the terminal -- via pbcopy, wl-copy, xclip or xsel,
+# and OSC 52 when there are none. A bottle has none, and the OSC 52 fallback
+# reaches a terminal that may not accept it (Terminal.app doesn't), so the
+# selection is highlighted, copied nowhere, and silently lost.
+#
+# PERMISSIONMODE, THEME and TUI are the feature's options; their enums keep
+# PERMISSIONMODE and TUI safe to write into JSON, THEME is checked here.
+case "$THEME" in *[!a-z-]*) echo "claude: theme must be a theme name like dark, not '$THEME'" >&2; exit 1 ;; esac
+home="$_REMOTE_USER_HOME"
+install -d -o "$_REMOTE_USER" -g "$_REMOTE_USER" "$home/.claude"
+cat > "$home/.claude/settings.json" <<JSON
+{
+  "permissions": { "defaultMode": "$PERMISSIONMODE" },
+  "model": "claude-opus-5-5",
+  "effortLevel": "medium",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "$THEME",
+  "tui": "$TUI",
+  "spinnerTipsEnabled": false,
+  "attribution": { "commit": "", "pr": "" }
+}
+JSON
+
+# Claude's own state file: first-run setup done, and / trusted -- the bottle is
+# the sandbox, and Claude honours a parent directory's trust -- so a project's
+# settings apply without the trust dialog wherever its repos are mounted; and the channel, as a user
+# MCP server, so a session started with it named in
+# --dangerously-load-development-channels server:events runs it (folio does).
+cat > "$home/.claude.json" <<JSON
+{
+  "hasCompletedOnboarding": true,
+  "projects": { "/": { "hasTrustDialogAccepted": true } },
+  "mcpServers": {
+    "events": { "type": "stdio", "command": "/usr/local/bin/bottle-event", "args": ["serve"] }
+  }
+}
+JSON
+
+# Claude's user instructions are bottle's context for the agent, which bottle
+# writes to ~/BOTTLE.md when it creates the bottle.
+ln -sfn "$home/BOTTLE.md" "$home/.claude/CLAUDE.md"
+chown -h "$_REMOTE_USER:$_REMOTE_USER" "$home/.claude/settings.json" "$home/.claude.json" "$home/.claude/CLAUDE.md"

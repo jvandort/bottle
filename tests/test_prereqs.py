@@ -8,8 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import krun, prereqs
-from bottle.errors import BottleError
+from bottle import prereqs
 
 
 class EnsureCliTest(unittest.TestCase):
@@ -26,7 +25,7 @@ class EnsureCliTest(unittest.TestCase):
         self.source.write_text("fn main() {}\n")
         self.built = self.repo / "target" / "dist" / "bottle-cli"
         self.commands: list[list[str]] = []
-        for target, name, value in ((krun, "REPO", self.repo), (prereqs.platform, "system", lambda: "Darwin"),
+        for target, name, value in ((prereqs, "REPO", self.repo), (prereqs.platform, "system", lambda: "Darwin"),
                                     (prereqs.platform, "machine", lambda: "arm64"),
                                     (prereqs, "RUSTUP_CARGO", self.repo / "no-rustup" / "cargo")):
             patcher = mock.patch.object(target, name, value)
@@ -89,7 +88,7 @@ class EnsureCliTest(unittest.TestCase):
 
     def test_one_named_is_used_as_it_is(self) -> None:
         os.environ["BOTTLE_CLI"] = str(self.repo / "mine")
-        with self.assertRaisesRegex(BottleError, "BOTTLE_CLI is .*mine, which isn't there"):
+        with self.assertRaisesRegex(prereqs.PrereqError, "BOTTLE_CLI is .*mine, which isn't there"):
             self.ensure()
         (self.repo / "mine").write_text("")
         self.ensure()
@@ -121,7 +120,7 @@ class EnsureCliTest(unittest.TestCase):
         return subprocess.CompletedProcess(cmd, 0)
 
     def test_needs_cargo(self) -> None:
-        with self.assertRaisesRegex(BottleError, "rustup"):
+        with self.assertRaisesRegex(prereqs.PrereqError, "rustup"):
             self.ensure(cargo=False)
 
     def test_checks_once_per_process(self) -> None:
@@ -134,7 +133,7 @@ class EnsureCliTest(unittest.TestCase):
 
     def test_rejects_intel(self) -> None:
         with mock.patch.object(prereqs.platform, "machine", return_value="x86_64"), \
-                self.assertRaisesRegex(BottleError, "Apple silicon"):
+                self.assertRaisesRegex(prereqs.PrereqError, "Apple silicon"):
             self.ensure()
 
 

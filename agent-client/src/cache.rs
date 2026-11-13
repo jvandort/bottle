@@ -1,6 +1,6 @@
 //! The HTTP cache, at the host side of a bottle's network: what a bottle downloads from a host the
 //! policy says to cache (policy.rs's Cached) is answered here, from the store where it can be (see
-//! store.rs), as bottled answered it (Gateway._serve_cached in bottle/egress.py, whose rules
+//! store.rs), as bottled answered it (Gateway._serve_cached in folio/folio/bottle/egress.py, whose rules
 //! these are), and kept when it's fetched, for the next bottle.
 //!
 //! Over https, the bottle's TLS is terminated here, with a certificate for the host from the

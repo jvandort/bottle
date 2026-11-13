@@ -1,4 +1,4 @@
-//! The HTTP cache's files, as bottled keeps them (bottle/cache.py): $BOTTLE_HOME/cache/http/<host>/<path>,
+//! The HTTP cache's files: $BOTTLE_HOME/cache/http/<host>/<path>,
 //! the path as the bottle asked for it. Only a whole 200 is kept, so a file is all there is: no
 //! headers, no status. A file's modification time is when a bottle last used it: one unused for
 //! EXPIRY is removed (Store::expire). A file being downloaded is written in .partial/ and put in place only once
