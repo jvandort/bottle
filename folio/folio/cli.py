@@ -148,19 +148,14 @@ def main(argv: list[str] | None = None) -> int:
     auth_commands = auth_.add_subparsers(required=True)
     command = auth_commands.add_parser("list", help="list credentials features declare, and which are set")
     command.set_defaults(run=_auth_list)
-    command = auth_commands.add_parser(
-        "login", help="log in, with the credential's own login flow",
-        description="Log in and store the credential in the Keychain. Runs the declaring feature's login "
-        "command in a throwaway bottle, attached to this terminal, and captures the credential it prints.")
-    command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
-    command.set_defaults(run=_auth_login)
-    command = auth_commands.add_parser("set", help="store a credential read from stdin",
-                                       description="Store a credential read from stdin.")
+    command = auth_commands.add_parser("set", help="store a credential in the Keychain, read from stdin",
+                                       description="Store a credential in the Keychain, read from stdin (asked for, "
+                                       "unechoed, on a terminal): `claude setup-token` makes claude's.")
     command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
     command.set_defaults(run=_auth_set)
-    command = auth_commands.add_parser("logout", help="remove a stored credential")
+    command = auth_commands.add_parser("remove", aliases=["rm"], help="remove a stored credential")
     command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
-    command.set_defaults(run=_auth_logout)
+    command.set_defaults(run=_auth_remove)
 
     args = parser.parse_args(argv)
     try:
@@ -536,14 +531,6 @@ def _credential_status(declared, is_set: bool) -> str:
     return status
 
 
-def _auth_login(args: argparse.Namespace) -> int:
-    from bottle import auth
-
-    auth.login(args.name)
-    print(f"Logged in: {args.name}. Bottles with it get it when they next start.")
-    return 0
-
-
 def _auth_set(args: argparse.Namespace) -> int:
     import getpass
 
@@ -555,10 +542,10 @@ def _auth_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def _auth_logout(args: argparse.Namespace) -> int:
+def _auth_remove(args: argparse.Namespace) -> int:
     from bottle import auth
 
-    print(f"Removed {args.name}" if auth.logout(args.name) else f"{args.name} wasn't set")
+    print(f"Removed {args.name}" if auth.remove(args.name) else f"{args.name} wasn't set")
     return 0
 
 

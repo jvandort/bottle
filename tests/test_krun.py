@@ -160,7 +160,7 @@ class KrunBottleTest(GitTestCase):
             (bottles.runners.prereqs, "ensure_cli", lambda: None),
             (bottles.features_, "ensure_built", lambda specs, runner=None: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda runner=None: []),
-            (bottles.auth, "ensure_logged_in", lambda specs: None),
+            (bottles.auth, "warn_unset", lambda specs: None),
             (bottles.auth, "standins_for", lambda specs: {"CLAUDE_CODE_OAUTH_TOKEN": "stand-in"}),
             (bottles.auth, "credential_destinations", lambda specs: []),
             (bottles.runners.krun, "ca_certificate", lambda name, hosts, cli=None: None),

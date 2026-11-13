@@ -84,22 +84,15 @@ those hosts (see bottle/egress.py).
   The feature either writes one itself (the teamcity feature puts it in the
   CLI's config file, as STANDIN) or names an environment variable in
   inject.standin, and bottle sets that variable, to a value of its own, in
-  every bottle with the feature. Bottles only: the throwaway bottle that runs
-  a login command gets no stand-ins, so a login flow starts from nothing
-  rather than from a token that isn't one.
+  every bottle with the feature.
 
 properties is optional: a file on the machine where a tool already keeps its
 credentials, as Java properties of `host=credential` lines (Gradle's
 Develocity keys.properties is one), with `${option}` for an option's value and
 `~` for the home directory. bottled reads it each time a bottle starts, and
 attaches to each of inject.hosts the credential on that host's line; a host
-the file has no line for gets the one stored by `bottle auth login`, if any.
+the file has no line for gets the one stored by `folio auth set`, if any.
 Only the line for a host the feature names ever leaves the file.
-
-login is optional: without it, `bottle auth login` asks for the value. capture
-is a regular expression with one group, matched across lines against the
-command's output with terminal escape codes removed; whitespace is removed from
-the captured value, since a narrow terminal may wrap it.
 
 cache names hosts whose downloads bottled keeps on the machine, so the next
 bottle gets them from there (see bottle/cache.py): as with a credential's
@@ -171,8 +164,7 @@ APT_KEYS = {"repositories", "packages"}
 REPOSITORY_KEYS = {"uri", "suite", "components", "key"}
 # An apt package's name (Debian policy 5.6.1), and ${option} where an option's value goes.
 PACKAGE = re.compile(r"(?:[a-z0-9+.-]|\$\{[A-Za-z0-9_]+\})+(?::[a-z0-9-]+)?")
-CREDENTIAL_KEYS = {"description", "login", "inject", "properties"}
-LOGIN_KEYS = {"command", "capture"}
+CREDENTIAL_KEYS = {"description", "inject", "properties"}
 INJECT_KEYS = {"hosts", "header", "value", "standin", "forbid", "allow", "rewrite"}
 REWRITE_KEYS = {"route", "header", "json", "encoding"}
 # What a stand-in variable holds: enough for a tool to believe it's configured,
@@ -193,12 +185,6 @@ class Option:
 
 
 @dataclass(frozen=True)
-class Login:
-    command: tuple[str, ...]
-    capture: str  # regex with one group
-
-
-@dataclass(frozen=True)
 class Inject:
     """Where a credential belongs, so bottled can attach it there."""
 
@@ -206,7 +192,7 @@ class Inject:
     value: str  # the header value, with ${credential} where the real one goes
     header: str = "Authorization"
     # A variable holding a fake token in the bottle, for a tool that won't
-    # work until it thinks it's logged in. Never set in a login throwaway.
+    # work until it thinks it's logged in.
     standin: str | None = None
     # Routes never sent; the only ones the credential goes on, if any; where else it's presented.
     forbid: tuple[egress.Route, ...] = ()
@@ -220,7 +206,6 @@ class Credential:
     description: str
     # Where it goes: onto the bottle's requests, by bottled.
     inject: Inject
-    login: Login | None = None
     # A properties file on the machine, of host=credential lines, read before the Keychain.
     properties: str | None = None
 
@@ -501,21 +486,6 @@ def _credential(name, spec, options, fail) -> Credential:
         raise fail(f"{where}: needs a description")
     if "inject" not in spec:
         raise fail(f"{where}: needs inject, the hosts the proxy attaches it to; a bottle never holds a credential")
-    login = None
-    if "login" in spec:
-        raw = spec["login"]
-        if not isinstance(raw, dict) or set(raw) != LOGIN_KEYS:
-            raise fail(f"{where}: login needs exactly command and capture")
-        command = raw["command"]
-        if not isinstance(command, list) or not command or not all(isinstance(c, str) and c for c in command):
-            raise fail(f"{where}: login command must be a non-empty list of strings")
-        try:
-            groups = re.compile(raw["capture"]).groups if isinstance(raw["capture"], str) else -1
-        except re.error as e:
-            raise fail(f"{where}: login capture isn't a valid regular expression: {e}") from None
-        if groups != 1:
-            raise fail(f"{where}: login capture must be a regular expression with exactly one group")
-        login = Login(tuple(command), raw["capture"])
     properties = spec.get("properties")
     if properties is not None:
         if not isinstance(properties, str) or not properties:
@@ -523,7 +493,7 @@ def _credential(name, spec, options, fail) -> Credential:
         for option in OPTION_REFERENCE.findall(properties):
             if option not in options or options[option].type != "string":
                 raise fail(f"{where}: properties: {properties!r} names no string option of this feature")
-    return Credential(name, spec["description"], _inject(spec["inject"], options, where, fail), login, properties)
+    return Credential(name, spec["description"], _inject(spec["inject"], options, where, fail), properties)
 
 
 def _inject(inject, options, where, fail) -> Inject:

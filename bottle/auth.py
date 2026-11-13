@@ -1,11 +1,8 @@
 """Credentials: logged in to once on the controller, and used by the bottles that need them.
 
 Features declare the credentials they need (customizations.bottle.credentials
-in their devcontainer-feature.json): a name, how to log in, and where the
-credential goes. bottle stores each one in the macOS Keychain. Logging in runs
-the feature's own login command (e.g. `claude setup-token`) in a throwaway
-bottle with that feature, attached to your terminal, and captures the
-credential from its output.
+in their devcontainer-feature.json): a name, and where the credential goes.
+Each is stored in the macOS Keychain, set from stdin (`folio auth set`).
 
 A credential never enters a bottle. bottled hands it to that bottle's
 gateway (injections_for), which puts it in place of the stand-in on the bottle's
@@ -18,23 +15,18 @@ What a bottle gets instead is a stand-in (standins_for): a fake token in the
 variable a feature named, because a CLI doesn't know its token is being
 replaced for it and won't work until it thinks it's logged in. A request that
 presents the stand-in is one that asks for the credential; the rest reach the
-host as they would from the machine. The throwaway bottle a login command
-runs in gets none, so logging in starts from nothing.
+host as they would from the machine.
 
 A credential can also come from a file a tool on the machine already keeps
 its credentials in (the credential's properties, see features.py), such as
 Gradle's ~/.gradle/develocity/keys.properties: bottled reads the line for each
 host, and the Keychain is for the hosts the file doesn't name.
 
-A bottle picks up a login or a logout, or a change to such a file, when it next starts.
+A bottle picks up a credential set or removed, or a change to such a file, when it next starts.
 """
 
-import getpass
 import hashlib
 import logging
-import os
-import pty
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -47,9 +39,6 @@ from bottle.store import bottle_home
 log = logging.getLogger("bottle.auth")
 
 HTTPS_PORT = 443
-
-# Terminal escape codes: colors, cursor movement, window titles.
-ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78DEHM]")
 
 
 @dataclass(frozen=True)
@@ -187,62 +176,14 @@ def value_for(credential: features.Credential, host: str) -> str | None:
     return from_properties(credential, host) or get(credential.name)
 
 
-def login(name: str) -> None:
-    """Log in with the credential's declared flow, or ask for the value if it has none."""
-    d = get_declared(name)
-    if not sys.stdin.isatty():
-        raise BottleError(f"logging in needs a terminal; to set {name} from a script, use `folio auth set {name}`")
-    login = d.credential.login
-    if login is None:
-        value = getpass.getpass(f"{d.credential.description}: ")
-    else:
-        from bottle import bottles  # bottles imports features, runners, daemon; only logging in needs it
-
-        print(f"Starting a throwaway bottle with {d.feature} to run `{' '.join(login.command)}`...", file=sys.stderr)
-        with bottles.throwaway([d.feature]) as argv_for:
-            output = run_captured(argv_for(list(login.command)))
-        value = capture(login.capture, output)
-        if value is None:
-            value = getpass.getpass(f"bottle couldn't find the {name} credential in the output; paste it: ")
-    put(name, value.strip())
-
-
 def set_value(name: str, value: str) -> None:
     get_declared(name)
     put(name, value.strip())
 
 
-def logout(name: str) -> bool:
+def remove(name: str) -> bool:
     get_declared(name)
     return delete(name)
-
-
-def capture(pattern: str, output: str) -> str | None:
-    """The credential in a login command's output: `pattern`'s group, with escape codes removed first.
-
-    The pattern is matched across lines, and whitespace is removed from what it
-    captures: a narrow terminal can wrap a long token over several lines, and
-    credentials never contain whitespace.
-    """
-    match = re.search(pattern, ANSI.sub("", output), re.DOTALL)
-    value = re.sub(r"\s+", "", match.group(1)) if match else ""
-    return value or None
-
-
-def run_captured(argv: list[str]) -> str:
-    """Run `argv` attached to this terminal, returning everything it printed."""
-    chunks: list[bytes] = []
-
-    def read(fd: int) -> bytes:
-        data = os.read(fd, 4096)
-        chunks.append(data)
-        return data
-
-    status_ = pty.spawn(argv, read)
-    output = b"".join(chunks).decode(errors="replace")
-    if os.waitstatus_to_exitcode(status_) != 0 and "\x1b" not in output and not output.strip():
-        raise BottleError(f"`{' '.join(argv)}` failed")
-    return output
 
 
 # --- injection ------------------------------------------------------------------
@@ -253,19 +194,14 @@ def credentials_for(specs: tuple[str, ...] | list[str]) -> list[features.Credent
     return [c for f in features.resolve(list(specs)) for c in f.resolved_credentials()]
 
 
-def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
-    """Log in to any credential these features need that isn't set yet.
-
-    Interactive only: without a terminal, say how to log in and carry on.
-    """
+def warn_unset(specs: tuple[str, ...] | list[str]) -> None:
+    """Say which credentials these features need that aren't set, and how to set them; the bottle goes on
+    without, reaching their hosts unauthenticated."""
     for credential in credentials_for(specs):
         if all(from_properties(credential, host) for host in credential.inject.hosts) or get(credential.name) is not None:
             continue
-        if not sys.stdin.isatty():
-            print(f"bottle: {credential.name} isn't logged in; run `folio auth login {credential.name}`", file=sys.stderr)
-            continue
-        print(f"{credential.description}: not logged in yet. Logging in now...", file=sys.stderr)
-        login(credential.name)
+        print(f"bottle: {credential.name} ({credential.description}) isn't set: `folio auth set {credential.name}`",
+              file=sys.stderr)
 
 
 def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
@@ -318,8 +254,7 @@ def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:
 
     A stand-in is not a credential and not a secret: it is what makes a tool
     believe it's logged in, so it will make the request bottled then
-    authenticates. bottle sets these when it creates a bottle -- but never in
-    the throwaway bottle a login command runs in, which must find nothing.
+    authenticates. bottle sets these when it creates a bottle.
     """
     return {c.inject.standin: features.STANDIN for c in credentials_for(specs) if c.inject.standin}
 

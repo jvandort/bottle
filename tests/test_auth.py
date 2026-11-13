@@ -2,41 +2,11 @@ import os
 import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 from bottle import auth, features, krun
 from bottle.errors import BottleError
-
-# What `claude setup-token` printed, as recorded with `script` (token replaced).
-RECORDED = (
-    "^M^[[1C^[[9A^[[K^M^[[1C^[[1B^[[32m✓ Long-lived authentication token created successfully!^M^[[1B^[[39m^[[K"
-    "^M^[[1B Your OAuth token (valid for 1 year):^[[K^M^[[1C^[[2B^[[93msk-ant-oat01-EXAMPLE_token-123^M^[[1C^[[2B"
-    "^[[37mStore this token securely. You won't be able to see it again.^M^[[1C^[[1B^[[39m^[[K^M^M"
-).replace("^[", "\x1b").replace("^M", "\r")
-
-
-class CaptureTest(unittest.TestCase):
-    pattern = auth.features.load("claude").credentials[0].login.capture
-
-    def test_the_recorded_claude_output(self) -> None:
-        self.assertEqual(auth.capture(self.pattern, RECORDED), "sk-ant-oat01-EXAMPLE_token-123")
-
-    def test_a_token_wrapped_over_lines_by_a_narrow_terminal(self) -> None:
-        wrapped = RECORDED.replace(
-            "sk-ant-oat01-EXAMPLE_token-123",
-            "sk-ant-oat01-EXAMPLE\r\x1b[1C\x1b[1B\x1b[93m_token-123",
-        )
-        self.assertEqual(auth.capture(self.pattern, wrapped), "sk-ant-oat01-EXAMPLE_token-123")
-
-    def test_no_match(self) -> None:
-        self.assertIsNone(auth.capture(self.pattern, "Login cancelled\r\n"))
-
-    def test_run_captured_records_output(self) -> None:
-        output = auth.run_captured(["sh", "-c", "printf 'Your OAuth token:\\r\\n\\033[93mabc-123\\r\\nStore this token\\r\\n'"])
-        self.assertEqual(auth.capture(self.pattern, output), "abc-123")
-
 
 class FakeKeychain:
     """Stands in for `security`, recording every command line it's given."""
@@ -224,10 +194,10 @@ class PropertiesTest(unittest.TestCase):
         [credential] = auth.credentials_for(["develocity:server=dv.corp.example.com"])
         self.assertEqual(credential.properties, "~/.gradle/develocity/keys.properties")
 
-    def test_no_login_needed_when_the_file_has_it(self) -> None:
-        with mock.patch.object(auth, "get", return_value=None), \
-                mock.patch.object(auth, "login", side_effect=AssertionError("the file has it")):
-            auth.ensure_logged_in(self.specs)
+    def test_nothing_unset_when_the_file_has_it(self) -> None:
+        with mock.patch.object(auth, "get", return_value=None), mock.patch("sys.stderr") as err:
+            auth.warn_unset(self.specs)
+        err.write.assert_not_called()
 
 
 class DestinationTest(unittest.TestCase):
@@ -244,85 +214,23 @@ class DestinationTest(unittest.TestCase):
                 auth.destination(host)
 
 
-class LoginTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.stored: dict[str, str] = {}
-        self.ran: list[list[str]] = []
+class WarnUnsetTest(unittest.TestCase):
+    def said(self, specs: list[str]) -> str:
+        with mock.patch("sys.stderr") as err:
+            auth.warn_unset(specs)
+        return "".join(c.args[0] for c in err.write.call_args_list)
 
-        @contextmanager
-        def throwaway(features):
-            self.features = features
-            yield lambda argv: ["exec-in-throwaway", *argv]
+    def test_says_how_to_set_what_isnt(self) -> None:
+        with mock.patch.object(auth, "get", return_value=None):
+            self.assertIn("claude", self.said(["claude", "tools"]))
+            self.assertIn("`folio auth set claude`", self.said(["claude"]))
 
-        for patcher in (
-            mock.patch.object(auth, "put", side_effect=self.stored.__setitem__),
-            mock.patch("bottle.bottles.throwaway", throwaway),
-            mock.patch.object(auth.sys.stdin, "isatty", return_value=True),
-            mock.patch("sys.stderr"),
-        ):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def run_login(self, output: str, pasted: str = "") -> None:
-        def run_captured(argv):
-            self.ran.append(argv)
-            return output
-
-        with mock.patch.object(auth, "run_captured", side_effect=run_captured), \
-                mock.patch.object(auth.getpass, "getpass", return_value=pasted) as prompt:
-            auth.login("claude")
-        self.prompted = prompt.called
-
-    def test_runs_the_declared_command_in_a_throwaway_bottle_and_captures(self) -> None:
-        self.run_login(RECORDED)
-        self.assertEqual(self.features, ["claude"])
-        self.assertEqual(self.ran, [["exec-in-throwaway", "claude", "setup-token"]])
-        self.assertEqual(self.stored, {"claude": "sk-ant-oat01-EXAMPLE_token-123"})
-        self.assertFalse(self.prompted)
-
-    def test_falls_back_to_pasting(self) -> None:
-        self.run_login("something unexpected", pasted="  pasted-token\n")
-        self.assertTrue(self.prompted)
-        self.assertEqual(self.stored, {"claude": "pasted-token"})
-
-    def test_needs_a_terminal(self) -> None:
-        with mock.patch.object(auth.sys.stdin, "isatty", return_value=False), \
-                self.assertRaisesRegex(BottleError, "use `folio auth set claude`"):
-            auth.login("claude")
-
-
-class EnsureLoggedInTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.logged_in: list[str] = []
-        for patcher in (
-            mock.patch.object(auth, "login", side_effect=self.logged_in.append),
-            mock.patch("sys.stderr"),
-        ):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def test_logs_in_when_missing_at_a_terminal(self) -> None:
-        with mock.patch.object(auth, "get", return_value=None), \
-                mock.patch.object(auth.sys.stdin, "isatty", return_value=True):
-            auth.ensure_logged_in(["claude", "tools"])
-        self.assertEqual(self.logged_in, ["claude"])
-
-    def test_nothing_to_do_when_set(self) -> None:
+    def test_nothing_when_set(self) -> None:
         with mock.patch.object(auth, "get", return_value="tok"):
-            auth.ensure_logged_in(["claude"])
-        self.assertEqual(self.logged_in, [])
-
-    def test_without_a_terminal_only_says_how(self) -> None:
-        with mock.patch.object(auth, "get", return_value=None), \
-                mock.patch.object(auth.sys.stdin, "isatty", return_value=False), \
-                mock.patch("sys.stderr") as err:
-            auth.ensure_logged_in(["claude"])
-        self.assertEqual(self.logged_in, [])
-        self.assertIn("folio auth login claude", "".join(c.args[0] for c in err.write.call_args_list))
+            self.assertEqual(self.said(["claude"]), "")
 
     def test_features_without_credentials(self) -> None:
-        auth.ensure_logged_in(["tools"])
-        self.assertEqual(self.logged_in, [])
+        self.assertEqual(self.said(["tools"]), "")
 
 
 class ExecEnvTest(unittest.TestCase):

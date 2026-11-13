@@ -45,13 +45,6 @@
       "credentials": {
         "claude": {
           "description": "Claude subscription token, from `claude setup-token` (valid for a year)",
-          "login": {
-            "command": [
-              "claude",
-              "setup-token"
-            ],
-            "capture": "Your OAuth token[^:]*:(.*?)Store this token"
-          },
           "inject": {
             "hosts": [
               "api.anthropic.com"

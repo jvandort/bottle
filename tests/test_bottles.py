@@ -151,7 +151,7 @@ class FakeSmolvm:
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
             mock.patch.object(bottles.auth, "standins_for", side_effect=lambda specs: dict(self.standins)),
-            mock.patch.object(bottles.auth, "ensure_logged_in", side_effect=lambda specs: self.calls.append("ensure_logged_in")),
+            mock.patch.object(bottles.auth, "warn_unset", side_effect=lambda specs: self.calls.append("warn_unset")),
         ):
             patcher.start()
             test.addCleanup(patcher.stop)
@@ -202,7 +202,7 @@ class CreateTest(BottleTestCase):
     def test_order_bound_before_it_starts(self) -> None:
         fake = self.fake()
         self.create()
-        self.assertEqual(fake.calls, ["ensure_logged_in", "create", "bind", "start", "verify_contract",
+        self.assertEqual(fake.calls, ["warn_unset", "create", "bind", "start", "verify_contract",
                                       "trust_egress_ca", "point_at_host", "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
@@ -596,36 +596,18 @@ class StandinTest(BottleTestCase):
         self.assertEqual(env["BOTTLE_PERMISSIONS"], "list-bottles,message-any")
         self.assertEqual(env["BOTTLE_MIRROR_ENV"], "BOTTLE_PERMISSIONS BOTTLE_WORKDIR")
 
-    def test_the_bottle_a_login_runs_in_gets_none(self) -> None:
-        """`bottle auth login claude` must find nothing that looks like a token."""
-        fake = self.fake()
-        fake.standins = {"CLAUDE_CODE_OAUTH_TOKEN": features_.STANDIN}
-        with mock.patch.object(bottles.features_, "ensure_built", return_value="localhost/bottle/base:with-claude"), \
-                bottles.throwaway(["claude"]) as argv_for:
-            self.assertEqual(argv_for(["claude", "setup-token"])[-2:], ["claude", "setup-token"])
-            [name] = fake.machines
-        self.assertEqual(fake.create_args["env"], {})
-        self.assertIsNone(fake.create_args["memory_mib"])  # no spec: smolvm's default
-        # Nor is it bound with features: a login mustn't send the credential it's replacing.
-        self.assertEqual(fake.egress_features, ())
-        # And it trusts no egress CA, since bottled terminates none of its flows.
-        self.assertEqual(fake.calls, ["create", "bind", "start"])
-        # Everything is gone after.
-        self.assertEqual((fake.machines, fake.bound), ({}, set()))
-        self.assertTrue(name.startswith("bottle-throwaway-"))
-
 
 class CredentialTest(BottleTestCase):
     def test_new_start_and_a_command_log_in_first(self) -> None:
         fake = self.fake()
         self.create()
-        self.assertEqual(fake.calls[0], "ensure_logged_in")
+        self.assertEqual(fake.calls[0], "warn_unset")
         fake.calls.clear()
         bottles.start("example")
-        self.assertEqual(fake.calls[0], "ensure_logged_in")
+        self.assertEqual(fake.calls[0], "warn_unset")
         fake.calls.clear()
         bottles.exec_command("example", ["bash", "-l"], tty=True)
-        self.assertEqual(fake.calls[0], "ensure_logged_in")
+        self.assertEqual(fake.calls[0], "warn_unset")
 
     def test_a_command_is_handed_nothing(self) -> None:
         """Credentials stay with folio serve, so a session gets none of them, and no proxy either."""
@@ -645,7 +627,7 @@ class OwnershipTest(BottleTestCase):
             self.create()
         self.assertEqual(fake.machines, {bottles.namespace() + "example": "running"})
         self.assertEqual(bottles.load(), {})
-        self.assertEqual(fake.calls, ["ensure_logged_in"])  # nothing was created, so nothing rolled back
+        self.assertEqual(fake.calls, ["warn_unset"])  # nothing was created, so nothing rolled back
 
     def test_other_homes_get_their_own_machine_names(self) -> None:
         # The tests run in a scratch BOTTLE_HOME, so names are prefixed.

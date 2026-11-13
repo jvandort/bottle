@@ -16,7 +16,7 @@
     "keyFile": {
       "type": "string",
       "default": "~/.gradle/develocity/keys.properties",
-      "description": "Where on the machine Gradle keeps Develocity access keys, as server=key lines (./gradlew provisionDevelocityAccessKey writes them). bottled reads each server's key from it each time the bottle starts; for a server it has no line for, `bottle auth login develocity` is used instead."
+      "description": "Where on the machine Gradle keeps Develocity access keys, as server=key lines (./gradlew provisionDevelocityAccessKey writes them). bottled reads each server's key from it each time the bottle starts; for a server it has no line for, the one `folio auth set develocity` stored is used instead."
     }
   },
   "customizations": {

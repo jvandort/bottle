@@ -52,8 +52,7 @@ class RealFeaturesTest(unittest.TestCase):
         # The API's own https address, which the proxy terminates to attach the
         # real token -- for every call, not just the ones ANTHROPIC_BASE_URL
         # moves -- and a stand-in for the one Claude Code needs to believe it's
-        # logged in, which bottle sets per bottle, so it isn't in the image a
-        # login runs in.
+        # logged in, which bottle sets per bottle, not in the image.
         self.assertNotIn("ANTHROPIC_BASE_URL", claude.container_env)
         self.assertEqual(credential.inject.standin, "CLAUDE_CODE_OAUTH_TOKEN")
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude.container_env)
@@ -67,8 +66,6 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertEqual((credential.inject.header, credential.inject.value), ("Authorization", "Bearer ${credential}"))
         self.assertEqual(credential.inject.standin, "GH_TOKEN")
         self.assertNotIn("GH_TOKEN", github.container_env)
-        # Asked for, not captured from a login flow: gh's would mint a token for every repo.
-        self.assertIsNone(credential.login)
 
     def injection(self, feature_id: str) -> egress.Injection:
         """The feature's credential as bottled attaches it, but for the host and the value."""
@@ -313,13 +310,9 @@ class LoadTest(FeatureTestCase):
         return {"bottle": {"credentials": {"tok": {**base, **spec}}}}
 
     def test_credentials(self) -> None:
-        self.feature("a", customizations=self.credential(login={"command": ["cli", "login"], "capture": "token: (\\S+)"}))
-        [c] = features.load("a").credentials
-        self.assertEqual((c.name, c.inject.hosts, c.login.command), ("tok", ("ci.example.com",), ("cli", "login")))
-
-    def test_credential_without_a_login_flow(self) -> None:
         self.feature("a", customizations=self.credential())
-        self.assertIsNone(features.load("a").credentials[0].login)
+        [c] = features.load("a").credentials
+        self.assertEqual((c.name, c.inject.hosts), ("tok", ("ci.example.com",)))
 
     def test_credential_injected_at_a_hosts_option(self) -> None:
         self.feature(
@@ -511,10 +504,7 @@ class LoadTest(FeatureTestCase):
             ({"file": "/x"}, "unsupported: file"),
             ({"inject": {"hosts": ["x"], "value": "Bearer ${credential}", "standin": "1BAD"}},
              "inject.standin must be an environment variable name"),
-            ({"login": {"command": ["x"]}}, "login needs exactly command and capture"),
-            ({"login": {"command": [], "capture": "(x)"}}, "non-empty list of strings"),
-            ({"login": {"command": ["x"], "capture": "no group"}}, "exactly one group"),
-            ({"login": {"command": ["x"], "capture": "(unclosed"}}, "isn't a valid regular expression"),
+            ({"login": {"command": ["x"], "capture": "(x)"}}, "unsupported: login"),
             ({"properties": ""}, "properties must be the path of a properties file"),
             ({"properties": "${nope}"}, "names no string option"),
         ):

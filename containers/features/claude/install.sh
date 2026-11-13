@@ -23,9 +23,9 @@ install -m 0755 bottle-event /usr/local/bin/bottle-event
 #   settings and policy limits, which ignore ANTHROPIC_BASE_URL.
 #
 #   CLAUDE_CODE_OAUTH_TOKEN is the credential's inject.standin, so bottle puts
-#   a fake token there when it creates a bottle -- and nowhere in the image, so
-#   the throwaway bottle `bottle auth login claude` runs `claude setup-token`
-#   in finds nothing to mistake for a login. The stand-in is what puts Claude
+#   a fake token there when it creates a bottle, and nowhere in the image. The
+#   real one is `claude setup-token`'s, run anywhere, stored with `folio auth
+#   set claude`. The stand-in is what puts Claude
 #   Code in subscription-token mode, so it sends the Authorization header (and
 #   the OAuth beta header the API wants with such a token) that bottled then
 #   replaces on the way out.

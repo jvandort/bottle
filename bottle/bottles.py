@@ -42,7 +42,6 @@ import shlex
 import sys
 import time
 import uuid
-from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 
@@ -351,7 +350,7 @@ def create(
     # A bottle it may ssh to is one it works with: their lanes may be shared.
     planned = _plan_mounts(mounts or [], [b for b in existing.values() if b.id not in {g.id for g in grants}])
     tag = features_.ensure_built(installed, on)
-    auth.ensure_logged_in(installed)
+    auth.warn_unset(installed)
 
     bottle = Bottle(
         name, uuid.uuid4().hex, images.BASE, time.time(),
@@ -566,37 +565,6 @@ def _exec(bottle: Bottle, argv: list[str], user: str | None = None, input: str |
     return runner_of(bottle).exec_(bottle.machine, argv, user=user, input=input)
 
 
-@contextmanager
-def throwaway(feature_specs: list[str]):
-    """A short-lived bottle with just these features and network access, and no repo.
-
-    Yields a function turning a command into the command line that runs it in
-    the throwaway bottle, attached to a terminal. Everything is removed on exit.
-    """
-    tag = features_.ensure_built(feature_specs)
-    name = f"bottle-throwaway-{uuid.uuid4().hex[:12]}"
-    log.info("%s: throwaway bottle with %s", name, ", ".join(feature_specs) or "no features")
-    runner = runners.get()
-    try:
-        archive = runner.archive(tag)
-        if archive is None:
-            raise BottleError(f"{tag} isn't built")
-        # No spec to say how much memory: bottle-cli's own default, for a login command.
-        runner.create(name, archive, mounts=[], env={}, memory_mib=None)
-        # Bound with no features, so no credentials and no egress CA: a login starts from
-        # nothing, and mustn't find its own credential attached to what it sends.
-        runner.start(name, name)
-        yield lambda argv: runner.exec_command(name, argv, user=USER, tty=True)
-    finally:
-        for cleanup in (lambda: runner.release(name), lambda: runner.delete(name)):
-            try:
-                cleanup()
-            except Exception as e:
-                log.warning("%s: cleaning up: %s", name, e)
-                print(f"bottle: cleaning up {name}: {e}", file=sys.stderr)
-        log.info("%s: throwaway bottle removed", name)
-
-
 def git_dir(mount: Mount) -> Path | None:
     """The git dir of a mount's repo, which its remotes are served from; None if it's gone."""
     try:
@@ -734,7 +702,7 @@ def _init_mounts(bottle: Bottle) -> None:
 
 
 def start(name: str) -> Bottle:
-    auth.ensure_logged_in(get(name).features)
+    auth.warn_unset(get(name).features)
     return ensure_running(name)
 
 
@@ -840,7 +808,7 @@ def verify_contract(bottle: Bottle) -> None:
 def exec_command(name: str, argv: list[str], tty: bool = False) -> list[str]:
     """The command line, for this machine, that runs `argv` in the bottle as genie, at its first mount: started if
     it's stopped, logged in first to what its features need."""
-    auth.ensure_logged_in(get(name).features)
+    auth.warn_unset(get(name).features)
     bottle = ensure_running(name)
     return runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
 
