@@ -1,7 +1,6 @@
 import dataclasses
 import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -203,9 +202,9 @@ class CreateTest(BottleTestCase):
         self.create()
         self.assertEqual(fake.statuses_seen, ["creating"])
 
-    def test_machine_gets_its_archive_memory_and_read_only_objects(self) -> None:
+    def test_machine_gets_its_image_memory_and_read_only_objects(self) -> None:
         fake = self.fake()
-        bottle = self.create(memory="3G")
+        self.create(memory="3G")
         self.assertEqual(fake.create_args["image"], "localhost/bottle/base:latest")
         self.assertEqual((fake.create_args["memory_mib"], fake.create_args["disk_gib"]), (3072, None))
         self.create(memory="2G", name="big", disk="50G")

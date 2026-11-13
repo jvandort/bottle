@@ -170,8 +170,8 @@ class KrunBottleTest(GitTestCase):
         with mock.patch.object(bottles.specs, "host_memory_mib", return_value=mac_mib):
             return bottles.create(thread_dir(), spec, "b", [bottles.MountRequest("/workspace", self.repo_path)])
 
-    def test_a_new_bottle_is_a_machine_bound_to_the_decider(self) -> None:
-        bottle = self.create()
+    def test_a_new_bottle_is_a_machine_bound_to_folio_serve(self) -> None:
+        self.create()
         self.assertEqual(self.calls, [
             "create", "bind b", "start", "contract as genie", "trust CA as root",
             "bottle.host as root", "workspace as root", "workspace as genie",
