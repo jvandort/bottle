@@ -23,6 +23,9 @@ use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};
 /// a protocol whose server speaks first gives none.
 const FIRST_BYTES: usize = 8192;
 const FIRST_WAIT: Duration = Duration::from_millis(100);
+/// How long more of an opening whose name decides it is waited for, and the most of it read.
+const OPENING_WAIT: Duration = Duration::from_secs(3);
+const MAX_OPENING: usize = 5 + (1 << 14);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the decider gets to answer.
@@ -36,9 +39,64 @@ pub struct Decider {
     pub token: [u8; 32],
     pub machine: [u8; 16],
     policy: PolicyState,
-    /// Whose caching CA a cached host's https is terminated with (see ca.rs).
-    pub ca: Option<String>,
-    cache: Arc<OnceLock<cache::Context>>,
+}
+
+/// How a bottle's connections are decided: by its machine's own policy (its network.json), or by
+/// bottled's, asking it what that policy hands over.
+pub struct Network {
+    rules: Rules,
+    /// The machine's name: whose caching CA a cached or routed host's TLS is terminated with (see
+    /// ca.rs), and who a service is told its connections are from.
+    pub machine: Option<String>,
+    cache: OnceLock<cache::Context>,
+}
+
+enum Rules {
+    Fixed(Arc<Policy>),
+    Bottled(Decider),
+}
+
+impl Network {
+    pub fn fixed(policy: Policy, machine: Option<String>) -> Network {
+        Network {
+            rules: Rules::Fixed(Arc::new(policy)),
+            machine,
+            cache: OnceLock::new(),
+        }
+    }
+
+    pub fn bottled(decider: Decider, machine: Option<String>) -> Network {
+        Network {
+            rules: Rules::Bottled(decider),
+            machine,
+            cache: OnceLock::new(),
+        }
+    }
+
+    fn policy(&self) -> Option<Arc<Policy>> {
+        match &self.rules {
+            Rules::Fixed(policy) => Some(Arc::clone(policy)),
+            Rules::Bottled(decider) => decider.policy(),
+        }
+    }
+
+    /// What serving a cached or routed host needs, made the first time it's needed.
+    fn cache(&self) -> &cache::Context {
+        self.cache
+            .get_or_init(|| cache::Context::new(self.machine.clone()))
+    }
+
+    /// What's done with what the policy doesn't decide: asked of bottled, if it's bottled's;
+    /// refused, if it's the machine's own (an IPv6 address, which the bottle has no route to).
+    fn hand(&self, to: SocketAddr, first: &[u8]) -> Decision {
+        match &self.rules {
+            Rules::Bottled(decider) => decider.decide(to, first).unwrap_or(Decision::Deny),
+            Rules::Fixed(_) => {
+                eprintln!("bottle-cli: refused {to}: not allowed");
+                Decision::Deny
+            }
+        }
+    }
 }
 
 /// The policy bottled gave, once it has; when it was last asked for.
@@ -65,21 +123,7 @@ impl Decider {
             token,
             machine,
             policy: Default::default(),
-            ca: None,
-            cache: Default::default(),
         }
-    }
-
-    /// Terminating a cached host's https with `ca`'s caching CA: a machine's name, or
-    /// `bottle-builds`. Without one, only plain http is cached here.
-    pub fn caching(self, ca: Option<String>) -> Decider {
-        Decider { ca, ..self }
-    }
-
-    /// What serving a cached host needs, made the first time it's needed.
-    fn cache(&self) -> &cache::Context {
-        self.cache
-            .get_or_init(|| cache::Context::new(self.ca.clone()))
     }
 
     /// The policy bottled gives, asked for the first time it's needed, and again after
@@ -186,9 +230,10 @@ pub fn raise_open_files() -> u64 {
 }
 
 /// Serves the bottle's network on `listener`, each stream on a thread of its own, until accepting
-/// fails. Without a decider, every connection goes directly: for trying a machine out, not for
+/// fails. Without a network, every connection goes directly: for trying a machine out, not for
 /// bottles.
-pub fn serve(listener: UnixListener, decider: Option<Decider>) -> io::Result<()> {
+pub fn serve(listener: UnixListener, network: Option<Network>) -> io::Result<()> {
+    let network = network.map(Arc::new);
     loop {
         let (conn, _) = match listener.accept() {
             Ok(accepted) => accepted,
@@ -207,9 +252,9 @@ pub fn serve(listener: UnixListener, decider: Option<Decider>) -> io::Result<()>
             }
             Err(e) => return Err(e),
         };
-        let decider = decider.clone();
+        let network = network.clone();
         thread::spawn(move || {
-            if let Err(e) = handle(conn, decider.as_ref()) {
+            if let Err(e) = handle(conn, network.as_deref()) {
                 // A connection reset or refused is the bottle's business, not this process's log.
                 if !matches!(
                     e.kind(),
@@ -222,10 +267,10 @@ pub fn serve(listener: UnixListener, decider: Option<Decider>) -> io::Result<()>
     }
 }
 
-fn handle(mut conn: UnixStream, decider: Option<&Decider>) -> io::Result<()> {
+fn handle(mut conn: UnixStream, network: Option<&Network>) -> io::Result<()> {
     match Request::read(&mut conn)? {
         Request::Resolve(name) => resolve(&name).write(&mut conn),
-        Request::Connect(to) => connect(conn, to, decider),
+        Request::Connect(to) => connect(conn, to, network),
     }
 }
 
@@ -267,17 +312,24 @@ fn resolve(name: &str) -> Resolved {
     }
 }
 
-fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> io::Result<()> {
-    let first = first_bytes(&mut conn)?;
+fn connect(mut conn: UnixStream, to: SocketAddr, network: Option<&Network>) -> io::Result<()> {
+    let mut first = first_bytes(&mut conn)?;
     let ips = |name: &str| match resolve(name) {
         Resolved::Addresses(ips) => ips,
         _ => Vec::new(),
     };
-    let decision = match decider {
+    let decision = match network {
         None => Decision::Direct,
-        Some(decider) => {
-            let policy = decider.policy();
-            match policy.as_ref().map(|policy| policy.decide(to, &first, ips)) {
+        Some(network) => {
+            let policy = network.policy();
+            let mut local = policy.as_ref().map(|p| p.decide(to, &first, ips));
+            if local == Some(Local::Unread) {
+                read_opening(&mut conn, &mut first)?;
+                local = policy
+                    .as_ref()
+                    .map(|p| p.decide_opened(to, &first, ips, true));
+            }
+            match local {
                 Some(Local::Direct) => Decision::Direct,
                 Some(Local::Deny) => {
                     let name = crate::policy::name_in(&first);
@@ -291,21 +343,28 @@ fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> i
                     let policy = policy.as_ref().unwrap();
                     let name = crate::policy::name_in(&first).unwrap_or_default();
                     let plain = first.first() != Some(&0x16);
-                    let ctx = decider.cache();
+                    let ctx = network.cache();
                     if plain || ctx.terminates(&name) {
                         conn.write_all(&[CONNECTED])?;
                         let reachable = |host: &str| policy.reachable(host, ips);
                         let rule = &policy.cache[i];
                         return cache::serve(conn, first, &name, rule, plain, ctx, &reachable);
                     }
-                    // bottled's cache, for now: its CA is the one the bottle trusts.
                     eprintln!(
-                        "bottle-cli: {name} is cached, but {} has no caching CA for it",
-                        decider.ca.as_deref().unwrap_or("this machine")
+                        "bottle-cli: {name} is cached, but {} has no caching CA for it: not cached",
+                        network.machine.as_deref().unwrap_or("this machine")
                     );
-                    decider.decide(to, &first).unwrap_or(Decision::Deny)
+                    match &network.rules {
+                        Rules::Bottled(_) => network.hand(to, &first),
+                        Rules::Fixed(_) => Decision::Direct,
+                    }
                 }
-                Some(Local::Hand) | None => decider.decide(to, &first).unwrap_or(Decision::Deny),
+                Some(Local::Route(i)) => {
+                    let policy = policy.as_ref().unwrap();
+                    return route(conn, to, first, policy.routes[i].socket(), network);
+                }
+                // Unread even after waiting for it: decided as it stands.
+                Some(Local::Hand | Local::Unread) | None => network.hand(to, &first),
             }
         }
     };
@@ -323,6 +382,231 @@ fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> i
     };
     conn.write_all(&[CONNECTED])?;
     splice(conn, far)
+}
+
+/// Gives a routed connection to its service at `socket`: a PROXY protocol header first (see
+/// proxy_header), then its bytes, its TLS unwrapped here, with the machine's caching CA, when it
+/// opens with a ClientHello. Refused when the service isn't there.
+fn route(
+    mut conn: UnixStream,
+    to: SocketAddr,
+    first: Vec<u8>,
+    socket: &std::path::Path,
+    network: &Network,
+) -> io::Result<()> {
+    let name = crate::policy::name_in(&first);
+    let tls = first.first() == Some(&0x16);
+    let described = format!(
+        "{to}{}",
+        name.as_ref().map_or(String::new(), |n| format!(" ({n})"))
+    );
+    let config = if tls {
+        let ctx = network.cache();
+        match name.as_deref().filter(|n| ctx.terminates(n)) {
+            Some(n) => Some(ctx.server_config(n)?),
+            None => {
+                eprintln!("bottle-cli: refused {described}: no certificate for it to be routed");
+                return refuse(conn);
+            }
+        }
+    } else {
+        None
+    };
+    let mut service = match UnixStream::connect(socket) {
+        Ok(service) => service,
+        Err(e) => {
+            eprintln!("bottle-cli: refused {described}: {}: {e}", socket.display());
+            return refuse(conn);
+        }
+    };
+    service.write_all(&proxy_header(
+        to,
+        name.as_deref(),
+        tls,
+        network.machine.as_deref(),
+    ))?;
+    conn.write_all(&[CONNECTED])?;
+    match config {
+        None => {
+            service.write_all(&first)?;
+            splice(conn, service)
+        }
+        Some(config) => unwrapped(conn, first, config, service),
+    }
+}
+
+/// The PROXY protocol's version 2 signature (haproxy's proxy-protocol.txt).
+const PROXY_SIGNATURE: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
+/// Its fields: the name the bottle asked for (SNI, or an HTTP request's Host); that it spoke TLS,
+/// unwrapped here; and, in the range kept for applications, the machine's name.
+const PP2_TYPE_AUTHORITY: u8 = 0x02;
+const PP2_TYPE_SSL: u8 = 0x20;
+const PP2_CLIENT_SSL: u8 = 0x01;
+pub const PP2_TYPE_MACHINE: u8 = 0xE0;
+
+/// What a service reads before a routed connection's bytes: a PROXY protocol v2 header, its
+/// destination the address and port the bottle connected to (its source unknown: 0.0.0.0:0),
+/// with the name it asked for, whether it spoke TLS, and the machine it's from.
+pub fn proxy_header(
+    to: SocketAddr,
+    name: Option<&str>,
+    tls: bool,
+    machine: Option<&str>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    let family = match to.ip() {
+        IpAddr::V4(ip) => {
+            body.extend_from_slice(&[0; 4]);
+            body.extend_from_slice(&ip.octets());
+            0x11 // TCP over IPv4
+        }
+        IpAddr::V6(ip) => {
+            body.extend_from_slice(&[0; 16]);
+            body.extend_from_slice(&ip.octets());
+            0x21 // TCP over IPv6
+        }
+    };
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&to.port().to_be_bytes());
+    let mut tlv = |kind: u8, value: &[u8]| {
+        body.push(kind);
+        body.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        body.extend_from_slice(value);
+    };
+    if let Some(name) = name {
+        tlv(PP2_TYPE_AUTHORITY, name.as_bytes());
+    }
+    if tls {
+        // The client's bits, then "verify": 0, as no client certificate was asked for.
+        tlv(PP2_TYPE_SSL, &[PP2_CLIENT_SSL, 0, 0, 0, 0]);
+    }
+    if let Some(machine) = machine {
+        tlv(PP2_TYPE_MACHINE, machine.as_bytes());
+    }
+    let mut header = PROXY_SIGNATURE.to_vec();
+    header.push(0x21); // version 2, PROXY
+    header.push(family);
+    header.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    header.extend(body);
+    header
+}
+
+/// Passes a bottle's TLS connection, which opened with `first`, to `service` unwrapped, and the
+/// service's answers back wrapped, until both have ended.
+fn unwrapped(
+    guest: UnixStream,
+    first: Vec<u8>,
+    config: Arc<rustls::ServerConfig>,
+    service: UnixStream,
+) -> io::Result<()> {
+    let tls = Arc::new(Mutex::new(
+        rustls::ServerConnection::new(config).map_err(io::Error::other)?,
+    ));
+    // Only the TLS state is shared, never held while reading or writing either side.
+    let pending = |tls: &mut rustls::ServerConnection| -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        while tls.wants_write() {
+            tls.write_tls(&mut out)?;
+        }
+        Ok(out)
+    };
+    let (mut guest_r, guest_w) = (guest.try_clone()?, guest);
+    let (mut service_r, mut service_w) = (service.try_clone()?, service);
+    let up = {
+        let (tls, mut guest_w) = (Arc::clone(&tls), guest_w.try_clone()?);
+        thread::spawn(move || -> io::Result<()> {
+            let mut received = first;
+            let mut buf = vec![0; 16 * 1024];
+            loop {
+                if received.is_empty() {
+                    let n = guest_r.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&buf[..n]);
+                }
+                let (plain, out, closed) = {
+                    let mut tls = tls.lock().unwrap_or_else(|e| e.into_inner());
+                    let (mut plain, mut closed) = (Vec::new(), false);
+                    let mut rest = &received[..];
+                    while !rest.is_empty() {
+                        tls.read_tls(&mut rest)?;
+                        let state = tls.process_new_packets().map_err(io::Error::other)?;
+                        let mut chunk = vec![0; state.plaintext_bytes_to_read()];
+                        tls.reader().read_exact(&mut chunk)?;
+                        plain.extend(chunk);
+                        closed |= state.peer_has_closed();
+                    }
+                    (plain, pending(&mut tls)?, closed)
+                };
+                received.clear();
+                guest_w.write_all(&out)?;
+                service_w.write_all(&plain)?;
+                if closed {
+                    break;
+                }
+            }
+            let _ = service_w.shutdown(Shutdown::Write);
+            Ok(())
+        })
+    };
+    let mut guest_w = guest_w;
+    let mut buf = vec![0; 16 * 1024];
+    loop {
+        let n = service_r.read(&mut buf).unwrap_or(0);
+        let out = {
+            let mut tls = tls.lock().unwrap_or_else(|e| e.into_inner());
+            if n == 0 {
+                tls.send_close_notify();
+            } else {
+                tls.writer().write_all(&buf[..n])?;
+            }
+            pending(&mut tls)?
+        };
+        if guest_w.write_all(&out).is_err() || n == 0 {
+            break;
+        }
+    }
+    let _ = guest_w.shutdown(Shutdown::Write);
+    let _ = up.join();
+    Ok(())
+}
+
+/// Reads more of an opening whose name may decide it: the rest of a TLS record, or the first of
+/// one that hadn't come, for up to OPENING_WAIT.
+fn read_opening(conn: &mut UnixStream, first: &mut Vec<u8>) -> io::Result<()> {
+    let deadline = Instant::now() + OPENING_WAIT;
+    let complete = |data: &[u8]| {
+        data.len() >= 5 && data.len() >= 5 + usize::from(u16::from_be_bytes([data[3], data[4]]))
+    };
+    let mut buf = vec![0; FIRST_BYTES];
+    while !(first.first() == Some(&0x16) && complete(first))
+        && !(first.first().is_some_and(|&b| b != 0x16)
+            && first.windows(4).any(|w| w == b"\r\n\r\n"))
+        && first.len() < MAX_OPENING
+    {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        conn.set_read_timeout(Some(left))?;
+        match conn.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => first.extend_from_slice(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    conn.set_read_timeout(None)?;
+    Ok(())
 }
 
 fn refuse(mut conn: UnixStream) -> io::Result<()> {
@@ -361,17 +645,41 @@ fn first_bytes(conn: &mut UnixStream) -> io::Result<Vec<u8>> {
 }
 
 /// Passes bytes both ways until both have ended, each end's end passed on as a shutdown.
-fn splice(conn: UnixStream, far: TcpStream) -> io::Result<()> {
-    let (mut conn_r, mut far_w) = (conn.try_clone()?, far.try_clone()?);
+fn splice<Far: Stream>(conn: UnixStream, far: Far) -> io::Result<()> {
+    let (mut conn_r, mut far_w) = (conn.try_clone()?, far.clone_stream()?);
     let up = thread::spawn(move || {
         let _ = io::copy(&mut conn_r, &mut far_w);
-        let _ = far_w.shutdown(Shutdown::Write);
+        let _ = far_w.shut_write();
     });
     let (mut far_r, mut conn_w) = (far, conn);
     let _ = io::copy(&mut far_r, &mut conn_w);
     let _ = conn_w.shutdown(Shutdown::Write);
     let _ = up.join();
     Ok(())
+}
+
+/// A connection's far end: a host's, or a service's.
+trait Stream: Read + Write + Send + Sized + 'static {
+    fn clone_stream(&self) -> io::Result<Self>;
+    fn shut_write(&self) -> io::Result<()>;
+}
+
+impl Stream for TcpStream {
+    fn clone_stream(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn shut_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+    }
+}
+
+impl Stream for UnixStream {
+    fn clone_stream(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn shut_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+    }
 }
 
 #[cfg(test)]
@@ -422,7 +730,7 @@ mod tests {
             s.write_all(&[1]).unwrap();
             (fixed, first)
         });
-        let d = Decider::new(address, [7; 32], [9; 16]);
+        let d = Network::bottled(Decider::new(address, [7; 32], [9; 16]), None);
         let (mut agent, host) = pair();
         thread::spawn(move || handle(host, Some(&d)));
         Request::Connect("192.0.2.9:443".parse().unwrap())
@@ -466,10 +774,13 @@ mod tests {
             s.write_all(&[1]).unwrap();
             magic
         });
-        let d = Decider::new(address, [7; 32], [9; 16]);
+        let d = Arc::new(Network::bottled(
+            Decider::new(address, [7; 32], [9; 16]),
+            None,
+        ));
         let connect = |to: SocketAddr, first: &[u8]| {
             let (mut agent, host) = pair();
-            let d = d.clone();
+            let d = Arc::clone(&d);
             thread::spawn(move || handle(host, Some(&d)));
             Request::Connect(to).write(&mut agent).unwrap();
             agent.write_all(first).unwrap();
@@ -509,7 +820,7 @@ mod tests {
                 s.write_all(&(policy.len() as u32).to_be_bytes()).unwrap();
                 s.write_all(policy).unwrap();
             });
-            let d = Decider::new(address, [7; 32], [9; 16]).caching(Some("m1".into()));
+            let d = Network::bottled(Decider::new(address, [7; 32], [9; 16]), Some("m1".into()));
             let (mut agent, host) = pair();
             thread::spawn(move || handle(host, Some(&d)));
             Request::Connect("93.184.216.34:80".parse().unwrap())
@@ -523,6 +834,161 @@ mod tests {
             assert!(answer.starts_with("\0HTTP/1.1 200 OK\r\n"), "{answer:?}");
             assert!(answer.ends_with("\r\n\r\nrelease"), "{answer:?}");
             gave.join().unwrap();
+        });
+    }
+
+    /// What a test service read of a connection: its destination, its PROXY fields, its bytes.
+    type Served = (SocketAddr, Vec<(u8, Vec<u8>)>, Vec<u8>);
+
+    /// A service at a socket of its own: what it read of each connection's PROXY header (the
+    /// destination, and its fields by type) and of its bytes, up to an empty line, answered with
+    /// `reply`.
+    fn service(
+        dir: &std::path::Path,
+        reply: &'static [u8],
+    ) -> (std::path::PathBuf, std::sync::mpsc::Receiver<Served>) {
+        std::fs::create_dir_all(dir).unwrap();
+        let socket = dir.join("service.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for conn in listener.incoming() {
+                let mut conn = conn.unwrap();
+                let mut head = [0; 16];
+                conn.read_exact(&mut head).unwrap();
+                assert_eq!(&head[..12], PROXY_SIGNATURE);
+                assert_eq!((head[12], head[13]), (0x21, 0x11));
+                let mut body = vec![0; u16::from_be_bytes([head[14], head[15]]) as usize];
+                conn.read_exact(&mut body).unwrap();
+                let to = SocketAddr::new(
+                    IpAddr::from(<[u8; 4]>::try_from(&body[4..8]).unwrap()),
+                    u16::from_be_bytes([body[10], body[11]]),
+                );
+                let (mut fields, mut at) = (Vec::new(), 12);
+                while at < body.len() {
+                    let len = u16::from_be_bytes([body[at + 1], body[at + 2]]) as usize;
+                    fields.push((body[at], body[at + 3..at + 3 + len].to_vec()));
+                    at += 3 + len;
+                }
+                let mut bytes = Vec::new();
+                let mut byte = [0];
+                while !bytes.ends_with(b"\r\n\r\n") && conn.read(&mut byte).unwrap() == 1 {
+                    bytes.push(byte[0]);
+                }
+                conn.write_all(reply).unwrap();
+                tx.send((to, fields, bytes)).unwrap();
+            }
+        });
+        (socket, rx)
+    }
+
+    #[test]
+    fn a_routed_connection_goes_to_its_service_after_a_proxy_header() {
+        let dir = std::env::temp_dir().join(format!("bottle-route-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (socket, served) = service(&dir, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        let policy = format!(
+            r#"{{"routes": [{{"address": "192.0.2.1", "port": 80, "socket": "{}"}},
+                            {{"address": "192.0.2.2", "port": 80, "socket": "{}/none.sock"}}]}}"#,
+            socket.display(),
+            dir.display()
+        );
+        let network = Arc::new(Network::fixed(
+            serde_json::from_str(&policy).unwrap(),
+            Some("gpu".into()),
+        ));
+        let connect = |to: &str, first: &[u8]| {
+            let (mut agent, host) = pair();
+            let network = Arc::clone(&network);
+            thread::spawn(move || handle(host, Some(&network)));
+            Request::Connect(to.parse().unwrap())
+                .write(&mut agent)
+                .unwrap();
+            agent.write_all(first).unwrap();
+            agent
+        };
+        let request = b"GET /git/x HTTP/1.1\r\nHost: bottle.host\r\n\r\n";
+        let mut agent = connect("192.0.2.1:80", request);
+        let mut answer = Vec::new();
+        agent.read_to_end(&mut answer).unwrap();
+        assert_eq!(answer[0], CONNECTED);
+        assert!(answer.ends_with(b"\r\n\r\nhi"));
+        let (to, fields, bytes) = served.recv().unwrap();
+        assert_eq!(to, "192.0.2.1:80".parse().unwrap());
+        assert_eq!(
+            fields,
+            [
+                (PP2_TYPE_AUTHORITY, b"bottle.host".to_vec()),
+                (PP2_TYPE_MACHINE, b"gpu".to_vec())
+            ]
+        );
+        assert_eq!(bytes, request);
+        // A service that isn't there: refused.
+        let mut agent = connect("192.0.2.2:80", request);
+        let mut answer = [0];
+        agent.read_exact(&mut answer).unwrap();
+        assert_eq!(answer[0], REFUSED);
+        // What the machine's policy can't decide (IPv6, which the bottle has no route to): refused.
+        let mut agent = connect("[2001:db8::1]:443", b"");
+        agent.read_exact(&mut answer).unwrap();
+        assert_eq!(answer[0], REFUSED);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_routed_tls_connection_reaches_its_service_unwrapped() {
+        crate::ca::in_home(|home| {
+            let (socket, served) = service(home, b"HTTP/1.1 204 No Content\r\n\r\n");
+            let policy = format!(
+                r#"{{"routes": [{{"host": "api.example", "port": 443, "socket": "{}"}}]}}"#,
+                socket.display()
+            );
+            let policy: Policy = serde_json::from_str(&policy).unwrap();
+            let pem = crate::ca::certificate("gpu", &policy.terminated_hosts())
+                .unwrap()
+                .unwrap();
+            let network = Network::fixed(policy, Some("gpu".into()));
+            let (mut agent, host) = pair();
+            thread::spawn(move || handle(host, Some(&network)));
+            Request::Connect("1.2.3.4:443".parse().unwrap())
+                .write(&mut agent)
+                .unwrap();
+            // A client trusting the machine's CA alone: its ClientHello first, which decides it.
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::pem::PemObject::from_pem_slice(pem.as_bytes()).unwrap())
+                .unwrap();
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let mut client =
+                rustls::ClientConnection::new(Arc::new(config), "api.example".try_into().unwrap())
+                    .unwrap();
+            client.write_tls(&mut agent).unwrap();
+            let mut answer = [0];
+            agent.read_exact(&mut answer).unwrap();
+            assert_eq!(answer[0], CONNECTED);
+            let mut tls = rustls::StreamOwned::new(client, agent);
+            tls.write_all(b"GET /v1/models HTTP/1.1\r\nHost: api.example\r\n\r\n")
+                .unwrap();
+            let mut reply = Vec::new();
+            let _ = tls.read_to_end(&mut reply);
+            assert_eq!(reply, b"HTTP/1.1 204 No Content\r\n\r\n");
+            let (to, fields, bytes) = served.recv().unwrap();
+            assert_eq!(to, "1.2.3.4:443".parse().unwrap());
+            assert_eq!(
+                fields,
+                [
+                    (PP2_TYPE_AUTHORITY, b"api.example".to_vec()),
+                    (PP2_TYPE_SSL, vec![PP2_CLIENT_SSL, 0, 0, 0, 0]),
+                    (PP2_TYPE_MACHINE, b"gpu".to_vec())
+                ]
+            );
+            assert_eq!(
+                bytes,
+                b"GET /v1/models HTTP/1.1\r\nHost: api.example\r\n\r\n"
+            );
         });
     }
 

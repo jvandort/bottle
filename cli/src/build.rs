@@ -373,7 +373,7 @@ impl Launch for Boot {
             .args(self.net.args())
             .args(match self.net {
                 // An image's apt repositories' https answered with the builds' caching CA.
-                Net::Decider(_) => vec!["--ca", BUILDS_CA],
+                Net::Decider(_) | Net::Policy(_) => vec!["--ca", BUILDS_CA],
                 _ => vec![],
             })
             .args(mount.into_iter().flat_map(|m| {

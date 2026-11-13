@@ -128,7 +128,7 @@ impl Context {
         Ok(authority)
     }
 
-    fn server_config(&self, host: &str) -> io::Result<Arc<ServerConfig>> {
+    pub(crate) fn server_config(&self, host: &str) -> io::Result<Arc<ServerConfig>> {
         let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(config) = servers.get(host) {
             return Ok(Arc::clone(config));

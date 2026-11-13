@@ -5,7 +5,8 @@
 //!     bottle-cli ca forget NAME
 //!
 //! `certificate` prints NAME's CA certificate for HOSTs, made if it isn't, as PEM; nothing, for no
-//! hosts. NAME is a machine's, or `bottle-builds` for builds.
+//! hosts. NAME is a machine's, or `bottle-builds` for builds. Without HOSTs, a machine made with a
+//! network policy's are its policy's: those it caches over https and routes by name.
 
 use std::process::ExitCode;
 
@@ -21,11 +22,18 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         return crate::usage_error(USAGE);
     };
     let result = match command.as_deref() {
-        Some("certificate") => ca::certificate(&name, &args.collect::<Vec<_>>()).map(|pem| {
-            if let Some(pem) = pem {
-                print!("{pem}");
-            }
-        }),
+        Some("certificate") => {
+            let mut hosts: Vec<String> = args.collect();
+            (|| {
+                if hosts.is_empty() {
+                    hosts = crate::machine::terminated_hosts(&name)?.unwrap_or_default();
+                }
+                if let Some(pem) = ca::certificate(&name, &hosts)? {
+                    print!("{pem}");
+                }
+                Ok(())
+            })()
+        }
         Some("forget") if args.next().is_none() => ca::forget(&name),
         _ => return crate::usage_error(USAGE),
     };

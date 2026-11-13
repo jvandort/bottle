@@ -11,8 +11,13 @@
 //! the rest. Otherwise: loopback, link-local, multicast and unspecified addresses are refused;
 //! public ones are connected; a private one only by a name `allow_private` matches, that leads
 //! there. IPv6 is always handed over: the bottle has no route for it, and bottled judges it.
+//!
+//! A machine's own policy (its network.json, given when it's made) has no bottled to hand to: what
+//! it routes, by address, network or name on a port, goes to a service's unix socket (see net.rs),
+//! and what it would hand is refused.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -25,6 +30,48 @@ pub struct Policy {
     /// The hosts whose downloads are kept here (see cache.rs), as bottled's cache.Cached has them.
     #[serde(default)]
     pub cache: Vec<Cached>,
+    /// The connections a service answers, on its unix socket.
+    #[serde(default)]
+    pub routes: Vec<Route>,
+}
+
+/// Connections a service answers: to an address, into a network, or by name, each on a port.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Route {
+    Address {
+        address: IpAddr,
+        port: u16,
+        socket: PathBuf,
+    },
+    Network {
+        network: String,
+        port: u16,
+        socket: PathBuf,
+    },
+    Host {
+        host: String,
+        port: u16,
+        socket: PathBuf,
+    },
+}
+
+impl Route {
+    pub fn socket(&self) -> &PathBuf {
+        match self {
+            Route::Address { socket, .. }
+            | Route::Network { socket, .. }
+            | Route::Host { socket, .. } => socket,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        match self {
+            Route::Address { port, .. }
+            | Route::Network { port, .. }
+            | Route::Host { port, .. } => *port,
+        }
+    }
 }
 
 /// A host whose downloads are kept, asked on `ports`: those at paths matching `include`, if it
@@ -80,6 +127,10 @@ pub enum Local {
     Deny,
     /// Answered here, from the store where it can be: the policy's cache entry for its host.
     Cache(usize),
+    /// The policy's route for it: to its service's socket.
+    Route(usize),
+    /// Its name may decide it, and isn't all here yet: decided again once it's read, with `opened`.
+    Unread,
 }
 
 impl Policy {
@@ -90,6 +141,17 @@ impl Policy {
         to: SocketAddr,
         first: &[u8],
         resolve: impl Fn(&str) -> Vec<IpAddr>,
+    ) -> Local {
+        self.decide_opened(to, first, resolve, false)
+    }
+
+    /// As decide; `opened`: as much of its opening as will be read has been, so it's never Unread.
+    pub fn decide_opened(
+        &self,
+        to: SocketAddr,
+        first: &[u8],
+        resolve: impl Fn(&str) -> Vec<IpAddr>,
+        opened: bool,
     ) -> Local {
         let ip = match to.ip() {
             IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -110,6 +172,21 @@ impl Policy {
                 _ => {}
             }
         }
+        for (i, route) in self.routes.iter().enumerate() {
+            match route {
+                Route::Address {
+                    address, port: p, ..
+                } if *address == ip && *p == port => {
+                    return Local::Route(i);
+                }
+                Route::Network {
+                    network, port: p, ..
+                } if *p == port && in_network(ip, network) => {
+                    return Local::Route(i);
+                }
+                _ => {}
+            }
+        }
         let named_here = |name: &str| {
             self.hand.iter().any(|rule| {
                 matches!(rule, Hand::Name { name: pattern, port: p } if *p == port && glob(pattern, name))
@@ -121,20 +198,35 @@ impl Policy {
         match &name {
             Some(name) if named_here(name) => return Local::Hand,
             Some(name) => {
+                if let Some(i) = self.routes.iter().position(
+                    |r| matches!(r, Route::Host { host, port: p, .. } if *p == port && glob(host, name)),
+                ) {
+                    return Local::Route(i);
+                }
                 if let Some(i) = self.cache.iter().position(|c| {
                     c.ports.contains(&port) && tls == (port != HTTP_PORT) && c.matches(name)
                 }) {
                     return Local::Cache(i);
                 }
             }
+            // bottled reads the rest of what it's handed.
             None if opening_unread(first)
-                && (self
+                && self
                     .hand
                     .iter()
-                    .any(|r| matches!(r, Hand::Name { port: p, .. } if *p == port))
-                    || self.cache.iter().any(|c| c.ports.contains(&port))) =>
+                    .any(|r| matches!(r, Hand::Name { port: p, .. } if *p == port)) =>
             {
                 return Local::Hand;
+            }
+            None if !opened
+                && opening_unread(first)
+                && (self
+                    .routes
+                    .iter()
+                    .any(|r| matches!(r, Route::Host { .. }) && r.port() == port)
+                    || self.cache.iter().any(|c| c.ports.contains(&port))) =>
+            {
+                return Local::Unread;
             }
             None => {}
         }
@@ -161,6 +253,24 @@ impl Policy {
 }
 
 impl Policy {
+    /// The hosts whose TLS is terminated here: those cached over https, and those routed by name.
+    /// What a machine's caching CA is for.
+    pub fn terminated_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = self
+            .cache
+            .iter()
+            .filter(|c| c.ports.iter().any(|&p| p != HTTP_PORT))
+            .map(|c| c.host.to_lowercase())
+            .chain(self.routes.iter().filter_map(|r| match r {
+                Route::Host { host, .. } => Some(host.to_lowercase()),
+                _ => None,
+            }))
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
     /// The addresses of `name` a connection may be made to from here, for a cached host's
     /// fetches: public ones, and private ones too if the name's allowed private.
     pub fn reachable(&self, name: &str, resolve: impl Fn(&str) -> Vec<IpAddr>) -> Vec<IpAddr> {
@@ -553,6 +663,51 @@ mod tests {
         assert!(deb.excludes("/debian/dists/trixie/InRelease"));
         assert!(deb.excludes("/DEBIAN/pool/x.deb")); // paths match with case
         assert_eq!(maven.ports, [443]);
+    }
+
+    #[test]
+    fn a_routed_connection_goes_to_its_service_by_address_network_or_name() {
+        let p = policy(
+            r#"{"routes": [
+                {"address": "192.0.2.1", "port": 80, "socket": "/s/host.sock"},
+                {"network": "192.0.2.0/24", "port": 22, "socket": "/s/ssh.sock"},
+                {"host": "*.anthropic.example", "port": 443, "socket": "/s/folio.sock"}],
+              "cache": [{"host": "deb.example", "ports": [80]}, {"host": "repo.example"}]}"#,
+        );
+        let nothing = |_: &str| vec![];
+        assert_eq!(p.decide(to("192.0.2.1", 80), b"", nothing), Local::Route(0));
+        assert_eq!(p.decide(to("192.0.2.9", 22), b"", nothing), Local::Route(1));
+        assert_eq!(
+            p.decide(
+                to("1.2.3.4", 443),
+                &client_hello("api.anthropic.example"),
+                nothing
+            ),
+            Local::Route(2)
+        );
+        assert_eq!(p.routes[2].socket(), &PathBuf::from("/s/folio.sock"));
+        // Another name, or none on another port: as any connection.
+        assert_eq!(
+            p.decide(to("1.2.3.4", 443), &client_hello("other.example"), nothing),
+            Local::Direct
+        );
+        assert_eq!(p.decide(to("1.2.3.4", 8080), b"", nothing), Local::Direct);
+        // A name that may decide it, not here yet: read it first, then decide as it stands.
+        let hello = client_hello("api.anthropic.example");
+        assert_eq!(p.decide(to("1.2.3.4", 443), b"", nothing), Local::Unread);
+        assert_eq!(
+            p.decide(to("1.2.3.4", 443), &hello[..20], nothing),
+            Local::Unread
+        );
+        assert_eq!(
+            p.decide_opened(to("1.2.3.4", 443), b"", nothing, true),
+            Local::Direct
+        );
+        // What a machine's caching CA is for: the hosts cached over https, and those routed by name.
+        assert_eq!(
+            p.terminated_hosts(),
+            ["*.anthropic.example", "repo.example"]
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bottle_agent_client::net::{Decider, serve};
+use bottle_agent_client::net::{Decider, Network, serve};
 use bottle_agent_proto::{Exit, Start, ToGuest, ToHost};
 
 fn root() -> bool {
@@ -193,7 +193,7 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
     fs::create_dir_all(dir.join("h")).unwrap();
     let listener = UnixListener::bind(dir.join("h/net.sock")).unwrap();
     let d = Decider::new(decider_address, [7; 32], [9; 16]);
-    thread::spawn(move || serve(listener, Some(d)));
+    thread::spawn(move || serve(listener, Some(Network::bottled(d, None))));
 
     let upper = dir.join("rw.ext4");
     let mke2fs = std::env::var("BOTTLE_MKE2FS").unwrap_or("mke2fs".into());

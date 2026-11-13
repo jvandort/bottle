@@ -3,7 +3,7 @@
 //!
 //!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
 //!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
-//!                               [--workdir DIR] [--label NAME=VALUE]...
+//!                               [--workdir DIR] [--label NAME=VALUE]... [--network FILE]
 //!     bottle-cli machine start --name NAME [--decider ADDRESS:PORT | --net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
@@ -19,7 +19,10 @@
 //! $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at most), and,
 //! while it runs, its pid, its agent's socket and its console's log. Started, it runs in the
 //! background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's arguments, to
-//! try this without VMs); start returns once its agent answers. Its network is boot's options:
+//! try this without VMs); start returns once its agent answers. Its network is the policy it was
+//! made with (--network: kept as its network.json, see bottle-agent-client's policy), every
+//! connection decided by it, cached and routed hosts' TLS answered with its own caching CA (see
+//! `bottle-cli ca`), made for that policy's hosts as it starts. Without one, it's start's options:
 //! with --decider, every connection is asked of bottled's decider, as the bottle whose token is in
 //! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection's allowed; without either, it has none. A machine is "created" until it's
 //! first started, then "running" or "stopped". --user and --workdir are who and where `exec` runs a
@@ -180,6 +183,11 @@ impl Machine {
         self.dir.join("disk.ext4")
     }
 
+    /// Its network policy, if it was made with one.
+    fn network(&self) -> PathBuf {
+        self.dir.join("network.json")
+    }
+
     /// Its agent's socket: in its directory, unless that's too long a path for a unix socket (104
     /// bytes, on macOS), then in a directory of this user's in /tmp.
     fn socket(&self) -> PathBuf {
@@ -233,6 +241,19 @@ impl Machine {
             return Err(other(format!("{} is running already", self.name)));
         }
         let config = self.config()?;
+        let own;
+        let net = if self.network().exists() {
+            if *net != crate::boot::Net::None {
+                return Err(other(format!("{} has a network of its own", self.name)));
+            }
+            // Its caching CA, for its policy's hosts as they are: made now if it isn't.
+            let hosts = crate::boot::policy(&self.network())?.terminated_hosts();
+            bottle_agent_client::ca::certificate(&self.name, &hosts)?;
+            own = crate::boot::Net::Policy(self.network());
+            &own
+        } else {
+            net
+        };
         let socket = self.socket();
         if let Some(dir) = socket.parent() {
             fs::create_dir_all(dir)?;
@@ -256,7 +277,9 @@ impl Machine {
         boot.args(net.args())
             .args(match net {
                 // A cached host's https answered with the machine's own caching CA.
-                crate::boot::Net::Decider(_) => vec!["--ca", &self.name],
+                crate::boot::Net::Decider(_) | crate::boot::Net::Policy(_) => {
+                    vec!["--ca", &self.name]
+                }
                 _ => vec![],
             })
             .arg(&socket)
@@ -374,6 +397,7 @@ fn create(args: &[String]) -> io::Result<()> {
         workdir: None,
         labels: Default::default(),
     };
+    let mut network = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -400,6 +424,11 @@ fn create(args: &[String]) -> io::Result<()> {
             }
             "--user" => config.user = Some(value()?),
             "--workdir" => config.workdir = Some(value()?),
+            "--network" => {
+                let path = PathBuf::from(value()?);
+                crate::boot::policy(&path)?; // refused now, not when it's started
+                network = Some(fs::read(&path)?);
+            }
             "--label" => {
                 let pair = value()?;
                 let (k, v) = pair
@@ -433,6 +462,9 @@ fn create(args: &[String]) -> io::Result<()> {
     fs::create_dir_all(&machine.dir)?;
     let made = (|| {
         bottle_disk::mke2fs::empty(&mke2fs, &machine.disk(), config.storage_gib << 30)?;
+        if let Some(network) = &network {
+            fs::write(machine.network(), network)?;
+        }
         fs::write(
             machine.dir.join("config.json"),
             serde_json::to_vec_pretty(&config).unwrap(),
@@ -489,6 +521,18 @@ fn start(args: &[String]) -> io::Result<()> {
         }
     }
     named(&rest)?.start(&net)
+}
+
+/// The hosts whose TLS machine `name`'s network policy has terminated here, for its caching CA;
+/// None if it has no policy of its own (or there's no such machine).
+pub fn terminated_hosts(name: &str) -> io::Result<Option<Vec<String>>> {
+    let machine = Machine::new(name)?;
+    if !machine.network().exists() {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::boot::policy(&machine.network())?.terminated_hosts(),
+    ))
 }
 
 /// The disks of every machine's image, running or not: what `gc` keeps.

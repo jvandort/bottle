@@ -20,7 +20,7 @@ positional, opts, env, mounts, run = [], {}, [], [], None
 i = 0
 while i < len(args):
     a = args[i]
-    if a in ("--cpus", "--mem", "--size", "--hostname", "--console"):
+    if a in ("--cpus", "--mem", "--size", "--hostname", "--console", "--network", "--ca"):
         opts[a] = args[i + 1]; i += 2
     elif a == "--env":
         k, v = args[i + 1].split("=", 1); env.append([k, v]); i += 2
@@ -34,6 +34,7 @@ sock, upper, disks = positional[0], positional[1], positional[2:]
 here = os.path.dirname(upper)
 config = os.path.join(here, "stand-in.json")
 json.dump({"env": env, "mounts": mounts, "run": run}, open(config, "w"))
+json.dump(opts, open(os.path.join(here, "boot-options.json"), "w"))
 loops = []
 def attach(path, *flags):
     dev = subprocess.check_output(["losetup", "-f", "--show", *flags, path], text=True).strip()
@@ -105,7 +106,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         // Short: overlayfs takes only so many characters of lowerdir.
-        let dir = PathBuf::from(format!("/tmp/bcm{}", std::process::id()));
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = PathBuf::from(format!("/tmp/bcm{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("store")).unwrap();
         fs::write(dir.join("store/host.ext4"), "").unwrap();
@@ -160,6 +163,7 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         // A machine left running by a failure: killed, its namespace and loop devices with it.
         let _ = self.cli(&["machine", "delete", "--name", "m1", "-f"]);
+        let _ = self.cli(&["machine", "delete", "--name", "m2", "-f"]);
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -309,4 +313,73 @@ fn machines_are_made_started_used_stopped_and_deleted() {
             .success()
     );
     assert_eq!(f.ok(&["machine", "ls", "--json"]), "[]\n");
+}
+
+#[test]
+fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
+    if !root() {
+        eprintln!("skipped: needs root (see the top of cli/tests/machine.rs)");
+        return;
+    }
+    let f = Fixture::new();
+    let image = f.dir.join("store/host.ext4").display().to_string();
+    let bad = f.dir.join("bad.json");
+    fs::write(&bad, r#"{"routes": [{"host": "x.example"}]}"#).unwrap();
+    let refused = f.cli(&[
+        "machine",
+        "create",
+        "--name",
+        "m2",
+        "--image",
+        &image,
+        "--network",
+    ]);
+    assert!(!refused.status.success());
+    let refused = f.cli(&[
+        "machine",
+        "create",
+        "--name",
+        "m2",
+        "--image",
+        &image,
+        "--network",
+        &bad.display().to_string(),
+    ]);
+    assert!(!refused.status.success(), "a policy that isn't one");
+    let policy = f.dir.join("network.json");
+    fs::write(
+        &policy,
+        r#"{"cache": [{"host": "repo.example"}],
+            "routes": [{"host": "api.example", "port": 443, "socket": "/nowhere.sock"}]}"#,
+    )
+    .unwrap();
+    f.ok(&[
+        "machine",
+        "create",
+        "--name",
+        "m2",
+        "--image",
+        &image,
+        "--storage",
+        "1",
+        "--network",
+        &policy.display().to_string(),
+    ]);
+    // Its caching CA, for its policy's hosts: what its creator installs in it.
+    let pem = f.ok(&["ca", "certificate", "m2"]);
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    // Started with nothing but its name; the network's its own.
+    let refused = f.cli(&["machine", "start", "--name", "m2", "--net-direct"]);
+    assert!(!refused.status.success(), "another network than its own");
+    f.ok(&["machine", "start", "--name", "m2"]);
+    let machine = f.dir.join("home/krun/machines/m2");
+    let options: serde_json::Value =
+        serde_json::from_slice(&fs::read(machine.join("boot-options.json")).unwrap()).unwrap();
+    assert_eq!(
+        options["--network"],
+        machine.join("network.json").display().to_string()
+    );
+    assert_eq!(options["--ca"], "m2");
+    assert_eq!(f.ok(&["ca", "certificate", "m2"]), pem); // the same CA, as it started
+    f.ok(&["machine", "delete", "--name", "m2", "-f"]);
 }
