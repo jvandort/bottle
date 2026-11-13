@@ -8,6 +8,7 @@
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
 //!     bottle-cli machine rename --name NAME --to NEW
+//!     bottle-cli machine configure --name NAME --network FILE
 //!     bottle-cli machine ls [--json]
 //!     bottle-cli machine status --name NAME [--json]
 //!     bottle-cli machine exec --name NAME [-i] [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--]
@@ -94,12 +95,13 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         Some("stop") => named(&args).and_then(|m| m.stop()),
         Some("delete") => delete(&args),
         Some("rename") => rename(&args),
+        Some("configure") => configure(&args),
         Some("ls") => ls(&args),
         Some("status") => status(&args),
         Some("exec") => return exec(args),
         _ => {
             return crate::usage_error(
-                "machine needs create, start, stop, delete, rename, ls, status or exec",
+                "machine needs create, start, stop, delete, rename, configure, ls, status or exec",
             );
         }
     };
@@ -570,6 +572,30 @@ fn delete(args: &[String]) -> io::Result<()> {
     fs::remove_dir_all(&machine.dir)?;
     // Its caching CA too (see `bottle-cli ca`): another machine of its name gets a new one.
     bottle_agent_client::ca::forget(&machine.name)
+}
+
+/// `machine configure`: a stopped machine's network policy, given again (its creator's, when what
+/// it was made with changes, or one made before machines had their own).
+fn configure(args: &[String]) -> io::Result<()> {
+    let (mut name, mut network) = (None, None);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--name" => name = args.next(),
+            "--network" => network = args.next(),
+            other_arg => return Err(other(format!("unknown option {other_arg}"))),
+        }
+    }
+    let machine = Machine::new(name.ok_or_else(|| other("no --name"))?)?;
+    let network = PathBuf::from(network.ok_or_else(|| other("no --network"))?);
+    machine.must_exist()?;
+    if machine.running() {
+        return Err(other(format!("{} is running: stop it first", machine.name)));
+    }
+    crate::boot::policy(&network)?;
+    let staged = machine.dir.join(".network.json");
+    fs::write(&staged, fs::read(&network)?)?;
+    fs::rename(staged, machine.network())
 }
 
 /// `machine rename`: a stopped machine, under another name; its disk, config and logs with it.

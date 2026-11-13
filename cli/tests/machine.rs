@@ -381,5 +381,14 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     );
     assert_eq!(options["--ca"], "m2");
     assert_eq!(f.ok(&["ca", "certificate", "m2"]), pem); // the same CA, as it started
+    // Given again, stopped only: its CA follows its hosts.
+    let other = f.dir.join("other.json");
+    fs::write(&other, r#"{"cache": [{"host": "other.example"}]}"#).unwrap();
+    let other = other.display().to_string();
+    let refused = f.cli(&["machine", "configure", "--name", "m2", "--network", &other]);
+    assert!(!refused.status.success(), "running");
+    f.ok(&["machine", "stop", "--name", "m2"]);
+    f.ok(&["machine", "configure", "--name", "m2", "--network", &other]);
+    assert_ne!(f.ok(&["ca", "certificate", "m2"]), pem);
     f.ok(&["machine", "delete", "--name", "m2", "-f"]);
 }
