@@ -16,7 +16,8 @@
 //! (`debian:trixie-slim`, `name@sha256:...`), fetched by curl, streamed into the import (see
 //! bottle_disk::registry). Images are a store's stages by their tags (Store::tags): `image build`
 //! builds a recipe whose base is a registry's image (`pull`: its reference) or one of the store's
-//! (`from`: a tag, or a stage's name), and tags what it made; `image tag` and `image rm` name and
+//! (`from`: a tag, or a stage's name; a relative mount source is beside RECIPE), and tags what
+//! it made; `image tag` and `image rm` name and
 //! unname stages; `images` lists the tags. gc keeps every tagged image, every machine's stages,
 //! running or not, and IMAGEs'. Each VM
 //! is `bottle-cli boot`, this program again, its console kept for when it fails; libkrun and the
@@ -193,9 +194,19 @@ fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
                 )));
             }
         };
-        let mut recipe: Recipe = serde_json::from_value(value)
-            .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
+        let path = recipe;
+        let mut recipe: Recipe =
+            serde_json::from_value(value).map_err(|e| io::Error::other(format!("{path}: {e}")))?;
         recipe.from = base;
+        // A mount's relative source is beside the recipe: a recipe sent with what it mounts.
+        if let Some(mount) = &mut recipe.mount
+            && mount.source.is_relative()
+        {
+            mount.source = Path::new(&path)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&mount.source);
+        }
         let name = store.build(&recipe, &Boot { net })?;
         if let Some(tag) = &tag {
             store.tag(tag, &name)?;

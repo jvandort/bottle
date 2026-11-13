@@ -471,6 +471,20 @@ fn net_socket_beside(socket: &Path) -> PathBuf {
     env::temp_dir().join(format!("bottle-net-{}.sock", std::process::id()))
 }
 
+/// A machine's network policy as given: a file's, or stdin's for `-`; refused unless it's one.
+pub fn policy_given(arg: &str) -> io::Result<Vec<u8>> {
+    let json = if arg == "-" {
+        let mut json = Vec::new();
+        io::Read::read_to_end(&mut io::stdin(), &mut json)?;
+        json
+    } else {
+        fs::read(arg).map_err(|e| io::Error::other(format!("{arg}: {e}")))?
+    };
+    serde_json::from_slice::<bottle_agent_client::policy::Policy>(&json)
+        .map_err(|e| io::Error::other(format!("{arg}: {e}")))?;
+    Ok(json)
+}
+
 /// A machine's network policy, as a file has it (see bottle-agent-client's policy).
 pub fn policy(path: &Path) -> io::Result<bottle_agent_client::policy::Policy> {
     let json = fs::read(path).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;

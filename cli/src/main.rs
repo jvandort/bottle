@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         Some("gc") => build::gc(args),
         Some("image") => build::image(args),
         Some("images") => build::images(args),
+        Some("info") => machine::info(args),
         Some("machine") => machine::main(args),
         Some("ca") => ca::main(args),
         Some("exec") => {

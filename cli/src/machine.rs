@@ -3,12 +3,12 @@
 //!
 //!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
 //!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
-//!                               [--workdir DIR] [--label NAME=VALUE]... [--network FILE]
+//!                               [--workdir DIR] [--label NAME=VALUE]... [--network FILE|-]
 //!     bottle-cli machine start --name NAME [--net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
 //!     bottle-cli machine rename --name NAME --to NEW
-//!     bottle-cli machine configure --name NAME --network FILE
+//!     bottle-cli machine configure --name NAME --network FILE|-
 //!     bottle-cli machine ls [--json]
 //!     bottle-cli machine status --name NAME [--json]
 //!     bottle-cli machine exec --name NAME [-i] [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--]
@@ -30,6 +30,7 @@
 //!
 //! The same, machine-wide and by name, at the top level (what `bottle` will be):
 //!
+//!     bottle-cli info [--json]
 //!     bottle-cli ls [--json]
 //!     bottle-cli status NAME [--json]
 //!     bottle-cli start NAME
@@ -37,7 +38,8 @@
 //!     bottle-cli exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!     bottle-cli shell NAME
 //!
-//! `shell` is a login shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
+//! `info` is this machine's: its memory and cores, what machines here can have. `shell` is a login
+//! shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
 //! terminal. `start` starts a machine with its own network policy, if it has one, and nothing else;
 //! `shell` and `exec` start one that has, if it's stopped. One made without (a machine of bottle's
 //! from before, until bottle gives it one) is started with no network.
@@ -58,7 +60,7 @@ use crate::FAILED;
 
 pub const USAGE: &str =
     "machine create|start|stop|delete|ls|status|exec ... (see cli/src/machine.rs)";
-pub const TOP_USAGE: &str = "ls [--json] | status NAME [--json] | start NAME | stop NAME | shell NAME \
+pub const TOP_USAGE: &str = "info [--json] | ls [--json] | status NAME [--json] | start NAME | stop NAME | shell NAME \
     | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// How long a stopped machine's VM gets to end, before it's killed.
@@ -433,11 +435,8 @@ fn create(args: &[String]) -> io::Result<()> {
             }
             "--user" => config.user = Some(value()?),
             "--workdir" => config.workdir = Some(value()?),
-            "--network" => {
-                let path = PathBuf::from(value()?);
-                crate::boot::policy(&path)?; // refused now, not when it's started
-                network = Some(fs::read(&path)?);
-            }
+            // Refused now, not when it's started.
+            "--network" => network = Some(crate::boot::policy_given(&value()?)?),
             "--label" => {
                 let pair = value()?;
                 let (k, v) = pair
@@ -594,14 +593,14 @@ fn configure(args: &[String]) -> io::Result<()> {
         }
     }
     let machine = Machine::new(name.ok_or_else(|| other("no --name"))?)?;
-    let network = PathBuf::from(network.ok_or_else(|| other("no --network"))?);
+    let network = network.ok_or_else(|| other("no --network"))?;
     machine.must_exist()?;
     if machine.running() {
         return Err(other(format!("{} is running: stop it first", machine.name)));
     }
-    crate::boot::policy(&network)?;
+    let network = crate::boot::policy_given(network)?;
     let staged = machine.dir.join(".network.json");
-    fs::write(&staged, fs::read(&network)?)?;
+    fs::write(&staged, network)?;
     fs::rename(staged, machine.network())
 }
 
@@ -793,6 +792,32 @@ fn exec(args: Vec<String>) -> ExitCode {
     }
     let socket = machine.socket().to_string_lossy().into_owned();
     crate::exec::main(std::iter::once(socket).chain(defaults).chain(rest))
+}
+
+/// `info [--json]`: this machine's memory (MiB) and cores.
+pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    if !(args.is_empty() || args == ["--json"]) {
+        return crate::usage_error(TOP_USAGE);
+    }
+    // SAFETY: sysconf has no preconditions.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    let memory_mib = (pages.max(0) as u64 * page.max(0) as u64) >> 20;
+    let cpus = thread::available_parallelism().map_or(1, |n| n.get());
+    if args.is_empty() {
+        println!("memory  {memory_mib} MiB\ncpus    {cpus}");
+    } else {
+        println!(
+            "{}",
+            serde_json::json!({"memory_mib": memory_mib, "cpus": cpus})
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 /// The machine-wide commands, by name (see the module's doc): `ls`, `status`, `start`, `stop`,
