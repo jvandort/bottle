@@ -44,9 +44,9 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Fixture {
+    fn new(tag: &str) -> Fixture {
         // Short: unix socket paths are.
-        let dir = PathBuf::from(format!("/tmp/bcr{}", std::process::id()));
+        let dir = PathBuf::from(format!("/tmp/bc{tag}{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("remotes")).unwrap();
         for (name, script) in [("ssh", FAKE_SSH), ("boot", FAKE_BOOT)] {
@@ -114,7 +114,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self.cli(&["machine", "delete", "--name", "box/m", "-f"]);
+        for machine in ["box/m", "here"] {
+            let _ = self.cli(&["machine", "delete", "--name", machine, "-f"]);
+        }
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -144,7 +146,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 
 #[test]
 fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwarded_here() {
-    let f = Fixture::new();
+    let f = Fixture::new("r");
     f.ok(&["runner", "add", "box", "--ssh", "box"]);
     assert!(f.there().join(".bottle/dist/bottle-cli").exists());
     assert!(f.ok(&["runner", "ls"]).starts_with("box  box"));
@@ -262,4 +264,74 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
     assert!(!record.exists());
     f.ok(&["runner", "rm", "box"]);
     assert_eq!(f.ok(&["runner", "ls"]), "");
+}
+
+#[test]
+fn cp_copies_into_out_of_and_between_machines_here_and_a_runners() {
+    let f = Fixture::new("c");
+    f.ok(&["runner", "add", "box", "--ssh", "box"]);
+    let image = f.dir.join("store/s.ext4").display().to_string();
+    let work = f.dir.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let workdir = work.display().to_string();
+    for name in ["here", "box/m"] {
+        f.ok(&[
+            "machine",
+            "create",
+            "--name",
+            name,
+            "--image",
+            &image,
+            "--storage",
+            "1",
+            "--workdir",
+            &workdir,
+        ]);
+    }
+    // The stand-in boot runs bottle-agent here, so "in" either machine is this one's files: each
+    // copies to a directory of its own under the workdir.
+    let out = f.dir.join("out");
+    fs::create_dir_all(out.join("tree/sub")).unwrap();
+    fs::write(out.join("tree/sub/f"), "a file").unwrap();
+    let tree = out.join("tree").display().to_string();
+    f.ok(&["start", "here"]);
+    f.ok(&["start", "box/m"]);
+
+    // In: started machines, relative to their workdir.
+    fs::create_dir_all(work.join("a")).unwrap();
+    assert_eq!(f.ok(&["cp", &tree, "here:a"]), "here:a/tree\n");
+    assert_eq!(
+        fs::read_to_string(work.join("a/tree/sub/f")).unwrap(),
+        "a file"
+    );
+    // Between: from one machine to another, a runner's.
+    assert_eq!(f.ok(&["cp", "here:a/tree/sub", "box/m:b"]), "box/m:b\n");
+    assert_eq!(fs::read_to_string(work.join("b/f")).unwrap(), "a file");
+    // Out: into a directory here, and as a name.
+    let back = f.dir.join("back");
+    fs::create_dir_all(&back).unwrap();
+    let to = back.display().to_string();
+    assert_eq!(f.ok(&["cp", "box/m:b/f", &to]), format!("{to}/f\n"));
+    assert_eq!(
+        f.ok(&["cp", "box/m:b/f", &format!("{to}/g")]),
+        format!("{to}/g\n")
+    );
+    assert_eq!(fs::read_to_string(back.join("g")).unwrap(), "a file");
+    assert_eq!(
+        fs::read_dir(&back).unwrap().count(),
+        2,
+        "nothing left beside it"
+    );
+
+    // Failures leave things as they were, saying why.
+    let failed = f.cli(&["cp", "here:nope", &to]);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("couldn't copy here:nope"));
+    let failed = f.cli(&["cp", &tree, "here:a"]);
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("is a directory already"));
+    assert!(!f.cli(&["cp", "x", "y"]).status.success());
+    assert_eq!(fs::read_dir(&back).unwrap().count(), 2);
+
+    f.ok(&["stop", "here"]);
+    f.ok(&["stop", "box/m"]);
 }

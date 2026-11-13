@@ -62,6 +62,7 @@ use crate::FAILED;
 pub const USAGE: &str =
     "machine create|start|stop|delete|ls|status|exec ... (see cli/src/machine.rs)";
 pub const TOP_USAGE: &str = "info [--json] | ls [--json] | status NAME [--json] | start NAME | stop NAME | shell NAME \
+    | cp SRC DST (either NAME:PATH) \
     | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// How long a stopped machine's VM gets to end, before it's killed.
@@ -134,6 +135,18 @@ fn machines() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".bottle"));
     home.join("krun/machines")
+}
+
+/// Whether `name` is a machine there is: this machine's, or a runner's (RUNNER/NAME, its runner
+/// added).
+pub fn is_machine(name: &str) -> bool {
+    match crate::runner::split(name) {
+        Some((runner, rest)) => {
+            Machine::new(rest).is_ok()
+                && crate::runner::registered().is_ok_and(|r| r.contains_key(runner))
+        }
+        None => Machine::new(name).is_ok_and(|m| m.exists()),
+    }
 }
 
 struct Machine {

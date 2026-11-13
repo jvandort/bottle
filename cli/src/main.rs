@@ -7,6 +7,7 @@ use std::process::ExitCode;
 mod boot;
 mod build;
 mod ca;
+mod copy;
 mod exec;
 mod machine;
 mod remote;
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
         Some("ca") => ca::main(args),
         Some("runner") => runner::main(args),
         Some("on") => runner::on(args),
+        Some("cp") => copy::main(args),
         Some("forward") => remote::forward(args),
         Some("exec") => {
             let args: Vec<String> = args.collect();
