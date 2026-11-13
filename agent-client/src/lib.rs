@@ -14,6 +14,7 @@ pub use bottle_agent_proto::{Exit, Start, WinSize};
 use bottle_agent_proto::{ToGuest, ToHost};
 
 pub mod ca;
+pub mod cache;
 pub mod net;
 pub mod policy;
 pub mod store;

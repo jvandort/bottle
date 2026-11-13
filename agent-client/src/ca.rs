@@ -307,22 +307,23 @@ impl Authority {
     }
 }
 
+/// Runs `test` with $BOTTLE_HOME a directory of its own (the tests that set it run one at a
+/// time, under a lock).
+#[cfg(test)]
+pub(crate) fn in_home(test: impl FnOnce(&Path)) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = std::env::temp_dir().join(format!("bottle-ca-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    // SAFETY: the tests that read BOTTLE_HOME hold LOCK.
+    unsafe { std::env::set_var("BOTTLE_HOME", &home) };
+    test(&home);
+    let _ = fs::remove_dir_all(&home);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Runs `test` with $BOTTLE_HOME a directory of its own (the tests that set it run one at a
-    /// time, under a lock).
-    fn in_home(test: impl FnOnce(&Path)) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("bottle-ca-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        // SAFETY: the tests that read BOTTLE_HOME hold LOCK.
-        unsafe { std::env::set_var("BOTTLE_HOME", &home) };
-        test(&home);
-        let _ = fs::remove_dir_all(&home);
-    }
 
     fn hosts(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()
