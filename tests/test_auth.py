@@ -287,7 +287,7 @@ class LoginTest(unittest.TestCase):
 
     def test_needs_a_terminal(self) -> None:
         with mock.patch.object(auth.sys.stdin, "isatty", return_value=False), \
-                self.assertRaisesRegex(BottleError, "use `bottle auth set claude`"):
+                self.assertRaisesRegex(BottleError, "use `folio auth set claude`"):
             auth.login("claude")
 
 
@@ -318,7 +318,7 @@ class EnsureLoggedInTest(unittest.TestCase):
                 mock.patch("sys.stderr") as err:
             auth.ensure_logged_in(["claude"])
         self.assertEqual(self.logged_in, [])
-        self.assertIn("bottle auth login claude", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertIn("folio auth login claude", "".join(c.args[0] for c in err.write.call_args_list))
 
     def test_features_without_credentials(self) -> None:
         auth.ensure_logged_in(["tools"])

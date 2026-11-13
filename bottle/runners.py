@@ -1,4 +1,4 @@
-"""Runners: the machines bottles run on, behind one interface (see the README's `bottle runner`).
+"""Runners: the machines bottles run on, behind one interface (see `folio runner`).
 
 A runner holds bottles' machines, the images they boot, and the bottled their
 machines route connections to. Everything else -- the registry, credentials,
@@ -389,12 +389,12 @@ def forget(name: str) -> None:
 
 
 def get(name: str = LOCAL) -> Runner:
-    """The runner named `name`: this machine, or one added with `bottle runner add`."""
+    """The runner named `name`: this machine, or one added with `folio runner add`."""
     if name == LOCAL:
         return _LOCAL
     entry = registered().get(name)
     if entry is None:
-        raise BottleError(f"no runner named {name!r}; add one with `bottle runner add {name} --ssh DESTINATION`")
+        raise BottleError(f"no runner named {name!r}; add one with `folio runner add {name} --ssh DESTINATION`")
     if "detached" in entry:
         # Used again: it's attached again if it's back, and if it isn't, that's what's said.
         try:
@@ -417,7 +417,7 @@ def add(name: str, destination: str) -> Check:
         raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
     known = registered().get(name)
     if known is not None and known["ssh"] != destination:
-        raise BottleError(f"runner {name} is already {known['ssh']}; `bottle runner remove {name}` first")
+        raise BottleError(f"runner {name} is already {known['ssh']}; `folio runner rm {name}` first")
     found = check(destination)
     if found.missing:
         raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(found.missing)}")
@@ -458,17 +458,17 @@ def detach(name: str, offline: bool = False, ask=None) -> list[str]:
             running = [b.name for b in bottles.load().values()
                        if b.runner == name and b.status == "ready" and runner.state(b.machine) == "running"]
         except BottleError as e:
-            raise BottleError(f"{e}; if it's off already, `bottle runner detach {name} --offline`") from None
+            raise BottleError(f"{e}; if it's off already, `folio runner detach {name} --offline`") from None
         if running and (ask is None or not ask(running)):
             raise BottleError(f"runner {name} is still attached, and {', '.join(running)} still running: "
-                              f"`bottle runner detach {name}` again when they can be stopped")
+                              f"`folio runner detach {name}` again when they can be stopped")
         stopped, unreachable = bottles.stop_all(name)
         if unreachable:
-            raise BottleError(f"{unreachable[name]}; if it's off already, `bottle runner detach {name} --offline`")
+            raise BottleError(f"{unreachable[name]}; if it's off already, `folio runner detach {name} --offline`")
         still = get(name).running()
         if still:
             raise BottleError(f"runner {name} still runs {', '.join(still)}, which no bottle here stops: "
-                              f"wait for it to finish, then `bottle runner detach {name}` again")
+                              f"wait for it to finish, then `folio runner detach {name}` again")
     _mark(name, {"at": time.time(), "stopped": stopped})
     return stopped
 

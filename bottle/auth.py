@@ -191,7 +191,7 @@ def login(name: str) -> None:
     """Log in with the credential's declared flow, or ask for the value if it has none."""
     d = get_declared(name)
     if not sys.stdin.isatty():
-        raise BottleError(f"logging in needs a terminal; to set {name} from a script, use `bottle auth set {name}`")
+        raise BottleError(f"logging in needs a terminal; to set {name} from a script, use `folio auth set {name}`")
     login = d.credential.login
     if login is None:
         value = getpass.getpass(f"{d.credential.description}: ")
@@ -262,7 +262,7 @@ def ensure_logged_in(specs: tuple[str, ...] | list[str]) -> None:
         if all(from_properties(credential, host) for host in credential.inject.hosts) or get(credential.name) is not None:
             continue
         if not sys.stdin.isatty():
-            print(f"bottle: {credential.name} isn't logged in; run `bottle auth login {credential.name}`", file=sys.stderr)
+            print(f"bottle: {credential.name} isn't logged in; run `folio auth login {credential.name}`", file=sys.stderr)
             continue
         print(f"{credential.description}: not logged in yet. Logging in now...", file=sys.stderr)
         login(credential.name)

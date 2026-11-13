@@ -2,10 +2,9 @@
 
 import argparse
 import sys
-from pathlib import Path
 import time
 
-from . import broker, engine, notes, obsidian, picker, repos, threads
+from . import admin, broker, engine, notes, obsidian, picker, repos, threads
 from .errors import FolioError
 
 
@@ -89,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         "Threads get it in their next bottle; a bottle already running keeps what it has.",
     )
     _configure_arguments(configure, runner_help="the runner the repo's threads' bottles are made on, unless a "
-                         "thread is given its own (`bottle runner status` lists them; default: this machine)")
+                         "thread is given its own (`folio runner ls` lists them; default: this machine)")
     configure.set_defaults(run=_configure, parser=configure, command="configure")
 
     sidecar = commands.add_parser(
@@ -107,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "saved.",
     )
     command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-    _configure_arguments(command, runner_help="the runner it's made on (`bottle runner status` lists them)")
+    _configure_arguments(command, runner_help="the runner it's made on (`folio runner ls` lists them)")
     command.set_defaults(run=_sidecar_configure, parser=command, command="sidecar configure")
     for name, help_, run in (("remove", "take the thread's sidecar away", _sidecar_remove),
                              ("shell", "a shell in the running thread's sidecar, at /workspace, for as long as you're "
@@ -145,10 +144,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_stop = serve_commands.add_parser("stop", help="stop it; bottles' machines go on, but for what they route")
     serve_stop.set_defaults(run=_serve_stop)
 
+    admin.add(commands)
+
     args = parser.parse_args(argv)
     try:
         return args.run(args)
-    except FolioError as e:
+    except (FolioError, engine.BottleError) as e:
         print(f"folio: error: {e}", file=sys.stderr)
         return 1
 
@@ -458,10 +459,7 @@ def _runner(repo: repos.Repo) -> str:
 
 def _daemon():
     """bottle's daemon module, which folio serve is for now: shared, until it's folio's own."""
-    root = str(Path(__file__).resolve().parents[2])
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from bottle import daemon
+    from bottle import daemon   # engine has put bottle's package where it's found
 
     return daemon
 

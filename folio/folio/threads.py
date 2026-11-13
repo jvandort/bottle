@@ -276,7 +276,7 @@ def _delete_sidecar(thread: Thread) -> bool:
     row = engine.status([thread.sidecar_bottle])[thread.sidecar_bottle]
     if row["state"] in RUNNER_OFF:
         print(f"folio: thread {thread.name}'s sidecar, {thread.sidecar_bottle}, is left on runner {row['runner']}, "
-              f"which is off: it's deleted when the thread next gets one, or with `bottle delete "
+              f"which is off: it's deleted when the thread next gets one, or with `folio bottle rm "
               f"{thread.sidecar_bottle}`", file=sys.stderr)
         return False
     if row["state"] != "missing":

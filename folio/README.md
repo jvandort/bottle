@@ -85,7 +85,7 @@ then, so a resume is also how a thread gets features added since.
 ## Runners
 
 A thread's bottle can run on another machine of yours, a runner added with
-`bottle runner add` (see bottle's README): its sessions, lane, notes and
+`folio runner add` (see bottle's README): its sessions, lane, notes and
 pause work as here, over ssh. A repo's threads are made on the repo's runner
 (`folio configure --runner desktop`), else here; a thread can have its
 own (`folio new fix-it --runner desktop`). It applies whenever the thread's
@@ -127,7 +127,7 @@ deleted with it, a pause included, which keeps nothing of it: what's worth
 keeping there is pushed before. So a thread that has a bottle gets its new
 sidecar, or loses its old one, when it's paused and resumed. `folio list`
 shows each thread's sidecar's runner, and its state (`running`, `stopped`, or
-`detached` while its runner is turned off: see `bottle runner detach`).
+`detached` while its runner is turned off: see `folio runner detach`).
 
 A sidecar's runner that's off holds nothing up. `folio claude` and `folio
 shell` go on without the sidecar, saying so. A pause leaves it there, to be
@@ -185,6 +185,11 @@ its reach until you resume it.
 | `folio sidecar configure` / `remove` / `shell [THREAD]` | A thread's sidecar (see Sidecars) |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` (`ls`) | Every repo folio has state for |
+| `folio auth login` / `list` / `set` / `logout` | Credentials bottles get (see bottle's README) |
+| `folio runner add` / `ls` / `stop` / `detach` / `attach` / `rm` | The machines bottles run on (see bottle's README) |
+| `folio bottle ls` / `rm BOTTLE` | Every bottle, whose it is, and its machine; delete one no thread has |
+| `folio serve start` / `stop` | What bottles' machines route to folio: their git, credentials, ssh and messages |
+| `folio shutdown` | Stop every running bottle, then folio serve |
 
 Leave the thread out, on a terminal, and you choose it from a list: the
 repo's threads, most recently active first, with their state. Move with j/k
@@ -225,6 +230,8 @@ folio configure --no-feature jvm
 cd folio && python3 -m unittest discover -s tests -t .
 ```
 
-The tests run `bin/folio` against `tests/fake_bottle.py`, a stand-in for
-bottle's CLI that keeps its bottles in a JSON file and runs commands in a real
-clone of the repo, so they need no VM.
+Folio makes its bottles with bottle's code, in its own process (`folio/engine.py`,
+calling `bottle/bottles.py`). The tests stand `tests/fake_bottle.py` in for it, a
+bottle CLI that keeps its bottles in a JSON file and runs commands in a real
+clone of the repo, so they need no VM: `$FOLIO_ENGINE` names `tests/cli_engine.py`,
+which drives it.

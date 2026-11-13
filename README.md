@@ -39,14 +39,14 @@ A bottle is **not** a box for a hostile agent. Egress allows any public destinat
 inside a bottle — the repo, and anything you put there — can leave. Treat a bottle's contents as
 the agent's to read and to send: don't put a secret in one you wouldn't hand to the agent
 directly. Credentials bottle itself manages stay out of the bottle: `folio serve` attaches them
-(see `bottle auth login`), so they're never there to leave, though the bottle can still spend them
+(see `folio auth login`), so they're never there to leave, though the bottle can still spend them
 against the hosts they're attached to.
 
 ## Quick start
 
 Bottle is the sandbox. To work in one -- a line of work with its own lane of branches, Claude
-running in a session you can detach from, and pause and resume -- use [folio](folio/README.md), which drives bottle for
-you:
+running in a session you can detach from, and pause and resume -- use [folio](folio/README.md), which makes
+bottles for you:
 
 ```sh
 cd ~/path/to/foo
@@ -54,13 +54,9 @@ folio configure --feature claude
 folio claude fix-it       # A thread: a bottle, a lane for its commits, and Claude in it
 ```
 
-Bottle on its own:
-
-```sh
-echo '{"features": ["tools", "claude"], "memory": "4G"}' > spec.json
-bottle new --spec spec.json --name foo --mount /workspace=~/path/to/foo
-bottle shell foo          # Open a shell at /workspace, its first mount; run `claude` here
-```
+`bottle` itself is bottle-cli, which runs every bottle's VM, its *machine*, here and on your
+runners: `bottle ls` lists them, and `bottle shell MACHINE` opens a shell in one (`folio bottle ls`
+says which is whose).
 
 ## Prerequisites
 
@@ -91,24 +87,26 @@ it's needed; the first time takes a while). (Untested on a real runner yet.)
 
 ## Commands
 
+Bottles are made, kept and deleted by [folio](folio/README.md), one for each thread (and its
+sidecar). What's left is a machine's, by its name, and bottle's parts:
+
 | Command | |
 | --- | --- |
-| `bottle auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
-| `bottle new` | Create a bottle from a spec |
-| `bottle spec validate` | Check a spec, and print it in canonical form |
-| `bottle shell` | Open a shell in a bottle, at its first mount |
-| `bottle exec` | Run one command in a bottle |
-| `bottle status` | List bottles and their state; name one to see all of it |
-| `bottle start` / `stop` / `delete` | Control a bottle's lifecycle |
-| `bottle build` | Build an image with the given features |
-| `bottle runner add` / `status` / `stop` / `remove` | The machines bottles run on: this one, and others over ssh |
-| `bottle daemon start` / `stop` | Manage `folio serve`, which answers what bottles' machines route to it |
-| `bottle shutdown` | Stop every running bottle, then `folio serve` |
+| `bottle ls` / `status MACHINE` | List machines, here and on every runner, and their state |
+| `bottle shell MACHINE` | Open a shell in a machine, at its workdir |
+| `bottle exec MACHINE` | Run one command in a machine |
+| `bottle cp SRC DST` | Copy into, out of, or between machines |
+| `bottle start` / `stop MACHINE` | Start or stop a machine |
+| `folio auth login` / `list` / `set` / `logout` | Store a credential once, for every bottle |
+| `folio runner add` / `ls` / `stop` / `detach` / `attach` / `rm` | The machines bottles run on: this one, and others over ssh |
+| `folio bottle ls` / `rm` | Every bottle, whose it is, and its machine; delete one no thread has |
+| `folio serve start` / `stop` | `folio serve`, which answers what bottles' machines route to it |
+| `folio shutdown` | Stop every running bottle, then `folio serve` |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
 
-### `bottle auth login CREDENTIAL`
+### `folio auth login CREDENTIAL`
 
 Logs in once, for every bottle. Features declare the credentials they need (the
 `claude` feature needs `claude`, a Claude subscription token; the `github`
@@ -170,36 +168,29 @@ request until it thinks it's logged in, so a bottle gets a **stand-in**: a fake
 token, never a secret. A feature either writes one itself (`teamcity` puts one
 in the CLI's config file) or names an environment variable for bottle to set in
 every bottle with that feature (`claude` names `CLAUDE_CODE_OAUTH_TOKEN`). The
-throwaway bottle a login command runs in gets none, so `bottle auth login
+throwaway bottle a login command runs in gets none, so `folio auth login
 claude` starts from nothing rather than from a token that isn't one.
 
-`bottle new`, `shell` and `start` log in for you when a bottle's
-features need a credential that isn't set yet.
+Folio logs in for you when a bottle's features need a credential that isn't
+set yet, as it makes or starts the bottle.
 
 ```sh
-bottle auth login claude
-bottle auth login teamcity
+folio auth login claude
+folio auth login teamcity
 ```
 
-### `bottle auth list` / `bottle auth set CREDENTIAL` / `bottle auth logout CREDENTIAL`
+### `folio auth list` / `folio auth set CREDENTIAL` / `folio auth logout CREDENTIAL`
 
 Lists declared credentials and which are set; stores one read from stdin (for
 scripts); removes one. Bottles pick up changes when they next start.
 
-### `bottle build [--feature FEATURE]... [--no-cache] [--runner RUNNER]`
+### Features
 
-Builds the bottle image with the given features installed; `bottle new` does
-this itself when needed. Each image records what it was built from, so an image
-whose features (or the base underneath) have changed since is stale: `bottle
-new` rebuilds it, and after any build bottle deletes its stale images that no
-bottle uses.
-
-```sh
-bottle build --feature tools --feature claude
-```
-
-With `--runner`, it's built on that runner, for the bottles there: each runner
-keeps its own images, built for its own CPU.
+A bottle's image is built with its features when it's made, if it isn't built
+yet. Each image records what it was built from, so an image whose features (or
+the base underneath) have changed since is stale: the next bottle rebuilds it,
+and after any build bottle deletes its stale images that no bottle uses. Each
+runner keeps its own images, built for its own CPU.
 
 Features, in the [Dev Container feature](https://containers.dev/implementors/features/)
 format (a `devcontainer-feature.json` and an `install.sh` per directory):
@@ -234,18 +225,18 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
 - `claude`: Claude Code, from Anthropic's signed apt repository, ready to work:
   every directory is trusted (the bottle is the sandbox), first-run setup is done, it reaches the
   API through the egress proxy, which holds the `claude` credential
-  (`bottle auth login claude`) so the agent can spend its own subscription
+  (`folio auth login claude`) so the agent can spend its own subscription
   token without ever being able to read it, and it reads
   bottle's context for the agent (`~/BOTTLE.md`) as its instructions. Sessions
   start on Opus 5.5 at medium effort. It also
   has a channel, `bottle-event`, an MCP server that brings events into a
-  running session (`bottle exec NAME -- bottle-event send -f FROM TEXT`, which
+  running session (`bottle exec MACHINE -- bottle-event send -f FROM TEXT`, which
   waits until the session takes it) and gives the agent a `send` tool for
   messages to other bottles: folio serve delivers each one as an event whose `from`
   is an address for answering the sender, issued to the recipient and good
   from no other bottle, and answers once that session has taken it (404 for no
   running bottle the sender may reach that way, 504 for no session that took it
-  in time). Only a bottle with the `message-any` permission (see `bottle new`)
+  in time). Only a bottle with the `message-any` permission (see its spec, below)
   can start a conversation, by a bottle's name; any other can only answer.
   Claude Code
   runs the channel when started with `--dangerously-load-development-channels
@@ -255,7 +246,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   capture the mouse, and a bottle has no clipboard to copy to instead).
 - `github`: GitHub's CLI, `gh`, from GitHub's signed apt repository, with `gh`
   and git both authenticated to github.com by the egress proxy, which holds the
-  `github` credential. `bottle auth login github` asks for a
+  `github` credential. `folio auth login github` asks for a
   [fine-grained personal access token](https://github.com/settings/personal-access-tokens):
   what the token may do is what a bottle may do on GitHub, and a push there
   doesn't pass through your repo the way a push to a bottle's remote does, so give
@@ -264,13 +255,11 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   has no ssh key.
 
   ```sh
-  echo '{"features": ["tools", "github"]}' > spec.json
-  bottle new --spec spec.json --name reponame --mount /workspace=~/src/reponame
-  bottle exec reponame -- gh pr list
+  folio configure --feature github
   ```
 - `teamcity`: JetBrains' [TeamCity CLI](https://www.jetbrains.com/help/teamcity/teamcity-cli.html),
   verified against JetBrains' signature from its GitHub release, with its access token
-  held by the egress proxy rather than the bottle (see `bottle auth login`).
+  held by the egress proxy rather than the bottle (see `folio auth login`).
   Options: `server` (required), the TeamCity server, e.g.
   `https://teamcity.example.com`; `version`, the CLI release (default `latest`); and `readOnly`
   (default `true`), which blocks everything but GET, so a bottle can read
@@ -278,9 +267,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   start them. A token with read-only permissions is the real boundary.
 
   ```sh
-  echo '{"features": ["tools", "teamcity:server=https://teamcity.example.com"]}' > spec.json
-  bottle new --spec spec.json --name reponame --mount /workspace=~/src/reponame
-  bottle exec reponame -- teamcity run list
+  folio configure --feature teamcity:server=https://teamcity.example.com
   ```
 - `develocity`: [Develocity's MCP server](https://docs.develocity.ai/2026.3/integrations/agentic-ai/mcp-servers/ai-agents/)
   for Claude Code, with its access key held by the egress proxy rather than
@@ -288,7 +275,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   `~/.gradle/develocity/keys.properties` (`server=key` lines, as
   `./gradlew provisionDevelocityAccessKey` writes them) each time the bottle
   starts, so there's nothing to log in to; a server the file has no line for
-  uses `bottle auth login develocity` instead. Develocity serves MCP itself, so
+  uses `folio auth login develocity` instead. Develocity serves MCP itself, so
   nothing is installed: the server goes in Claude Code's user config, which
   the feature writes whether or not `claude` is in the spec (it installs after
   it when it is). The server's API is authenticated the same way. Options:
@@ -305,7 +292,7 @@ format (a `devcontainer-feature.json` and an `install.sh` per directory):
   VPN often is, is reachable because the credential names it.
 
   ```sh
-  echo '{"features": ["claude", "develocity:server=https://develocity.example.com,https://ge.example.com"]}' > spec.json
+  folio configure --feature develocity:server=https://develocity.example.com,https://ge.example.com
   ```
 
 A feature can take options: `FEATURE:OPTION=VALUE[,OPTION=VALUE]`, e.g.
@@ -324,12 +311,14 @@ has to set, and `context`, a sentence or two for the agent about what the
 feature gives it, added to `~/BOTTLE.md` with `${option}` filled in).
 Anything else in a definition is an error. Remote features aren't supported.
 
-### `bottle new --spec FILE --name NAME [--mount PATH=REPO [--checkout PATH=REF] [--git-remote PATH:REMOTE]...]... [--context FILE] [--runner RUNNER] [--ssh [NAME=]BOTTLE]...`
+### A bottle: its spec, repos, remotes and ssh
 
-Creates a bottle from a **spec**: a file giving its features and memory, owned
-by whoever creates the bottle. `NAME` is required, and is the bottle's identity:
-there's no default, and a name that's taken is refused. The image with those features
-is built first if it isn't built yet.
+Folio makes each bottle (bottle/bottles.py, in folio's process) from a
+**spec**: its features and memory (`folio configure` sets a repo's). Its name
+is its identity, and its thread's: a name that's taken is refused. Its
+record is kept with its thread, in folio's home
+(`~/.folio/<repo>/<thread>/bottles/<name>.json`); one no thread has is in
+`~/.folio/bottles`, and `folio bottle rm` deletes it.
 
 ```json
 {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"}
@@ -348,18 +337,16 @@ folio serve checks the bottle's spec, never the bottle; the bottle sees its
 permissions as `BOTTLE_PERMISSIONS`, so its tools know what to offer. Folio
 never gives a thread's bottle permissions.
 
-Each `--mount PATH=REPO` checks a repo out in the bottle at PATH, any absolute
-path: none is special. Its objects are mounted read-only, so nothing is
+Each of its repos is checked out at a path of its own, any absolute path
+(folio's: the thread's repo at `/workspace`, its notes at `/notes`). Its objects are mounted read-only, so nothing is
 cloned and the bottle can't change the repo except by pushing to a remote
-it's served. The first mount is where `bottle shell` and `bottle exec` start
-(genie's home, without one), and where an SSH login goes. `--checkout
-PATH=REF` says what's checked out there: a branch (the repo's, else
-origin's) or a commit, by default the origin remote's default branch, or, if
-there's no origin, whatever the repo has checked out. Without a mount the
-bottle has no repo.
+it's served. The first is its machine's workdir, where `bottle shell` and
+`bottle exec` start, and where an SSH login goes. What's checked out there is
+a branch (the repo's, else origin's) or a commit, by default the origin
+remote's default branch, or, if there's no origin, whatever the repo has
+checked out.
 
-Each `--git-remote PATH:REMOTE` serves the mount at PATH one remote,
-`NAME:fetch=VIEW[,push=ns/NAMESPACE]`, live, at
+Each is served the remotes it's given, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`, live, at
 `http://bottle.host/git/<PATH>/<NAME>`, which folio serve answers. What a fetch
 sees is one of three views:
 
@@ -386,72 +373,64 @@ off. A namespace is what confines the
 bottle: every ref its `receive-pack` resolves is inside it, and your own refs
 aren't advertised to it at all. Pushes are append-only, refusing force-pushes
 and deletes, so nothing you've already read changes underneath you; no other
-bottle may push into the same namespace, but one it may `--ssh` to; and your repo's own hooks don't run.
+bottle may push into the same namespace, but one it may ssh to; and your repo's own hooks don't run.
 Reading one namespace and writing another makes a two-lane exchange, where
 neither side's push is ever refused for what the other did: that's how
-[folio](folio/README.md) gives each thread its lane. A mount given no
-`--git-remote` gets `origin` (`upstream`) and `host` (`heads`), both read-only.
+[folio](folio/README.md) gives each thread its lane (`origin:fetch=upstream`,
+`host:fetch=heads`, `agent:fetch=ns/T-out,push=ns/T-out`, `user:fetch=ns/T-in`).
+A repo given none gets `origin` (`upstream`) and `host` (`heads`), both read-only.
 
-```sh
-bottle new --spec spec.json --name foo-fix-tests --mount /workspace=~/src/foo --checkout /workspace=main \
-  --git-remote /workspace:origin:fetch=upstream \
-  --git-remote /workspace:host:fetch=heads \
-  --git-remote /workspace:agent:fetch=ns/fix-tests-out,push=ns/fix-tests-out \
-  --git-remote /workspace:user:fetch=ns/fix-tests-in
-```
+`~/BOTTLE.md` says what the bottle, its remotes and its features are, and,
+after that, what its maker adds: folio's say how to work in a thread.
 
-`--context FILE` adds the file's contents to the end of `~/BOTTLE.md`, which
-says what the bottle, its remotes and its features are, and nothing about how
-to work in it.
+Its machine runs on a runner: `local`, this machine, by default, or one added
+with `folio runner add`. The image is built there if it isn't yet, and the
+spec's memory must fit that machine.
 
-`--runner RUNNER` says which machine the bottle's VM runs on: `local`, this
-machine, by default, or one added with `bottle runner add`. The image is built
-there if it isn't yet, and the spec's memory must fit that machine.
-
-`--ssh [NAME=]BOTTLE` lets the bottle ssh to another, which must exist
-already: `ssh NAME` (by default, the other bottle's own name) in this one is a
-login there, as `genie`, and so are scp and git over ssh. That's all it
+A bottle can be let ssh to another (folio's thread, to its sidecar), which must
+exist already: `ssh NAME` in this one is a login there, as `genie`, and so are scp and git over ssh. That's all it
 reaches: NAME's address goes to that bottle's sshd and nowhere else, never to
 a machine on your network. It's the bottle as it was when the grant was made:
 one made again under the same name isn't reached until this one is made again
 too. Bottle doesn't start it: start both. The two may push into the same
 namespaces, as two people share a branch: a push that lost a race is refused,
-not lost. Repeatable.
+not lost.
 
-Bottle keeps its state in `~/.bottle`; set `BOTTLE_HOME` to use another
-directory.
+bottle-cli keeps its state (machines, images, the HTTP cache, runners) in
+`~/.bottle`, and folio its own in `~/.folio`; `BOTTLE_HOME` and `FOLIO_HOME`
+name others.
 
-### `bottle runner add RUNNER --ssh DESTINATION` / `status` / `stop` / `detach` / `attach` / `remove`
+### `folio runner add RUNNER --ssh DESTINATION` / `ls` / `stop` / `detach` / `attach` / `rm`
 
 A **runner** is a machine bottles run on. `local` is this Mac; another is a
 Linux machine reached over ssh, and a bottle on one is a **drone**. Your Mac
 stays the **controller**: the registry, your credentials and your repos are
 here, and what a drone needs of them comes here.
 
-- **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
+- **`folio runner add RUNNER --ssh DESTINATION`** checks a machine and adds
   it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
   can't set up itself, and copies bottle-cli's distribution for the
   machine's architecture over, built here (see above).
   Whenever bottle-cli's sources change, it's built and copied again before
   the runner's next bottle is made.
-- **`bottle runner status [RUNNER]...`** (also `list`, `ls`) shows each runner, whether it can be
+- **`folio runner ls [RUNNER]...`** (also `list`, `status`) shows each runner, whether it can be
   reached, what it lacks, and its bottles.
-- **`bottle runner stop RUNNER`** stops every bottle on a runner, so the
-  machine can be shut down. Their disks stay there; `bottle start` starts one again.
-- **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
+- **`folio runner stop RUNNER`** stops every bottle on a runner, so the
+  machine can be shut down. Their disks stay there; each starts again when it's next used.
+- **`folio runner detach RUNNER [--offline]`** is for turning a runner off:
   it names the bottles running there and asks before stopping them (in a
   terminal; told no, or with no one to ask, it stops nothing and leaves the
   runner attached, so you can have their agents wrap up first), checks that nothing else runs there (an image build,
   say; if something does, it says what, and leaves the runner attached), and
   lets it go, then says it's safe to turn off. Until it's attached again,
   nothing asks it anything: its bottles show as `detached`, at once. Using one of its bottles again
-  (`start`, `attach`, `exec`, `cp`, folio's `attach`) attaches it again if
+  (folio's `claude`, `shell`, and the like) attaches it again if
   it answers, and says it's still off if it doesn't. `--offline` marks one
   that's off already, unasked.
-- **`bottle runner attach RUNNER`** attaches a detached runner again, once it
+- **`folio runner attach RUNNER`** attaches a detached runner again, once it
   answers, and names the bottles detaching it stopped.
-- **`bottle runner remove RUNNER`** forgets a runner with no bottles. Nothing
+- **`folio runner rm RUNNER`** forgets a runner with no bottles. Nothing
   on the machine is touched.
 
 On a runner, everything bottle keeps is in `~/.bottle`: bottle-cli's
@@ -460,7 +439,7 @@ HTTP cache, and a bare mirror of each repo its bottles use (`~/.bottle/git`),
 which your Mac pushes into as a drone is made, so its checkout borrows objects
 from the runner's disk. Runners are bottle-cli's (`bottle-cli runner`): it
 runs itself there over ssh, and a runner's machines are your Mac's by
-`RUNNER/NAME` (`bottle-cli shell desktop/foo`; `bottle-cli ls` lists every
+`RUNNER/NAME` (`bottle shell desktop/foo`; `bottle ls` lists every
 machine, here and on each runner); nothing else of bottle's runs there.
 
 A drone works as a local bottle does, with these differences:
@@ -482,7 +461,7 @@ A drone works as a local bottle does, with these differences:
   until it's back: it connects again, waiting up to a minute between tries,
   and ends when the drone stops.
 
-A runner that's off is unreachable, not broken: `bottle status` shows its
+A runner that's off is unreachable, not broken: `folio bottle ls` shows its
 bottles as `unreachable`, a command for one fails at once, saying so, and
 nothing else waits on it.
 
@@ -491,82 +470,63 @@ macOS refusing the local network to the process that asked: give the app you
 run bottle from the Local Network permission (System Settings > Privacy &
 Security > Local Network). folio serve has the permission of whatever started it.
 
-### `bottle spec validate FILE [--json]`
+### `bottle shell MACHINE`
 
-Checks a spec as `bottle new --spec` would: its features exist, their options
-are valid and every required one is set, and the memory is a size. Whether
-the memory fits is `bottle new`'s to check, against the runner it makes the
-bottle on: the same spec makes bottles anywhere. Prints it in canonical form, with `--json` as JSON: features sorted, each
-one's options sorted and its defaults left out, and the memory as a size.
-Every spec gives its memory.
+Opens a login shell in the machine, at its workdir, as its user (a bottle's:
+its first repo, as `genie`), starting it if it's stopped and it has its
+network. `MACHINE` is its name as `bottle ls` has it: `RUNNER/NAME` for one on
+a runner.
 
-### `bottle shell BOTTLE`
+### `bottle exec MACHINE [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...`
 
-Opens a shell in the bottle at its first mount, starting the bottle if it's stopped.
-
-### `bottle exec BOTTLE COMMAND [ARG]...`
-
-Runs one command in the bottle, at its first mount, and exits with its status,
-starting the bottle if it's stopped. Put `--` before the command if it takes
-options of its own. Its output is a terminal only if bottle's is, so piping and
-redirecting work.
+Runs one command in the machine, as `shell` does, and exits with its status.
+Put `--` before the command if it takes options of its own; `-t` gives it a
+terminal.
 
 ```sh
-bottle exec reponame -- claude -p 'fix the failing test'
-bottle exec reponame cat /workspace/report.json | jq .failures
+bottle exec foo -- claude -p 'fix the failing test'
+bottle exec foo -- cat /workspace/report.json | jq .failures
 ```
 
 ### `bottle cp SRC DST`
 
 Copies SRC, a file or a directory, to DST, as `cp -r` would: into DST if it's
-a directory, else as DST. `BOTTLE:PATH` is a path in that bottle (a relative
-one is from its first mount), which is started if it's stopped; any other is a
-path here, as scp has it (`./a:b` is a path here). One side at least is in a
-bottle: out of one, into one, or between two, by way of this machine.
-
-What a bottle sends here is unpacked as data: nothing lands outside DST, and a
-link pointing out of what's copied, or a device, is left out and named. In a
-bottle it's unpacked by tar as `genie`, with umask 022. Either way a copy that
+a directory, else as DST. `MACHINE:PATH` is a path in that machine (a relative
+one is from its workdir), `RUNNER/NAME:PATH` one on a runner; any other is a
+path here (`./a:b` is one). One side at least is in a machine: out of one, into
+one, or between two, by way of this machine. A shorthand for `exec`, as
+`shell` is: tar packs it on one side and unpacks it on the other, as the
+machine's user there, and this machine's tar, which keeps it to where it's
+unpacked, here. Either way it's unpacked beside DST first, so a copy that
 fails leaves DST as it was.
 
 ```sh
-bottle cp reponame:build/reports/tests .
-bottle cp ./fixtures reponame:/workspace/src/test/
-bottle cp reponame:build/libs/app.jar reponame-sidecar:
+bottle cp foo:build/reports/tests .
+bottle cp ./fixtures foo:/workspace/src/test/
+bottle cp foo:build/libs/app.jar desktop/foo-sidecar:
 ```
 
-### `bottle status [BOTTLE]... [--json]`
+### `bottle start MACHINE` / `bottle stop MACHINE`
 
-Also `bottle list` and `bottle ls`. Shows every bottle's name, state, runner and memory, a line each. Name bottles to see
-all of each: its runner, if it isn't `local`, its features, and each mount's
-path, repo, branch and remotes. A name with no bottle shows as `missing`, and
-one on a runner that can't be reached as `unreachable`. With `--json`, one
-object per bottle with what it was made from: runner, features, memory, spec
-and mounts.
+Starts or stops a machine's VM, without folio: what its policy routes to
+folio serve is refused while it isn't running. Stopping keeps its disk.
 
-### `bottle start BOTTLE` / `bottle stop BOTTLE`
+### `folio bottle ls [--json]` / `folio bottle rm BOTTLE`
 
-Starts or stops a bottle's VM. Stopping keeps the checkout and any changes;
-`shell` also starts a stopped bottle.
+Every bottle, its thread (`REPO/THREAD`), its state, its runner and its
+machine; a bottle on a runner that can't be reached shows as `unreachable`.
+`rm` deletes one no thread has (a thread's goes with it: `folio delete`, or
+`folio pause`), and everything it created; if making or deleting one was
+interrupted, `rm` cleans up whatever is left. Whatever it pushed is kept, in
+your repo's namespaces, and its image, so the next bottle with the same
+features starts without a build.
 
-### `bottle delete BOTTLE`
-
-Deletes the bottle and everything it created. If creating or deleting a bottle
-was interrupted, `delete` cleans up whatever is left.
-
-It doesn't ask: anything in the bottle that was never pushed goes with it, so
-push what you want first. Whatever the bottle pushed is kept, in your repo's
-namespaces. The bottle's image is kept, so the next
-bottle with the same features starts without a build; images whose features
-or base have changed since they were built are deleted, unless a bottle uses
-one.
-
-### `bottle shutdown`
+### `folio shutdown`
 
 Stops every running bottle, then `folio serve`. Bottles on a runner that can't be
 reached are left as they are, and it says so.
 
-### `bottle daemon start` / `bottle daemon stop`
+### `folio serve start` / `folio serve stop`
 
 Starts or stops `folio serve`, the background process that serves what bottles'
 machines route to it. A machine decides each TCP connection the bottle opens
@@ -578,10 +538,9 @@ which answers `bottle.host` with the bottle's git remotes. A refused
 connection is reset, and logged in the machine's `boot.log`. A bottle's names
 are looked up by the machine it runs on, with its resolver, as they're asked;
 a bottle has no UDP or IPv6. A machine starts with nothing but its name
-(`bottle-cli start NAME` works without folio serve); what it routes to folio serve is
+(`bottle start MACHINE` works without folio serve); what it routes to folio serve is
 refused while folio serve isn't running. folio serve logs one line per connection it
-serves, in `~/.folio/logs/serve.log`. It's folio's (`folio serve start|stop`); `bottle daemon` is the same,
-for now, while its code is still bottle's.
+serves, in `~/.folio/logs/serve.log`. Its code is still bottle's (bottle/daemon.py).
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
 one downloads every dependency again. A feature can name hosts whose
@@ -635,7 +594,7 @@ first time, while they pull and build images:
 
 - `tests/test_krun_contract.py`: what bottle relies on bottle-cli for. Run it
   after changing bottle-cli, the agent or libkrun.
-- `tests/test_end_to_end.py`: a real bottle through `bin/bottle`, in its own
+- `tests/test_end_to_end.py`: a real bottle, made as folio makes one and run in through `bin/bottle`, in its own
   `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
 
 Elsewhere they're skipped. Runners are tested here with a fake ssh, which

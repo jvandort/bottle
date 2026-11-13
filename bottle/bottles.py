@@ -38,19 +38,15 @@ breaks, and the bottle has to be made again.
 
 import fcntl
 import logging
-import os
 import re
 import shlex
 import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import NoReturn
 
 from bottle import auth, cache, daemon, features as features_, host, images, repos, runners, services, specs
 from bottle.errors import BottleError
@@ -652,7 +648,7 @@ def context(bottle: Bottle) -> str:
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
     lines.append(f"- To hand the user a file or a directory, give them the command that copies it out of this\n"
-                 f"  bottle to their current directory: `bottle cp {bottle.name}:<path> .`")
+                 f"  bottle to their current directory: `bottle cp {bottle.machine}:<path> .`")
     resolved = features_.resolve(list(bottle.features))
     if any(f.credentials for f in resolved):
         lines.append("- A credential the host attaches goes only where its feature allows: a request it refuses\n"
@@ -782,11 +778,11 @@ def ensure_running(name: str) -> Bottle:
     """Start the bottle's machine if it isn't running, bottled answering it."""
     bottle = get(name)
     if bottle.status != "ready":
-        raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
+        raise BottleError(f"{name} is {bottle.status}; remove it with `folio bottle rm {name}`")
     runner = runner_of(bottle)
     state = runner.state(bottle.machine)
     if state is None:
-        raise BottleError(f"{bottle.name}'s machine is gone; `bottle delete {bottle.name}`, then `bottle new` again")
+        raise BottleError(f"{bottle.name}'s machine is gone; `folio bottle rm {bottle.name}`, and make it again")
     if state != "running":
         runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
@@ -867,165 +863,12 @@ def verify_contract(bottle: Bottle) -> None:
         raise BottleError(f"{bottle.environment} doesn't meet the bottle contract: {problems}")
 
 
-def shell(name: str) -> NoReturn:
-    """Open a login shell in the bottle, at its first mount."""
-    _attach(name, ["bash", "-l"], tty=True)
-
-
-def exec_(name: str, argv: list[str]) -> NoReturn:
-    """Run one command in the bottle, at its first mount, and exit with its status.
-
-    A TTY only when this process has one on both ends, so output stays clean
-    when it's piped or redirected.
-    """
-    if not argv:
-        raise BottleError("bottle exec needs a command: bottle exec NAME COMMAND [ARG...]")
-    _attach(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
-
-
-# In a bottle, whatever $1 names, as a tar of it alone: its last name, and what's under it.
-_PACK = 'p=$(realpath -e -- "$1") && exec tar -C "$(dirname -- "$p")" -cf - -- "$(basename -- "$p")"'
-# In a bottle, the tar on stdin, of one thing, as cp -r would put it: into $1 if it's a directory, else as $1;
-# unpacked beside it first, so a copy that fails changes nothing. Says where it went.
-_UNPACK = r"""umask 022
-d=$1
-if [ -d "$d" ]; then into=$d; else into=$(dirname -- "$d"); fi
-s=$(mktemp -d -- "$into/.bottle-cp-XXXXXX") || exit 1
-trap 'rm -rf -- "$s"' EXIT
-tar -xf - -C "$s" --no-same-owner || exit 1
-n=$(ls -A -- "$s")
-if [ -z "$n" ] || [ "$(printf '%s\n' "$n" | wc -l)" -ne 1 ]; then echo "it sent nothing" >&2; exit 1; fi
-if [ -d "$d" ]; then t=${d%/}/$n; else t=$d; fi
-if [ -d "$t" ] && [ ! -L "$t" ]; then echo "$t is a directory already: copy into it, or somewhere new" >&2; exit 1; fi
-if [ -d "$s/$n" ] && [ ! -L "$s/$n" ] && { [ -e "$t" ] || [ -L "$t" ]; }; then
-  echo "$t exists, and what's copied is a directory" >&2; exit 1
-fi
-mv -fT -- "$s/$n" "$t" && printf '%s\n' "$t"
-"""
-
-
-@dataclass(frozen=True)
-class CopySide:
-    """One side of a copy: a path in a bottle (relative to its first mount), or, with no bottle, here."""
-
-    bottle: str | None
-    path: str
-
-    @classmethod
-    def parse(cls, arg: str) -> "CopySide":
-        """BOTTLE:PATH, or a path here: as scp has it, a colon before any '/' names a bottle (./a:b doesn't)."""
-        name, colon, path = arg.partition(":")
-        if colon and NAME_PATTERN.fullmatch(name):
-            return cls(name, path or ".")
-        return cls(None, arg)
-
-    def __str__(self) -> str:
-        return f"{self.bottle}:{self.path}" if self.bottle else self.path
-
-
-def copy(src: CopySide, dst: CopySide) -> tuple[str, list[str]]:
-    """Copy `src`, a file or a directory, to `dst`, as cp -r would: into `dst` if it's a directory, else as
-    it. Either side, or both, in a bottle, which is started if stopped. Returns where it went, and what was
-    left out of it, saying why.
-
-    It goes as a tar, by way of this machine. Unpacked here, it's data: nothing
-    in it lands outside what it names, and a link out of it, or a device, is
-    left out. Unpacked in a bottle, it's tar's, as `genie` there. Either way
-    nothing is there until all of it is: a copy that fails leaves `dst` as it was.
-    """
-    if src.bottle is None and dst.bottle is None:
-        raise BottleError("bottle cp copies into or out of a bottle: name one, BOTTLE:PATH")
-    if src.bottle is not None and src.path.rstrip("/") == "":
-        raise BottleError("bottle cp copies a file or a directory, not /")
-    if src.bottle is None:
-        return _copy_in(Path(src.path), dst), []
-    pack = _copy_command(src.bottle, ["sh", "-c", _PACK, "sh", src.path])
-    if dst.bottle is None:
-        return _copy_out(src, pack, Path(dst.path))
-    unpack = _copy_command(dst.bottle, ["sh", "-c", _UNPACK, "sh", dst.path])
-    # stdin stays open until it ends: an exec's stdin closing early may end it early.
-    with subprocess.Popen(pack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as sending:
-        with subprocess.Popen(unpack, stdin=sending.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as taking:
-            sending.stdout.close()
-            out, taken = taking.communicate()
-        sending.stdin.close()
-        sent = sending.stderr.read()
-    if sending.returncode != 0:
-        raise BottleError(f"couldn't copy {src}: {_said(sent) or 'it sent nothing'}")
-    if taking.returncode != 0:
-        raise BottleError(f"couldn't copy {src} to {dst}: {_said(taken) or 'it failed'}")
-    return f"{dst.bottle}:{out.decode().strip()}", []
-
-
-def _copy_command(name: str, argv: list[str]) -> list[str]:
-    return exec_command(name, argv)
-
-
-def _said(stderr: bytes) -> str:
-    return stderr.decode(errors="replace").strip()
-
-
-def _copy_out(src: CopySide, pack: list[str], dst: Path) -> tuple[str, list[str]]:
-    into = dst.is_dir()
-    with tempfile.TemporaryDirectory(dir=dst if into else dst.parent, prefix=".bottle-cp-") as scratch:
-        with subprocess.Popen(pack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-            names: set[str] = set()
-            left_out: list[str] = []
-            try:
-                with tarfile.open(fileobj=process.stdout, mode="r|") as tar:
-                    for member in tar:
-                        names.add(member.name.split("/")[0])
-                        try:
-                            tar.extract(member, scratch, filter="data")
-                        except tarfile.FilterError as e:
-                            left_out.append(f"{member.name}: {e}")
-            except tarfile.TarError:
-                names = set()
-            process.stdin.close()
-            error = _said(process.stderr.read())
-        if process.returncode != 0 or len(names) != 1:
-            raise BottleError(f"couldn't copy {src}: {error or 'it sent nothing'}")
-        [base] = names
-        target = dst / base if into else dst
-        copied = Path(scratch) / base
-        if target.is_dir() and not target.is_symlink():
-            raise BottleError(f"{target} is a directory already: copy into it, or somewhere new")
-        if copied.is_dir() and target.exists():
-            raise BottleError(f"{target} exists, and {src} is a directory")
-        copied.replace(target)
-    return str(target), left_out
-
-
-def _copy_in(src: Path, dst: CopySide) -> str:
-    if not src.exists() and not src.is_symlink():
-        raise BottleError(f"couldn't copy {src}: there's no such file or directory")
-    base = src.resolve().name if src.name in ("", ".", "..") else src.name
-    unpack = _copy_command(dst.bottle, ["sh", "-c", _UNPACK, "sh", dst.path])
-    with subprocess.Popen(unpack, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-        try:
-            with tarfile.open(fileobj=process.stdin, mode="w|") as tar:
-                tar.add(src, arcname=base)
-            process.stdin.close()
-        except BrokenPipeError:
-            pass   # it stopped taking it: what it says is why
-        out, error = process.stdout.read(), process.stderr.read()
-    if process.returncode != 0:
-        raise BottleError(f"couldn't copy {src} to {dst}: {_said(error) or 'it failed'}")
-    return f"{dst.bottle}:{out.decode().strip()}"
-
-
 def exec_command(name: str, argv: list[str], tty: bool = False) -> list[str]:
     """The command line, for this machine, that runs `argv` in the bottle as genie, at its first mount: started if
     it's stopped, logged in first to what its features need."""
     auth.ensure_logged_in(get(name).features)
     bottle = ensure_running(name)
     return runner_of(bottle).exec_command(bottle.machine, argv, user=USER, workdir=bottle.workdir, tty=tty)
-
-
-def _attach(name: str, argv: list[str], tty: bool) -> NoReturn:
-    """Replace this process with `argv` running in the bottle, starting it if stopped."""
-    command = exec_command(name, argv, tty)
-    os.execvp(command[0], command)
 
 
 def _in_bottle(bottle: Bottle, argv: list[str]) -> str:
@@ -1063,7 +906,7 @@ def list_all() -> list[tuple[Bottle, str]]:
 
 
 def status(names: list[str] = ()) -> list[dict]:
-    """Every bottle's state and what it was made from, or just those `names`, for `bottle status --json`.
+    """Every bottle's state and what it was made from, or just those `names`.
 
     A name with no bottle gets a row with state "missing", so a caller can
     tell a bottle that's gone from a command that failed.
@@ -1077,6 +920,8 @@ def status(names: list[str] = ()) -> list[dict]:
         bottle, state = states[name]
         rows.append({
             "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
+            # Its machine, as bottle-cli here names it (`bottle shell MACHINE`).
+            "machine": bottle.machine if bottle.runner == runners.LOCAL else f"{bottle.runner}/{bottle.machine}",
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,
             "ssh": {g.name: g.bottle for g in bottle.ssh},
             # Where its objects and remotes are, as a checkout restored into it has to point.
@@ -1109,7 +954,7 @@ def delete(name: str) -> None:
     if failures:
         log.warning("%s: deleting left parts behind: %s", name, "; ".join(failures))
         _save(replace(bottle, status="broken"))
-        raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `bottle delete {name}`")
+        raise BottleError(f"couldn't fully delete {name} ({'; '.join(failures)}); rerun `folio bottle rm {name}`")
     _forget(name)
     log.info("%s: deleted", name)
     _remove_stale_images(runner)

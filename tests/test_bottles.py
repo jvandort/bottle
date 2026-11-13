@@ -288,7 +288,7 @@ class CreateTest(BottleTestCase):
         self.assertIn(f"You're `genie`, running in bottle `{bottle.name}`", context)
         self.assertIn("passwordless sudo", context)
         self.assertIn("The network works as usual", context)
-        self.assertIn(f"`bottle cp {bottle.name}:<path> .`", context)
+        self.assertIn(f"`bottle cp {bottle.machine}:<path> .`", context)
 
     def test_context_for_a_detached_commit(self) -> None:
         bottle = bottles.Bottle("b", "id", "base", 0.0, mounts=(bottles.Mount("/workspace", "/src/r", None, "c" * 40),))
@@ -441,7 +441,7 @@ class DeleteTest(BottleTestCase):
     def test_retry_after_a_failed_delete(self) -> None:
         fake = self.fake(fail_cleanup="machine")
         self.create()
-        with self.assertRaisesRegex(BottleError, "rerun `bottle delete example`"):
+        with self.assertRaisesRegex(BottleError, "rerun `folio bottle rm example`"):
             bottles.delete("example")
         self.assertEqual(bottles.get("example").status, "broken")
         self.assertEqual(fake.bound, set())  # the other steps still ran
@@ -519,7 +519,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         self.create()
         fake.machines.clear()
-        with self.assertRaisesRegex(BottleError, "machine is gone; `bottle delete example`, then `bottle new` again"):
+        with self.assertRaisesRegex(BottleError, "machine is gone; `folio bottle rm example`, and make it again"):
             bottles.ensure_running("example")
 
     def test_unfinished_bottle(self) -> None:
@@ -617,13 +617,7 @@ class StandinTest(BottleTestCase):
 
 
 class CredentialTest(BottleTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        patcher = mock.patch.object(bottles.os, "execvp")
-        self.execvp = patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_new_start_and_shell_log_in_first(self) -> None:
+    def test_new_start_and_a_command_log_in_first(self) -> None:
         fake = self.fake()
         self.create()
         self.assertEqual(fake.calls[0], "ensure_logged_in")
@@ -631,14 +625,14 @@ class CredentialTest(BottleTestCase):
         bottles.start("example")
         self.assertEqual(fake.calls[0], "ensure_logged_in")
         fake.calls.clear()
-        bottles.shell("example")
+        bottles.exec_command("example", ["bash", "-l"], tty=True)
         self.assertEqual(fake.calls[0], "ensure_logged_in")
 
-    def test_shell_hands_the_bottle_nothing(self) -> None:
-        """Credentials stay with bottled, so a session gets none of them, and no proxy either."""
+    def test_a_command_is_handed_nothing(self) -> None:
+        """Credentials stay with folio serve, so a session gets none of them, and no proxy either."""
         fake = self.fake()
         self.create()
-        bottles.shell("example")
+        bottles.exec_command("example", ["bash", "-l"], tty=True)
         self.assertIsNone(fake.attached["env"])
 
 
@@ -798,131 +792,22 @@ class ExecTest(BottleTestCase):
         super().setUp()
         self.fake_smolvm = self.fake()
         self.create()
-        patcher = mock.patch.object(bottles.os, "execvp")
-        self.execvp = patcher.start()
-        self.addCleanup(patcher.stop)
 
     @property
     def attached(self) -> dict:
         return self.fake_smolvm.attached
 
-    def test_runs_the_command_in_the_workspace(self) -> None:
-        bottles.exec_("example", ["git", "push", "host"])
+    def test_runs_the_command_in_the_workspace_as_genie(self) -> None:
+        command = bottles.exec_command("example", ["git", "push", "host"])
         self.assertEqual(self.attached["argv"], ["git", "push", "host"])
-        self.assertEqual((self.attached["user"], self.attached["workdir"]), ("genie", "/workspace"))
-        command = ["smolvm-exec", self.attached["name"], "git", "push", "host"]
-        self.execvp.assert_called_once_with("smolvm-exec", command)
-
-    def test_a_tty_only_when_this_process_has_one(self) -> None:
-        for isatty, expected in ((True, True), (False, False)):
-            with self.subTest(isatty=isatty), mock.patch("sys.stdin.isatty", return_value=isatty), \
-                    mock.patch("sys.stdout.isatty", return_value=isatty):
-                bottles.exec_("example", ["true"])
-                self.assertEqual(self.attached["tty"], expected)
-
-    def test_shell_always_gets_a_tty(self) -> None:
-        with mock.patch("sys.stdin.isatty", return_value=False):
-            bottles.shell("example")
-        self.assertEqual((self.attached["argv"], self.attached["tty"]), (["bash", "-l"], True))
-
-    def test_no_command_is_an_error(self) -> None:
-        with self.assertRaisesRegex(BottleError, "bottle exec needs a command"):
-            bottles.exec_("example", [])
+        self.assertEqual((self.attached["user"], self.attached["workdir"], self.attached["tty"]),
+                         ("genie", "/workspace", False))
+        self.assertEqual(command, ["smolvm-exec", self.attached["name"], "git", "push", "host"])
 
     def test_starts_a_stopped_bottle(self) -> None:
         bottles.stop("example")
-        bottles.exec_("example", ["true"])
+        bottles.exec_command("example", ["true"])
         self.assertIn("start", self.fake_smolvm.calls)
-
-
-class CopyTest(BottleTestCase):
-    """bottle cp: each bottle's side run here for real (sh, realpath, tar, mv), at a directory standing in
-    for its first mount."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.fake_smolvm = self.fake()
-        self.inside = {}
-        for name in ("a", "b"):
-            machine = self.create(name=name).machine
-            self.inside[name] = self.inside[machine] = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.here = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        reports = self.inside["a"] / "build" / "reports"
-        reports.mkdir(parents=True)
-        (reports / "index.html").write_bytes(self.HTML)
-        (reports / "away").symlink_to("/etc/passwd")
-        (reports / "near").symlink_to("index.html")
-        self.users = []
-
-        def exec_command(name, argv, user=None, workdir=None, tty=False, env=None, cli=None):
-            self.users.append((user, workdir, tty))
-            return ["sh", "-c", f"cd {self.inside[name]} && " + argv[2], *argv[3:]]
-
-        self.enterContext(mock.patch.object(bottles.runners.krun, "exec_command", side_effect=exec_command))
-
-    HTML = b"<html>\x00\xff</html>"
-
-    def cp(self, src: str, dst: str) -> tuple[str, list[str]]:
-        return bottles.copy(bottles.CopySide.parse(src), bottles.CopySide.parse(dst))
-
-    def test_sides(self) -> None:
-        self.assertEqual(bottles.CopySide.parse("a:build"), bottles.CopySide("a", "build"))
-        self.assertEqual(bottles.CopySide.parse("a:"), bottles.CopySide("a", "."))
-        for here in ("./a:b", "/tmp/a:b", "build"):
-            self.assertEqual(bottles.CopySide.parse(here), bottles.CopySide(None, here))
-
-    def test_a_file_out_into_a_directory_and_as_a_name(self) -> None:
-        self.assertEqual(self.cp("a:build/reports/index.html", str(self.here)), (str(self.here / "index.html"), []))
-        self.assertEqual((self.here / "index.html").read_bytes(), self.HTML)
-        self.assertEqual(self.cp("a:build/reports/index.html", str(self.here / "r.html"))[0], str(self.here / "r.html"))
-        self.cp("a:build/reports/index.html", str(self.here / "r.html"))   # over a file, as cp does
-        self.assertEqual(self.users[-1], ("genie", "/workspace", False))
-        self.assertEqual(sorted(p.name for p in self.here.iterdir()), ["index.html", "r.html"])   # no scratch left
-
-    def test_a_directory_out_with_what_is_under_it(self) -> None:
-        _, left_out = self.cp("a:build/reports/", str(self.here / "out"))
-        self.assertEqual((self.here / "out" / "index.html").read_bytes(), self.HTML)
-        self.assertEqual(os.readlink(self.here / "out" / "near"), "index.html")   # a link within comes as one
-        self.assertFalse((self.here / "out" / "away").is_symlink())   # one out of it doesn't
-        self.assertEqual([why.split(":")[0] for why in left_out], ["reports/away"])
-        (self.here / "file").write_text("")
-        with self.assertRaisesRegex(BottleError, "exists, and a:build/reports is a directory"):
-            self.cp("a:build/reports", str(self.here / "file"))
-
-    def test_in(self) -> None:
-        (self.here / "fixtures").mkdir()
-        (self.here / "fixtures" / "one").write_bytes(self.HTML)
-        self.assertEqual(self.cp(str(self.here / "fixtures"), "b:"), (f"b:./fixtures", []))
-        self.assertEqual((self.inside["b"] / "fixtures" / "one").read_bytes(), self.HTML)
-        self.assertEqual((self.inside["b"] / "fixtures" / "one").stat().st_mode & 0o777, 0o644)
-        self.assertEqual(self.cp(str(self.here / "fixtures" / "one"), "b:two")[0], "b:two")
-        self.assertEqual((self.inside["b"] / "two").read_bytes(), self.HTML)
-        with self.assertRaisesRegex(BottleError, "fixtures is a directory already"):
-            self.cp(str(self.here / "fixtures"), "b:.")
-        self.assertEqual(sorted(p.name for p in self.inside["b"].iterdir()), ["fixtures", "two"])   # no scratch left
-
-    def test_between_bottles(self) -> None:
-        self.assertEqual(self.cp("a:build/reports", "b:."), ("b:./reports", []))
-        self.assertEqual((self.inside["b"] / "reports" / "index.html").read_bytes(), self.HTML)
-        self.assertEqual(os.readlink(self.inside["b"] / "reports" / "near"), "index.html")
-        with self.assertRaisesRegex(BottleError, "couldn't copy a:nope: .*nope"):
-            self.cp("a:nope", "b:.")
-
-    def test_what_isnt_there_says_so_and_leaves_nothing(self) -> None:
-        with self.assertRaisesRegex(BottleError, "couldn't copy a:nope: .*nope"):
-            self.cp("a:nope", str(self.here))
-        with self.assertRaisesRegex(BottleError, "no such file or directory"):
-            self.cp(str(self.here / "nope"), "b:.")
-        with self.assertRaisesRegex(BottleError, "couldn't copy .* to b:missing/x: "):
-            (self.here / "f").write_text("")
-            self.cp(str(self.here / "f"), "b:missing/x")
-        self.assertEqual(list(self.inside["b"].iterdir()), [])
-
-    def test_one_side_in_a_bottle_and_not_root(self) -> None:
-        with self.assertRaisesRegex(BottleError, "name one, BOTTLE:PATH"):
-            self.cp("x", "y")
-        with self.assertRaisesRegex(BottleError, "not /"):
-            self.cp("a:/", str(self.here))
 
 
 class ListTest(BottleTestCase):
@@ -1283,8 +1168,8 @@ class StatusTest(BottleTestCase):
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
         self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "runner": "local", "features": [], "memory": "2G",
-            "ssh": {},
+            "name": "spec", "state": "stopped", "created": None, "runner": "local", "machine": b.machine,
+            "features": [], "memory": "2G", "ssh": {},
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
                         "remotes": ["work:fetch=ns/t-in,push=ns/t-out"], "objects": "/mnt/objects/workspace",
