@@ -93,7 +93,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         return reply
 
     async def test_ping(self) -> None:
-        self.assertEqual(await self.request({"op": "ping"}), {"ok": True, "code": daemon.ssh.code_hash()})
+        self.assertEqual(await self.request({"op": "ping"}), {"ok": True, "code": daemon.code_hash()})
 
     async def test_sockets_are_owner_only(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
@@ -312,7 +312,7 @@ class CurrentCodeTest(unittest.TestCase):
 
         def start_daemon():
             self.calls.append("start")
-            self.running = {"code": daemon.ssh.code_hash()}
+            self.running = {"code": daemon.code_hash()}
 
         for patcher in (mock.patch.object(daemon, "_send", side_effect=send),
                         mock.patch.object(daemon, "_start_daemon", side_effect=start_daemon),
@@ -338,7 +338,7 @@ class CurrentCodeTest(unittest.TestCase):
         self.assertEqual(self.calls, ["ping", "ping", "shutdown", "ping", "start"])
 
     def test_one_on_this_code_is_left_alone(self) -> None:
-        self.running = {"code": daemon.ssh.code_hash()}
+        self.running = {"code": daemon.code_hash()}
         daemon.bind("b", "b-m")
         self.assertEqual(self.calls, ["ping", "bind"])
 

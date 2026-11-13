@@ -7,15 +7,17 @@ run on. The code on the driver's side reaches machines only through a
 Runner, so it can't tell which runner it has.
 
 The local runner is the driver itself: krun.py (bottle-cli's machines),
-images.py and bottled, called in-process. A remote runner is the same, its
-bottle-cli run over ssh (ssh.RemoteCli): it has bottle-cli and nothing else of
-bottle's. What to build (an image's tag, its inputs and their hash) is the
+images.py and bottled, called in-process. A remote runner is
+bottle-cli's (`bottle-cli runner`), its machines this machine's bottle-cli's
+by RUNNER/NAME: it has bottle-cli and nothing else of bottle's. What to build (an image's tag, its inputs and their hash) is the
 controller's to work out, in images.py and features.py; the runner keeps the
 images it's built and builds those it's sent.
 """
 
 import hashlib
+import json
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -23,15 +25,13 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from bottle import daemon, images, krun, prereqs, repos, services
 from bottle.errors import BottleError
 from bottle.host import Served
 from bottle.store import bottle_home, read_json, write_json
 
-if TYPE_CHECKING:
-    from bottle import ssh
 
 LOCAL = "local"
 
@@ -128,7 +128,7 @@ class LocalRunner:
     """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, services are bottled's."""
 
     name = LOCAL
-    # Where bottle-cli runs for it: here.
+    # Where bottle-cli keeps its images, and makes its CAs: here.
     cli: krun.Cli = krun.LOCAL
 
     def ensure_ready(self) -> None:
@@ -142,9 +142,9 @@ class LocalRunner:
     def cpus(self) -> int:
         return os.cpu_count() or 1
 
-    def services_socket(self) -> str:
-        """Where its machines reach bottled: what their routes say."""
-        return str(daemon.services_socket())
+    def qualified(self, machine: str) -> str:
+        """`machine`, as this machine's bottle-cli names it."""
+        return machine
 
     def archive(self, tag: str) -> Path | None:
         return images.archive_of(tag, self.cli)
@@ -172,17 +172,18 @@ class LocalRunner:
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
                workdir: str | None = None, labels: dict[str, str] | None = None,
                network: dict | None = None) -> None:
-        krun.create(machine, str(archive), [krun.Mount(m.source, m.target) for m in mounts], env, memory_mib,
-                    self.cpus(), disk_gib, user, workdir, labels,
-                    services.with_socket(network, self.services_socket()) if network else None, cli=self.cli)
+        # Its routes to bottled's socket here, wherever the machine is: bottle-cli forwards them to a runner's.
+        krun.create(self.qualified(machine), str(archive), [krun.Mount(m.source, m.target) for m in mounts], env,
+                    memory_mib, self.cpus(), disk_gib, user, workdir, labels,
+                    services.with_socket(network, str(daemon.services_socket())) if network else None)
 
     def configure(self, machine: str, network: dict) -> None:
-        krun.configure(machine, services.with_socket(network, self.services_socket()), cli=self.cli)
+        krun.configure(self.qualified(machine), services.with_socket(network, str(daemon.services_socket())))
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
         daemon.bind(bottle, machine, served, features)
-        krun.start(machine, cli=self.cli)
+        krun.start(self.qualified(machine))
 
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
@@ -194,46 +195,49 @@ class LocalRunner:
         daemon.start()
 
     def stop(self, machine: str) -> None:
-        krun.stop(machine, cli=self.cli)
+        krun.stop(self.qualified(machine))
 
     def rename(self, machine: str, new: str) -> None:
-        krun.rename(machine, new, cli=self.cli)
+        krun.rename(self.qualified(machine), self.qualified(new))
 
     def running(self) -> list[str]:
-        return krun.running(cli=self.cli)
+        # Its own, not those of runners it reaches.
+        return [m for m in krun.running(cli=self.cli) if "/" not in m]
 
     def delete(self, machine: str) -> None:
-        krun.delete(machine, cli=self.cli)
+        krun.delete(self.qualified(machine))
 
     def state(self, machine: str) -> str | None:
-        return krun.state(machine, cli=self.cli)
+        return krun.state(self.qualified(machine))
 
     def exec_(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
               input: str | None = None, env: dict[str, str] | None = None) -> str:
-        return krun.exec_(machine, argv, user=user, workdir=workdir, input=input, env=env, cli=self.cli)
+        return krun.exec_(self.qualified(machine), argv, user=user, workdir=workdir, input=input, env=env)
 
     def exec_command(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
                      tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
-        return krun.exec_command(machine, argv, user=user, workdir=workdir, tty=tty, env=env, cli=self.cli)
+        return krun.exec_command(self.qualified(machine), argv, user=user, workdir=workdir, tty=tty, env=env)
 
 
 class RemoteRunner(LocalRunner):
-    """A runner elsewhere, reached over ssh: its bottle-cli run there (ssh.RemoteCli), as the local runner runs
-    this machine's; its machines' routes to a socket there that ssh forwards to bottled here (see daemon.Links);
-    a repo's objects, for its machines to mount, pushed into a bare mirror there."""
+    """A runner elsewhere: bottle-cli's (`bottle-cli runner`), its machines this machine's bottle-cli's by
+    RUNNER/NAME, its images and CAs bottle-cli's there (`bottle-cli on RUNNER`); a repo's objects, for its machines
+    to mount, pushed into a bare mirror there, over bottle-cli's ssh."""
 
-    def __init__(self, name: str, transport: "ssh.SshTransport") -> None:
-        from bottle import ssh
-
+    def __init__(self, name: str) -> None:
         self.name = name
-        self.transport = transport
-        self.cli = ssh.RemoteCli(transport)
+        self.cli = krun.RunnerCli(name)
         self._info: dict | None = None
 
     def ensure_ready(self) -> None:
-        # Its bottle-cli as this repo's sources are now, built here; what else it's missing is the controller's to ask
-        # about when the runner's added.
-        self.transport.ensure_dist()
+        # Its bottle-cli as this repo's sources are now, built here for its architecture (bottle-cli copies it
+        # there when it's another build).
+        prereqs.ensure_cli()
+        arch = check(self.name).arch
+        target = prereqs.LINUX_TARGETS.get(arch)
+        if target is None:
+            raise BottleError(f"runner {self.name} is {arch or 'unknown'}: bottle-cli is built for x86_64 and arm64")
+        prereqs.ensure_dist(target)
 
     def _host(self) -> dict:
         if self._info is None:
@@ -246,42 +250,67 @@ class RemoteRunner(LocalRunner):
     def cpus(self) -> int:
         return int(self._host()["cpus"])
 
-    def services_socket(self) -> str:
-        return self.transport.services_socket()
+    def qualified(self, machine: str) -> str:
+        return f"{self.name}/{machine}"
 
     def objects(self, repo: repos.Repo) -> Path:
         # A bare mirror of the repo there, brought up to date by a push from here: what its machines borrow
         # objects from. Fetches aren't served from it: they come here, as everything routed does.
         git_dir = repos.objects_dir(repo).parent
         there = f"{self.cli.home()}/git/{mirror_key(git_dir)}.git"
-        made = self.transport.run(f"[ -d {shlex.quote(there)} ] || git init -q --bare {shlex.quote(there)}")
+        ssh = [krun.binary(), "runner", "ssh", self.name]
+        made = subprocess.run([*ssh, f"[ -d {shlex.quote(there)} ] || git init -q --bare {shlex.quote(there)}"],
+                              capture_output=True, text=True)
         if made.returncode != 0:
-            raise BottleError(f"runner {self.name}: {made.stderr.decode(errors='replace').strip()}")
-        # Its ssh as bottle runs it, up to "--": git adds the destination and its command, and nothing else (a
-        # "simple" ssh, to git, takes no options of git's).
-        ssh_command = shlex.join(self.transport._ssh(tty=False)[:-1])
-        pushed = subprocess.run(["git", "-C", str(git_dir), "push", "--quiet", "--mirror",
-                                 f"{self.transport.destination}:{there}"], capture_output=True, text=True,
-                                env={**os.environ, "GIT_SSH_COMMAND": ssh_command, "GIT_SSH_VARIANT": "simple"})
+            raise BottleError(f"runner {self.name}: {krun._error(made.stderr)}")
+        # git runs bottle-cli's ssh, a "simple" one to it: the runner's name for a host, and git's command.
+        pushed = subprocess.run(["git", "-C", str(git_dir), "push", "--quiet", "--mirror", f"{self.name}:{there}"],
+                                capture_output=True, text=True,
+                                env={**os.environ, "GIT_SSH_COMMAND": shlex.join(ssh[:-1]),
+                                     "GIT_SSH_VARIANT": "simple"})
         if pushed.returncode != 0:
             raise BottleError(f"runner {self.name}: copying {repo.name} there failed: {pushed.stderr.strip()}")
         return Path(there) / "objects"
-
-    def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
-              features: tuple[str, ...] | list[str] = ()) -> None:
-        # The forward its routes reach bottled through, up first.
-        self.ensure_deciding()
-        super().start(machine, bottle, served, features)
-
-    def ensure_deciding(self) -> None:
-        # bottled here, and the forward its machines reach it through.
-        daemon.ensure_link(self.name)
 
 
 def mirror_key(git_dir: Path) -> str:
     """A repo's name among a runner's mirrors: its name, and a hash of where it is here."""
     name = git_dir.parent.name if git_dir.name == ".git" else git_dir.name.removesuffix(".git")
     return f"{name}-{hashlib.sha256(str(git_dir).encode()).hexdigest()[:8]}"
+
+
+@dataclass(frozen=True)
+class Check:
+    """What a machine has, of what it needs to run machines (`bottle-cli runner check`)."""
+
+    os: str
+    arch: str
+    kvm: bool
+    git: bool
+    missing: tuple[str, ...]
+
+
+def check(target: str) -> Check:
+    """What runner `target`, or the machine at ssh destination `target`, has and lacks; refused, saying so, if it
+    can't be reached."""
+    result = subprocess.run([krun.binary(), "runner", "check", target, "--json"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise BottleError(explained(krun._error(result.stderr)))
+    found = json.loads(result.stdout)
+    return Check(found["os"], found["arch"], found["kvm"], found["git"], tuple(found["missing"]))
+
+
+# What macOS says to a process it doesn't let reach the local network, whatever the network is doing.
+NO_ROUTE = "No route to host"
+LOCAL_NETWORK = ("on macOS, often the Local Network permission (System Settings > Privacy & Security > Local "
+                 "Network) of whatever started this: bottled has the permission of the process that started it")
+
+
+def explained(why: str) -> str:
+    """What ssh said, with the likeliest reason on a Mac when it's that there's no route."""
+    if NO_ROUTE in why and platform.system() == "Darwin":
+        return f"{why}; {LOCAL_NETWORK}"
+    return why
 
 
 _LOCAL = LocalRunner()
@@ -332,8 +361,6 @@ def get(name: str = LOCAL) -> Runner:
     entry = registered().get(name)
     if entry is None:
         raise BottleError(f"no runner named {name!r}; add one with `bottle runner add {name} --ssh DESTINATION`")
-    from bottle import ssh
-
     if "detached" in entry:
         # Used again: it's attached again if it's back, and if it isn't, that's what's said.
         try:
@@ -342,31 +369,33 @@ def get(name: str = LOCAL) -> Runner:
             raise BottleError(f"runner {name} is detached, and doesn't answer yet ({e}): "
                               "turn it on, then try again") from None
         print(f"bottle: runner {name} is back, and attached again", file=sys.stderr)
-    return RemoteRunner(name, ssh.SshTransport(name, entry["ssh"]))
+    return RemoteRunner(name)
 
 
-def add(name: str, destination: str) -> "ssh.Check":
-    """Add a remote runner: check it over ssh, set up bottle there, and record it.
+def add(name: str, destination: str) -> Check:
+    """Add a remote runner: check it over ssh, and have bottle-cli add it, copying itself there.
 
     What bottle can't set up itself refuses it, saying what's missing.
     bottle-cli, built here for its architecture (on a Mac, in a Linux VM: see
     xtask), is copied there before it's recorded: all a runner has of bottle.
     """
-    from bottle import ssh
-
     if name == LOCAL or not NAME_PATTERN.fullmatch(name):
         raise BottleError(f"invalid runner name {name!r}: use letters, digits, '.', '_' or '-', and not {LOCAL!r}")
     known = registered().get(name)
     if known is not None and known["ssh"] != destination:
         raise BottleError(f"runner {name} is already {known['ssh']}; `bottle runner remove {name}` first")
-    transport = ssh.SshTransport(name, destination)
-    check = transport.check()
-    missing = check.missing()
-    if missing:
-        raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(missing)}")
-    transport.ensure_dist()
-    register(name, destination)
-    return check
+    found = check(destination)
+    if found.missing:
+        raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(found.missing)}")
+    prereqs.ensure_cli()
+    target = prereqs.LINUX_TARGETS.get(found.arch)
+    if target is not None:
+        prereqs.ensure_dist(target)
+    result = subprocess.run([krun.binary(), "runner", "add", name, "--ssh", destination], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise BottleError(krun._error(result.stderr))
+    return found
 
 
 def detach(name: str, offline: bool = False, ask=None) -> list[str]:
@@ -379,7 +408,7 @@ def detach(name: str, offline: bool = False, ask=None) -> list[str]:
     if it can't be reached, or if a machine that isn't a bottle's (a build, say) still runs there: it isn't safe
     to turn off yet. `offline`: it's off already; mark it without asking it.
     """
-    from bottle import bottles, ssh
+    from bottle import bottles
 
     entry = registered().get(name)
     if name == LOCAL:
@@ -407,18 +436,17 @@ def detach(name: str, offline: bool = False, ask=None) -> list[str]:
             raise BottleError(f"runner {name} still runs {', '.join(still)}, which no bottle here stops: "
                               f"wait for it to finish, then `bottle runner detach {name}` again")
     _mark(name, {"at": time.time(), "stopped": stopped})
-    ssh.SshTransport(name, entry["ssh"]).close()
     return stopped
 
 
 def attach(name: str) -> list[str]:
     """Attach a detached runner again, once it answers; the bottles detaching it stopped, still there to start."""
-    from bottle import bottles, ssh
+    from bottle import bottles
 
     entry = registered().get(name)
     if entry is None:
         raise BottleError(f"no runner named {name!r}")
-    ssh.SshTransport(name, entry["ssh"]).check()
+    check(entry["ssh"])
     stopped = entry.get("detached", {}).get("stopped", [])
     if "detached" in entry:
         _mark(name, None)
@@ -428,7 +456,7 @@ def attach(name: str) -> list[str]:
 
 def status(names: list[str] = ()) -> list[dict]:
     """Each runner, or those named: where it is, whether it can be reached and run bottles, and its bottles."""
-    from bottle import bottles, ssh
+    from bottle import bottles
 
     on: dict[str, list[str]] = {}
     for bottle in bottles.load().values():
@@ -448,11 +476,11 @@ def status(names: list[str] = ()) -> list[dict]:
             rows.append(row | {"detached": True, "reachable": None})
             continue
         try:
-            check = ssh.SshTransport(name, row["ssh"]).check()
+            found = check(row["ssh"])
         except BottleError as e:
             rows.append(row | {"reachable": False, "error": str(e)})
             continue
-        rows.append(row | {"reachable": True, "os": check.os, "arch": check.arch, "missing": check.missing()})
+        rows.append(row | {"reachable": True, "os": found.os, "arch": found.arch, "missing": list(found.missing)})
     return rows
 
 

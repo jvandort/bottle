@@ -76,3 +76,25 @@ def krun_present() -> bool:
 
 # For tests that run real machines: they need bottle-cli and a Mac, and skip elsewhere.
 requires_krun = unittest.skipUnless(krun_present(), "needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
+
+
+_BUILT_CLI: list[Path] = []
+
+
+def built_cli() -> Path:
+    """bottle-cli, built from this repo by cargo (debug), for tests that drive the real one; skips the test where
+    cargo can't build it."""
+    import shutil
+
+    if _BUILT_CLI:
+        return _BUILT_CLI[0]
+    repo = Path(__file__).resolve().parent.parent
+    cargo = shutil.which("cargo") or str(Path.home() / ".cargo" / "bin" / "cargo")
+    if not Path(cargo).exists():
+        raise unittest.SkipTest("needs cargo, to build bottle-cli")
+    built = subprocess.run([cargo, "build", "-q", "-p", "bottle-cli"], cwd=repo, capture_output=True, text=True)
+    if built.returncode != 0:
+        raise unittest.SkipTest(f"bottle-cli didn't build: {built.stderr.strip()[-300:]}")
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or repo / "target")
+    _BUILT_CLI.append(target / "debug" / "bottle-cli")
+    return _BUILT_CLI[0]

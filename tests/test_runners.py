@@ -23,7 +23,7 @@ class LocalRunnerTest(GitTestCase):
     def test_starting_binds_its_machine_at_bottled_then_starts_it(self) -> None:
         calls = []
         with mock.patch.object(runners.daemon, "bind", side_effect=lambda *a: calls.append(("bind", *a))), \
-                mock.patch.object(runners.krun, "start", side_effect=lambda *a, cli: calls.append(("start", *a))):
+                mock.patch.object(runners.krun, "start", side_effect=lambda *a: calls.append(("start", *a))):
             runners.get().start("b-machine", "b", (), ["tools"])
         self.assertEqual(calls, [("bind", "b", "b-machine", (), ["tools"]), ("start", "b-machine")])
 
@@ -35,7 +35,7 @@ class LocalRunnerTest(GitTestCase):
         routed = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80,
                                             "socket": str(runners.daemon.services_socket())}]}
         self.assertEqual(create.call_args.args[-1], routed)
-        configure.assert_called_once_with("m", routed, cli=runners.krun.LOCAL)
+        configure.assert_called_once_with("m", routed)
 
     def test_a_machine_mounts_the_repos_own_objects(self) -> None:
         path = self.make_repo("example")
@@ -46,4 +46,23 @@ class LocalRunnerTest(GitTestCase):
             runners.get().create("m", Path("/stages/a.ext4"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                  {"A": "1"}, 512, 50)
         create.assert_called_once_with("m", "/stages/a.ext4", [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                       {"A": "1"}, 512, 12, 50, None, None, None, None, cli=runners.krun.LOCAL)
+                                       {"A": "1"}, 512, 12, 50, None, None, None, None)
+
+
+class RemoteRunnerTest(unittest.TestCase):
+    """A runner elsewhere is bottle-cli's: its machines by RUNNER/NAME, its images and CAs bottle-cli's there."""
+
+    def test_its_machines_are_named_runner_slash_name_its_images_asked_there(self) -> None:
+        box = runners.RemoteRunner("box")
+        with mock.patch.object(runners.krun, "start") as start, \
+                mock.patch.object(runners.daemon, "bind") as bind, \
+                mock.patch.object(runners.krun, "state", return_value="running") as state:
+            box.start("m", "b", (), ["tools"])
+            self.assertEqual(box.state("m"), "running")
+        bind.assert_called_once_with("b", "m", (), ["tools"])   # bottled knows it by the name its routes give
+        start.assert_called_once_with("box/m")
+        state.assert_called_once_with("box/m")
+        self.assertEqual(box.cli.command(["images", "/s", "--json"])[1:], ["on", "box", "images", "/s", "--json"])
+        command = box.exec_command("m", ["bash", "-l"], user="genie", tty=True)
+        self.assertEqual(command[1:6], ["machine", "exec", "--name", "box/m", "-t"])
+

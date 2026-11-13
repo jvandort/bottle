@@ -153,7 +153,7 @@ class Missing(BottleError):
 
 
 class Cli:
-    """Where bottle-cli runs: on this machine (LOCAL), or a runner's, over ssh (ssh.RemoteCli)."""
+    """Where bottle-cli runs: on this machine (LOCAL), or a runner's (RunnerCli)."""
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
         """The command line that runs bottle-cli with `args` there."""
@@ -179,6 +179,23 @@ class Cli:
 
 
 LOCAL = Cli()
+
+
+class RunnerCli(Cli):
+    """bottle-cli on runner `runner`, as this one runs it there (`bottle-cli on RUNNER`): what images builds
+    and keeps there. An image build sends its recipe, what it mounts and its policy with it."""
+
+    def __init__(self, runner: str) -> None:
+        self.runner = runner
+        self._home: str | None = None
+
+    def command(self, args: list[str], tty: bool | None = None) -> list[str]:
+        return [binary(), "on", self.runner, *args]
+
+    def home(self) -> str:
+        if self._home is None:
+            self._home = info(cli=self)["home"]
+        return self._home
 
 
 def _run(*args: str, input: str | None = None, cli: Cli | None = None) -> str:

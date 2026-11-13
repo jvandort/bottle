@@ -1,15 +1,17 @@
-"""A drone, end to end, with only ssh and bottle-cli faked: the controller's bottled, the link, a runner's bottled.
+"""A drone, end to end, with ssh and the runner's bottle-cli faked: bottled and this repo's bottle-cli here.
 
 The runner is this machine, in a home of its own, reached through a fake ssh
 that runs each command there and makes a forward (-R) a symlink to the
 socket here. bottle-cli there records how a machine was started; the test is
-then bottle-cli, giving the runner's bottled a connection its guest opened, as
-the machine's policy routes it.
+then bottle-cli there, giving a socket its machine's routes name a connection
+its guest opened: forwarded here, by the process bottle-cli here keeps for
+the machine, to bottled.
 """
 
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -19,27 +21,32 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, daemon, features, host, images, prereqs, repos, runners
+from bottle import bottles, daemon, features, host, images, prereqs, repos, runners, services
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
-from tests.support import GitTestCase, run
+from tests.support import GitTestCase, built_cli, run
 from tests.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
-forward=
-while [ "$1" != "--" ]; do [ "$1" = -R ] && forward=$2; shift; done
+forwards=()
+while [ "$1" != "--" ]; do [ "$1" = -R ] && forwards+=("$2"); shift; done
 shift; destination=$1; shift
-mkdir -p "$FAKE_REMOTES/$destination"
-if [ -n "$forward" ]; then ln -sfn "${forward#*:}" "${forward%%:*}"; exec sleep 3600; fi
-exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
+home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
+if [ ${#forwards[@]} -gt 0 ]; then
+  for f in "${forwards[@]}"; do ln -sfn "${f#*:}" "${f%%:*}"; done
+  exec sleep 3600
+fi
+cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$*"
 """
 
-# bottle-cli there: a machine started is recorded, with what it was given.
+# bottle-cli there: a machine started is recorded, with what it was given; every machine is running.
 FAKE_CLI = r"""#!/usr/bin/env bash
-if [ "$1 $2" = "machine start" ]; then
-  printf '{"args": "%s"}' "$*" > "$HOME/started.json"
-fi
-echo '{"state": "running"}'
+case "$1 $2" in
+  "machine start") printf '{"args": "%s"}' "$*" > "$HOME/started.json" ;;
+  "machine create"|"machine configure") cat > "$HOME/network.json" ;;
+  "info --json") printf '{"memory_mib": 4096, "cpus": 32, "home": "%s/.bottle"}' "$HOME" ;;
+  *) echo '{"state": "running"}' ;;
+esac
 """
 
 
@@ -47,7 +54,7 @@ echo '{"state": "running"}'
 STATEFUL_CLI = r"""#!/usr/bin/env bash
 # Its images: as the test wrote them. Its host, and its CAs.
 [ "$1" = images ] && exec cat "$HOME/images.listed"
-[ "$1" = info ] && { echo '{"memory_mib": 4096, "cpus": 32}'; exit 0; }
+[ "$1" = info ] && { printf '{"memory_mib": 4096, "cpus": 32, "home": "%s/.bottle"}' "$HOME"; exit 0; }
 [ "$1 $2" = "ca certificate" ] && { echo "a CA of $3's"; exit 0; }
 op="$1 $2"; shift 2
 while [ $# -gt 0 ]; do [ "$1" = --name ] && name=$2; [ "$1" = -- ] && break; shift; done
@@ -92,29 +99,56 @@ class DroneCase(GitTestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text(FAKE_CLI)
         cli.chmod(0o755)
-        # Built from these sources, as far as the controller can tell (see ssh.SshTransport.ensure_dist): not copied.
-        (cli.parent / prereqs.STAMP).write_text(prereqs.source_hash())
+        # The same build as what bottle-cli here would copy there: not copied.
+        (cli.parent / prereqs.STAMP).write_text("these sources")
+        arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
+        dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
+        dist.mkdir(parents=True)
+        (dist / prereqs.STAMP).write_text("these sources")
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)
         fake.chmod(0o755)
+        self.controller = short / "controller"
         env = mock.patch.dict(os.environ, {
-            "BOTTLE_HOME": str(short / "controller"), "BOTTLE_SSH": str(fake), "FAKE_REMOTES": str(short / "r"),
+            "BOTTLE_HOME": str(self.controller), "BOTTLE_SSH": str(fake), "FAKE_REMOTES": str(short / "r"),
+            "BOTTLE_CLI": str(built_cli()), "BOTTLE_RUNNER_DISTS": str(short / "dists"),
         })
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(self.stop_both)
+        for name in ("ensure_dist", "ensure_cli"):
+            patcher = mock.patch.object(prereqs, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         runners.register("box", "box")
 
     def stop_both(self) -> None:
-        daemon.stop()  # the controller's, and with it its forwards
+        daemon.stop()
+        # And the forwards bottle-cli keeps for machines there.
+        for pid in self.controller.glob("krun/runners/*/*/forward.pid"):
+            try:
+                os.killpg(int(pid.read_text()), signal.SIGTERM)
+            except (ProcessLookupError, ValueError):
+                pass
 
-    def guest_connects(self, machine: str, address: str, port: int, first: bytes) -> bytes:
-        """A connection from `machine`'s guest, as bottle-cli there gives it to the socket its routes name: one ssh
-        forwards to bottled on the controller."""
+    def made(self, machine: str) -> None:
+        """`machine` made on box, routed as a bottle's is (services.network)."""
+        runners.get("box").create(machine, Path("/stages/base.ext4"), [], {}, 512,
+                                  network=services.network([], []))
+
+    def guest_connects(self, machine: str, address: str, port: int, first: bytes, said: str | None = None) -> bytes:
+        """A connection from `machine`'s guest, as bottle-cli there gives it to the socket its routes name, forwarded
+        to bottled here: the machine it's from as the PROXY header says, `machine` unless `said`."""
+        forwards = json.loads((self.controller / "krun" / "runners" / "box" / machine / "forwards.json").read_text())
+        there = Path(forwards[0][0])
+        for _ in range(100):   # its forward, made in the background as it started
+            if there.exists():
+                break
+            time.sleep(0.1)
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(10)
-            s.connect(str(self.remote / ".bottle" / "services.sock"))
-            s.sendall(header(address, port, machine=machine) + first)
+            s.connect(str(there))
+            s.sendall(header(address, port, machine=said or machine) + first)
             answer = b""
             while chunk := s.recv(65536):
                 answer += chunk
@@ -139,12 +173,14 @@ class DroneTest(DroneCase):
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))
         new = self.commit(upstream, "since the controller last fetched")
-        box.start("bottle-b", "b", (Served(repo / ".git", remotes, "workspace"),), ())
+        machine = bottles.get("b").machine
+        self.made(machine)
+        box.start(machine, "b", (Served(repo / ".git", remotes, "workspace"),), ())
 
         started = json.loads((self.remote / "started.json").read_text())
-        self.assertEqual(started["args"], "machine start --name bottle-b")   # nothing else: its policy is its own
+        self.assertEqual(started["args"], f"machine start --name {machine}")   # nothing else: its policy is its own
         request = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
-        answer = self.guest_connects("bottle-b", host.ADDRESS, 80, request)
+        answer = self.guest_connects(machine, host.ADDRESS, 80, request)
         self.assertIn(b"HTTP/1.1 200", answer)
         # The controller fetched origin into the hub, and served it, through the forward.
         self.assertIn(f"{new} refs/heads/main".encode(), answer)
@@ -166,9 +202,10 @@ class DroneTest(DroneCase):
         self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.ext4"))
         machine = self.remote / "machines" / bottle.machine
         self.assertEqual(machine.read_text().strip(), "running")
-        # Its routes, to the socket there that's forwarded here.
+        # Its routes, to a socket of its own there, forwarded here.
         network = json.loads((self.remote / "machines" / f"{bottle.machine}.network").read_text())
-        self.assertEqual({r["socket"] for r in network["routes"]}, {str(self.remote / ".bottle" / "services.sock")})
+        [there] = {r["socket"] for r in network["routes"]}
+        self.assertTrue(there.startswith(str(self.remote / ".bottle" / "routes")), there)
         mirror = self.remote / ".bottle" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))
@@ -193,6 +230,7 @@ class DroneTest(DroneCase):
         box = runners.get("box")
         box.objects(repos.Repo("repo", repo))
         machine = bottles.get("b").machine   # as bottled, restarted, binds it again
+        self.made(machine)
         box.start(machine, "b", bottles.served(bottles.get("b")), ())
         fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         self.assertIn(b"HTTP/1.1 200", self.guest_connects(machine, host.ADDRESS, 80, fetch))
@@ -218,9 +256,10 @@ class DroneTest(DroneCase):
         self.assertIn(b"HTTP/1.1 200", self.guest_connects(machine, host.ADDRESS, 80, push))
 
     def test_what_a_machine_no_bottle_is_routes_gets_nothing_there(self) -> None:
+        self.made("bottle-b")
         runners.get("box").start("bottle-b", "b", (), ())
         fetch = b"GET /git/workspace/origin/info/refs HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
-        self.assertEqual(self.guest_connects("stranger", host.ADDRESS, 80, fetch), b"")
+        self.assertEqual(self.guest_connects("bottle-b", host.ADDRESS, 80, fetch, said="stranger"), b"")
 
 
 class DetachTest(DroneCase):
