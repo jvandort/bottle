@@ -26,10 +26,11 @@
 
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
 
 use bottle_disk::Archive;
 use bottle_disk::build::{Launch, Mount, Recipe, Store, Vm, wait_for_agent};
@@ -358,6 +359,39 @@ struct Booted {
     child: Child,
     socket: PathBuf,
     console: PathBuf,
+    /// What its boot says, passed on but for each cached request's line, counted instead.
+    said: Option<thread::JoinHandle<Downloads>>,
+}
+
+/// A build's requests to the hosts it caches, by what became of them (see agent-client's cache).
+#[derive(Default)]
+struct Downloads {
+    kept: usize,
+    hit: usize,
+    other: usize,
+}
+
+/// Passes on what a build's VM's boot says, to this process's stderr, but for the line each request to a
+/// cached host makes: a build's output is its steps', and those are counted, for one line at its end.
+fn relay(stderr: impl Read) -> Downloads {
+    let mut downloads = Downloads::default();
+    for line in io::BufReader::new(stderr).lines().map_while(Result::ok) {
+        // "bottle-cli: GET https://host/path stored 200"
+        let words: Vec<&str> = line.split(' ').collect();
+        match words.as_slice() {
+            ["bottle-cli:", method, _, outcome, _]
+                if method.chars().all(|c| c.is_ascii_uppercase()) =>
+            {
+                match *outcome {
+                    "stored" => downloads.kept += 1,
+                    "hit" => downloads.hit += 1,
+                    _ => downloads.other += 1,
+                }
+            }
+            _ => eprintln!("{line}"),
+        }
+    }
+    downloads
 }
 
 impl Launch for Boot {
@@ -397,11 +431,18 @@ impl Launch for Boot {
             .args(["--cpus", CPUS, "--mem", MEM_MIB, "--console"])
             .arg(&console)
             .stdin(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
+        let mut child = child;
+        let said = child
+            .stderr
+            .take()
+            .map(|stderr| thread::spawn(move || relay(stderr)));
         let mut booted = Booted {
             child,
             socket,
             console,
+            said,
         };
         let socket = booted.socket.clone();
         // Dropped if it doesn't answer: killed.
@@ -431,6 +472,14 @@ impl Vm for Booted {
 
     fn wait(mut self: Box<Self>) -> io::Result<()> {
         let status = self.child.wait()?;
+        if let Some(Ok(d)) = self.said.take().map(|t| t.join())
+            && d.kept + d.hit + d.other > 0
+        {
+            eprintln!(
+                "bottle-cli: cached hosts: {} answered from the cache, {} kept, {} passed on",
+                d.hit, d.kept, d.other
+            );
+        }
         if status.success() {
             Ok(())
         } else {
@@ -445,5 +494,20 @@ impl Drop for Booted {
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.socket);
         let _ = fs::remove_file(&self.console);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_builds_vm_says_what_it_would_but_each_cached_request_is_counted() {
+        let said = "bottle-cli: GET http://deb.example/a.deb stored 200\n\
+                    bottle-cli: GET https://deb.example/b.deb hit 200\n\
+                    bottle-cli: GET http://deb.example/InRelease passed 200\n\
+                    bottle-cli: refused 10.0.0.1:80: not allowed\n";
+        let d = relay(said.as_bytes());
+        assert_eq!((d.kept, d.hit, d.other), (1, 1, 1));
     }
 }

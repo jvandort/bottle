@@ -347,9 +347,15 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             .unwrap_or(1);
         krun::krun_set_log_level(level);
         let ctx = check("creating libkrun's context", krun::krun_create_ctx())? as u32;
+        // No more than the hypervisor gives a VM (HVF's own limit on a Mac; KVM's on Linux).
+        let most = krun::krun_get_max_vcpus();
+        let cpus = match u8::try_from(most) {
+            Ok(most) if most > 0 && args.cpus > most => most,
+            _ => args.cpus,
+        };
         check(
             "setting cpus and memory",
-            krun::krun_set_vm_config(ctx, args.cpus, args.mem_mib),
+            krun::krun_set_vm_config(ctx, cpus, args.mem_mib),
         )?;
         // Memory the guest frees goes back to the host, really, on macOS too.
         check(

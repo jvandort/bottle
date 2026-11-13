@@ -423,7 +423,8 @@ fn create(args: &[String]) -> io::Result<()> {
         match arg.as_str() {
             "--name" => name = Some(value()?),
             "--image" => image = Some(PathBuf::from(value()?)),
-            "--cpus" => config.cpus = number(value()?)? as u8,
+            // As many as the hypervisor has for it, at most: boot sees to that.
+            "--cpus" => config.cpus = number(value()?).map(|n: u64| n.min(255) as u8)?,
             "--mem" => config.mem_mib = number(value()?)? as u32,
             "--storage" => config.storage_gib = number(value()?)?,
             "-e" => {

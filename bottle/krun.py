@@ -41,10 +41,6 @@ def dist() -> Path:
     return REPO / "target" / "dist"
 
 
-# A machine's caps. vCPUs cost nothing idle; memory is committed as the guest touches it.
-MAX_CPUS = 16
-
-
 # --- machines -------------------------------------------------------------------
 
 
@@ -61,7 +57,7 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
     None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
     `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
     `network`, the policy every connection it makes is decided by (services.network), kept with it."""
-    args = ["machine", "create", "--name", name, "--image", image, "--cpus", str(min(cpus, MAX_CPUS)),
+    args = ["machine", "create", "--name", name, "--image", image, "--cpus", str(cpus),
             *(["--mem", str(memory_mib)] if memory_mib else []), *(["--storage", str(disk_gib)] if disk_gib else []),
             *(["--user", user] if user else []), *(["--workdir", workdir] if workdir else [])]
     for key, value in (labels or {}).items():
