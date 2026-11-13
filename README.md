@@ -116,9 +116,12 @@ bottle-cli has (`folio configure --runner RUNNER`).
   it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
   can't set up itself, and copies bottle-cli's distribution for the
-  machine's architecture over, built here (see above): in a checkout,
-  whenever bottle-cli's sources change, it's built (`bin/bottle-build TARGET`) and
-  copied again before the runner's next use.
+  machine's architecture over, built here (see above). Before each use of
+  the runner, what differs of it is copied again, file by file: each file's
+  sha256, from the manifest the build wrote beside it, against what the
+  runner's `sha256sum` says of its copy, and only the files that differ are
+  sent; in a checkout, it's built first if its sources have changed
+  (`bin/bottle-build TARGET`).
 - **`bottle runner ls`** lists them; **`bottle runner check RUNNER`** says
   what one is and lacks.
 - **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:

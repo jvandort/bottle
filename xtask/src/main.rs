@@ -24,6 +24,8 @@
 //! Incremental: cargo builds what's changed, and a file of the distribution is copied (and on a Mac
 //! signed) only when what it's copied from has. One build of a distribution at a time: another
 //! waits for it. Whether one is needed at all, without starting cargo, is bin/bottle-build's.
+//! Every distribution has a manifest of its files (MANIFEST): each one's sha256 and name, as
+//! sha256sum writes them, which is what a runner's copy is compared with (bottle-cli's runner.rs).
 
 mod builder;
 
@@ -128,8 +130,30 @@ fn dist(target: Option<String>, out: Option<PathBuf>) -> Result<()> {
     } else {
         linux_dist(arch, &target, &out)?;
     }
+    manifest(&out)?;
     eprintln!("xtask: {}", out.display());
     Ok(())
+}
+
+/// Beside a distribution's files: each one's sha256 and name, as sha256sum writes them.
+const MANIFEST: &str = ".files";
+
+/// Writes `out`'s manifest (MANIFEST): every file in it but those whose names start with a dot,
+/// by name.
+fn manifest(out: &Path) -> Result<()> {
+    let mut names: Vec<String> = fs::read_dir(out)
+        .map_err(|e| format!("{}: {e}", out.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+    let mut listed = String::new();
+    for name in names {
+        listed += &format!("{}  {name}\n", digest(&out.join(&name))?);
+    }
+    fs::write(out.join(MANIFEST), listed).map_err(|e| format!("{}: {e}", out.display()))
 }
 
 /// The agent, a static Linux build for `arch`, the VMs' architecture.

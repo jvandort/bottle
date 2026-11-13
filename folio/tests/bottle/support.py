@@ -121,3 +121,12 @@ def stop_bottle(name: str) -> None:
     if runner.state(bottle.machine) == "running":
         runner.stop(bottle.machine)
     daemon.release_egress(bottle.name)
+
+
+def manifest(dist: "Path") -> None:
+    """A distribution's manifest, as xtask writes it: each file's sha256 and name, as sha256sum writes them."""
+    import hashlib
+
+    names = sorted(p.name for p in dist.iterdir() if p.is_file() and not p.name.startswith("."))
+    (dist / ".files").write_text("".join(f"{hashlib.sha256((dist / n).read_bytes()).hexdigest()}  {n}\n"
+                                         for n in names))

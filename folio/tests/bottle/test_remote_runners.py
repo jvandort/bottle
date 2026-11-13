@@ -7,7 +7,7 @@ from unittest import mock
 
 from folio.bottle import images, runners
 from folio.bottle.errors import BottleError
-from tests.bottle.support import GitTestCase, built_cli, register_runner
+from tests.bottle.support import GitTestCase, built_cli, manifest, register_runner
 
 # ssh, as far as bottle-cli uses it: options up to --, the destination, and a command for its shell, run here as
 # if at the destination, in a home of its own. "down" can't be reached. The destination is Linux, on what this
@@ -55,7 +55,7 @@ class RemoteRunnerTestCase(GitTestCase):
         self.dist.mkdir(parents=True)
         (self.dist / "bottle-cli").write_text(FAKE_CLI)
         (self.dist / "bottle-cli").chmod(0o755)
-        (self.dist / ".sources").write_text("these sources")
+        manifest(self.dist)
         env = mock.patch.dict(os.environ, {
             "BOTTLE_CLI": str(cli), "BOTTLE_SSH": str(short / "ssh"), "BOTTLE_RUNNER_DISTS": str(short / "dists"),
             "FAKE_SSH_LOG": str(self.log), "FAKE_REMOTES": str(self.remotes), "FAKE_KVM": str(self.kvm),

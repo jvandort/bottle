@@ -64,7 +64,7 @@ impl Fixture {
         let dist = dir.join(format!("dists/dist-{}-unknown-linux-musl", arch.trim()));
         fs::create_dir_all(&dist).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_bottle-cli"), dist.join("bottle-cli")).unwrap();
-        fs::write(dist.join(".sources"), "these sources").unwrap();
+        manifest(&dist);
         // An image: a store's stage, of nothing, which the stand-in boot never mounts.
         fs::create_dir_all(dir.join("store")).unwrap();
         fs::write(dir.join("store/s.ext4"), "").unwrap();
@@ -121,6 +121,18 @@ impl Drop for Fixture {
     }
 }
 
+/// A distribution's manifest, as xtask writes it: sha256sum's, of its files.
+fn manifest(dist: &Path) {
+    let listed = Command::new("sh")
+        .arg("-c")
+        .arg("sha256sum -- *")
+        .current_dir(dist)
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    fs::write(dist.join(".files"), listed.stdout).unwrap();
+}
+
 /// bottle-agent, built here.
 fn agent() -> PathBuf {
     let profile = Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
@@ -150,6 +162,35 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
     f.ok(&["runner", "add", "box", "--ssh", "box"]);
     assert!(f.there().join(".bottle/dist/bottle-cli").exists());
     assert!(f.ok(&["runner", "ls"]).starts_with("box  box"));
+    // Copied again only what's changed, file by file; nothing, when nothing has.
+    let dist = fs::read_dir(f.dir.join("dists"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let copied = |out: &Output| String::from_utf8_lossy(&out.stderr).contains("copying");
+    assert!(!copied(&f.cli(&["on", "box", "info", "--json"])));
+    fs::write(dist.join("kernel"), "a kernel").unwrap();
+    manifest(&dist);
+    let out = f.cli(&["on", "box", "info", "--json"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("copying kernel to runner box"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(f.there().join(".bottle/dist/kernel")).unwrap(),
+        "a kernel"
+    );
+    assert!(f.there().join(".bottle/dist/bottle-cli").exists());
+    fs::remove_file(dist.join("kernel")).unwrap();
+    manifest(&dist);
+    f.ok(&["on", "box", "info", "--json"]);
+    assert!(
+        !f.there().join(".bottle/dist/kernel").exists(),
+        "gone here, gone there"
+    );
     let checked: serde_json::Value =
         serde_json::from_str(&f.ok(&["runner", "check", "box", "--json"])).unwrap();
     assert_eq!(

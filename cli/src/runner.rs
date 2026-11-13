@@ -64,8 +64,9 @@ const CONNECT_TIMEOUT: u32 = 10;
 const MAX_CONTROL_PATH: usize = 80;
 /// Where a runner has this program, under its home.
 pub const DIST: &str = ".bottle/dist";
-/// What a distribution was built from, as the dev shim stamps it (bin/bottle-build).
-const STAMP: &str = ".sources";
+/// Beside a distribution's files, as xtask writes it: each one's sha256 and name, as sha256sum
+/// writes them.
+const MANIFEST: &str = ".files";
 
 /// $BOTTLE_HOME, else ~/.bottle.
 pub fn home() -> PathBuf {
@@ -136,6 +137,14 @@ fn other(message: impl Into<String>) -> io::Error {
 /// `machine` as a runner's: `RUNNER/NAME`, else None (this machine's).
 pub fn split(machine: &str) -> Option<(&str, &str)> {
     machine.split_once('/')
+}
+
+/// sha256sum's lines (a sha256, two spaces, a name), by name.
+fn sums<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+    lines
+        .filter_map(|line| line.split_once("  "))
+        .map(|(sum, name)| (name.to_string(), sum.to_string()))
+        .collect()
 }
 
 /// `s` quoted for a POSIX shell.
@@ -291,17 +300,18 @@ impl Runner {
         Ok(home)
     }
 
-    /// This program there, the build for its architecture beside this one's: copied over, whole,
-    /// if it isn't the same build.
+    /// This program there, the build for its architecture beside this one's: what differs of it
+    /// copied over, file by file, by each file's sha256: this distribution's manifest (MANIFEST)
+    /// against what sha256sum says of the runner's copy.
     pub fn ensure_dist(&self) -> io::Result<()> {
         let found = self.run(
-            &format!(r#"uname -m; cat "$HOME/{DIST}/{STAMP}" 2>/dev/null"#),
+            &format!(r#"uname -m; cd "$HOME/{DIST}" 2>/dev/null && sha256sum -- * 2>/dev/null"#),
             None,
         )?;
         let found = String::from_utf8_lossy(&found.stdout).into_owned();
         let mut lines = found.lines();
         let arch = lines.next().unwrap_or_default().to_string();
-        let theirs = lines.next().unwrap_or_default().to_string();
+        let theirs = sums(lines);
         let target = match arch.as_str() {
             "x86_64" => "x86_64-unknown-linux-musl",
             "aarch64" => "aarch64-unknown-linux-musl",
@@ -334,31 +344,72 @@ impl Runner {
                 return Err(other(format!("building bottle-cli for {target} failed")));
             }
         }
-        let ours = fs::read_to_string(dist.join(STAMP)).map_err(|_| {
-            other(format!(
-                "no bottle-cli for {target} at {} (cargo xtask dist --target {target})",
-                dist.display()
-            ))
-        })?;
-        if ours.trim() == theirs.trim() {
+        let ours = fs::read_to_string(dist.join(MANIFEST))
+            .map(|listed| sums(listed.lines()))
+            .map_err(|_| {
+                other(format!(
+                    "no bottle-cli for {target} at {} (cargo xtask dist --target {target})",
+                    dist.display()
+                ))
+            })?;
+        let changed: Vec<&String> = ours
+            .iter()
+            .filter(|(name, sum)| theirs.get(*name) != Some(sum))
+            .map(|(name, _)| name)
+            .collect();
+        let gone: Vec<&String> = theirs.keys().filter(|n| !ours.contains_key(*n)).collect();
+        if changed.is_empty() && gone.is_empty() {
             return Ok(());
         }
-        eprintln!("bottle-cli: copying bottle-cli to runner {}...", self.name);
-        let tar = Command::new("tar")
-            .args(["-czf", "-", "-C"])
-            .arg(&dist)
-            .arg(".")
-            .output()?;
-        if !tar.status.success() {
-            return Err(other(format!("tar of {} failed", dist.display())));
+        let names = |names: &[&String]| {
+            names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut sent = Vec::new();
+        if changed.is_empty() {
+            eprintln!(
+                "bottle-cli: removing {} from runner {}...",
+                names(&gone),
+                self.name
+            );
+        } else {
+            eprintln!(
+                "bottle-cli: copying {} to runner {}...",
+                names(&changed),
+                self.name
+            );
+            let tar = Command::new("tar")
+                .args(["-czf", "-", "-C"])
+                .arg(&dist)
+                .arg("--")
+                .args(&changed)
+                .output()?;
+            if !tar.status.success() {
+                return Err(other(format!("tar of {} failed", dist.display())));
+            }
+            sent = tar.stdout;
         }
+        // What's changed, over a copy of what's there, with what's gone gone; then that, whole, in
+        // its place: it's never half of one build and half of another.
         let there = format!(r#""$HOME/{DIST}""#);
+        let gone: Vec<String> = gone.iter().map(|n| quote(n)).collect();
         let copied = self.run(
             &format!(
                 "set -e; rm -rf {there}.partial; mkdir -p {there}.partial; \
-                 tar -xzf - -C {there}.partial; rm -rf {there}; mv {there}.partial {there}"
+                 if [ -d {there} ]; then cp -pR {there}/. {there}.partial/; fi; \
+                 {unpack} cd {there}.partial; rm -f .sources {gone}; cd ..; \
+                 rm -rf {there}; mv {there}.partial {there}",
+                unpack = if sent.is_empty() {
+                    String::new()
+                } else {
+                    format!("tar -xzf - -C {there}.partial;")
+                },
+                gone = gone.join(" ")
             ),
-            Some(&tar.stdout),
+            Some(&sent),
         )?;
         if !copied.status.success() {
             return Err(other(format!(

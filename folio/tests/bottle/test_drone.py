@@ -22,7 +22,7 @@ from unittest import mock
 from folio.bottle import bottles, daemon, features, host, images, repos, runners, services
 from folio.bottle.host import Remote, Served
 from folio.bottle.errors import BottleError
-from tests.bottle.support import GitTestCase, built_cli, register_runner, run, stop_bottle, thread_dir, write_bottles
+from tests.bottle.support import GitTestCase, built_cli, manifest, register_runner, run, stop_bottle, thread_dir, write_bottles
 from tests.bottle.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -97,14 +97,10 @@ class DroneCase(GitTestCase):
         self.remote = short / "r" / "box"
         cli = self.remote / ".bottle" / "dist" / "bottle-cli"
         cli.parent.mkdir(parents=True)
-        cli.write_text(FAKE_CLI)
-        cli.chmod(0o755)
-        # The same build as what bottle-cli here would copy there: not copied.
-        (cli.parent / ".sources").write_text("these sources")
         arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
-        dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
-        dist.mkdir(parents=True)
-        (dist / ".sources").write_text("these sources")
+        self.dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
+        self.dist.mkdir(parents=True)
+        self.runner_cli(FAKE_CLI)
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)
         fake.chmod(0o755)
@@ -117,6 +113,14 @@ class DroneCase(GitTestCase):
         self.addCleanup(env.stop)
         self.addCleanup(self.stop_both)
         register_runner("box", "box")
+
+    def runner_cli(self, script: str) -> None:
+        """bottle-cli there `script`, and here the same build of it, for there: not copied."""
+        for cli in (self.remote / ".bottle" / "dist" / "bottle-cli", self.dist / "bottle-cli"):
+            cli.parent.mkdir(parents=True, exist_ok=True)
+            cli.write_text(script)
+            cli.chmod(0o755)
+        manifest(self.dist)
 
     def stop_both(self) -> None:
         daemon.stop()
@@ -183,7 +187,7 @@ class DroneTest(DroneCase):
         self.assertIn(f"{new} refs/heads/main".encode(), answer)
 
     def test_bottle_new_on_a_runner_makes_a_drone_there(self) -> None:
-        (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
+        self.runner_cli(STATEFUL_CLI)
         # Its base image built there already, from what it's built from now.
         store = self.remote / ".bottle" / "stages"
         store.mkdir(parents=True)
@@ -267,7 +271,7 @@ class DetachTest(DroneCase):
 
     def setUp(self) -> None:
         super().setUp()
-        (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
+        self.runner_cli(STATEFUL_CLI)
         self.machines = self.remote / "machines"
         self.machines.mkdir()
         write_bottles({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box", machine_name=f"bottle-{name}")
