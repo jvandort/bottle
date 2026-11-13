@@ -1176,3 +1176,80 @@ mod tests {
         assert_eq!(at("http://c.example/z"), None);
     }
 }
+
+/// Against the internet: `cargo test -p bottle-agent-client -- --ignored`.
+#[cfg(test)]
+mod online {
+    use super::*;
+    use crate::ca::{certificate, in_home};
+
+    #[test]
+    #[ignore]
+    fn debians_release_file_is_fetched_kept_and_answered_from_the_store() {
+        in_home(|home| {
+            let ctx = Arc::new(Context::new(Some("m1".into())));
+            let rule = Cached {
+                host: "deb.debian.org".into(),
+                exclude: vec![],
+                include: vec![],
+                ports: vec![443],
+                immutable: false,
+            };
+            let pem = certificate("m1", &["deb.debian.org".to_string()])
+                .unwrap()
+                .unwrap();
+            let path = "/debian/pool/main/h/hello/hello_2.10-3_amd64.deb";
+            for _ in 0..2 {
+                let (guest, host) = UnixStream::pair().unwrap();
+                let (ctx, rule) = (Arc::clone(&ctx), rule.clone());
+                let served = std::thread::spawn(move || {
+                    let public = |h: &str| {
+                        use std::net::ToSocketAddrs;
+                        (h, 443).to_socket_addrs().map_or(vec![], |a| {
+                            a.map(|a| a.ip()).filter(IpAddr::is_ipv4).collect()
+                        })
+                    };
+                    serve(
+                        host,
+                        Vec::new(),
+                        "deb.debian.org",
+                        &rule,
+                        false,
+                        &ctx,
+                        &public,
+                    )
+                });
+                let mut roots = RootCertStore::empty();
+                roots
+                    .add(rustls::pki_types::pem::PemObject::from_pem_slice(pem.as_bytes()).unwrap())
+                    .unwrap();
+                let config = ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                let tls =
+                    ClientConnection::new(Arc::new(config), "deb.debian.org".try_into().unwrap())
+                        .unwrap();
+                let mut bottle = StreamOwned::new(tls, guest);
+                write!(
+                    bottle,
+                    "GET {path} HTTP/1.1\r\nHost: deb.debian.org\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut response = Vec::new();
+                let _ = bottle.read_to_end(&mut response);
+                let head_end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                assert!(
+                    response.starts_with(b"HTTP/1.1 200"),
+                    "{}",
+                    String::from_utf8_lossy(&response[..head_end])
+                );
+                // A .deb: an ar archive.
+                assert!(response[head_end..].starts_with(b"!<arch>\n"));
+                served.join().unwrap().unwrap();
+            }
+            let kept =
+                std::fs::read(home.join(format!("cache/http/deb.debian.org{path}"))).unwrap();
+            assert!(kept.starts_with(b"!<arch>\n"));
+        });
+    }
+}
