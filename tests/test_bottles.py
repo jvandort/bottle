@@ -145,7 +145,6 @@ class FakeSmolvm:
             mock.patch.object(bottles.daemon, "stop", self.daemon_stop),
             mock.patch.object(bottles.runners.prereqs, "ensure_cli"),
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
-            mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
             mock.patch.object(bottles.cache, "cached_for",
                               side_effect=lambda specs: [bottles.cache.Cached("deb.debian.org", ports=(80,))]),
             mock.patch.object(bottles.auth, "credential_destinations",
@@ -781,10 +780,6 @@ class DroneCertificatesTest(BottleTestCase):
         self.assertIn(bottles.CACHE_CERTIFICATE, cache_script)
         self.assertEqual((ours, theirs), (None, "the runner's CA's certificate"))
 
-    def test_delete_forgets_its_runners_ca_too(self) -> None:
-        self.box.state.return_value = None
-        bottles.delete("there")
-        self.box.forget_certificates.assert_called_once_with("there")
 
 
 class ExecTest(BottleTestCase):

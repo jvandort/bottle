@@ -97,10 +97,6 @@ class Runner(Protocol):
         """The certificate of the caching CA the runner's bottle-cli answers `machine`'s cached https `hosts`
         behind, made if missing; None if there are no hosts. bottle-cli deletes it with the machine."""
 
-    def forget_certificates(self, bottle: str) -> None:
-        """Delete the CA bottled on the runner kept for `bottle` before bottle-cli answered its cached hosts,
-        if it has one."""
-
     def ensure_deciding(self) -> None:
         """bottled up there, for what bottles still running route to it: it binds them again as it starts."""
 
@@ -183,9 +179,6 @@ class LocalRunner:
 
     def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
         return krun.ca_certificate(machine, hosts)
-
-    def forget_certificates(self, bottle: str) -> None:
-        pass
 
     def ensure_deciding(self) -> None:
         daemon.start()
@@ -318,9 +311,6 @@ class RemoteRunner:
 
     def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
         return self._call("cache_ca", machine=machine, hosts=hosts)
-
-    def forget_certificates(self, bottle: str) -> None:
-        self._call("forget_ca", bottle=bottle)
 
     def ensure_deciding(self) -> None:
         self.transport.link()

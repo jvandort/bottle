@@ -150,10 +150,9 @@ class InjectedCredentialTest(unittest.TestCase):
         with mock.patch.object(auth, "get", return_value=None):
             self.assertEqual(auth.injections_for(self.specs), [])
 
-    def test_the_ca_is_for_credentials_hosts_and_cached_ones(self) -> None:
-        with mock.patch.object(auth.cache, "cached_for", return_value=[auth.cache.Cached("files.example.com")]):
-            hosts = auth.intercepted_hosts(self.specs)
-        self.assertEqual(hosts, ["ci.corp.example.com", "files.example.com"])
+    def test_its_machine_routes_its_credentials_hosts_and_ports_logged_in_or_not(self) -> None:
+        with mock.patch.object(auth, "get", return_value=None):
+            self.assertEqual(auth.credential_destinations(self.specs), [("ci.corp.example.com", 443)])
 
     def test_one_host_belongs_to_one_credential(self) -> None:
         claimed = features.Credential(
@@ -203,7 +202,7 @@ class PropertiesTest(unittest.TestCase):
             injections = auth.injections_for(specs)
         self.assertEqual([(i.host, i.value) for i in injections],
                          [("ge.example.com", "Bearer ge-key"), ("dv.corp.example.com", "Bearer dv-key")])
-        self.assertEqual(auth.intercepted_hosts(specs), ["dv.corp.example.com", "ge.example.com"])
+        self.assertEqual(auth.credential_destinations(specs), [("dv.corp.example.com", 443), ("ge.example.com", 443)])
 
     def test_a_host_with_no_line_falls_back_to_the_keychain(self) -> None:
         specs = [f"develocity:server=https://new.example.com,keyFile={self.keys}"]

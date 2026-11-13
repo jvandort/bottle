@@ -72,7 +72,7 @@ def install_script(repositories: list[tuple[str, Repository]], packages: list[st
     Each repository's key goes in /etc/apt/keyrings, by the name of its file,
     and its sources in /etc/apt/sources.list.d, signed by it. A build's https
     repositories are answered by bottle-cli from its cache, behind a certificate
-    from the caching CA builds have (ca.BUILDS), in $BOTTLE_BUILD_CA: apt trusts it for
+    from the caching CA builds have (images.BUILDS_CA), in $BOTTLE_BUILD_CA: apt trusts it for
     their hosts alone, from a file in /run, and nothing of it stays in the image.
     """
     lines = ["set -eu"]

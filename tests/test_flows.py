@@ -3,13 +3,12 @@ import dataclasses
 import ssl
 import subprocess
 import tempfile
-import functools
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import ca, egress, host
-from bottle.egress import CREDENTIAL, GIT, OPENING, SSH, Direct, Flow, Gateway, Policy, Redirect, Refused
+from bottle import egress, host
+from bottle.egress import CREDENTIAL, GIT, SSH, Direct, Flow, Gateway, Policy, Redirect, Refused
 from tests.support import client_hello
 from tests.test_egress import LoopbackPolicy, Upstream, fake_resolve
 
@@ -70,7 +69,7 @@ class DecideTest(unittest.IsolatedAsyncioTestCase):
 
         self.proxy = Gateway(
             "t", Policy(allow_private=("*.corp.test",)), resolve, services=object(),
-            injections=(self.injection,), certificates=lambda name: None,
+            injections=(self.injection,),
         )
 
     async def decide(self, address: str, port: int = 443, name: str | None = None):
@@ -81,19 +80,6 @@ class DecideTest(unittest.IsolatedAsyncioTestCase):
     async def refused(self, *args, **kwargs) -> None:
         with self.assertRaises(Refused):
             await self.decide(*args, **kwargs)
-
-    async def test_a_clienthello_not_all_shown_is_read_by_bottled_on_a_credentials_port(self) -> None:
-        hello = client_hello("api.test")
-        for first in (b"", hello[:10]):
-            with self.subTest(first=first):
-                self.assertEqual(await self.proxy.decide(Flow("93.184.216.34", 443, first)), Redirect(OPENING))
-        # Once bottled has read what it's going to, it decides on that.
-        self.assertEqual(await self.proxy.decide(Flow("93.184.216.34", 443, b""), opening_read=True),
-                         Direct(("93.184.216.34",)))
-        # No credential uses the port, or the address is the host's own: nothing to wait for.
-        self.assertEqual(await self.proxy.decide(Flow("93.184.216.34", 8443, b"")), Direct(("93.184.216.34",)))
-        with self.assertRaises(Refused):
-            await self.proxy.decide(Flow("127.0.0.1", 443, b""))
 
     async def test_a_public_address_goes_direct(self) -> None:
         self.assertEqual(await self.decide("93.184.216.34"), Direct(("93.184.216.34",)))
@@ -177,20 +163,13 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch.object(egress, "_tls_context", lambda: trusting)
         patcher.start()
         self.addCleanup(patcher.stop)
-        home = mock.patch.dict("os.environ", {"BOTTLE_HOME": str(Path(tmp.name) / "home")})
-        home.start()
-        self.addCleanup(home.stop)
-        self.bottle_trusts = ssl.create_default_context(cadata=ca.certificate("test", ("upstream.test",)))
 
         self.services = FakeServices()
         injection = egress.Injection(
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
             standin="stand-in", credential="real-token",
         )
-        self.proxy = Gateway(
-            "test", LoopbackPolicy(), fake_resolve, services=self.services, injections=(injection,),
-            certificates=functools.partial(ca.server_context, "test", ("upstream.test",)),
-        )
+        self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=(injection,))
         self.decisions = []
         decider = await asyncio.start_server(self.decider, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, decider)
@@ -205,7 +184,7 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         """As services.py serves what a machine routes to bottled: its TLS taken off by bottle-cli, its name said."""
         address, port = self.connected_to
         flow = Flow(address, port, name="upstream.test", unwrapped=True)
-        decision = await self.proxy.decide(flow, opening_read=True)
+        decision = await self.proxy.decide(flow)
         self.decisions.append(decision)
         await self.proxy.serve(flow, decision, reader, writer)
 
@@ -218,32 +197,9 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         self.decisions.append(decision)
         await self.proxy.serve(flow, decision, reader, writer)
 
-    async def connect(self, address: str, port: int, first_size: int = 64 * 1024, tls: bool = False):
+    async def connect(self, address: str, port: int, first_size: int = 64 * 1024):
         self.connected_to, self.first_size = (address, port), first_size
-        if tls:
-            return await asyncio.open_connection(
-                "127.0.0.1", self.decider_port, ssl=self.bottle_trusts, server_hostname="upstream.test")
         return await asyncio.open_connection("127.0.0.1", self.decider_port)
-
-    async def test_a_credentials_host_is_served_over_tls_begun_in_the_first_bytes(self) -> None:
-        # The bottle connected to some address; the credential goes to upstream.test's own.
-        reader, writer = await self.connect("203.0.113.5", self.upstream_port, tls=True)
-        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-        response = await asyncio.wait_for(reader.read(), 5)
-        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
-        self.assertTrue(response.endswith(b"hello"))
-        self.assertIn("Authorization: Bearer real-token", head)
-        self.assertNotIn("stand-in", head)
-        self.assertEqual(self.decisions[0].service, CREDENTIAL)
-
-    async def test_a_credentials_flow_refused_before_its_tls_gets_no_plaintext_answer(self) -> None:
-        def no_certificate(name):
-            raise RuntimeError("no CA")
-
-        self.proxy.certificates = no_certificate
-        reader, writer = await self.connect("203.0.113.5", self.upstream_port)
-        writer.write(client_hello("upstream.test"))
-        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
 
     def handing_off(self) -> None:
         """Decide and serve as a runner's gateway does: knowing where the credential is for, not the credential,
@@ -252,16 +208,6 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         controller = self.proxy
         self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=where,
                              hand_off=controller.serve_handed_off)
-
-    async def test_a_credentials_flow_handed_to_the_controller_gets_the_credential_there(self) -> None:
-        self.handing_off()
-        reader, writer = await self.connect("203.0.113.5", self.upstream_port, tls=True)
-        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-        response = await asyncio.wait_for(reader.read(), 5)
-        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
-        self.assertTrue(response.endswith(b"hello"))
-        self.assertIn("Authorization: Bearer real-token", head)
-        self.assertEqual(self.decisions[0].service, CREDENTIAL)
 
     async def test_a_credentials_flow_bottle_cli_unwrapped_gets_the_credential_in_plain_http(self) -> None:
         for handed in (False, True):
@@ -277,14 +223,6 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Authorization: Bearer real-token", head)
                 self.assertNotIn("stand-in", head)
                 self.assertEqual(self.decisions[-1].service, CREDENTIAL)
-
-    async def test_a_credentials_flow_whose_opening_came_late_is_handed_off_once_read(self) -> None:
-        self.handing_off()
-        reader, writer = await self.connect("203.0.113.5", self.upstream_port, first_size=10, tls=True)
-        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-        self.assertTrue((await asyncio.wait_for(reader.read(), 5)).endswith(b"hello"))
-        self.assertIn("Authorization: Bearer real-token", (await asyncio.wait_for(self.received.get(), 5)).decode())
-        self.assertEqual(self.decisions[0].service, OPENING)
 
     async def sshd_says_hello_and_echoes(self) -> None:
         self.asked = []

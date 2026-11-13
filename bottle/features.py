@@ -67,13 +67,13 @@ those hosts (see bottle/egress.py).
              The credential goes in that place, in the same encoding, when
              what's there is exactly the stand-in, and nowhere else.
 
-  A tool in the bottle talks to the host over https as it always would: the
-  proxy terminates the tunnel with a certificate from the bottle's egress CA,
-  which the bottle trusts for its credentials' hosts and no others (see
-  bottle/ca.py), so it can read the request and put the credential in place
-  of the stand-in, on the requests that present it (see below). A host is
-  a name, an IP address, or `*.` and a name, since the CA's name constraint
-  can say nothing else. Anything else the tool needs in order to believe it's
+  A tool in the bottle talks to the host over https as it always would: its
+  machine routes the connection to bottled, bottle-cli taking the TLS off with
+  a certificate from the machine's CA, which the bottle trusts for its
+  credentials' and cached hosts and no others (bottle-cli ca), so bottled can
+  read the request and put the credential in place of the stand-in, on the
+  requests that present it (see below). A host is a name, an IP address, or
+  `*.` and a name, since the CA's name constraint can say nothing else. Anything else the tool needs in order to believe it's
   configured is the feature's own business, in its install.sh.
 
   A CLI doesn't know someone is attaching its token for it, and usually
@@ -763,7 +763,7 @@ def image_tag(features: list[Feature]) -> str:
 
 
 def apt_https_hosts() -> list[str]:
-    """Every host an https apt repository a feature declares is on: what the CA builds have covers (ca.BUILDS)."""
+    """Every host an https apt repository a feature declares is on: what the CA builds have covers (images.BUILDS_CA)."""
     return sorted({r.host for f in [base(), *(load(i) for i in available())] for r in f.apt.repositories if r.https})
 
 

@@ -147,7 +147,7 @@ class Services:
         gateway = binding.gateway
         flow = Flow(header.address, header.port, name=header.name, unwrapped=header.tls)
         try:
-            decision = await gateway.decide(flow, opening_read=True)
+            decision = await gateway.decide(flow)
         except Refused as e:
             gateway.log_flow(target, None, e.outcome, None, [0], [0], started)
             writer.close()

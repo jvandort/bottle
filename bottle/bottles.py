@@ -49,7 +49,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NoReturn
 
-from bottle import auth, ca, cache, daemon, features as features_, host, images, repos, runners, services, specs
+from bottle import auth, cache, daemon, features as features_, host, images, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -1032,8 +1032,6 @@ def delete(name: str) -> None:
     for step, action in (
         ("egress", lambda: runner.release(bottle.name)),
         ("machine", lambda: runner.delete(bottle.machine)),
-        ("egress CA", lambda: ca.forget(bottle.name)),
-        ("runner's CA", lambda: runner.forget_certificates(bottle.name)),
     ):
         try:
             action()

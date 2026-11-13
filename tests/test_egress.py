@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import dataclasses
-import functools
 import ipaddress
 import shutil
 import ssl
@@ -12,9 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import ca, egress
+from bottle import egress
 from bottle.egress import Direct, Flow, Gateway, Policy, Refused
-from tests.support import client_hello
 
 # The address a bottle connected to for the credential's host: never where it goes.
 CONNECTED_TO = "203.0.113.5"
@@ -122,11 +120,10 @@ class StatusTest(unittest.TestCase):
 class InjectionTest(unittest.IsolatedAsyncioTestCase):
     """What bottled attaches for the bottle, and where.
 
-    The bottle talks HTTPS to an address, as to anywhere, and smolvm hands
-    bottled the flow with its ClientHello. For an injected host bottled
-    answers the TLS handshake itself, with a certificate from the egress CA
-    (the bottle trusts it), and the upstream is a TLS server, because that is
-    the only kind an injected request has.
+    The bottle talks HTTPS to an address, as to anywhere, and its machine
+    routes an injected host's flow to bottled, bottle-cli having taken its TLS
+    off: bottled reads the plain request. The upstream is a TLS server, because
+    that is the only kind an injected request has.
     """
 
     async def asyncSetUp(self) -> None:
@@ -146,38 +143,27 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(Upstream.close, upstream)
         self.upstream_port = upstream.sockets[0].getsockname()[1]
 
-        # The proxy trusts the upstream's certificate; the bottle trusts the egress CA.
+        # The proxy trusts the upstream's certificate.
         trusting = ssl.create_default_context(cafile=str(certificate))
         patcher = mock.patch.object(egress, "_tls_context", lambda: trusting)
         patcher.start()
         self.addCleanup(patcher.stop)
-        home = mock.patch.dict("os.environ", {"BOTTLE_HOME": str(Path(tmp.name) / "home")})
-        home.start()
-        self.addCleanup(home.stop)
-        self.bottle_trusts = ssl.create_default_context(cadata=ca.certificate("test", ("upstream.test",)))
 
         self.asked: list[tuple[str, bool]] = []
         injection = egress.Injection(
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
             standin="stand-in", credential="real-token",
         )
-        self.gateway = Gateway(
-            "test", self.recording_policy(), fake_resolve, injections=(injection,),
-            certificates=functools.partial(ca.server_context, "test", ("upstream.test",)),
-        )
-        server = await asyncio.start_server(self.decider, "127.0.0.1", 0)
+        self.gateway = Gateway("test", self.recording_policy(), fake_resolve, injections=(injection,))
+        server = await asyncio.start_server(self.routed, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, server)
         self.port = server.sockets[0].getsockname()[1]
 
-    # How much of the flow smolvm shows the decider: what arrived (None), or just
-    # this many bytes, as when the guest's ClientHello comes after smolvm stops waiting.
-    shown: int | None = None
     connected_to = CONNECTED_TO
 
-    async def decider(self, reader, writer) -> None:
-        """What the decider does with a flow smolvm hands it: decide, and serve it if it's bottled's."""
-        first = await reader.read(64 * 1024) if self.shown is None else await reader.readexactly(self.shown)
-        flow = Flow(self.connected_to, self.connected_port, first)
+    async def routed(self, reader, writer) -> None:
+        """What bottled does with a flow a machine routes to it (services.py): decide, and serve it."""
+        flow = Flow(self.connected_to, self.connected_port, name=self.asked_for, unwrapped=True)
         try:
             decision = await self.gateway.decide(flow)
         except Refused:
@@ -197,12 +183,11 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
 
     upstream = Upstream.upstream
 
-    async def tunnel(self, host: str = "upstream.test", port: int | None = None,
-                     trust: ssl.SSLContext | None = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """What a bottle's HTTPS client does: TLS to the host's address, which smolvm hands bottled."""
-        self.connected_port = port or self.upstream_port
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=trust or self.bottle_trusts, server_hostname=host), 5)
+    async def tunnel(self, host: str = "upstream.test", port: int | None = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """What a bottle's HTTPS client does, as bottled is given it: TLS to the host's address, taken off by
+        bottle-cli, which says the name the bottle asked for."""
+        self.connected_port, self.asked_for = port or self.upstream_port, host
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.port), 5)
         self.addCleanup(writer.close)
         return reader, writer
 
@@ -226,26 +211,6 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Authorization: Bearer real-token", head)
         self.assertNotIn("stand-in", head)
         self.assertIn("Accept: */*", head)
-
-    async def test_a_clienthello_smolvm_didnt_wait_for_still_gets_the_credential(self) -> None:
-        for shown in (0, 10):  # none of it, and a part without the name
-            with self.subTest(shown=shown):
-                self.shown = shown
-                head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-                self.assertIn("Authorization: Bearer real-token", head)
-
-    async def test_a_late_clienthello_for_another_host_goes_where_the_bottle_connected_untouched(self) -> None:
-        self.shown, self.connected_to = 0, "127.0.0.1"
-        # Not the egress CA's: the bottle's TLS goes through to the server, whose certificate it sees.
-        anything = ssl.create_default_context()
-        anything.check_hostname, anything.verify_mode = False, ssl.CERT_NONE
-        reader, writer = await self.tunnel("elsewhere.test", trust=anything)
-        writer.write(b"GET / HTTP/1.1\r\nHost: elsewhere.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-        response = await asyncio.wait_for(reader.read(), 5)
-        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
-        self.assertTrue(response.endswith(b"hello"))
-        self.assertIn("Authorization: Bearer stand-in", head)
-        self.assertNotIn("real-token", head)
 
     async def test_a_request_that_doesnt_ask_for_the_credential_goes_without_it(self) -> None:
         # Over TLS all the same: the upstream speaks nothing else.
@@ -272,16 +237,6 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         head = await self.head_of(b"GET / HTTP/1.1\r\nHost: upstream.test\r\nauthorization: bearer stand-in\r\n\r\n")
         self.assertIn("Authorization: Bearer real-token", head)
         self.assertEqual(head.lower().count("authorization:"), 1)
-
-    async def test_the_bottle_is_shown_a_certificate_for_the_host_it_asked_for(self) -> None:
-        _, writer = await self.tunnel()
-        certificate = writer.get_extra_info("peercert")
-        self.assertIn(("DNS", "upstream.test"), certificate["subjectAltName"])
-
-    async def test_a_client_that_doesnt_trust_the_ca_gets_no_request_through(self) -> None:
-        with self.assertRaises(ssl.SSLCertVerificationError):
-            await self.tunnel(trust=ssl.create_default_context())
-        self.assertTrue(self.received.empty())
 
     async def test_the_log_says_a_credential_was_attached_and_what_the_server_answered(self) -> None:
         with self.assertLogs("bottle.egress") as logs:
@@ -344,24 +299,17 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         await self.head_of(b"GET / HTTP/1.1\r\n\r\n")
         self.assertEqual(self.asked[-1], ("upstream.test", True))
         # Another port is an ordinary flow, judged by the policy alone.
-        await self.gateway.decide(Flow("127.0.0.1", 1, client_hello("upstream.test")))
+        await self.gateway.decide(Flow("127.0.0.1", 1, name="upstream.test", unwrapped=True))
         self.assertEqual(self.asked[-1], ("upstream.test", False))
 
-    async def test_a_destination_the_bottle_may_not_reach_gets_no_certificate(self) -> None:
-        minted = []
-
-        def certificates(host: str) -> ssl.SSLContext:
-            minted.append(host)
-            return ca.server_context("test", ("upstream.test",), host)
-
+    async def test_a_destination_the_bottle_may_not_reach_is_refused_before_anything_is_read(self) -> None:
         injections = tuple(egress.Injection(host=h, header="Authorization", value="Bearer real-token")
                            for h in ("metadata.test", "nowhere.test"))
-        gateway = Gateway("test", LoopbackPolicy(), fake_resolve, injections=injections, certificates=certificates)
+        gateway = Gateway("test", LoopbackPolicy(), fake_resolve, injections=injections)
         for name, status in (("metadata.test", 403), ("nowhere.test", 502)):
             with self.subTest(name), self.assertRaises(Refused) as refused:
-                await gateway.decide(Flow(CONNECTED_TO, 443, client_hello(name)))
+                await gateway.decide(Flow(CONNECTED_TO, 443, name=name, unwrapped=True))
             self.assertEqual(refused.exception.status, status)
-        self.assertEqual(minted, [])
 
     async def test_plain_http_to_a_credentials_host_and_port_gets_no_credential(self) -> None:
         # A credential goes only on TLS: a Host header doesn't claim one.
@@ -586,8 +534,8 @@ class InjectionMatchTest(unittest.TestCase):
         egress.Injection(host="*.mirror.test", header="X-Auth", value="mirror-token", port=8111),
     )
 
-    def injection_for(self, target: str, certificates=lambda host: None) -> egress.Injection | None:
-        gateway = Gateway("test", Policy(), fake_resolve, injections=self.injections, certificates=certificates)
+    def injection_for(self, target: str) -> egress.Injection | None:
+        gateway = Gateway("test", Policy(), fake_resolve, injections=self.injections)
         host, _, port = target.rpartition(":")
         return gateway._injection_at(host, int(port))
 

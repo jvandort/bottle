@@ -47,7 +47,11 @@ REPOSITORY = "localhost/bottle"
 MOUNT = "/run/bottle-build"
 # What a build's steps run with, as a Dockerfile's RUN would: root's home, and no debconf prompts.
 STEP_ENV = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-# A step with this in its environment gets the certificate of the CA builds have (ca.BUILDS) in it: the apt step.
+# The caching CA every image's build has, bottle-cli's (bottle-cli ca), for its apt step (see apt.py): constrained to
+# the https apt repositories every feature declares, so it's the same for every build, and a stage built again from
+# the same is named the same.
+BUILDS_CA = "bottle-builds"
+# A step with this in its environment gets the certificate of the CA builds have (BUILDS_CA) in it: the apt step.
 BUILD_CA = "BOTTLE_BUILD_CA"
 
 
@@ -107,7 +111,7 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     the CA they're answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
     With `no_cache`, the stage is made again even if one was made from the same.
     """
-    from bottle import ca, cache, features, services  # features imports this module
+    from bottle import cache, features, services  # features imports this module
 
     prereqs.ensure_cli()
     _migrate()
@@ -120,7 +124,7 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
         # A stage is named for what it's made from: something new in it makes it anew.
         image_labels["bottle.build"] = uuid.uuid4().hex
     # The caching CA of bottle-cli's builds, which answers their apt repositories.
-    certificate = krun.ca_certificate(ca.BUILDS, features.apt_https_hosts()) or ""
+    certificate = krun.ca_certificate(BUILDS_CA, features.apt_https_hosts()) or ""
     steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step
              for step in recipe.get("steps", [])]
     made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},

@@ -100,7 +100,7 @@ def start(name: str) -> None:
 
 def ca_certificate(name: str, hosts: list[str]) -> str | None:
     """The certificate of the caching CA bottle-cli answers `name`'s cached https `hosts` behind (a machine's, or
-    ca.BUILDS for builds), made if missing; None for no hosts."""
+    images.BUILDS_CA for builds), made if missing; None for no hosts."""
     return _run("ca", "certificate", name, *hosts) or None
 
 

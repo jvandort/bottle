@@ -37,10 +37,6 @@ def _run(op: str, args: dict):
         case "cache_ca":
             # The machine's caching CA here: for its cached hosts alone, which bottle-cli here answers.
             return local.cache_certificate(args["machine"], args["hosts"])
-        case "forget_ca":
-            from bottle import ca
-
-            ca.forget(args["bottle"])
         case "memory_mib":
             return local.memory_mib()
         case "mirror":
