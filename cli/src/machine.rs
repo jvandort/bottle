@@ -92,6 +92,12 @@ struct Config {
 pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     let command = args.next();
     let args: Vec<String> = args.collect();
+    // A runner's machine, RUNNER/NAME: asked of this program there (see remote.rs).
+    if let Some(command) = &command
+        && let Some(code) = crate::remote::machine(command, &args)
+    {
+        return code;
+    }
     let result = match command.as_deref() {
         Some("create") => create(&args),
         Some("start") => start(&args),
@@ -647,7 +653,7 @@ fn ls(args: &[String]) -> io::Result<()> {
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    let rows: Vec<_> = found
+    let mut rows: Vec<_> = found
         .iter()
         .map(|(name, state, config)| {
             let mut row = serde_json::json!({"name": name, "state": state});
@@ -661,6 +667,8 @@ fn ls(args: &[String]) -> io::Result<()> {
             row
         })
         .collect();
+    // And every runner's, RUNNER/NAME (see remote.rs).
+    rows.extend(crate::remote::listed());
     if json {
         println!("{}", serde_json::Value::Array(rows));
         return Ok(());
@@ -832,6 +840,28 @@ pub fn top(command: &str, args: Vec<String>) -> ExitCode {
         _ => return crate::usage_error(&format!("{command} needs a machine's name")),
     };
     let named = |rest: Vec<String>| [vec!["--name".to_string(), name.clone()], rest].concat();
+    // A runner's machine, RUNNER/NAME: as `machine`'s commands have it.
+    if crate::runner::split(&name).is_some() {
+        let (command, args) = match command {
+            "shell" if rest.is_empty() => (
+                "exec",
+                named(
+                    [
+                        "-t",
+                        "--",
+                        "/bin/sh",
+                        "-c",
+                        r#"exec "${SHELL:-/bin/sh}" -l"#,
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+            ),
+            "status" | "start" | "stop" | "exec" => (command, named(rest)),
+            _ => return crate::usage_error(TOP_USAGE),
+        };
+        return crate::remote::machine(command, &args).unwrap_or(ExitCode::from(FAILED));
+    }
     if matches!(command, "exec" | "shell")
         && let Err(e) = Machine::new(&name).and_then(|m| m.up())
     {

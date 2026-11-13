@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+sha2.workspace = true
 bottle-agent-client.workspace = true
 bottle-disk.workspace = true
 libc.workspace = true

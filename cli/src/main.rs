@@ -9,6 +9,8 @@ mod build;
 mod ca;
 mod exec;
 mod machine;
+mod remote;
+mod runner;
 mod upkeep;
 
 /// A failure of bottle-cli's own, not a command's: as ssh has it.
@@ -27,6 +29,8 @@ fn main() -> ExitCode {
         Some("info") => machine::info(args),
         Some("machine") => machine::main(args),
         Some("ca") => ca::main(args),
+        Some("runner") => runner::main(args),
+        Some("forward") => remote::forward(args),
         Some("exec") => {
             let args: Vec<String> = args.collect();
             match args.split_first() {
@@ -50,6 +54,7 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("   or: bottle-cli {}", exec::USAGE);
     eprintln!("   or: bottle-cli {}", boot::USAGE);
     eprintln!("   or: bottle-cli {}", ca::USAGE);
+    eprintln!("   or: bottle-cli {}", runner::USAGE);
     eprintln!("   or: bottle-cli {}", build::BUILD_USAGE);
     eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);
     eprintln!("   or: bottle-cli {}", build::PULL_USAGE);
