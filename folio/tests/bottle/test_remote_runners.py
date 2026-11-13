@@ -7,9 +7,9 @@ from unittest import mock
 
 from folio.bottle import images, runners
 from folio.bottle.errors import BottleError
-from tests.bottle.support import GitTestCase, built_cli, manifest, register_runner
+from tests.bottle.support import GitTestCase, built_cli, built_folio_cli, manifest, register_runner
 
-# ssh, as far as bottle-cli uses it: options up to --, the destination, and a command for its shell, run here as
+# ssh, as far as folio-cli uses it: options up to --, the destination, and a command for its shell, run here as
 # if at the destination, in a home of its own. "down" can't be reached. The destination is Linux, on what this
 # machine is, and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether it has KVM.
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -37,8 +37,8 @@ esac
 
 
 class RemoteRunnerTestCase(GitTestCase):
-    """bottle, as a controller, and runner box: this machine, in a home of its own, reached by a stand-in ssh;
-    this repo's bottle-cli here, and a stand-in for it there."""
+    """folio, as a controller, and runner box: this machine, in a home of its own, reached by a stand-in ssh;
+    this repo's bottle-cli and folio-cli here, and a stand-in for bottle-cli there."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -48,7 +48,7 @@ class RemoteRunnerTestCase(GitTestCase):
         self.remotes, self.log, self.kvm = short / "remotes", short / "ssh.log", short / "kvm"
         (short / "ssh").write_text(FAKE_SSH)
         (short / "ssh").chmod(0o755)
-        # What bottle-cli copies to a runner of this machine's architecture: the stand-in, built "from these
+        # What folio-cli copies to a runner of this machine's architecture: the stand-in, built "from these
         # sources".
         arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
         self.dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
@@ -57,7 +57,8 @@ class RemoteRunnerTestCase(GitTestCase):
         (self.dist / "bottle-cli").chmod(0o755)
         manifest(self.dist)
         env = mock.patch.dict(os.environ, {
-            "BOTTLE_CLI": str(cli), "BOTTLE_SSH": str(short / "ssh"), "BOTTLE_RUNNER_DISTS": str(short / "dists"),
+            "BOTTLE_CLI": str(cli), "FOLIO_CLI": str(built_folio_cli()), "FOLIO_SSH": str(short / "ssh"),
+            "FOLIO_RUNNER_DISTS": str(short / "dists"),
             "FAKE_SSH_LOG": str(self.log), "FAKE_REMOTES": str(self.remotes), "FAKE_KVM": str(self.kvm),
         })
         env.start()
@@ -74,7 +75,7 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.has_kvm()
-        added = subprocess.run([os.environ["BOTTLE_CLI"], "runner", "add", "box", "--ssh", "box"],
+        added = subprocess.run([os.environ["FOLIO_CLI"], "runner", "add", "box", "--ssh", "box"],
                                capture_output=True, text=True)
         self.assertEqual(added.returncode, 0, added.stderr)
         self.box = runners.get("box")
@@ -92,9 +93,9 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
             images.build_recipe(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []},
                                 cli=self.box.cli)
 
-    def test_a_shell_there_is_its_bottle_cli_exec_by_runner_slash_name(self) -> None:
+    def test_a_shell_there_is_its_bottle_cli_exec_by_the_machines_name_there(self) -> None:
         command = self.box.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)
-        self.assertEqual(command[1:4], ["exec", "box/bottle-b", "-t"])
+        self.assertEqual(command[1:6], ["on", "box", "exec", "bottle-b", "-t"])
 
     def test_a_repos_objects_are_pushed_into_a_mirror_there(self) -> None:
         repo = self.make_repo("app")

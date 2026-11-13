@@ -31,10 +31,12 @@
 //! detached; `--offline` marks one that's off already, unasked. A detached runner isn't asked
 //! anything. Using one again (`on`, `runner ssh`) attaches it again if it answers, and says it's
 //! off if it doesn't; `runner attach` does that alone, and names the machines detaching it stopped.
-//! `runner rm` forgets one, touching nothing there.
+//! `runner rm` forgets one, touching nothing there. `runner home` says its user's home there, which
+//! paths there (a forward's sockets, say) are under: asked once, and kept with it.
 //!
 //! Runners are listed in folio's home, runners.json, `{"version": 1, "runners": {NAME: {"ssh":
-//! DESTINATION, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an entry says
+//! DESTINATION, "home": PATH, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an
+//! entry says
 //! is kept as it is. With none there yet, bottle-cli's ($BOTTLE_HOME/runners.json, from when
 //! runners were bottle-cli's) is taken as it is.
 
@@ -55,7 +57,8 @@ use crate::FAILED;
 const USAGE: &str = "runner add NAME --ssh DESTINATION | runner ls [--json] | runner rm NAME \
                      | runner ssh NAME [COMMAND]... | runner check NAME|DESTINATION [--json] \
                      | runner detach NAME [--offline] | runner attach NAME \
-                     | runner forward NAME THERE=HERE... | on NAME COMMAND [ARG]...";
+                     | runner home NAME | runner forward NAME THERE=HERE... \
+                     | on NAME COMMAND [ARG]...";
 
 /// ssh's own failures, connecting or authenticating, exit 255.
 const SSH_FAILED: i32 = 255;
@@ -493,6 +496,7 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         (Some("detach"), [name]) => detach(name, false),
         (Some("detach"), [name, flag]) if flag == "--offline" => detach(name, true),
         (Some("attach"), [name]) => attach(name),
+        (Some("home"), [name]) => home(name).map(|home| println!("{home}")),
         (Some("forward"), [name, forwards @ ..]) if !forwards.is_empty() => forward(name, forwards),
         (Some("ssh"), [name, command @ ..]) => {
             return match Runner::named(name) {
@@ -755,6 +759,31 @@ fn check(target: &str, json: bool) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runner `name`'s user's home there, asked once and kept in its entry.
+fn home(name: &str) -> io::Result<String> {
+    let entry = registered()?
+        .remove(name)
+        .ok_or_else(|| other(format!("no runner named {name}")))?;
+    if let Some(home) = entry.rest.get("home").and_then(|h| h.as_str()) {
+        return Ok(home.to_string());
+    }
+    let runner = Runner::named(name)?;
+    let output = runner.run(r#"printf %s "$HOME""#, None)?;
+    let home = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() || !home.starts_with('/') {
+        return Err(other(format!(
+            "runner {name}: no home ({})",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut registry = registry()?;
+    if let Some(entry) = registry.runners.get_mut(name) {
+        entry.rest.insert("home".into(), home.clone().into());
+    }
+    write_registry(&registry)?;
+    Ok(home)
 }
 
 /// Forgets runner `name`. Nothing there is touched: what's there of folio's bottles is folio's to

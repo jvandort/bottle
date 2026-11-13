@@ -93,7 +93,7 @@ class FakeSmolvm:
         self.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
         return ["smolvm-exec", name, *argv]
 
-    def bind(self, bottle, machine, repos=(), features=()):
+    def bind(self, bottle, machine, repos=(), features=(), runner="local"):
         self._step("bind")
         self.egress_repos = tuple(repos)
         self.egress_git_dir = repos[0].git_dir if repos else None

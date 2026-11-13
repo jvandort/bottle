@@ -1,11 +1,11 @@
-"""A drone, end to end, with ssh and the runner's bottle-cli faked: bottled and this repo's bottle-cli here.
+"""A drone, end to end, with ssh and the runner's bottle-cli faked: folio serve and this repo's folio-cli here.
 
 The runner is this machine, in a home of its own, reached through a fake ssh
 that runs each command there and makes a forward (-R) a symlink to the
 socket here. bottle-cli there records how a machine was started; the test is
 then bottle-cli there, giving a socket its machine's routes name a connection
-its guest opened: forwarded here, by the process bottle-cli here keeps for
-the machine, to bottled.
+its guest opened: forwarded here, by the forward folio serve keeps for the
+runner, to folio serve.
 """
 
 import json
@@ -22,7 +22,8 @@ from unittest import mock
 from folio.bottle import bottles, daemon, features, host, images, repos, runners, services
 from folio.bottle.host import Remote, Served
 from folio.bottle.errors import BottleError
-from tests.bottle.support import GitTestCase, built_cli, manifest, register_runner, run, stop_bottle, thread_dir, write_bottles
+from tests.bottle.support import (GitTestCase, built_cli, built_folio_cli, manifest, register_runner, run, stop_bottle,
+                                  thread_dir, write_bottles)
 from tests.bottle.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -106,8 +107,9 @@ class DroneCase(GitTestCase):
         fake.chmod(0o755)
         self.controller = short / "controller"
         env = mock.patch.dict(os.environ, {
-            "BOTTLE_HOME": str(self.controller), "BOTTLE_SSH": str(fake), "FAKE_REMOTES": str(short / "r"),
-            "BOTTLE_CLI": str(built_cli()), "BOTTLE_RUNNER_DISTS": str(short / "dists"),
+            "BOTTLE_HOME": str(self.controller), "FOLIO_SSH": str(fake), "FAKE_REMOTES": str(short / "r"),
+            "BOTTLE_CLI": str(built_cli()), "FOLIO_CLI": str(built_folio_cli()),
+            "FOLIO_RUNNER_DISTS": str(short / "dists"),
         })
         env.start()
         self.addCleanup(env.stop)
@@ -123,13 +125,8 @@ class DroneCase(GitTestCase):
         manifest(self.dist)
 
     def stop_both(self) -> None:
-        daemon.stop()
-        # And the forwards bottle-cli keeps for machines there.
-        for pid in self.controller.glob("krun/runners/*/*/forward.pid"):
-            try:
-                os.killpg(int(pid.read_text()), signal.SIGTERM)
-            except (ProcessLookupError, ValueError):
-                pass
+        daemon.stop()   # its forwards with it
+        daemon._wait_gone()
 
     def made(self, machine: str) -> None:
         """`machine` made on box, routed as a bottle's is (services.network)."""
@@ -137,11 +134,11 @@ class DroneCase(GitTestCase):
                                   network=services.network([], []))
 
     def guest_connects(self, machine: str, address: str, port: int, first: bytes, said: str | None = None) -> bytes:
-        """A connection from `machine`'s guest, as bottle-cli there gives it to the socket its routes name, forwarded
-        to bottled here: the machine it's from as the PROXY header says, `machine` unless `said`."""
-        forwards = json.loads((self.controller / "krun" / "runners" / "box" / machine / "forwards.json").read_text())
-        there = Path(forwards[0][0])
-        for _ in range(100):   # its forward, made in the background as it started
+        """A connection from `machine`'s guest, as bottle-cli there gives it to the socket its routes name for
+        bottle.host, forwarded to folio serve here: the machine it's from as the PROXY header says, `machine` unless
+        `said`."""
+        there = Path(runners.get("box").services_sockets()["host"])
+        for _ in range(100):   # its runner's forward, made in the background as it was bound
             if there.exists():
                 break
             time.sleep(0.1)
@@ -175,7 +172,7 @@ class DroneTest(DroneCase):
         new = self.commit(upstream, "since the controller last fetched")
         machine = bottles.get("b").machine
         self.made(machine)
-        daemon.bind("b", machine, (Served(repo / ".git", remotes, "workspace"),), ())
+        daemon.bind("b", machine, (Served(repo / ".git", remotes, "workspace"),), (), "box")
         box.start(machine)
 
         started = json.loads((self.remote / "started.json").read_text())
@@ -183,7 +180,7 @@ class DroneTest(DroneCase):
         request = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         answer = self.guest_connects(machine, host.ADDRESS, 80, request)
         self.assertIn(b"HTTP/1.1 200", answer)
-        # The controller fetched origin into the hub, and served it, through the forward.
+        # The controller fetched origin into the hub, and served it, through the runner's forward.
         self.assertIn(f"{new} refs/heads/main".encode(), answer)
 
     def test_bottle_new_on_a_runner_makes_a_drone_there(self) -> None:
@@ -203,11 +200,12 @@ class DroneTest(DroneCase):
         self.assertEqual((bottle.runner, bottle.status), ("box", "ready"))
         machine = self.remote / "machines" / bottle.machine
         self.assertEqual(machine.read_text().strip(), "running")
-        # Its routes, to a socket of its own there, forwarded here.
+        # Its routes, to folio serve's sockets there, which folio serve forwards here.
         network = json.loads((self.remote / "machines" / f"{bottle.machine}.network").read_text())
         theres = {r["socket"] for r in network["routes"]}
         self.assertEqual(len(theres), 2)   # bottle.host's, ssh's: a socket there for each socket here
-        self.assertTrue(all(t.startswith(str(self.remote / ".bottle" / "routes")) for t in theres), theres)
+        services_there = self.remote / ".folio" / "services" / runners.controller_key()
+        self.assertTrue(all(t.startswith(f"{services_there}/") for t in theres), theres)
         mirror = self.remote / ".folio" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))
@@ -233,18 +231,18 @@ class DroneTest(DroneCase):
         box.objects(repos.Repo("repo", repo))
         machine = bottles.get("b").machine   # as bottled, restarted, binds it again
         self.made(machine)
-        daemon.bind("b", machine, bottles.served(bottles.get("b")), ())
+        daemon.bind("b", machine, bottles.served(bottles.get("b")), (), "box")
         box.start(machine)
         fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         self.assertIn(b"HTTP/1.1 200", self.guest_connects(machine, host.ADDRESS, 80, fetch))
 
         daemon.stop()
-        with self.assertRaises(OSError):   # the forward's gone with it: refused, as bottle-cli would be
+        with self.assertRaises(OSError):   # its forward's gone with it: refused
             self.guest_connects(machine, host.ADDRESS, 80, fetch)
 
         daemon.start()
         answer = b""
-        for _ in range(100):   # the forward comes back in the background
+        for _ in range(100):   # its forward comes back, as the bottle's bound again
             try:
                 answer = self.guest_connects(machine, host.ADDRESS, 80, fetch)
             except OSError:
@@ -260,7 +258,7 @@ class DroneTest(DroneCase):
 
     def test_what_a_machine_no_bottle_is_routes_gets_nothing_there(self) -> None:
         self.made("bottle-b")
-        daemon.bind("b", "bottle-b")
+        daemon.bind("b", "bottle-b", runner="box")
         runners.get("box").start("bottle-b")
         fetch = b"GET /git/workspace/origin/info/refs HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         self.assertEqual(self.guest_connects("bottle-b", host.ADDRESS, 80, fetch, said="stranger"), b"")
@@ -282,43 +280,43 @@ class DetachTest(DroneCase):
 
     def off(self):
         """ssh as it is while the runner is off."""
-        off = Path(os.environ["BOTTLE_SSH"]).with_name("off-ssh")
+        off = Path(os.environ["FOLIO_SSH"]).with_name("off-ssh")
         off.write_text(OFF_SSH)
         off.chmod(0o755)
-        return mock.patch.dict(os.environ, {"BOTTLE_SSH": str(off)})
+        return mock.patch.dict(os.environ, {"FOLIO_SSH": str(off)})
 
     def turn_off(self) -> None:
         patch = self.off()
         patch.start()
         self.addCleanup(patch.stop)
 
-    def bottle_cli(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([os.environ["BOTTLE_CLI"], *args], capture_output=True, text=True,
+    def folio_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([os.environ["FOLIO_CLI"], *args], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL)
 
     def test_with_its_bottles_running_and_no_one_to_ask_it_stops_nothing_and_stays_attached(self) -> None:
-        detached = self.bottle_cli("runner", "detach", "box")
+        detached = self.folio_cli("runner", "detach", "box")
         self.assertNotEqual(detached.returncode, 0)
-        self.assertIn("box is still attached, and box/" + self.a.name + " still running", detached.stderr)
+        self.assertIn("box is still attached, and " + self.a.name + " still running", detached.stderr)
         self.assertEqual(self.a.read_text().strip(), "running")
         self.assertFalse(runners.is_detached("box"))
 
     def test_detached_its_bottles_are_detached_and_it_isnt_asked(self) -> None:
         self.a.write_text("stopped\n")
-        self.assertEqual(self.bottle_cli("runner", "detach", "box").returncode, 0)
+        self.assertEqual(self.folio_cli("runner", "detach", "box").returncode, 0)
         self.assertTrue(runners.is_detached("box"))
         self.turn_off()
         self.assertEqual({row["name"]: row["state"] for row in bottles.status()}, {"a": "detached", "b": "detached"})
 
     def test_one_that_cant_be_reached_is_detached_only_offline(self) -> None:
         self.turn_off()
-        self.assertIn("--offline", self.bottle_cli("runner", "detach", "box").stderr)
+        self.assertIn("--offline", self.folio_cli("runner", "detach", "box").stderr)
         self.assertFalse(runners.is_detached("box"))
-        self.assertEqual(self.bottle_cli("runner", "detach", "box", "--offline").returncode, 0)
+        self.assertEqual(self.folio_cli("runner", "detach", "box", "--offline").returncode, 0)
         self.assertTrue(runners.is_detached("box"))
 
     def test_using_it_again_attaches_it_once_its_back(self) -> None:
-        self.bottle_cli("runner", "detach", "box", "--offline")
+        self.folio_cli("runner", "detach", "box", "--offline")
         with self.off():
             with self.assertRaisesRegex(BottleError, "box is detached, and doesn't answer yet.*turn it on"):
                 bottles.ensure_running("a")

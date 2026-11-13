@@ -65,26 +65,36 @@ def krun_present() -> bool:
 requires_krun = unittest.skipUnless(krun_present(), "needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
 
 
-_BUILT_CLI: list[Path] = []
+_BUILT: dict[str, Path] = {}
 
 
-def built_cli() -> Path:
-    """bottle-cli, built from this repo by cargo (debug), for tests that drive the real one; skips the test where
-    cargo can't build it."""
+def _built(package: str) -> Path:
+    """`package`'s program, built from this repo by cargo (debug), for tests that drive the real one; skips the test
+    where cargo can't build it."""
     import shutil
 
-    if _BUILT_CLI:
-        return _BUILT_CLI[0]
+    if package in _BUILT:
+        return _BUILT[package]
     repo = Path(__file__).resolve().parents[3]
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo" / "bin" / "cargo")
     if not Path(cargo).exists():
-        raise unittest.SkipTest("needs cargo, to build bottle-cli")
-    built = subprocess.run([cargo, "build", "-q", "-p", "bottle-cli"], cwd=repo, capture_output=True, text=True)
+        raise unittest.SkipTest(f"needs cargo, to build {package}")
+    built = subprocess.run([cargo, "build", "-q", "-p", package], cwd=repo, capture_output=True, text=True)
     if built.returncode != 0:
-        raise unittest.SkipTest(f"bottle-cli didn't build: {built.stderr.strip()[-300:]}")
+        raise unittest.SkipTest(f"{package} didn't build: {built.stderr.strip()[-300:]}")
     target = Path(os.environ.get("CARGO_TARGET_DIR") or repo / "target")
-    _BUILT_CLI.append(target / "debug" / "bottle-cli")
-    return _BUILT_CLI[0]
+    _BUILT[package] = target / "debug" / package
+    return _BUILT[package]
+
+
+def built_cli() -> Path:
+    """bottle-cli, built from this repo."""
+    return _built("bottle-cli")
+
+
+def built_folio_cli() -> Path:
+    """folio-cli, built from this repo."""
+    return _built("folio-cli")
 
 
 def write_bottles(bottles_: dict) -> None:
@@ -98,10 +108,10 @@ def write_bottles(bottles_: dict) -> None:
 
 
 def register_runner(name: str, destination: str) -> None:
-    """Runner `name` added, at ssh `destination`, as `bottle runner add` records it (unchecked)."""
-    from folio.bottle.store import bottle_home, read_json, write_json
+    """Runner `name` added, at ssh `destination`, as `folio runner add` records it (unchecked)."""
+    from folio.bottle.store import folio_home, read_json, write_json
 
-    path = bottle_home() / "runners.json"
+    path = folio_home() / "runners.json"
     known = (read_json(path) or {}).get("runners", {})
     write_json(path, {"version": 1, "runners": {**known, name: {"ssh": destination}}})
 

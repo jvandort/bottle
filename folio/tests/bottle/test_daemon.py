@@ -264,13 +264,13 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
         d = Daemon()
         await d.bind("b", "b-m")
         bound = d.services.bindings["b-m"]
-        await d.restore([("b", "b-m", (), ()), ("other", "other-m", (), ())])
+        await d.restore([("b", "b-m", (), (), "local"), ("other", "other-m", (), (), "local")])
         self.assertEqual({m: b.bottle for m, b in d.services.bindings.items()}, {"b-m": "b", "other-m": "other"})
         self.assertIs(d.services.bindings["b-m"], bound)
 
     async def test_it_stops_once_no_bottle_is_left_to_answer(self) -> None:
         d = Daemon()
-        await d.restore([("a", "a-m", (), ()), ("b", "b-m", (), ())])
+        await d.restore([("a", "a-m", (), (), "local"), ("b", "b-m", (), (), "local")])
         await d.release("a")
         self.assertFalse(d.stopping.is_set())
         await d.release("b")
@@ -287,7 +287,7 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(daemon.auth, "injections_for", side_effect=injections_for), \
                 self.assertLogs("bottle.daemon", "WARNING"):
-            unrestored = await d.restore([("bad", "bad-m", (), ("bad",)), ("good", "good-m", (), ())])
+            unrestored = await d.restore([("bad", "bad-m", (), ("bad",), "local"), ("good", "good-m", (), (), "local")])
         self.assertEqual([binding.bottle for binding in d.services.bindings.values()], ["good"])
         self.assertEqual([b[0] for b in unrestored], ["bad"])
 

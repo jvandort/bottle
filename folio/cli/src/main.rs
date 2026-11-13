@@ -8,6 +8,7 @@
 //!     folio-cli runner check NAME|DESTINATION [--json]
 //!     folio-cli runner detach NAME [--offline]
 //!     folio-cli runner attach NAME
+//!     folio-cli runner home NAME
 //!     folio-cli runner forward NAME THERE=HERE...
 //!     folio-cli on NAME COMMAND [ARG]...
 //!
@@ -25,7 +26,7 @@ use std::process::ExitCode;
 /// What this program exits when it fails, as bottle-cli does.
 const FAILED: u8 = 255;
 
-const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|forward ... \
+const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|home|forward ... \
                      | folio-cli on NAME COMMAND [ARG]...";
 
 fn main() -> ExitCode {

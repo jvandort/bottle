@@ -1,0 +1,31 @@
+#!/bin/sh
+# folio-cli from this checkout (target/release/folio-cli), built if its sources have changed since
+# it was: for this machine alone, where folio runs. Whether they have is a hash of their contents and
+# names, without starting cargo, against the one its last build left beside it
+# (target/release/.folio-sources), as bin/bottle-build does bottle-cli's: a build is `cargo build`,
+# its progress on stderr, and leaves the hash once it's done.
+#
+#   folio-build
+set -eu
+# The checkout this script is in, through any symlinks to it (one on PATH, say).
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+cd "$root"
+
+# What folio-cli is built from. A compiled sha256sum where there's one (Linux; recent macOS), else
+# shasum. In a fixed order, whatever the locale.
+if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; else sum="shasum -a 256"; fi
+sources=$(find Cargo.toml Cargo.lock .cargo folio/cli -path '*/target' -prune -o -type f -print \
+          | LC_ALL=C sort | tr '\n' '\0' | xargs -0 $sum | $sum | cut -d' ' -f1)
+stamp=target/release/.folio-sources
+if [ -f target/release/folio-cli ] && [ "$(cat "$stamp" 2>/dev/null)" = "$sources" ]; then
+  exit 0
+fi
+# rustup's cargo, if it isn't on PATH.
+cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
+"$cargo" build --release -p folio-cli >&2
+printf '%s' "$sources" > "$stamp"

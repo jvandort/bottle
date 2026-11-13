@@ -15,10 +15,12 @@ tests/test_krun_contract.py checks:
     disk kept across stops.
 
 Machines, and running commands in them, are all this module does: building
-the images machines boot is images.py's, on top of bottle-cli's builds. A
-machine is named as bottle-cli here names it: RUNNER/NAME for a runner's (see
-runners.py). The bottle-cli is $BOTTLE_CLI's (bin/folio sets it, from a
-checkout), else `bottle-cli` on PATH: folio builds nothing.
+the images machines boot is images.py's, on top of bottle-cli's builds. Each
+function takes the bottle-cli it runs (`cli`): this machine's (LOCAL), or a
+runner's (RunnerCli, which folio-cli reaches over ssh: see runners.py), a
+machine named as that bottle-cli names it. This machine's is $BOTTLE_CLI's
+(bin/folio sets it, from a checkout), else `bottle-cli` on PATH; folio-cli is
+$FOLIO_CLI's, else `folio-cli` on PATH: folio's Python builds nothing.
 """
 
 import json
@@ -36,6 +38,11 @@ def binary() -> str:
     return os.environ.get("BOTTLE_CLI") or shutil.which("bottle-cli") or "bottle-cli"
 
 
+def folio_binary() -> str:
+    """folio-cli: $FOLIO_CLI's, else the one on PATH."""
+    return os.environ.get("FOLIO_CLI") or shutil.which("folio-cli") or "folio-cli"
+
+
 # --- machines -------------------------------------------------------------------
 
 
@@ -47,7 +54,7 @@ class Mount:
 
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
            disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
-           labels: dict[str, str] | None = None, network: dict | None = None) -> None:
+           labels: dict[str, str] | None = None, network: dict | None = None, cli: "Cli | None" = None) -> None:
     """Create a stopped machine from `image` (a tag in bottle-cli's store where the machine is), its mounts
     read-only; `memory_mib` and `disk_gib` None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
     `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
@@ -63,32 +70,32 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
         args += ["-e", f"{key}={value}"]
     if network is not None:
         args += ["--network", "-"]
-    _run(*args, input=json.dumps(network) if network is not None else None)
+    _run(*args, input=json.dumps(network) if network is not None else None, cli=cli)
 
 
-def configure(name: str, network: dict) -> None:
+def configure(name: str, network: dict, cli: "Cli | None" = None) -> None:
     """Give a stopped machine the policy its connections are decided by (one made before it had one, say)."""
-    _run("configure", name, "--network", "-", input=json.dumps(network))
+    _run("configure", name, "--network", "-", input=json.dumps(network), cli=cli)
 
 
-def start(name: str) -> None:
+def start(name: str, cli: "Cli | None" = None) -> None:
     """Start a machine: by the policy it was made with, nothing else needed."""
-    _run("start", name)
+    _run("start", name, cli=cli)
 
 
-def stop(name: str) -> None:
-    _run("stop", name)
+def stop(name: str, cli: "Cli | None" = None) -> None:
+    _run("stop", name, cli=cli)
 
 
-def rename(name: str, new: str) -> None:
+def rename(name: str, new: str, cli: "Cli | None" = None) -> None:
     """Rename a stopped machine."""
-    _run("rename", name, new)
+    _run("rename", name, new, cli=cli)
 
 
-def delete(name: str) -> None:
+def delete(name: str, cli: "Cli | None" = None) -> None:
     """Delete a machine; a no-op if there's none."""
-    if state(name) is not None:
-        _run("delete", name, "-f")
+    if state(name, cli=cli) is not None:
+        _run("delete", name, "-f", cli=cli)
 
 
 def running(cli: "Cli | None" = None) -> list[str]:
@@ -97,24 +104,24 @@ def running(cli: "Cli | None" = None) -> list[str]:
     return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
 
 
-def state(name: str) -> str | None:
+def state(name: str, cli: "Cli | None" = None) -> str | None:
     """"running", "stopped", "created", or None if there's no such machine."""
     try:
-        return json.loads(_run("status", name, "--json"))["state"]
+        return json.loads(_run("status", name, "--json", cli=cli))["state"]
     except Missing:
         return None
 
 
 def exec_(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-          input: str | None = None, env: dict[str, str] | None = None) -> str:
+          input: str | None = None, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> str:
     """Run a command in a running machine and return its output; `input` is its stdin."""
-    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "")
+    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "", cli=cli)
 
 
 def exec_command(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-                 tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
+                 tty: bool = False, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> list[str]:
     """The command line that runs `argv` in a machine with stdin attached (and a TTY), for other tools to run."""
-    return LOCAL.command(exec_args(name, argv, user, workdir, env, tty), tty=tty)
+    return (cli or LOCAL).command(exec_args(name, argv, user, workdir, env, tty), tty=tty)
 
 
 def info(cli: "Cli | None" = None) -> dict:
@@ -148,12 +155,15 @@ class Cli:
         """The command line that runs bottle-cli with `args` there."""
         return [binary(), *args]
 
+    def missing(self) -> str:
+        """What's said when the program this runs isn't there."""
+        return f"no bottle-cli at {binary()}: install it, or set BOTTLE_CLI (bin/folio does, from a checkout)"
+
     def run(self, args: list[str], input: str | None = None) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
         except FileNotFoundError:
-            raise BottleError(f"no bottle-cli at {binary()}: install it, or set BOTTLE_CLI (bin/folio does, from "
-                              "a checkout)") from None
+            raise BottleError(self.missing()) from None
 
     def build(self, recipe: dict, network: dict, context: Path, tag: str) -> subprocess.CompletedProcess:
         """`bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged `tag`: its
@@ -171,14 +181,18 @@ LOCAL = Cli()
 
 
 class RunnerCli(Cli):
-    """bottle-cli on runner `runner`, as this one runs it there (`bottle-cli on RUNNER`): what images builds
-    and keeps there. An image build sends its recipe, what it mounts and its policy with it."""
+    """bottle-cli on runner `runner`, as folio-cli runs it there (`folio-cli on RUNNER`): its machines, by their
+    names there, and the images it builds and keeps. An image build sends its recipe, what it mounts and its
+    policy with it."""
 
     def __init__(self, runner: str) -> None:
         self.runner = runner
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
-        return super().command(["on", self.runner, *args], tty)
+        return [folio_binary(), "on", self.runner, *args]
+
+    def missing(self) -> str:
+        return f"no folio-cli at {folio_binary()}: install it, or set FOLIO_CLI (bin/folio does, from a checkout)"
 
 
 def _run(*args: str, input: str | None = None, cli: Cli | None = None) -> str:
@@ -192,9 +206,11 @@ def _run(*args: str, input: str | None = None, cli: Cli | None = None) -> str:
 
 
 def _error(stderr: str) -> str:
-    """bottle-cli's message, from the last line it wrote on stderr ("bottle-cli: ..."), else stderr as it is."""
+    """bottle-cli's or folio-cli's message, from the last line either wrote on stderr ("bottle-cli: ...",
+    "folio-cli: ..."), else stderr as it is."""
     lines = stderr.strip().splitlines()
     for line in reversed(lines):
-        if line.startswith("bottle-cli: "):
-            return line.removeprefix("bottle-cli: ")
+        for program in ("bottle-cli: ", "folio-cli: "):
+            if line.startswith(program):
+                return line.removeprefix(program)
     return stderr.strip()

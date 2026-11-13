@@ -183,7 +183,7 @@ class Bottle:
 
     @property
     def qualified(self) -> str:
-        """Its machine, as bottle-cli on the controller names it: RUNNER/NAME for one on a runner."""
+        """Its machine and where it is, as folio shows it: RUNNER/NAME for one on a runner."""
         return self.machine if self.runner == runners.LOCAL else f"{self.runner}/{self.machine}"
 
 
@@ -455,12 +455,13 @@ def _start_machine(bottle: Bottle) -> None:
     """Start the bottle's machine, folio serve answering what it routes there as this bottle's, its credentials
     read now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, and gives it to the
     bottle to trust (the base image's entrypoint does)."""
-    daemon.bind(bottle.name, bottle.machine, served(bottle), bottle.features)
+    daemon.bind(bottle.name, bottle.machine, served(bottle), bottle.features, bottle.runner)
     runner_of(bottle).start(bottle.machine)
 
 
-# The version of the policy network() makes: 1, its routes to folio serve's one socket; 2, folio serve's, by service.
-NETWORK = 2
+# The version of the policy network() makes: 1, its routes to folio serve's one socket; 2, folio serve's, by service;
+# 3, on a runner, to folio serve's forwarded there (runners.services_sockets), not bottle-cli's.
+NETWORK = 3
 
 
 def network(bottle: Bottle) -> dict:

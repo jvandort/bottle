@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         "Threads get it in their next bottle; a bottle already running keeps what it has.",
     )
     _configure_arguments(configure, runner_help="the runner the repo's threads' bottles are made on, unless a "
-                         "thread is given its own (`bottle runner ls` lists them; default: this machine)")
+                         "thread is given its own (`folio runner ls` lists them; default: this machine)")
     configure.set_defaults(run=_configure, parser=configure, command="configure")
 
     sidecar = commands.add_parser(
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "saved.",
     )
     command.add_argument("thread", metavar="THREAD", nargs="?", help=f"the thread (default: {PICK})")
-    _configure_arguments(command, runner_help="the runner it's made on (`bottle runner ls` lists them)")
+    _configure_arguments(command, runner_help="the runner it's made on (`folio runner ls` lists them)")
     command.set_defaults(run=_sidecar_configure, parser=command, command="sidecar configure")
     for name, help_, run in (("remove", "take the thread's sidecar away", _sidecar_remove),
                              ("shell", "a shell in the running thread's sidecar, at /workspace, for as long as you're "
@@ -157,12 +157,40 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("name", metavar="CREDENTIAL", help="the credential, e.g. claude")
     command.set_defaults(run=_auth_remove)
 
+    runner = commands.add_parser(
+        "runner", help="the other machines folio makes bottles on: add|ls|rm|ssh|check|detach|attach",
+        description="The other machines folio makes bottles on, over ssh: folio-cli's runner commands (`folio runner "
+        "add NAME --ssh DESTINATION`, `ls`, `rm NAME`, `ssh NAME [COMMAND]`, `check NAME|DESTINATION`, `detach NAME "
+        "[--offline]`, `attach NAME`). A runner folio has bottles on is removed only once they're deleted.",
+    )
+    runner.add_argument("arguments", nargs=argparse.REMAINDER, metavar="...", help="folio-cli runner's")
+    runner.set_defaults(run=_runner_command)
+
     args = parser.parse_args(argv)
     try:
         return args.run(args)
     except (FolioError, engine.BottleError) as e:
         print(f"folio: error: {e}", file=sys.stderr)
         return 1
+
+
+def _runner_command(args: argparse.Namespace) -> int:
+    """folio-cli's runner commands, folio-cli running in this process's place: but for removing a runner folio still
+    has bottles on, refused here, as folio-cli doesn't know them (yet)."""
+    import os
+
+    from .bottle import bottles, krun
+
+    if args.arguments[:1] == ["rm"] and len(args.arguments) > 1:
+        name = args.arguments[1]
+        there = sorted(b.name for b in bottles.load().values() if b.runner == name)
+        if there:
+            raise FolioError(f"runner {name} has bottles: {', '.join(there)}; delete their threads first")
+    program = krun.folio_binary()
+    try:
+        os.execvp(program, [program, "runner", *args.arguments])
+    except FileNotFoundError:
+        raise FolioError(krun.RunnerCli("").missing()) from None
 
 
 def _new(args: argparse.Namespace) -> int:

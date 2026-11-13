@@ -220,6 +220,23 @@ fn a_runner_is_added_kept_up_to_date_and_asked_anything_bottle_cli_does() {
         f.there().join(".bottle").display().to_string()
     );
     assert_eq!(f.ok(&["on", "box", "images", "--json"]), "[]\n");
+    // Its user's home there: asked once, then kept.
+    assert_eq!(
+        f.ok(&["runner", "home", "box"]),
+        format!("{}\n", f.there().display())
+    );
+    let asked = fs::read_to_string(f.dir.join("ssh.log"))
+        .unwrap()
+        .lines()
+        .count();
+    f.ok(&["runner", "home", "box"]);
+    assert_eq!(
+        fs::read_to_string(f.dir.join("ssh.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        asked
+    );
 
     // Its machines, by their names there.
     let image = f.dir.join("store/s.ext4").display().to_string();

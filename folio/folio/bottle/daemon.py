@@ -4,8 +4,9 @@ It's folio's, run as `folio serve`, its sockets and log in folio's home (home())
 shared, until it moves with the rest of what's folio's.
 
 It runs on the controller alone, for every runner's bottles (Daemon): a remote
-runner's machines reach its sockets through ones on the runner that bottle-cli
-forwards here.
+runner's machines reach its sockets through ones on the runner, which it
+forwards here itself, over one ssh per runner it answers bottles on, for as
+long as it does (`folio-cli runner forward`, run by Forwards).
 
 bottle-cli decides a bottle's connections itself, by the policy its machine
 was made with (services.network), and gives folio serve the ones that policy
@@ -22,6 +23,7 @@ import json
 import logging
 import os
 import resource
+import signal
 import socket
 import subprocess
 import sys
@@ -97,14 +99,16 @@ def services_sockets() -> dict[str, Path]:
     return {name: socket_path(f"services/{name}.sock") for name in SERVICES}
 
 
-def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = ()) -> None:
-    """Have folio serve answer what `machine` routes to it as `bottle`'s, starting folio serve if it isn't running.
+def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = (),
+         runner: str = "local") -> None:
+    """Have folio serve answer what `machine`, on `runner`, routes to it as `bottle`'s, starting folio serve if it
+    isn't running.
 
     Its credentials are read as it's bound: a login reaches a bottle when it's
     next started, or when folio serve is.
     """
     message = {
-        "op": "bind", "bottle": bottle, "machine": machine, "features": list(features),
+        "op": "bind", "bottle": bottle, "machine": machine, "features": list(features), "runner": runner,
         "repos": [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at,
                    "remotes": [remote.spec for remote in r.remotes]} for r in repos],
     }
@@ -253,6 +257,66 @@ def _start_daemon() -> None:
 # --- server -------------------------------------------------------------------
 
 
+class Forwards:
+    """What folio serve forwards to each runner it answers bottles on: its services' sockets, made reachable
+    there, by a `folio-cli runner forward` of the runner's own, while one or more of its bottles is bound.
+    Each forward leads a process group of its own, its ssh in it, so stopping one stops both; one whose
+    starter is gone (folio serve, killed) ends itself."""
+
+    def __init__(self) -> None:
+        self.runners: dict[str, str] = {}  # bottle -> the runner it's on, for those on a runner
+        self.processes: dict[str, subprocess.Popen] = {}
+
+    def bound(self, bottle: str, runner: str) -> None:
+        """`bottle`, on `runner`, is bound: its runner forwarded to, if it's another machine's."""
+        from folio.bottle import runners  # runners imports this module
+
+        if runner == runners.LOCAL:
+            return
+        self.runners[bottle] = runner
+        running = self.processes.get(runner)
+        if running is not None and running.poll() is None:
+            return
+        forwards = runners.get(runner).forwards()
+        log.info("forwarding to runner %s", runner)
+        with os.fdopen(open_log(f"forward-{runner}", home()), "a") as out:
+            self.processes[runner] = subprocess.Popen(
+                [_folio_cli(), "runner", "forward", runner, *forwards],
+                stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, cwd="/",
+            )
+
+    def released(self, bottle: str) -> None:
+        """`bottle` isn't bound any more: its runner's forward ends, if it was the last bottle bound there."""
+        runner = self.runners.pop(bottle, None)
+        if runner is not None and runner not in self.runners.values():
+            self._end(runner)
+
+    def end(self) -> None:
+        for runner in list(self.processes):
+            self._end(runner)
+
+    def _end(self, runner: str) -> None:
+        process = self.processes.pop(runner, None)
+        if process is None:
+            return
+        log.info("no longer forwarding to runner %s", runner)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def _folio_cli() -> str:
+    from folio.bottle import krun
+
+    return krun.folio_binary()
+
+
 class Daemon:
     """folio serve: the services sockets, each bottle's gateway, and what those hand it: ssh to bottles, and
     messages between them."""
@@ -261,6 +325,7 @@ class Daemon:
                  services_paths: dict[str, Path] | None = None) -> None:
         self.services = services or services_.Services()
         self.services_paths = services_paths
+        self.forwards = Forwards()
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
@@ -273,7 +338,9 @@ class Daemon:
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = await reader.readline()
-        if not line:  # a liveness probe: connected and hung up
+        # A liveness probe, connected and hung up; or anything, once it's stopping: closed unanswered, which says
+        # it's on its way out (_Closed).
+        if not line or self.stopping.is_set():
             writer.close()
             return
         try:
@@ -285,7 +352,8 @@ class Daemon:
                     repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
                                          tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
                                   for r in message.get("repos", ()))
-                    await self.bind(message["bottle"], message["machine"], repos, tuple(message.get("features", ())))
+                    await self.bind(message["bottle"], message["machine"], repos, tuple(message.get("features", ())),
+                                    message.get("runner", "local"))
                     reply = {"ok": True}
                 case "release":
                     await self.release(message["bottle"])
@@ -305,8 +373,9 @@ class Daemon:
         await writer.drain()
         writer.close()
 
-    async def bind(self, bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = ()) -> None:
-        """Answer what `machine` routes here as `bottle`'s.
+    async def bind(self, bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = (),
+                   runner: str = "local") -> None:
+        """Answer what `machine`, on `runner`, routes here as `bottle`'s: on a runner, through a forward to it.
 
         Its credentials are read now, each time it's bound, so a credential set
         or removed reaches a bottle when it next starts, or folio serve does.
@@ -318,12 +387,14 @@ class Daemon:
             services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers)
             gateway = egress.Gateway(bottle, services, injections, ssh=functools.partial(self.ssh, bottle))
             self.services.bind(bottle, machine, gateway)
+            await asyncio.to_thread(self.forwards.bound, bottle, runner)
 
     async def release(self, bottle: str) -> None:
         """Stop answering `bottle`'s machine: it's gone (deleted, or its thread paused). With none left to answer,
         folio serve stops: the next bottle made starts it again."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             self.services.release(bottle)
+            await asyncio.to_thread(self.forwards.released, bottle)
         if not self.services.bindings:
             log.info("no bottle left to answer: stopping")
             self.stopping.set()
@@ -331,16 +402,16 @@ class Daemon:
     async def restore(self, bound: list[tuple]) -> list[tuple]:
         """Answer the machines of bottles there were before folio serve started.
 
-        Each is (name, machine, the repos it's served, features), as
-        bound_bottles() gives them. Returns those it couldn't bind.
+        Each is (name, machine, the repos it's served, features, its runner),
+        as bound_bottles() gives them. Returns those it couldn't bind.
         """
         unrestored = []
         for binding in bound:
-            bottle, machine, repos, features = binding
+            bottle, machine, repos, features, runner = binding
             if self.services.bound(bottle):
                 continue
             try:
-                await self.bind(bottle, machine, repos, features)
+                await self.bind(bottle, machine, repos, features, runner)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore its decisions: %s", bottle, e)
                 unrestored.append(binding)
@@ -418,12 +489,12 @@ def _permissions(bottle) -> list[str]:
     return bottle.spec.get("permissions", []) if bottle is not None else []
 
 
-def bound_bottles() -> list[tuple[str, str, tuple[Served, ...], tuple[str, ...]]]:
-    """(name, machine, the repos it's served, features) of every ready bottle, wherever it runs, but on a runner
-    detached (turned off)."""
+def bound_bottles() -> list[tuple[str, str, tuple[Served, ...], tuple[str, ...], str]]:
+    """(name, machine, the repos it's served, features, its runner) of every ready bottle, wherever it runs, but on
+    a runner detached (turned off)."""
     from folio.bottle import bottles, runners  # bottles imports this module
 
-    return [(b.name, b.machine, bottles.served(b), tuple(b.features)) for b in bottles.load().values()
+    return [(b.name, b.machine, bottles.served(b), tuple(b.features), b.runner) for b in bottles.load().values()
             if b.status == "ready" and (b.runner == runners.LOCAL or not runners.is_detached(b.runner))]
 
 
@@ -474,9 +545,20 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     try:
         async with server:
             await daemon.stopping.wait()
+            # Its winding up, while it still takes connections (closing them unanswered): until it's done, whoever
+            # waits for it to be gone waits (_wait_gone), and a folio serve started next forwards to its runners
+            # afresh. What's routed here stops first; then its forwards, what they'd carry having nowhere to go.
+            _stop_routed(routed, services_paths)
+            await asyncio.to_thread(daemon.forwards.end)
+            log.info("folio serve %d stopped", os.getpid())
     finally:
-        for server, p in zip(routed, services_paths.values()):
-            server.close()
-            p.unlink(missing_ok=True)
+        # And whatever's left, if it failed.
+        _stop_routed(routed, services_paths)
+        daemon.forwards.end()
         path.unlink(missing_ok=True)
-        log.info("folio serve %d stopped", os.getpid())
+
+
+def _stop_routed(routed: list, paths: dict[str, Path]) -> None:
+    for server, p in zip(routed, paths.values()):
+        server.close()
+        p.unlink(missing_ok=True)
