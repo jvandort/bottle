@@ -61,7 +61,7 @@ def log_to_file(name: str = "bottle", home: Path | None = None) -> None:
 class _Log(logging.handlers.WatchedFileHandler):
     """A log, opened again when it's deleted or replaced (by a rotation, say), and private each time (open_log).
 
-    bottled runs for days: a plain FileHandler would go on writing to a log
+    folio serve runs for days: a plain FileHandler would go on writing to a log
     deleted under it, where no one can read it.
     """
 

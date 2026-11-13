@@ -4,7 +4,7 @@ Run by hooks/post-receive, on the controller, in the hub's git dir, once the
 push's refs have moved. Stdin is receive-pack's `<old> <new> <ref>` lines, the
 refs as the bottle named them, inside its namespace (GIT_NAMESPACE). What it
 says on stdout reaches the bottle as `remote:` lines in its push's output,
-and goes to $BOTTLE_HOOK_LOG for bottled's log.
+and goes to $BOTTLE_HOOK_LOG for folio serve's log.
 
 A branch of the hub's follows a push when its upstream is a remote reading
 the push's namespace -- folio's `bottle/<thread>`, whose uploadpack is `git

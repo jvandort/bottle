@@ -1,8 +1,5 @@
 import io
-import json
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest import mock
 
 from bottle import specs
@@ -89,33 +86,9 @@ class CanonicalTest(unittest.TestCase):
         self.assertEqual(specs.memory_limit({"features": [], "memory": "8G"}), "8G")
 
 
-class ReadTest(unittest.TestCase):
-    def setUp(self) -> None:
-        patcher = mock.patch.object(specs, "host_memory_mib", return_value=16384)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        tmp = TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.path = Path(tmp.name) / "spec.json"
-
-    def test_reads_the_canonical_form(self) -> None:
-        self.path.write_text(json.dumps({"features": ["tools"], "memory": "2g"}))
-        self.assertEqual(specs.read(self.path), {"features": ["tools"], "memory": "2G"})
-
-    def test_names_the_file_in_errors(self) -> None:
-        for text, message in (("nope", "isn't valid JSON"), ('{"features": ["nope"]}', "no feature named")):
-            self.path.write_text(text)
-            with self.subTest(text), self.assertRaisesRegex(BottleError, f"spec {self.path}.*{message}"):
-                specs.read(self.path)
-
-    def test_a_missing_file(self) -> None:
-        with self.assertRaisesRegex(BottleError, f"can't read spec {self.path}"):
-            specs.read(self.path)
-
-
 class RunnerMemoryTest(unittest.TestCase):
     def test_a_spec_alone_can_ask_for_any_memory(self) -> None:
-        # Which machine it's for is bottle new's to know, and to check it against.
+        # Which machine it's for is its bottle's to know, and to check it against.
         self.assertEqual(specs.canonical({"memory": "512G"})["memory"], "512G")
 
     def test_a_spec_for_a_runner_fits_the_runners_memory(self) -> None:

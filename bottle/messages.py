@@ -6,7 +6,7 @@ either a bottle's name or an address, `<name>~<signature>`. Names can't hold a
 
 An address is issued to one bottle, the holder, for reaching another, the
 target: the signature is an HMAC, under a key that never leaves the controller, of
-both their names. bottled hands one out as the `from` of every message it
+both their names. folio serve hands one out as the `from` of every message it
 delivers -- the sender's address, issued to the recipient -- so a bottle can
 answer whoever wrote to it, and no one else. The address is good only from its
 holder: one passed to another bottle is refused there, and can't be guessed.

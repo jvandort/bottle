@@ -1,7 +1,7 @@
 """bottle.host's services: what a bottle can ask of bottle, at http://bottle.host/.
 
 Requests to http://bottle.host/ never leave bottle: the bottle's machine routes
-them to bottled, which answers them itself, serving the bottle's repo over git's
+them to folio serve, which answers them itself, serving the bottle's repo over git's
 smart HTTP protocol with `git http-backend`. A bottle is served the remotes it
 was created with, each a Remote at http://bottle.host/git/<name>. What a fetch
 sees is one of three views:
@@ -32,7 +32,7 @@ with no namespace at all; the repo's own hooks never run.
 Reading one namespace and writing another makes a two-lane exchange, each lane
 with one writer, so neither side's push is ever rejected for what the other
 did: the bottle writes one lane, and whoever created it writes the other,
-directly in its own repo. bottled never serves that direction.
+directly in its own repo. folio serve never serves that direction.
 
 Fetches and pushes are the hub's, on the controller, wherever the bottle runs:
 a fetch sees the repo as it is right now, and a push goes in with every rule
@@ -45,16 +45,16 @@ files and all, in whichever worktree has it, unless the repo says
 `git config bottle.follow false`. Only ever a fast-forward, and only when it can't lose anything: a branch with commits of
 the hub's own, a change in the way, or a worktree mid-merge, -rebase and the
 like is left alone. The push succeeds either way, and its output tells the
-bottle what moved and what didn't; bottled logs it too.
+bottle what moved and what didn't; folio serve logs it too.
 
 A bottle can also send a message to another bottle: a POST to
 http://bottle.host/messages of {"to": ..., "text": ...}, where to is an address
 it was given (see messages.py) or, with the message-any permission, a running
-bottle's name. bottled hands it to that bottle's session as an event from the
+bottle's name. folio serve hands it to that bottle's session as an event from the
 sender (see Daemon.deliver), and answers once the session has taken it, or
 with why it couldn't: no running bottle it may reach by that (404), or no
 session took it in time (504). The sender names where a message goes, never
-where it came from: bottled knows which bottle is asking, and the event's from
+where it came from: folio serve knows which bottle is asking, and the event's from
 is its address, issued to the recipient.
 
 With the list-bottles permission, GET http://bottle.host/bottles lists the
@@ -84,7 +84,7 @@ log = logging.getLogger("bottle.egress")
 HOST = "bottle.host"
 # Where a bottle whose driver carries its sockets reaches bottle.host: its
 # /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
-# uses, which the bottle's machine routes to bottled (services.network).
+# uses, which the bottle's machine routes to folio serve (services.network).
 ADDRESS = "192.0.2.1"
 # Where a bottle reaches the bottles it may ssh to (a thread's, its sidecar): the rest
 # of TEST-NET-1, an address for each, under the name its creator gave it.
@@ -133,7 +133,7 @@ class Remote:
 
     @property
     def spec(self) -> str:
-        """As `--git-remote` takes it, less its mount: work:fetch=ns/x-in,push=ns/x-out."""
+        """As parse takes it: work:fetch=ns/x-in,push=ns/x-out."""
         return f"{self.name}:fetch={self.fetch}" + (f",push={self.push}" if self.push else "")
 
     @classmethod
@@ -174,7 +174,7 @@ class HttpRequest:
 
 
 class ServiceError(Exception):
-    """A request bottled refused or couldn't carry out, with the HTTP status that says why."""
+    """A request folio serve refused or couldn't carry out, with the HTTP status that says why."""
 
     def __init__(self, status: int, reason: str, why: str) -> None:
         super().__init__(why)

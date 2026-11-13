@@ -9,7 +9,7 @@ also cleans up a bottle that was left half-made.
 Each bottle has:
   - a machine, <name> (see krun.py), with each of its mounts' repos'
     objects mounted read-only, and the network policy it decides its
-    connections by (network), which routes some to bottled: bottle.host,
+    connections by (network), which routes some to folio serve: bottle.host,
     which serves each mount's git remotes, ssh to bottles, and its credentials'
     hosts (see services.py, egress.py, host.py)
   - for each mount, a checkout at its path that borrows those objects via
@@ -21,9 +21,9 @@ specs.py). Its remotes are the ones it was created with, and nothing is
 registered in the repo: what the bottle pushes is for its creator to read.
 What's worth keeping before a bottle is deleted is its creator's call too.
 
-A bottle may ssh to other bottles its creator names (`--ssh NAME=BOTTLE`),
+A bottle may ssh to other bottles its creator names (ssh: {NAME: BOTTLE}),
 and to nothing else that way: NAME, in its /etc/hosts, is an address whose
-port 22 bottled joins to sshd in that bottle, the one that existed when the
+port 22 folio serve joins to sshd in that bottle, the one that existed when the
 grant was made. Its key is let in there and that bottle's host key is known
 here, when it's made: so that bottle must exist first, and be made again
 with it, or the grant reaches nothing. The two may push into the same
@@ -63,7 +63,7 @@ LEGACY_PATH, LEGACY_OBJECTS = "/workspace", "/mnt/repo/objects"
 CONTEXT_FILE = "BOTTLE.md"  # in genie's home
 GIT_URL = f"http://{host.HOST}{host.GIT_PATH}"
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-# The remotes a bottle with a repo and no --git-remote is served, read-only.
+# The remotes a bottle's repo is served when it's given none, read-only.
 ORIGIN, HOST_REMOTE = "origin", "host"
 
 # What bottle relies on inside every bottle, checked (as genie) whenever one
@@ -76,7 +76,7 @@ CONTRACT = (
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
-# Where bottled's egress CA was in a bottle's trust store, before its machine's own took its place.
+# Where folio serve's egress CA was in a bottle's trust store, before its machine's own took its place.
 CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
 # Where a bottle has its machine's CA, which bottle-cli where it runs takes TLS off with (bottle-cli ca), in the
 # trust store whose bundle the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
@@ -131,12 +131,12 @@ SSH_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]
 
 @dataclass(frozen=True)
 class MountRequest:
-    """A mount as `bottle new` is asked for one: the repo, where, from what, served what."""
+    """A mount as create is asked for one: the repo, where, from what, served what."""
 
     path: str
     repo: Path
     checkout: str | None = None  # a branch or commit (default: origin's default branch, else what's checked out)
-    remotes: list[str] | None = None  # --git-remote specs, less the path (default: origin and host, read-only)
+    remotes: list[str] | None = None  # host.Remote specs (default: origin and host, read-only)
 
 
 @dataclass(frozen=True)
@@ -155,13 +155,13 @@ class Bottle:
     spec: dict = field(default_factory=dict)
     # Its repos, each checked out at its path; the first is where a shell starts.
     mounts: tuple[Mount, ...] = ()
-    # Its creator's addition to ~/BOTTLE.md (`bottle new --context`).
+    # Its creator's addition to ~/BOTTLE.md.
     context: str = ""
     # The image archive its machine was made from, which is kept while it exists.
     archive: str | None = None
     # The runner its machine is on (see runners.py); records from before runners were the local one's.
     runner: str = runners.LOCAL
-    # The bottles it may ssh to (`--ssh`).
+    # The bottles it may ssh to.
     ssh: tuple[SshGrant, ...] = ()
     # Its machine's name, as bottle-cli has it; "" for a bottle made before it was recorded (see machine).
     machine_name: str = ""
@@ -389,11 +389,11 @@ def _plan_ssh(ssh: dict[str, str], existing: dict[str, Bottle]) -> tuple[SshGran
     grants = []
     for index, (name, target) in enumerate(ssh.items()):
         if not SSH_NAME.fullmatch(name) or name == host.HOST:
-            raise BottleError(f"invalid --ssh name {name!r}: a host name, e.g. sidecar.host")
+            raise BottleError(f"invalid ssh name {name!r}: a host name, e.g. sidecar.host")
         if target not in existing:
-            raise BottleError(f"--ssh {name}={target}: no bottle named {target!r}")
+            raise BottleError(f"ssh {name}={target}: no bottle named {target!r}")
         if existing[target].status != "ready":
-            raise BottleError(f"--ssh {name}={target}: {target} is {existing[target].status}")
+            raise BottleError(f"ssh {name}={target}: {target} is {existing[target].status}")
         grants.append(SshGrant(name, target, existing[target].id, host.ssh_address(index)))
     return tuple(grants)
 
@@ -403,7 +403,7 @@ def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str, owner: Path) 
     failure."""
     # Never build on a name something else is using: rollback would then be cleaning up after it.
     if runner_of(bottle).state(bottle.machine) is not None:
-        raise BottleError(f"a machine named {bottle.machine} already exists; choose another name with --name")
+        raise BottleError(f"a machine named {bottle.machine} already exists")
     _save(bottle, owner)
     try:
         bottle = _run_machine(bottle, mounted, tag)
@@ -420,7 +420,7 @@ def _bring_up(bottle: Bottle, mounted: list[repos.Repo], tag: str, owner: Path) 
 
 
 def _start_at(repo: repos.Repo, checkout: str | None) -> repos.Start:
-    """Where `--checkout` starts: a branch (the repo's, else origin's), else any commit; by default origin's
+    """Where a checkout starts: a branch (the repo's, else origin's), else any commit; by default origin's
     default branch, else what the repo has checked out."""
     if checkout is None:
         return repos.default_start(repo)
@@ -526,7 +526,7 @@ def _start_machine(bottle: Bottle) -> None:
     runner_of(bottle).start(bottle.machine)
 
 
-# The version of the policy network() makes: 1, its routes to bottled's one socket; 2, folio serve's, by service.
+# The version of the policy network() makes: 1, its routes to folio serve's one socket; 2, folio serve's, by service.
 NETWORK = 2
 
 
@@ -536,7 +536,7 @@ def _network_version(bottle: Bottle) -> int:
 
 def network(bottle: Bottle) -> dict:
     """The policy the bottle's machine decides its connections by (services.network): what its features cache,
-    and what it routes to bottled: bottle.host, ssh to bottles, and its credentials' hosts, logged in or not."""
+    and what it routes to folio serve: bottle.host, ssh to bottles, and its credentials' hosts, logged in or not."""
     return services.network(auth.credential_destinations(bottle.features), cache.cached_for(bottle.features))
 
 
@@ -549,7 +549,7 @@ def _memory_mib(memory: str | None) -> int:
 
 
 def point_at_host(bottle: Bottle) -> None:
-    """Give the bottle bottle.host, at the address whose flows its machine routes to bottled's git service, and the
+    """Give the bottle bottle.host, at the address whose flows its machine routes to folio serve's git service, and the
     name of each bottle it may ssh to, at its address."""
     entries = [f"{host.ADDRESS} {host.HOST}", *(f"{g.address} {g.name}" for g in bottle.ssh)]
     script = "; ".join(f"grep -qsx {shlex.quote(e)} /etc/hosts || echo {shlex.quote(e)} >> /etc/hosts" for e in entries)
@@ -573,7 +573,7 @@ def git_dir(mount: Mount) -> Path | None:
 
 
 def served(bottle: Bottle) -> tuple[host.Served, ...]:
-    """What bottled serves the bottle at bottle.host: each mount's repo and remotes."""
+    """What folio serve serves the bottle at bottle.host: each mount's repo and remotes."""
     return tuple(host.Served(git_dir(m), m.remotes, m.at or "") for m in bottle.mounts)
 
 
@@ -583,7 +583,7 @@ def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, 
     its permissions, as BOTTLE_PERMISSIONS, so the tools that use them know to offer them; and where a
     login starts, as BOTTLE_WORKDIR (the base image's profile goes there).
 
-    BOTTLE_PERMISSIONS only says what bottled would allow: bottled checks the
+    BOTTLE_PERMISSIONS only says what folio serve would allow: folio serve checks the
     bottle's spec, not this, so a bottle that sets it itself gains nothing.
 
     Every exec sees these. SSH sessions only see /etc/environment, so the base
@@ -706,7 +706,7 @@ def start(name: str) -> Bottle:
 
 
 def ensure_running(name: str) -> Bottle:
-    """Start the bottle's machine if it isn't running, bottled answering it."""
+    """Start the bottle's machine if it isn't running, folio serve answering it."""
     bottle = get(name)
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; delete its thread to remove it (`folio delete`)")
@@ -725,7 +725,7 @@ def ensure_running(name: str) -> Bottle:
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
         if given:
-            # What was set up in it for the decider is set up again for its policy; one made with its policy has
+            # What was set up in it before is set up again for its policy; one made with its policy has
             # all it needs on its disk, as bottle-cli's start alone would find it.
             verify_contract(bottle)
             trust_egress_ca(bottle)
@@ -756,9 +756,9 @@ def trust_egress_ca(bottle: Bottle) -> None:
 
     The CA bottle-cli takes TLS off with, where the bottle runs, for the hosts
     its policy caches over https and routes by name (bottle-cli ca): what lets
-    it answer cached hosts and give bottled credentials' requests. Each time
+    it answer cached hosts and give folio serve credentials' requests. Each time
     a bottle starts, so one made before, or given its policy since, trusts the
-    current one; one with no such hosts trusts none. bottled's own egress CA,
+    current one; one with no such hosts trusts none. folio serve's own egress CA,
     from before, is taken out.
     """
     _trust(bottle, CA_CERTIFICATE, None)

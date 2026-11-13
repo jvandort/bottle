@@ -2,27 +2,25 @@
 
     {"features": ["claude", "jvm:version=25", "tools"], "memory": "8G"}
 
-A spec can also give the bottle permissions, what bottled lets it do beyond
+A spec can also give the bottle permissions, what folio serve lets it do beyond
 what every bottle may (see PERMISSIONS), and labels: its creator's names for
 it, which bottle doesn't read (folio's say which thread it's for), shown with
 its machine (`bottle-cli ls`) and to bottles with list-bottles:
 
     {"features": ["claude"], "memory": "4G", "permissions": ["message-any"], "labels": {"thread": "fix-it"}}
 
-Bottle keeps no specs. Whoever creates a bottle owns the file and passes it to
-`bottle new --spec`; `bottle spec validate` checks one the same way, and gives
-its canonical form: each feature's options sorted and every default left
-out, features sorted, and the memory as a size in M or G. Every spec gives its
-memory: a bottle has the size it's given, and no more.
+Whoever creates a bottle owns its spec (folio: a repo's, a sidecar's), and
+canonical checks it and gives its canonical form: each feature's options
+sorted and every default left out, features sorted, and the memory as a size
+in M or G. Every spec gives its memory: a bottle has the size it's given, and
+no more.
 A feature's dependencies aren't written in: they're the feature's to declare,
 and resolved again whenever a bottle is created.
 """
 
-import json
 import re
 import platform
 import subprocess
-from pathlib import Path
 
 from bottle.errors import BottleError
 
@@ -44,28 +42,12 @@ MEMORY_PATTERN = re.compile(r"([1-9][0-9]*)([MG])", re.IGNORECASE)
 DISK_PATTERN = re.compile(r"([1-9][0-9]*)G", re.IGNORECASE)
 
 
-def read(path: Path) -> dict:
-    """The canonical form of the spec in the file at `path`."""
-    try:
-        text = path.read_text()
-    except OSError as e:
-        raise BottleError(f"can't read spec {path}: {e.strerror or e}") from None
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise BottleError(f"spec {path} isn't valid JSON: {e}") from None
-    try:
-        return canonical(data)
-    except BottleError as e:
-        raise BottleError(f"spec {path}: {e}") from None
-
-
 def canonical(data: object, memory_mib: int | None = None, where: str = "this machine") -> dict:
-    """Validate a spec and put it in canonical form, as `bottle new` would accept it.
+    """Validate a spec and put it in canonical form.
 
     Given `memory_mib`, the memory of the machine it's for (`where`), its
-    memory must fit it too: what a spec is for, `bottle new` knows and a spec
-    doesn't, since the same spec makes bottles on any runner.
+    memory must fit it too: which machine a spec is for, its bottle knows and a
+    spec doesn't, since the same spec makes bottles on any runner.
     """
     from bottle import features  # imports images, which loading a spec doesn't otherwise need
 

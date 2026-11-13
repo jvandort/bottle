@@ -4,7 +4,7 @@ Features declare the credentials they need (customizations.bottle.credentials
 in their devcontainer-feature.json): a name, and where the credential goes.
 Each is stored in the macOS Keychain, set from stdin (`folio auth set`).
 
-A credential never enters a bottle. bottled hands it to that bottle's
+A credential never enters a bottle. folio serve hands it to that bottle's
 gateway (injections_for), which puts it in place of the stand-in on the bottle's
 requests to the hosts the feature named, on HTTPS connections the machine
 makes (see egress.py). The agent can spend the credential against those
@@ -19,7 +19,7 @@ host as they would from the machine.
 
 A credential can also come from a file a tool on the machine already keeps
 its credentials in (the credential's properties, see features.py), such as
-Gradle's ~/.gradle/develocity/keys.properties: bottled reads the line for each
+Gradle's ~/.gradle/develocity/keys.properties: folio serve reads the line for each
 host, and the Keychain is for the hosts the file doesn't name.
 
 A bottle picks up a credential set or removed, or a change to such a file, when it next starts.
@@ -205,9 +205,9 @@ def warn_unset(specs: tuple[str, ...] | list[str]) -> None:
 
 
 def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
-    """What bottled attaches for a bottle with these features: one per injected credential.
+    """What folio serve attaches for a bottle with these features: one per injected credential.
 
-    Read from its properties file or the Keychain here, in bottled, so the
+    Read from its properties file or the Keychain here, in folio serve, so the
     value goes no further than the gateway. A credential that isn't logged in is left out; the bottle then
     reaches the host unauthenticated, and the server says so.
 
@@ -244,7 +244,7 @@ def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]
 
 def credential_destinations(specs: tuple[str, ...] | list[str]) -> list[tuple[str, int]]:
     """The host patterns and ports a bottle with these features has credentials attached at, logged in or not:
-    what its machine routes to bottled (see services.network)."""
+    what its machine routes to folio serve (see services.network)."""
     return sorted({(pattern.lower(), port) for c in credentials_for(specs) for pattern, port in
                    (destination(h) for h in c.inject.hosts)})
 
@@ -253,7 +253,7 @@ def standins_for(specs: tuple[str, ...] | list[str]) -> dict[str, str]:
     """The fake tokens a bottle with these features gets, by variable name.
 
     A stand-in is not a credential and not a secret: it is what makes a tool
-    believe it's logged in, so it will make the request bottled then
+    believe it's logged in, so it will make the request folio serve then
     authenticates. bottle sets these when it creates a bottle.
     """
     return {c.inject.standin: features.STANDIN for c in credentials_for(specs) if c.inject.standin}

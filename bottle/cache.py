@@ -6,8 +6,8 @@ and every apt repository an image has is kept too (see apt.py). bottle-cli,
 which carries a bottle's connections, terminates the bottle's TLS to them
 with the machine's caching CA (`bottle-cli ca`), answers what it has, and
 keeps what it fetches, in $BOTTLE_HOME/cache/http, removing what's gone
-unused for a week (see bottle-agent-client's cache and store). bottled tells
-it which hosts, and how (egress.Gateway.driver_policy).
+unused for a week (see bottle-agent-client's cache and store). A machine's
+policy says which hosts, and how (services.cache_rules).
 
 What's kept is never refreshed, which suits hosts whose files don't change
 once they're published; a feature excludes the paths that do, such as an

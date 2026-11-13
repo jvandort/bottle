@@ -111,7 +111,7 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, labels: d
              for step in recipe.get("steps", [])]
     made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},
             "mount": {"target": MOUNT}, "steps": steps, "labels": image_labels}
-    # The public network, with none of its features' credentials, nothing routed to bottled; their apt
+    # The public network, with none of its features' credentials, nothing routed to folio serve; their apt
     # repositories kept.
     network = {"cache": services.cache_rules(cache.cached_for(recipe.get("features", []), build=True))}
     # Its progress on stderr; the disk of the stage it made, the last line of its stdout.

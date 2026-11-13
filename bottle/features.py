@@ -22,7 +22,7 @@ to set, and what to tell the agent.
 
 A credential is a secret bottle keeps on the controller and a bottle's tools need
 (see bottle/auth.py). It never enters a bottle: a credential says which hosts
-it belongs to, and bottled attaches it to the bottle's requests to
+it belongs to, and folio serve attaches it to the bottle's requests to
 those hosts (see bottle/egress.py).
 
   "customizations": {"bottle": {"credentials": {"teamcity": {
@@ -68,9 +68,9 @@ those hosts (see bottle/egress.py).
              what's there is exactly the stand-in, and nowhere else.
 
   A tool in the bottle talks to the host over https as it always would: its
-  machine routes the connection to bottled, bottle-cli taking the TLS off with
+  machine routes the connection to folio serve, bottle-cli taking the TLS off with
   a certificate from the machine's CA, which the bottle trusts for its
-  credentials' and cached hosts and no others (bottle-cli ca), so bottled can
+  credentials' and cached hosts and no others (bottle-cli ca), so folio serve can
   read the request and put the credential in place of the stand-in, on the
   requests that present it (see below). A host is a name, an IP address, or
   `*.` and a name, since the CA's name constraint can say nothing else. Anything else the tool needs in order to believe it's
@@ -89,14 +89,14 @@ those hosts (see bottle/egress.py).
 properties is optional: a file on the machine where a tool already keeps its
 credentials, as Java properties of `host=credential` lines (Gradle's
 Develocity keys.properties is one), with `${option}` for an option's value and
-`~` for the home directory. bottled reads it each time a bottle starts, and
+`~` for the home directory. folio serve reads it each time a bottle starts, and
 attaches to each of inject.hosts the credential on that host's line; a host
 the file has no line for gets the one stored by `folio auth set`, if any.
 Only the line for a host the feature names ever leaves the file.
 
-cache names hosts whose downloads bottled keeps on the machine, so the next
+cache names hosts whose downloads bottle-cli keeps on the machine, so the next
 bottle gets them from there (see bottle/cache.py): as with a credential's
-host, the bottle's TLS to them is terminated with its egress CA. exclude is
+host, the bottle's TLS to them is terminated with its machine's CA. exclude is
 fnmatch patterns over a request's path, for files a host changes after
 they're published, which are never kept.
 
@@ -111,7 +111,7 @@ repository stays installed in the image, its key (a file in the feature's
 directory) in /etc/apt/keyrings, so a bottle can install more from it. A
 package is a name, with ${option} for an option's value: one holding a
 comma-separated list is a package for each value, and none for an empty one.
-bottled keeps every repository's packages for builds and bottles alike, so a
+bottle-cli keeps every repository's packages for builds and bottles alike, so a
 feature's cache needn't name its repositories' hosts.
 
   "customizations": {"bottle": {"apt": {
@@ -186,7 +186,7 @@ class Option:
 
 @dataclass(frozen=True)
 class Inject:
-    """Where a credential belongs, so bottled can attach it there."""
+    """Where a credential belongs, so folio serve can attach it there."""
 
     hosts: tuple[str, ...]  # `host` or `host:port`; `${option}` is an option's value
     value: str  # the header value, with ${credential} where the real one goes
@@ -204,7 +204,7 @@ class Inject:
 class Credential:
     name: str
     description: str
-    # Where it goes: onto the bottle's requests, by bottled.
+    # Where it goes: onto the bottle's requests, by folio serve.
     inject: Inject
     # A properties file on the machine, of host=credential lines, read before the Keychain.
     properties: str | None = None
@@ -212,7 +212,7 @@ class Credential:
 
 @dataclass(frozen=True)
 class Cache:
-    """Hosts whose downloads bottled keeps, but for paths matching `exclude`."""
+    """Hosts whose downloads bottle-cli keeps, but for paths matching `exclude`."""
 
     hosts: tuple[str, ...]
     exclude: tuple[str, ...] = ()

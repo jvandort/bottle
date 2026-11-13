@@ -1,4 +1,4 @@
-"""Repos: what bottle needs to know about the repo a bottle is made with (`--git-repo`).
+"""Repos: what bottle needs to know about a repo a bottle is made with (a mount's).
 
 Where its objects are, to mount them; where a checkout starts; and what to
 call it.

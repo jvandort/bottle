@@ -7,13 +7,13 @@ repository its features declare, then their packages, together: one
 `apt-get update` and one `apt-get install` (install_script), before any
 feature's install.sh, which is left with what's its own to do.
 
-bottled keeps what's downloaded from a repository, for every image built and
+bottle-cli keeps what's downloaded from a repository, for every image built and
 every bottle running (see cache.py): its packages, the .deb files under its
 URI, whose names carry their versions, so a file at a path never changes.
 Its indexes (InRelease, Packages) aren't kept: they're how apt learns what's
 new. A package is kept whatever its server says about keeping it (some say
 max-age=0 of everything). apt checks every package against the repository's signed index, so a
-plain-http repository is kept as safely as an https one; bottled fetches
+plain-http repository is kept as safely as an https one; bottle-cli fetches
 what it keeps over https regardless.
 """
 
@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 from bottle import cache
 
-# The ports bottled answers a repository's requests on, by its URI's scheme.
+# The ports bottle-cli answers a repository's requests on, by its URI's scheme.
 PORTS = {"http": cache.HTTP_PORT, "https": cache.HTTPS_PORT}
 
 

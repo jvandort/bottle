@@ -57,7 +57,7 @@ ROUTING_HEADERS = {
 # Methods a server answers by echoing the request back, credential included,
 # so they're never sent with one. TRACK is IIS's TRACE.
 ECHOING_METHODS = {"TRACE", "TRACK"}
-# The most of a request's body bottled reads to put the credential in it (Rewrite.json).
+# The most of a request's body folio serve reads to put the credential in it (Rewrite.json).
 MAX_BODY_BYTES = 1024 * 1024
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -155,18 +155,18 @@ class Rewrite:
 
 @dataclass(frozen=True)
 class Injection:
-    """A credential bottled attaches on the bottle's behalf, for one host.
+    """A credential folio serve attaches on the bottle's behalf, for one host.
 
     A feature declares which hosts its credential belongs to (see
-    features.py); bottled looks the credential up on the machine and builds these
+    features.py); folio serve looks the credential up on the machine and builds these
     per bottle, so the token itself stays outside the bottle.
 
     The bottle talks to an injected host the way it talks to any other: HTTPS,
     straight to it. TLS is opaque, and a header can only be attached to a
-    request bottled can read, so for this host and port its machine routes the
-    flow to bottled, bottle-cli completing the TLS handshake with a certificate
+    request folio serve can read, so for this host and port its machine routes the
+    flow to folio serve, bottle-cli completing the TLS handshake with a certificate
     from the machine's CA, which the bottle trusts for its credentials' and
-    cached hosts only (bottle-cli ca); bottled reads each request, and sends it
+    cached hosts only (bottle-cli ca); folio serve reads each request, and sends it
     on over its own verified TLS connection. A credential is never on the wire in the clear, in the bottle
     or beyond it.
 

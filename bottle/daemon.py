@@ -38,7 +38,7 @@ log.addHandler(logging.NullHandler())
 
 START_TIMEOUT = 5
 # How long a message between bottles waits for its bottle's session to take it,
-# and how much longer bottled gives the exec that waits, which starts a process
+# and how much longer folio serve gives the exec that waits, which starts a process
 # in the bottle, before giving up on it.
 DELIVERY_TIMEOUT = 10
 DELIVERY_GRACE = 15
@@ -50,7 +50,7 @@ NOT_TAKEN = 75
 
 # macOS caps Unix socket paths at 104 bytes.
 MAX_SOCKET_PATH = 100
-# The open files bottled asks for: two for each flow it carries or serves (the bottle's side and the far end's),
+# The open files folio serve asks for: two for each flow it carries or serves (the bottle's side and the far end's),
 # and the cache's files, for every bottle's builds downloading at once. macOS gives what a shell starts 256.
 OPEN_FILES = 65536
 
@@ -61,7 +61,7 @@ LOG = "serve"
 
 def code_hash() -> str:
     """A hash of bottle's code: every file of this package, less what Python caches. What a command checks a
-    running bottled's against."""
+    running folio serve's against."""
     package = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for path in sorted(p for p in package.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
@@ -98,10 +98,10 @@ def services_sockets() -> dict[str, Path]:
 
 
 def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = ()) -> None:
-    """Have bottled answer what `machine` routes to it as `bottle`'s, starting bottled if it isn't running.
+    """Have folio serve answer what `machine` routes to it as `bottle`'s, starting folio serve if it isn't running.
 
     Its credentials are read as it's bound: a login reaches a bottle when it's
-    next started, or when bottled is.
+    next started, or when folio serve is.
     """
     message = {
         "op": "bind", "bottle": bottle, "machine": machine, "features": list(features),
@@ -112,7 +112,7 @@ def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tu
 
 
 def release_egress(bottle: str) -> None:
-    """Stop answering `bottle`'s machine, if bottled is running at all."""
+    """Stop answering `bottle`'s machine, if folio serve is running at all."""
     _request({"op": "release", "bottle": bottle}, start=False)
 
 
@@ -130,7 +130,7 @@ def stop() -> bool:
     """Stop the daemon and every egress it serves. False if it wasn't running."""
     try:
         reply = _send({"op": "shutdown"})
-        log.info("asked bottled to stop")
+        log.info("asked folio serve to stop")
     except (FileNotFoundError, ConnectionRefusedError):
         return False
     if not reply.get("ok"):
@@ -138,16 +138,16 @@ def stop() -> bool:
     return True
 
 
-# Whether this process has seen bottled running its own code: asked once a command.
+# Whether this process has seen folio serve running its own code: asked once a command.
 _current = False
 
 
 def _ensure_current() -> bool:
-    """bottled running this code, if it's running: one running other code is restarted first.
+    """folio serve running this code, if it's running: one running other code is restarted first.
 
     Other code is another checkout's, or this one's before it changed: one that
     may not know what this asks of it, or answer it as this would. Running
-    bottles keep their tokens, and the new bottled binds them again as it
+    bottles keep their tokens, and the new folio serve binds them again as it
     starts, so they lose only the connections they open in between. Returns
     whether it restarted it.
     """
@@ -164,7 +164,7 @@ def _ensure_current() -> bool:
     _current = True
     if reply.get("code") == code_hash():
         return False
-    log.info("bottled is running other code (%s); restarting it", reply.get("code", "from before it said"))
+    log.info("folio serve is running other code (%s); restarting it", reply.get("code", "from before it said"))
     print("bottle: folio serve was running other code; restarting it", file=sys.stderr)
     _restart()
     return True
@@ -177,7 +177,7 @@ def _restart() -> None:
 
 
 def _wait_gone() -> None:
-    """Until the bottled that's stopping is gone, or would the new one find it and leave. Until then it
+    """Until the folio serve that's stopping is gone, or would the new one find it and leave. Until then it
     answers, or, shutting down, takes a connection and closes it unanswered."""
     deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:
@@ -209,7 +209,7 @@ def _request(message: dict, start: bool, timeout: float = 30) -> dict:
 
 
 class _Closed(ConnectionError):
-    """bottled took the connection and closed it unanswered: what one shutting down does."""
+    """folio serve took the connection and closed it unanswered: what one shutting down does."""
 
 
 def _send(message: dict, timeout: float = 30) -> dict:
