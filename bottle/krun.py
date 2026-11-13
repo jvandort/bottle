@@ -79,6 +79,12 @@ def start(name: str, decider: str, token: str) -> None:
     _run("machine", "start", "--name", name, "--decider", decider, env={"BOTTLE_DECIDER_TOKEN": token})
 
 
+def ca_certificate(name: str, hosts: list[str]) -> str | None:
+    """The certificate of the caching CA bottle-cli answers `name`'s cached https `hosts` behind (a machine's, or
+    ca.BUILDS for builds), made if missing; None for no hosts."""
+    return _run("ca", "certificate", name, *hosts) or None
+
+
 def stop(name: str) -> None:
     _run("machine", "stop", "--name", name)
 

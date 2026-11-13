@@ -120,7 +120,8 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     if no_cache:
         # A stage is named for what it's made from: something new in it makes it anew.
         image_labels["bottle.build"] = uuid.uuid4().hex
-    certificate = ca.certificate(ca.BUILDS, features.apt_https_hosts()) or ""
+    # The caching CA of bottle-cli's builds, which answers their apt repositories.
+    certificate = krun.ca_certificate(ca.BUILDS, features.apt_https_hosts()) or ""
     steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step
              for step in recipe.get("steps", [])]
     made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},

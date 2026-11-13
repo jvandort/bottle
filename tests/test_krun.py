@@ -118,6 +118,7 @@ class KrunBottleTest(GitTestCase):
         def exec_(name, argv, user=None, workdir=None, input=None, env=None):
             script = argv[-1]
             what = ("contract" if "# bottle contract" in script else "trust CA" if bottles.CA_CERTIFICATE in script
+                    else "trust caching CA" if bottles.CACHE_CERTIFICATE in script
                     else "bottle.host" if host.HOST in script and "/etc/hosts" in script else "workspace")
             self.calls.append(f"{what} as {user}")
             return ""
@@ -153,6 +154,8 @@ class KrunBottleTest(GitTestCase):
             (bottles.auth, "ensure_logged_in", lambda specs: None),
             (bottles.auth, "standins_for", lambda specs: {"CLAUDE_CODE_OAUTH_TOKEN": "stand-in"}),
             (bottles.auth, "intercepted_hosts", lambda specs: []),
+            (bottles.auth, "credential_hosts", lambda specs: []),
+            (bottles.runners.krun, "ca_certificate", lambda name, hosts: None),
         ):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -168,7 +171,7 @@ class KrunBottleTest(GitTestCase):
         self.assertEqual(bottle.archive, "base.ext4")
         self.assertEqual(bottles.get("b").archive, "base.ext4")
         self.assertEqual(self.calls, [
-            "create", "bind b", "start 127.0.0.1:47329 token", "contract as genie", "trust CA as root",
+            "create", "bind b", "start 127.0.0.1:47329 token", "contract as genie", "trust CA as root", "trust caching CA as root",
             "bottle.host as root", "workspace as root", "workspace as genie",
         ])
 
@@ -196,7 +199,7 @@ class KrunBottleTest(GitTestCase):
         self.calls.clear()
         bottles.ensure_running("b")
         self.assertEqual(self.calls, ["bind b", "start 127.0.0.1:47329 token", "contract as genie",
-                                      "trust CA as root", "bottle.host as root"])
+                                      "trust CA as root", "trust caching CA as root", "bottle.host as root"])
         self.assertEqual(self.machines[bottle.machine], "running")
 
     def test_a_running_bottle_keeps_its_binding_and_has_bottled_running(self) -> None:

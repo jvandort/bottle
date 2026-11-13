@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import ca, daemon, features, images
+from bottle import daemon, features, images
 from bottle.errors import BottleError
 from tests.support import GitTestCase
 
@@ -90,20 +90,21 @@ class StoreTest(GitTestCase):
             (daemon, "release_egress", lambda bottle: self.calls.append(("release", bottle))),
             (images.subprocess, "run", self.cli),
             (images.prereqs, "ensure_cli", lambda: None),
-            (ca, "certificate", lambda bottle, hosts: f"PEM for {bottle} of {','.join(hosts)}" if hosts else None),
             (features, "apt_https_hosts", lambda: ["apt.example"]),
         ):
             patcher = mock.patch.object(target, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def cli(self, command, stdout=None, text=False, env=None, capture_output=False):
+    def cli(self, command, stdout=None, text=False, env=None, capture_output=False, input=None):
         """bottle-cli: an image build makes a stage named for its labels, on what it pulls or a tag's stage, and tags
         it; images lists the tags; gc deletes what no tag names and it isn't told to keep."""
         args = command[1:]
         store = images.store()
         store.mkdir(parents=True, exist_ok=True)
         done = lambda out="": subprocess.CompletedProcess(command, 0, out, "")
+        if args[:2] == ["ca", "certificate"]:
+            return done(f"PEM for {args[2]} of {','.join(args[3:])}" if args[3:] else "")
         if args[0] == "images":
             return done(json.dumps([{"tag": tag, "name": name, "disks": [str(store / f"{name}.ext4")],
                                      "labels": self.labels.get(name, {})}

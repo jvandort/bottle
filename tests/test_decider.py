@@ -148,7 +148,10 @@ class DeciderTest(unittest.IsolatedAsyncioTestCase):
             {"address": host.ADDRESS, "port": 80},
             {"network": host.SSH_NETWORK, "port": host.SSH_PORT},
             {"name": "ci.test", "port": 8443},
-            {"name": "deb.debian.org", "port": 80},
+        ])
+        # Cached hosts are answered by the driver itself.
+        self.assertEqual(policy["cache"], [
+            {"host": "deb.debian.org", "include": [], "exclude": [], "ports": [80], "immutable": False},
         ])
         # The machine that first asked is the bottle's, as for its flows; another, and a stranger, get nothing.
         self.assertIsNone(await self.policy(token, machine=bytes(range(2, 18))))

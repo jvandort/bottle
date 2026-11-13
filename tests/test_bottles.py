@@ -85,6 +85,9 @@ class FakeSmolvm:
             self._step("trust_egress_ca")
             self.trusted = (user, input)
             return ""
+        if bottles.CACHE_CERTIFICATE in argv[-1]:   # the machine's caching CA, as part of trust_egress_ca
+            self.cache_trusted = (user, input)
+            return ""
         if "/etc/hosts" in argv[-1]:
             self._step("point_at_host")
             self.hosts = (user, argv[-1])
@@ -117,13 +120,17 @@ class FakeSmolvm:
         self.calls.append("daemon_start")
         return False
 
+    def ca_certificate(self, name, hosts):
+        return "the machine's caching CA's certificate" if hosts else None
+
     def daemon_stop(self):
         self.calls.append("daemon_stop")
         return True
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runners.krun, ("create", "start", "stop", "rename", "delete", "state", "exec_", "exec_command")),
+            (bottles.runners.krun, ("create", "start", "stop", "rename", "delete", "state", "exec_", "exec_command",
+                                    "ca_certificate")),
             (bottles.daemon, ("bind_decider", "release_egress")),
         ):
             for name in names:
@@ -138,6 +145,7 @@ class FakeSmolvm:
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
             mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
             mock.patch.object(bottles.auth, "intercepted_hosts", side_effect=lambda specs: list(self.intercepted)),
+            mock.patch.object(bottles.auth, "credential_hosts", side_effect=lambda specs: list(self.intercepted)),
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
             mock.patch.object(bottles.auth, "standins_for", side_effect=lambda specs: dict(self.standins)),
@@ -746,11 +754,11 @@ class DroneCertificatesTest(BottleTestCase):
 
     def test_the_controllers_is_for_its_credentials_and_its_runners_for_the_rest(self) -> None:
         bottle = bottles.get("there")
-        self.assertEqual((bottles._terminated_here(bottle), bottles._cached_there(bottle)), (["api.example"], ["repo.example"]))
+        self.assertEqual((bottles._terminated_here(bottle), bottles._cached_hosts(bottle)), (["api.example"], ["repo.example"]))
         with mock.patch.object(bottles.ca, "certificate", return_value="the controller's CA's certificate") as certificate:
             bottles.trust_egress_ca(bottle)
         certificate.assert_called_once_with("there", ["api.example"])
-        self.box.cache_certificate.assert_called_once_with("there", ["repo.example"])
+        self.box.cache_certificate.assert_called_once_with(bottle.machine, ["repo.example"])
         [(script, ours), (cache_script, theirs)] = self.installed
         self.assertIn(bottles.CA_CERTIFICATE, script)
         self.assertIn(bottles.CACHE_CERTIFICATE, cache_script)

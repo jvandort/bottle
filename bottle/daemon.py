@@ -579,16 +579,16 @@ class Daemon:
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             injections, cached, services, controller_gateway = await self.controller.egress(
                 bottle, repos, features, build)
-            # Kept over https only for the hosts this machine's CA for the bottle covers, which bottle made when
-            # it started the bottle (a build: the CA builds have): what its cached hosts are answered behind.
-            # Plain http needs none.
-            owner = ca.BUILDS if build else bottle
-            intercepted = tuple(await asyncio.to_thread(ca.hosts, owner))
+            # The cached hosts are answered by the driver, bottle-cli, behind the machine's caching CA (see
+            # bottle-cli ca). Here, only those it hands over for their credentials, or asks about when it has no
+            # policy: over https only for the hosts this machine's CA for the bottle covers, which bottle made
+            # when it started the bottle (a build has none). Plain http needs none.
+            intercepted = () if build else tuple(await asyncio.to_thread(ca.hosts, bottle))
             caches = tuple(c for c in cached if c.host in intercepted or cache.HTTPS_PORT not in c.ports)
-            certificates = functools.partial(ca.server_context, owner, intercepted)
+            certificates = functools.partial(ca.server_context, bottle, intercepted)
             gateway = egress.Gateway(
                 bottle, self.policy, services=services, injections=injections, certificates=certificates,
-                caches=caches, store=self.store, hand_off=controller_gateway.serve_handed_off,
+                caches=caches, store=self.store, hand_off=controller_gateway.serve_handed_off, driver_caches=cached,
             )
             if self.remembered is not None:
                 self._remember(bottle, (bottle, link.served_to_json(repos), list(features), build))

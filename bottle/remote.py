@@ -35,10 +35,8 @@ def _run(op: str, args: dict):
         case "archive":
             return _path(local.archive(args["tag"]))
         case "cache_ca":
-            from bottle import ca
-
-            # Its CA here for the bottle: for its cached hosts alone, which bottled here answers.
-            return ca.certificate(args["bottle"], args["hosts"])
+            # The machine's caching CA here: for its cached hosts alone, which bottle-cli here answers.
+            return local.cache_certificate(args["machine"], args["hosts"])
         case "forget_ca":
             from bottle import ca
 

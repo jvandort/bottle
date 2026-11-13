@@ -104,8 +104,9 @@ subjectAltName = {san}
 """
 
 
-# The CA every image's build has, for its apt step (see apt.py): constrained to the https apt repositories every
-# feature declares, so it's the same for every build, and a stage built again from the same is named the same.
+# The caching CA every image's build has, bottle-cli's (bottle-cli ca), for its apt step (see apt.py): constrained to
+# the https apt repositories every feature declares, so it's the same for every build, and a stage built again from
+# the same is named the same.
 BUILDS = "bottle-builds"
 
 

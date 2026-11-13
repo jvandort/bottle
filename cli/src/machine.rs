@@ -523,7 +523,9 @@ fn delete(args: &[String]) -> io::Result<()> {
         machine.stop()?;
     }
     let _ = fs::remove_file(machine.socket());
-    fs::remove_dir_all(&machine.dir)
+    fs::remove_dir_all(&machine.dir)?;
+    // Its caching CA too (see `bottle-cli ca`): another machine of its name gets a new one.
+    bottle_agent_client::ca::forget(&machine.name)
 }
 
 /// `machine rename`: a stopped machine, under another name; its disk, config and logs with it.
@@ -547,7 +549,9 @@ fn rename(args: &[String]) -> io::Result<()> {
         return Err(other(format!("there's a machine {} already", new.name)));
     }
     let _ = fs::remove_file(machine.dir.join("pid"));
-    fs::rename(&machine.dir, &new.dir)
+    fs::rename(&machine.dir, &new.dir)?;
+    // Its caching CA is its old name's: one is made for the new name as it's next started.
+    bottle_agent_client::ca::forget(&machine.name)
 }
 
 fn ls(args: &[String]) -> io::Result<()> {

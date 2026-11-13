@@ -83,7 +83,7 @@ CONTRACT = (
 # Where the egress CA's certificate goes in a bottle's trust store, whose bundle
 # the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
 CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
-# Where a bottle on a runner elsewhere has its runner's CA for its cached hosts, which that runner answers.
+# Where a bottle has its machine's caching CA, for its cached hosts, which bottle-cli where it runs answers.
 CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"
 
 
@@ -461,27 +461,25 @@ def _let_in(bottle: Bottle, grant: SshGrant) -> None:
 def _start_machine(bottle: Bottle) -> None:
     """Start the bottle's machine, its flows decided by bottled under a token new for this run.
 
-    Its egress CA is made first, for the hosts its features name now: bottled
-    terminates TLS for the hosts that CA covers (see daemon.py), and
-    trust_egress_ca installs it once the machine is up.
+    Its CAs are made first, for the hosts its features name now: bottled
+    terminates TLS for the hosts its egress CA covers (see daemon.py), and
+    bottle-cli for those its machine's caching CA covers; trust_egress_ca
+    installs them once the machine is up.
     """
     runner = runner_of(bottle)
     ca.certificate(bottle.name, _terminated_here(bottle))
-    if runner.name != runners.LOCAL:
-        runner.cache_certificate(bottle.name, _cached_there(bottle))
+    runner.cache_certificate(bottle.machine, _cached_hosts(bottle))
     runner.start(bottle.machine, bottle.name, served(bottle), bottle.features)
 
 
 def _terminated_here(bottle: Bottle) -> list[str]:
-    """The hosts whose TLS the controller terminates for the bottle: its credentials', and here, its cached hosts'."""
-    if runner_of(bottle).name == runners.LOCAL:
-        return auth.intercepted_hosts(bottle.features)
+    """The hosts whose TLS bottled terminates for the bottle: its credentials'."""
     return auth.credential_hosts(bottle.features)
 
 
-def _cached_there(bottle: Bottle) -> list[str]:
-    """The hosts a runner elsewhere terminates the bottle's TLS for, to answer from its cache: none for the
-    credential hosts, which the controller does."""
+def _cached_hosts(bottle: Bottle) -> list[str]:
+    """The hosts bottle-cli terminates the bottle's TLS for, where it runs, to answer from its cache: none for the
+    credential hosts, which bottled does."""
     credentials = set(auth.credential_hosts(bottle.features))
     return sorted(h for h in auth.intercepted_hosts(bottle.features) if h not in credentials)
 
@@ -764,18 +762,17 @@ def _named_machine(bottle: Bottle, runner: runners.Runner) -> Bottle:
 
 
 def trust_egress_ca(bottle: Bottle) -> None:
-    """Make the bottle's trust store hold its egress CA's certificate, and no other.
+    """Make the bottle's trust store hold its egress CA's certificate and its machine's caching CA's, and no other.
 
-    Every time a bottle starts, so a bottle made before its CA, or whose
-    credential hosts have changed since, trusts the current one, and a bottle
-    with no credential hosts trusts none. It's what lets bottled attach a
-    credential to the bottle's HTTPS (see ca.py); the key stays on the Mac.
+    Every time a bottle starts, so a bottle made before its CAs, or whose
+    hosts have changed since, trusts the current ones, and a bottle with no
+    credential or cached hosts trusts none. The egress CA is what lets bottled
+    attach a credential to the bottle's HTTPS (see ca.py), its key on the Mac;
+    the caching CA what lets bottle-cli, where the bottle runs, answer its
+    cached hosts (bottle-cli ca).
     """
     _trust(bottle, CA_CERTIFICATE, ca.certificate(bottle.name, _terminated_here(bottle)))
-    runner = runner_of(bottle)
-    if runner.name != runners.LOCAL:
-        # And its runner's, for the hosts whose downloads that runner keeps.
-        _trust(bottle, CACHE_CERTIFICATE, runner.cache_certificate(bottle.name, _cached_there(bottle)))
+    _trust(bottle, CACHE_CERTIFICATE, runner_of(bottle).cache_certificate(bottle.machine, _cached_hosts(bottle)))
 
 
 def _trust(bottle: Bottle, path: str, certificate: str | None) -> None:

@@ -376,6 +376,7 @@ class Gateway:
         store: cache.Store | None = None,
         hand_off: "Callable[[Flow, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]] | None" = None,
         ssh: "Callable[[str], Awaitable[list[str]]] | None" = None,
+        driver_caches: tuple[cache.Cached, ...] = (),
     ) -> None:
         self.name = name
         self.policy = policy
@@ -399,6 +400,8 @@ class Gateway:
         self.caches = tuple(
             c for c in caches if certificates or cache.HTTPS_PORT not in c.ports) if store else ()
         self.store = store
+        # Hosts whose downloads the driver carrying the bottle's flows keeps itself (see driver_policy).
+        self.driver_caches = tuple(driver_caches)
 
     def log_flow(self, target: str, ip: str | None, outcome: str, status: str | None, up: list[int], down: list[int],
              started: float) -> None:
@@ -590,16 +593,21 @@ class Gateway:
     def driver_policy(self) -> dict:
         """What the driver carrying the bottle's flows may decide itself, as decide would, and which flows it
         must still hand here: those bottled is the far end of or must read (bottle.host's services, ssh to
-        bottles, a credential's or a cached host's), by address or by the name a flow's first bytes give (a
-        ClientHello's server name, an HTTP request's Host); and the private addresses it may reach by name."""
+        bottles, a credential's), by address or by the name a flow's first bytes give (a ClientHello's server
+        name, an HTTP request's Host); the private addresses it may reach by name; and the hosts whose downloads
+        it keeps itself, as cache.Cached has them, in the store bottled keeps."""
         hand: list[dict] = []
         if self.services is not None:
             hand.append({"address": host.ADDRESS, "port": 80})
         if self.ssh or self.hand_off:
             hand.append({"network": host.SSH_NETWORK, "port": host.SSH_PORT})
         hand += [{"name": i.host.lower(), "port": i.port} for i in self.injections]
-        hand += [{"name": c.host, "port": port} for c in self.caches for port in c.ports]
-        return {"version": 1, "allow_private": list(self.policy.allow_private), "hand": hand}
+        caches = [
+            {"host": c.host, "include": list(c.include), "exclude": list(c.exclude), "ports": list(c.ports),
+             "immutable": c.immutable}
+            for c in self.driver_caches
+        ]
+        return {"version": 1, "allow_private": list(self.policy.allow_private), "hand": hand, "cache": caches}
 
     def _injection_at(self, host: str, port: int) -> Injection | None:
         """The credential for this host and port, if one claims it."""
