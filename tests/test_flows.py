@@ -8,140 +8,76 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import egress, host
-from bottle.egress import CREDENTIAL, GIT, SSH, Direct, Flow, Gateway, Policy, Redirect, Refused
-from tests.support import client_hello
-from tests.test_egress import LoopbackPolicy, Upstream, fake_resolve
-
-
-class NameTest(unittest.TestCase):
-    def test_the_sni_of_a_client_hello(self) -> None:
-        self.assertEqual(egress.name_in(client_hello("API.Example.com")), "api.example.com")
-
-    def test_a_client_hello_without_sni(self) -> None:
-        self.assertIsNone(egress.name_in(client_hello(None)))
-
-    def test_any_cut_of_a_client_hello_is_survived(self) -> None:
-        hello = client_hello("api.example.com")
-        for end in range(len(hello)):
-            with self.subTest(end):
-                self.assertIn(egress.sni(hello[:end]), (None, "api.example.com"))
-
-    def test_lengths_that_point_past_the_record(self) -> None:
-        hello = bytearray(client_hello("api.example.com"))
-        for at in range(len(hello)):
-            corrupt = bytearray(hello)
-            corrupt[at] = 0xFF
-            egress.sni(bytes(corrupt))  # never raises
-
-    def test_the_host_of_an_http_request(self) -> None:
-        for head, name in (
-            (b"GET / HTTP/1.1\r\nHost: Example.COM\r\n\r\n", "example.com"),
-            (b"GET / HTTP/1.1\r\nhost: example.com:8080\r\n\r\n", "example.com"),
-            (b"GET / HTTP/1.1\r\nHost: [::1]:80\r\n\r\n", "::1"),
-            (b"GET /git/x HTTP/1.1\r\nUser-Agent: git\r\nHost: bottle.host\r\nAccept: */*\r\n\r\n", "bottle.host"),
-        ):
-            with self.subTest(head):
-                self.assertEqual(egress.name_in(head), name)
-
-    def test_no_host(self) -> None:
-        for head in (
-            b"GET / HTTP/1.1\r\n\r\n",
-            b"GET / HTTP/1.1\r\nHost: exam",  # cut off before the line ends
-            b"SSH-2.0-OpenSSH_9.6\r\n",
-            b"GET / HTTP/1.1\r\nHost: bad name\r\n\r\n",
-            b"",
-        ):
-            with self.subTest(head):
-                self.assertIsNone(egress.name_in(head))
+from bottle.egress import CREDENTIAL, GIT, SSH, Flow, Gateway, Redirect, Refused
+from tests.test_egress import Upstream, fake_resolve
 
 
 class DecideTest(unittest.IsolatedAsyncioTestCase):
-    """Flows to the address the bottle connected to, judged by that address and a name it can't vouch for."""
+    """Flows a machine routed here, judged by the address the bottle connected to and a name it can't vouch for."""
 
     def setUp(self) -> None:
         self.injection = egress.Injection(host="api.test", header="Authorization", value="Bearer real", port=443)
-        self.resolved = {"api.test": ["93.184.216.34"], "ci.corp.test": ["10.0.0.5"], "v6.corp.test": ["fd00:0:0::5"]}
+        self.resolved = {"api.test": ["93.184.216.34"], "ci.corp.test": ["10.0.0.5"], "here.test": ["127.0.0.1"]}
 
         async def resolve(name, port):
             if name not in self.resolved:
                 raise OSError("unknown host")
             return self.resolved[name]
 
-        self.proxy = Gateway(
-            "t", Policy(allow_private=("*.corp.test",)), resolve, services=object(),
-            injections=(self.injection,),
-        )
+        self.proxy = Gateway("t", services=object(), injections=(self.injection,), resolve=resolve)
 
-    async def decide(self, address: str, port: int = 443, name: str | None = None):
-        first = client_hello(name) if name and port == 443 else (
-            f"GET / HTTP/1.1\r\nHost: {name}\r\n\r\n".encode() if name else b"no name in these")
-        return await self.proxy.decide(Flow(address, port, first))
+    async def decide(self, address: str, port: int = 443, name: str | None = None, tls: bool = True):
+        return await self.proxy.decide(Flow(address, port, name, unwrapped=tls))
 
     async def refused(self, *args, **kwargs) -> None:
         with self.assertRaises(Refused):
             await self.decide(*args, **kwargs)
 
-    async def test_a_public_address_goes_direct(self) -> None:
-        self.assertEqual(await self.decide("93.184.216.34"), Direct(("93.184.216.34",)))
-
-    async def test_a_public_ipv6_address_goes_direct(self) -> None:
-        self.assertEqual(await self.decide("2606:4700::1"), Direct(("2606:4700::1",)))
-
-    async def test_ipv6_is_judged_as_ipv4_is(self) -> None:
-        for address in ("fd00::5", "fe80::1", "::1", "ff02::1", "::ffff:10.0.0.5", "::ffff:127.0.0.1"):
-            with self.subTest(address):
-                await self.refused(address)
-
-    async def test_a_private_ipv6_address_goes_direct_for_an_allowed_name_that_leads_there(self) -> None:
-        # Spelled otherwise than the lookup has it: the same address.
-        self.assertEqual(await self.decide("fd00::5", 80, name="v6.corp.test"), Direct(("fd00::5",)))
-        await self.refused("fd00::6", 80, name="v6.corp.test")
-
     async def test_bottle_host_is_the_git_service_on_port_80_only(self) -> None:
-        self.assertEqual(await self.decide(host.ADDRESS, 80), Redirect(GIT))
+        self.assertEqual(await self.decide(host.ADDRESS, 80, tls=False), Redirect(GIT))
         await self.refused(host.ADDRESS, 22)
 
     async def test_the_rest_of_test_net_1_is_ssh_to_bottles_on_port_22_only(self) -> None:
-        await self.refused("192.0.2.2", 22)   # nothing to look up the grant, and no controller to ask
+        await self.refused("192.0.2.2", 22)   # nothing to look up the grant
         self.proxy.ssh = lambda address: None
         for address in ("192.0.2.2", "192.0.2.200"):
-            self.assertEqual(await self.decide(address, 22), Redirect(SSH))
+            self.assertEqual(await self.decide(address, 22, tls=False), Redirect(SSH))
             await self.refused(address, 80)
-        self.assertEqual(await self.decide(host.ADDRESS, 80), Redirect(GIT))
 
     async def test_bottle_host_without_services_is_refused(self) -> None:
         self.proxy.services = None
         await self.refused(host.ADDRESS, 80)
 
-    async def test_a_credentials_host_is_redirected_whatever_address_the_bottle_connected_to(self) -> None:
+    async def test_a_credentials_host_is_served_whatever_address_the_bottle_connected_to(self) -> None:
         decision = await self.decide("10.9.9.9", name="api.test")
         self.assertEqual(decision, Redirect(CREDENTIAL, self.injection, ("93.184.216.34",)))
 
-    async def test_a_credentials_name_on_another_port_is_not_redirected(self) -> None:
-        self.assertEqual(await self.decide("93.184.216.34", 8443, name="api.test"), Direct(("93.184.216.34",)))
+    async def test_anything_else_is_no_service(self) -> None:
+        """What a policy out of date routes here: another port, no TLS, another name, no name."""
+        for args in (("93.184.216.34", 8443, "api.test"), ("93.184.216.34", 443, "api.test", False),
+                     ("93.184.216.34", 443, "example.com"), ("93.184.216.34",)):
+            with self.subTest(args), self.assertRaises(Refused) as refused:
+                await self.decide(*args)
+            self.assertEqual(refused.exception.outcome, "not-a-service")
 
-    async def test_the_host_itself_is_refused(self) -> None:
-        for address in ("127.0.0.1", "169.254.169.254", "0.0.0.0", "224.0.0.251"):
-            with self.subTest(address):
-                await self.refused(address, name="ci.corp.test")
+    async def test_a_credentials_host_at_this_machine_is_refused(self) -> None:
+        self.injection = dataclasses.replace(self.injection, host="here.test")
+        self.proxy.injections = (self.injection,)
+        await self.refused("10.9.9.9", name="here.test")
 
-    async def test_a_private_address_is_refused(self) -> None:
-        await self.refused("10.0.0.5")
-        await self.refused("10.0.0.5", name="example.com")
+    async def test_a_credentials_host_at_a_private_address_is_reached(self) -> None:
+        self.injection = dataclasses.replace(self.injection, host="ci.corp.test")
+        self.proxy.injections = (self.injection,)
+        self.assertEqual((await self.decide("10.9.9.9", name="ci.corp.test")).addresses, ("10.0.0.5",))
 
-    async def test_a_private_address_goes_direct_for_an_allowed_name_that_leads_there(self) -> None:
-        self.assertEqual(await self.decide("10.0.0.5", name="ci.corp.test"), Direct(("10.0.0.5",)))
-        self.assertEqual(await self.decide("10.0.0.5", 80, name="ci.corp.test"), Direct(("10.0.0.5",)))
-
-    async def test_an_allowed_name_sent_to_another_private_address_is_refused(self) -> None:
-        await self.refused("192.168.1.1", name="ci.corp.test")
-
-    async def test_an_allowed_name_that_doesnt_resolve_is_refused(self) -> None:
-        await self.refused("10.0.0.6", name="gone.corp.test")
+    async def test_a_credentials_host_that_doesnt_resolve_is_refused(self) -> None:
+        self.injection = dataclasses.replace(self.injection, host="gone.test")
+        self.proxy.injections = (self.injection,)
+        await self.refused("10.9.9.9", name="gone.test")
 
 
 class ServeTest(unittest.IsolatedAsyncioTestCase):
-    """Redirected flows, whose first bytes the decider has already read off the connection."""
+    """Flows served as services.py serves what a machine routes here: TLS taken off by bottle-cli, the name said."""
 
     async def asyncSetUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -169,11 +105,8 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
             standin="stand-in", credential="real-token",
         )
-        self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=(injection,))
-        self.decisions = []
-        decider = await asyncio.start_server(self.decider, "127.0.0.1", 0)
-        self.addAsyncCleanup(Upstream.close, decider)
-        self.decider_port = decider.sockets[0].getsockname()[1]
+        self.proxy = Gateway("test", services=self.services, injections=(injection,), resolve=fake_resolve,
+                             reachable=lambda ip: True)
         routed = await asyncio.start_server(self.routed, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, routed)
         self.routed_port = routed.sockets[0].getsockname()[1]
@@ -181,48 +114,21 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
     upstream = Upstream.upstream
 
     async def routed(self, reader, writer) -> None:
-        """As services.py serves what a machine routes to bottled: its TLS taken off by bottle-cli, its name said."""
-        address, port = self.connected_to
-        flow = Flow(address, port, name="upstream.test", unwrapped=True)
-        decision = await self.proxy.decide(flow)
-        self.decisions.append(decision)
-        await self.proxy.serve(flow, decision, reader, writer)
+        address, port, name, tls = self.flow
+        await self.proxy.serve(Flow(address, port, name, unwrapped=tls), reader, writer)
 
-    async def decider(self, reader, writer) -> None:
-        """What the decider will do: read the first bytes, decide, and serve the redirect."""
-        address, port = self.connected_to
-        first = await reader.read(self.first_size)
-        flow = Flow(address, port, first)
-        decision = await self.proxy.decide(flow)
-        self.decisions.append(decision)
-        await self.proxy.serve(flow, decision, reader, writer)
+    async def connect(self, address: str, port: int, name: str | None = None, tls: bool = False):
+        self.flow = (address, port, name, tls)
+        return await asyncio.open_connection("127.0.0.1", self.routed_port)
 
-    async def connect(self, address: str, port: int, first_size: int = 64 * 1024):
-        self.connected_to, self.first_size = (address, port), first_size
-        return await asyncio.open_connection("127.0.0.1", self.decider_port)
-
-    def handing_off(self) -> None:
-        """Decide and serve as a runner's gateway does: knowing where the credential is for, not the credential,
-        and handing its flows to the controller's gateway, self.proxy, which has it."""
-        where = tuple(dataclasses.replace(i, value="", credential="", standin="") for i in self.proxy.injections)
-        controller = self.proxy
-        self.proxy = Gateway("test", LoopbackPolicy(), fake_resolve, services=self.services, injections=where,
-                             hand_off=controller.serve_handed_off)
-
-    async def test_a_credentials_flow_bottle_cli_unwrapped_gets_the_credential_in_plain_http(self) -> None:
-        for handed in (False, True):
-            if handed:
-                self.handing_off()
-            with self.subTest(handed=handed):
-                self.connected_to = ("203.0.113.5", self.upstream_port)
-                reader, writer = await asyncio.open_connection("127.0.0.1", self.routed_port)
-                writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
-                response = await asyncio.wait_for(reader.read(), 5)
-                head = (await asyncio.wait_for(self.received.get(), 5)).decode()
-                self.assertTrue(response.endswith(b"hello"))
-                self.assertIn("Authorization: Bearer real-token", head)
-                self.assertNotIn("stand-in", head)
-                self.assertEqual(self.decisions[-1].service, CREDENTIAL)
+    async def test_a_credentials_flow_gets_the_credential_in_plain_http(self) -> None:
+        reader, writer = await self.connect("203.0.113.5", self.upstream_port, "upstream.test", tls=True)
+        writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+        response = await asyncio.wait_for(reader.read(), 5)
+        head = (await asyncio.wait_for(self.received.get(), 5)).decode()
+        self.assertTrue(response.endswith(b"hello"))
+        self.assertIn("Authorization: Bearer real-token", head)
+        self.assertNotIn("stand-in", head)
 
     async def sshd_says_hello_and_echoes(self) -> None:
         self.asked = []
@@ -239,15 +145,6 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         writer.write(b"SSH-2.0-client\r\n")
         writer.write_eof()
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-there\nSSH-2.0-client\r\n")
-        self.assertEqual((self.decisions[0].service, self.asked), (SSH, ["192.0.2.3"]))
-
-    async def test_a_flow_to_a_granted_address_is_handed_to_the_controller(self) -> None:
-        await self.sshd_says_hello_and_echoes()
-        self.handing_off()
-        reader, writer = await self.connect("192.0.2.3", 22)
-        writer.write(b"SSH-2.0-client\r\n")
-        writer.write_eof()
-        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"SSH-2.0-there\nSSH-2.0-client\r\n")
         self.assertEqual(self.asked, ["192.0.2.3"])
 
     async def test_a_flow_to_an_address_granted_nothing_is_closed(self) -> None:
@@ -256,33 +153,20 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
 
         self.proxy.ssh = none
         reader, writer = await self.connect("192.0.2.3", 22)
-        writer.write(b"SSH-2.0-client\r\n")
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
 
-    async def test_the_controller_refuses_a_flow_handed_it_for_no_credential(self) -> None:
-        async def handed(r, w) -> None:
-            await self.proxy.serve_handed_off(Flow("203.0.113.5", 443, client_hello("elsewhere.test")), r, w)
-
-        server = await asyncio.start_server(handed, "127.0.0.1", 0)
-        self.addAsyncCleanup(Upstream.close, server)
+    async def test_a_flow_for_no_service_is_closed(self) -> None:
         with self.assertLogs("bottle.egress", "WARNING"):
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+            reader, writer = await self.connect("203.0.113.5", 443, "elsewhere.test", tls=True)
             self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
         writer.close()
 
-    async def test_git_is_served_from_a_head_in_the_first_bytes(self) -> None:
+    async def test_git_is_served(self) -> None:
         reader, writer = await self.connect(host.ADDRESS, 80)
         writer.write(b"POST /git/agent/git-receive-pack HTTP/1.1\r\nHost: bottle.host\r\nContent-Length: 4\r\n\r\npack")
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"HTTP/1.1 200 OK\r\n\r\nserved")
         request = self.services.requests[0]
         self.assertEqual((request.method, request.path, request.body), ("POST", "/git/agent/git-receive-pack", b"pack"))
-
-    async def test_git_with_its_head_split_beyond_the_first_bytes(self) -> None:
-        reader, writer = await self.connect(host.ADDRESS, 80, first_size=10)
-        writer.write(b"GET /git/agent/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
-        await asyncio.wait_for(reader.read(), 5)
-        request = self.services.requests[0]
-        self.assertEqual((request.path, request.query), ("/git/agent/info/refs", "service=git-upload-pack"))
 
     async def test_git_wants_an_origin_form_request(self) -> None:
         reader, writer = await self.connect(host.ADDRESS, 80)

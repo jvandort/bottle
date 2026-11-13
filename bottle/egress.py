@@ -1,24 +1,20 @@
-"""Egress: a bottle's only way out.
+"""Egress: the connections a bottle's machine routes to folio serve, and what it does with them.
 
-A bottle's driver (bottle-cli) carries the guest's sockets and decides each TCP
-connection itself, by its machine's policy, which routes some to bottled
-(see services.py). Every connection is a flow (Flow): the address the bottle
-connected to, the name it asked for, and whether its TLS was taken off.
-Gateway.decide says which of bottled's services takes it, or refuses it;
-Gateway.serve is the far end of one bottled takes. The policy (Policy) is
-enforced where root in the bottle can't reach it.
+bottle-cli carries the guest's sockets and decides each TCP connection itself,
+by its machine's policy, which routes three kinds to folio serve (see
+services.py), each a flow (Flow): the address the bottle connected to, the
+name it asked for, and whether its TLS was taken off. A bottle's Gateway is
+the far end of its flows.
 
-bottled takes two kinds of flow. Those to bottle.host (host.ADDRESS) it
-answers itself, as the git service (see host.py); those to port 22 of the
-rest of host.SSH_NETWORK it joins to sshd in the bottle the address was
-granted for (`bottle new --ssh`), if any, which the controller does. And it
-holds credentials the bottle never sees (Injection): for the hosts a feature
-names, bottle-cli takes the bottle's TLS off with its machine's CA, and
-bottled puts the real token in place of the stand-in on the requests that
-present one, and makes the HTTPS connection to the server itself. Some of a
+Those to bottle.host (host.ADDRESS) it answers itself, as the git service
+(see host.py); those to port 22 of the rest of host.SSH_NETWORK it joins to
+sshd in the bottle the address was granted for, if any. And it holds
+credentials the bottle never sees (Injection): for the hosts a feature names,
+bottle-cli takes the bottle's TLS off with its machine's CA, and the gateway
+puts the real token in place of the stand-in on the requests that present
+one, and makes the HTTPS connection to the server itself. Some of a
 credential's requests are refused outright (Route): the ones that would turn
-the credential into another one the bottle could hold. The hosts a feature
-caches (see cache.py) are bottle-cli's alone.
+the credential into another one the bottle could hold.
 """
 
 import asyncio
@@ -37,13 +33,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
-from bottle import cache, host
+from bottle import host
 
 log = logging.getLogger("bottle.egress")
 # Silent unless the application configures logging (the CLI does).
 log.addHandler(logging.NullHandler())
 
-MAX_HEADER_BYTES = 64 * 1024
 HEADER_TIMEOUT = 30
 CONNECT_TIMEOUT = 10
 # Hop-by-hop headers, for this connection only, never forwarded upstream.
@@ -69,32 +64,13 @@ IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 
 
-@dataclass(frozen=True)
-class Policy:
-    """Which destinations a bottle may reach.
-
-    Public addresses are allowed. Private addresses (RFC 1918, ULA, CGNAT) are
-    reachable only via hostnames matching `allow_private`, e.g. "*.corp.example.com".
-    Loopback, link-local, multicast and unspecified addresses are never
-    reachable: they are the runner itself or its local network.
-    """
-
-    allow_private: tuple[str, ...] = ()
-
-    def allows(self, host: str, ip: IPAddress, private: bool = False) -> bool:
-        """Whether the bottle may reach `host` at `ip`.
-
-        `private` is for a destination a credential names (see Injection): the
-        host was configured on the machine, so a private address is expected. The
-        runner's own addresses are still refused.
-        """
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-        if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-            return False
-        if ip.is_global:
-            return True
-        return private or any(fnmatch.fnmatch(host.lower(), pattern.lower()) for pattern in self.allow_private)
+def reachable(ip: IPAddress) -> bool:
+    """Whether a credential's host may be reached at `ip`: anywhere but this machine itself and its link (loopback,
+    link-local, multicast, unspecified). A private address is expected: naming the host is what configuring the
+    credential means."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return not (ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified)
 
 
 @dataclass(frozen=True)
@@ -216,10 +192,7 @@ class Injection:
     failed. Some tools present the stand-in somewhere other than the header
     (`rewrites`): in a JSON body, or encoded in a header of their own.
 
-    An injected host is also reachable where the policy would otherwise refuse
-    a private address, since naming the host is what configuring the
-    credential means. Nothing else about that host opens up: a flow to
-    another port goes direct, and is judged by the policy alone.
+    An injected host is reachable at a private address (see reachable).
     """
 
     host: str  # a pattern, e.g. "teamcity.corp.example.com" or "*.example.com"
@@ -287,62 +260,37 @@ class Refused(Exception):
 
 @dataclass
 class Request:
+    """A request inside a credential's host's TLS, made ready for the host: its head (and body, if a rewrite read
+    it) as it's sent on, and whether the credential went on it."""
+
     method: str
     host: str
     port: int
-    # For plain HTTP: the request head to send upstream. None for the TLS around a credential's requests.
-    upstream_head: bytes | None
-    # For plain HTTP: the path, query and headers (lowercase names), for host services.
+    upstream_head: bytes
     path: str = ""
-    query: str = ""
-    headers: dict[str, str] | None = None
-    # Set for a request inside TLS bottled terminated, for a host a
-    # credential names: bottled makes this connection over TLS, and allows a
-    # private address for this destination.
-    terminated: bool = False
-    # Set when the credential was attached, which only a terminated request can have.
     injected: bool = False
 
 
 @dataclass(frozen=True)
 class Flow:
-    """One connection a bottle opened, as the driver presents it before connecting anywhere.
-
-    The address the guest connected to, and the first bytes it sent, where a name
-    may be: a TLS ClientHello's SNI, an HTTP request's Host. One bottle-cli
-    routes here (see services.py) comes with its name, read already, and
-    `unwrapped` if the bottle spoke TLS, which bottle-cli has taken off.
-    """
+    """One connection a bottle's machine routed here, as bottle-cli says (services.read_header): the address the
+    guest connected to, the name it asked for (SNI or Host), and `unwrapped` if the bottle spoke TLS, which
+    bottle-cli has taken off."""
 
     address: str
     port: int
-    first: bytes = b""  # the first bytes it sent, already read
     name: str | None = None
     unwrapped: bool = False
 
-    def named(self) -> str | None:
-        """The name it's for: as bottle-cli read it, else from its first bytes."""
-        return self.name if self.name is not None else name_in(self.first)
 
-
-# What a redirected flow is for.
+# What a flow is for.
 GIT, CREDENTIAL, SSH = "git", "credential", "ssh"
 
 
 @dataclass(frozen=True)
-class Direct:
-    """The flow may go straight to its address, its bytes untouched: the driver connects it."""
-
-    addresses: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class Redirect:
-    """bottled is the flow's far end: as bottle.host's git service, ssh to a bottle, or to attach
-    `injection`'s credential.
-
-    `addresses` are where the credential's host may be reached, already judged.
-    """
+    """Which of folio serve's services a flow is for: bottle.host's git service, ssh to a bottle, or attaching
+    `injection`'s credential, its host reached at `addresses`, already judged."""
 
     service: str
     injection: Injection | None = None
@@ -350,37 +298,27 @@ class Redirect:
 
 
 class Gateway:
-    """One bottle's way out: what decides its flows, and serves those it keeps."""
+    """One bottle's way out: the far end of the flows its machine routes here."""
 
     def __init__(
         self,
         name: str,
-        policy: Policy,
-        resolve: Resolver | None = None,
         services: "host.HostServices | None" = None,
         injections: tuple[Injection, ...] = (),
-        caches: tuple[cache.Cached, ...] = (),
-        hand_off: "Callable[[Flow, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]] | None" = None,
         ssh: "Callable[[str], Awaitable[list[str]]] | None" = None,
+        resolve: Resolver | None = None,
+        reachable: Callable[[IPAddress], bool] = reachable,
     ) -> None:
         self.name = name
-        self.policy = policy
-        self.resolve = resolve or _resolve
-        # bottle.host's git service: flows to host.ADDRESS are answered here, never forwarded.
+        # bottle.host's services: flows to host.ADDRESS are answered here.
         self.services = services
-        # Credentials bottled attaches for the bottle, by destination, on what
-        # bottle-cli gives it unwrapped. Where bottled here doesn't hold them, `hand_off` takes the flows a
-        # credential's host and port are redirected for: the controller's own
-        # gateway for the bottle (serve_handed_off), and `injections` are only
-        # where they're for, their secrets left out. It takes ssh's
-        # flows too.
-        self.hand_off = hand_off
+        # Credentials attached for the bottle, by destination, on what bottle-cli gives here unwrapped.
+        self.injections = tuple(injections)
         # The command line that runs sshd -i in the bottle granted at an
         # address, which a flow to it is joined to; raises Refused if none is.
         self.ssh = ssh
-        self.injections = tuple(injections)
-        # Hosts whose downloads the driver carrying the bottle's flows keeps (see driver_policy).
-        self.caches = tuple(caches)
+        self.resolve = resolve or _resolve
+        self.reachable = reachable
 
     def log_flow(self, target: str, ip: str | None, outcome: str, status: str | None, up: list[int], down: list[int],
              started: float) -> None:
@@ -391,14 +329,12 @@ class Gateway:
             up[0], down[0], time.monotonic() - started,
         )
 
-    async def decide(self, flow: "Flow") -> "Direct | Redirect":
-        """What to do with `flow`: where it may go directly, or which of bottled's services takes it.
+    async def decide(self, flow: Flow) -> Redirect:
+        """Which service takes `flow`; refused if none does (a policy out of date routed it here).
 
-        Refused if it may go nowhere. Judged by the address the bottle connected to,
-        and by the name it asked for, which is the bottle's claim, so it's
-        checked before it opens anything.
+        Judged by the address the bottle connected to, and by the name it asked
+        for, which is the bottle's claim, so it's checked before it opens anything.
         """
-        name = flow.named()
         address = ipaddress.ip_address(flow.address)
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
             address = address.ipv4_mapped  # judged as the IPv4 address it is
@@ -407,48 +343,38 @@ class Gateway:
                 return Redirect(GIT)
             raise Refused(403, "Forbidden: no such host service", "denied")
         if address in ipaddress.ip_network(host.SSH_NETWORK):
-            # Never anywhere on the network: only ever to sshd in the bottle granted there, which the controller
-            # (self.ssh) looks up.
-            if flow.port == host.SSH_PORT and (self.ssh or self.hand_off):
+            # Never anywhere on the network: only ever to sshd in the bottle granted there.
+            if flow.port == host.SSH_PORT and self.ssh is not None:
                 return Redirect(SSH)
             raise Refused(403, "Forbidden: no such bottle service", "denied")
-        # A credential goes only on TLS, so only a ClientHello's name claims one.
-        tls = flow.unwrapped or flow.first[:1] == b"\x16"
-        injection = self._injection_at(name, flow.port) if name and tls else None
-        if injection is not None:
-            # Sent to the name, never to the address the bottle chose: the
-            # credential goes only where its host's name leads.
-            return Redirect(CREDENTIAL, injection, tuple(await self._allowed(name, flow.port, private=True)))
-        if not self.policy.allows(name or "", address):
-            raise Refused(403, "Forbidden: destination not allowed", "denied")
-        if not address.is_global and (not name or address not in await self._addresses(name, flow.port)):
-            # A private address allowed only for its name: the name must lead there.
-            raise Refused(403, "Forbidden: destination not allowed", "denied")
-        return Direct((flow.address,))
+        # A credential goes only on TLS.
+        injection = self._injection_at(flow.name, flow.port) if flow.name and flow.unwrapped else None
+        if injection is None:
+            raise Refused(None, "not a service of folio serve's", "not-a-service")
+        # Sent to the name, never to the address the bottle chose: the credential goes only where its host's
+        # name leads.
+        return Redirect(CREDENTIAL, injection, tuple(await self._allowed(flow.name, flow.port)))
 
-    async def serve(self, flow: "Flow", decision: "Redirect", reader, writer) -> None:
-        """Be the far end of a redirected flow, whose first bytes have already been read from `reader`."""
+    async def serve(self, flow: Flow, reader, writer) -> None:
+        """Be the far end of `flow`, as decide says."""
         started = time.monotonic()
-        name = flow.named()
+        name = flow.name
         target = f"{flow.address}:{flow.port}" + (f" ({name})" if name else "")
         ip, up, down, response = None, [0], [0], bytearray()
         outcome, status = "ok", None
         upstream_writer = None
+        decision = None
         try:
+            decision = await self.decide(flow)
             if decision.service == GIT:
                 ip = "host"
-                outcome = await self._serve_git(flow.first, reader, writer)
+                outcome = await self._serve_git(reader, writer)
                 return
-            if decision.service == SSH and self.hand_off is None:
+            if decision.service == SSH:
                 ip = "ssh"
                 await self._serve_ssh(flow, reader, writer, up, down)
                 return
-            if decision.service in (CREDENTIAL, SSH) and self.hand_off is not None:
-                ip, outcome = "controller", "handed-off"
-                await self.hand_off(flow, reader, writer)
-                return
-            reader = _Reader(reader.read, flow.first)
-            request = await self._inside(Request("CONNECT", name, flow.port, None), decision.injection, reader, writer)
+            request = await self._inside(name, flow.port, decision.injection, reader, writer)
             if request.injected:
                 target += " +credential"
             ip, upstream_reader, upstream_writer = await self._open(request, list(decision.addresses))
@@ -463,7 +389,7 @@ class Gateway:
         except Refused as e:
             outcome = e.outcome
             # Answered in plain http: bottle-cli wraps it for a bottle speaking TLS.
-            if e.status is not None and (flow.unwrapped or decision.service == GIT):
+            if e.status is not None and (flow.unwrapped or (decision is not None and decision.service == GIT)):
                 await _respond(writer, e.status, e.reason, e.body, e.content_type)
         except Exception:
             outcome = "error"
@@ -474,36 +400,13 @@ class Gateway:
                     w.close()
             self.log_flow(target, ip, outcome, status, up, down, started)
 
-    async def serve_handed_off(self, flow: "Flow", reader, writer) -> None:
-        """Decide and serve a flow another gateway for this bottle redirected for a credential, its opening all
-        read, or for a bottle it may ssh to.
-
-        Decided again here, where the credential is: the destination is
-        judged from this machine, which is where the request is sent from.
-        Anything that isn't a credential's or ssh's flow after all is refused.
-        """
-        try:
-            decision = await self.decide(flow)
-        except Refused as e:
-            writer.close()
-            self.log_flow(f"{flow.address}:{flow.port}", None, e.outcome, None, [0], [0], time.monotonic())
-            return
-        if not isinstance(decision, Redirect) or decision.service not in (CREDENTIAL, SSH):
-            writer.close()
-            self.log_flow(f"{flow.address}:{flow.port}", None, "denied", None, [0], [0], time.monotonic())
-            return
-        await self.serve(flow, decision, reader, writer)
-
     async def _serve_ssh(self, flow: Flow, reader, writer, up: list[int], down: list[int]) -> None:
         """Join the flow to sshd in the bottle granted at its address, until sshd is done."""
-        first = flow.first
         command = await self.ssh(flow.address)
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         said = asyncio.create_task(process.stderr.read())
         try:
-            process.stdin.write(first)
-            up[0] += len(first)
             await _relay(reader, writer, process.stdout, process.stdin, up, down)
         finally:
             if process.returncode is None:
@@ -513,16 +416,15 @@ class Gateway:
             if process.returncode and errors:
                 log.warning("%s: sshd at %s: %s", self.name, flow.address, errors.splitlines()[-1])
 
-    async def _serve_git(self, first: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
-        """Answer an origin-form request to bottle.host, its head in `first` (perhaps not all of it)."""
-        source = _Reader(reader.read, first)
-        method, target, _, header_lines = await _read_head(source)
+    async def _serve_git(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
+        """Answer an origin-form request to bottle.host."""
+        method, target, _, header_lines = await _read_head(reader)
         url = urlsplit(target)
         if not target.startswith("/"):
             raise Refused(400, "Bad Request", "bad-request")
         headers = _parsed(header_lines)
         try:
-            body = await host.read_body(source, headers)
+            body = await host.read_body(reader, headers)
         except (ValueError, asyncio.IncompleteReadError):
             raise Refused(400, "Bad Request", "bad-request") from None
         return await self.services.handle(host.HttpRequest(method, url.path or "/", url.query, headers, body), writer)
@@ -534,14 +436,15 @@ class Gateway:
     def _log_request(self, method: str, name: str, path: str, outcome: str, status: str | None) -> None:
         log.info("%s %s https://%s%s %s %s", self.name, method, name, path, outcome, status or "-")
 
-    async def _inside(self, tunnel: Request, injection: Injection, reader: "_Reader", writer: asyncio.StreamWriter) -> Request:
-        """The request a bottle sent inside TLS terminated for `tunnel`'s host, made ready for the upstream.
+    async def _inside(self, name: str, port: int, injection: Injection, reader: asyncio.StreamReader,
+                      writer: asyncio.StreamWriter) -> Request:
+        """The request a bottle sent inside TLS terminated for host `name`, made ready for the upstream.
 
         Its head, and its body too when a rewrite reads it for the stand-in.
         """
         method, target, version, header_lines = await _read_head(reader)
         url = urlsplit(target)
-        if method == "CONNECT" or (url.scheme and url.scheme != "https") or (url.netloc and url.hostname != tunnel.host.lower()):
+        if method == "CONNECT" or (url.scheme and url.scheme != "https") or (url.netloc and url.hostname != name.lower()):
             raise Refused(400, "Bad Request", "bad-request")
         if method.upper() in ECHOING_METHODS:
             # The response would carry the credential back into the bottle.
@@ -552,9 +455,9 @@ class Gateway:
             raise Refused(400, "Bad Request", "bad-request")
         parsed = _parsed(header_lines)
         if injection.forbids(method, route):
-            self._log_request(method, tunnel.host, path, "forbidden", "403")
+            self._log_request(method, name, path, "forbidden", "403")
             raise _route_refused(
-                parsed, f"bottle refused {method} {url.path} on {tunnel.host}: the {injection.named}'s feature "
+                parsed, f"bottle refused {method} {url.path} on {name}: the {injection.named}'s feature "
                 "forbids this route, with the credential or without.", "forbidden")
         # The credential, if the bottle presented the stand-in under this name.
         presented = [line.split(":", 1)[1] for line in header_lines
@@ -572,9 +475,9 @@ class Gateway:
             body = await _request_body(reader, writer, parsed)
             body, in_body = _json_with_credential(body, [r for r in rewrites if r.json], injection)
         if (value is not None or rewritten or in_body) and not injection.allows(method, route):
-            self._log_request(method, tunnel.host, path, "not-allowed", "403")
+            self._log_request(method, name, path, "not-allowed", "403")
             raise _route_refused(
-                parsed, f"bottle refused {method} {url.path} on {tunnel.host}: the {injection.named} goes only on "
+                parsed, f"bottle refused {method} {url.path} on {name}: the {injection.named} goes only on "
                 "the routes its feature allows, and this isn't one of them.", "not-allowed")
         # The Host header goes with the destination, and the routing headers
         # go altogether, so a request carrying a credential can't ask one
@@ -584,7 +487,7 @@ class Gateway:
         if body is not None:
             dropped |= {"content-length", "transfer-encoding", "expect"}  # read here, and sent whole
         headers = [line for line in _forwarded(header_lines) if line.split(":", 1)[0].strip().lower() not in dropped]
-        authority = tunnel.host + (f":{tunnel.port}" if tunnel.port != 443 else "")
+        authority = name + (f":{port}" if port != 443 else "")
         headers = [f"Host: {authority}", *headers, *rewritten.values()]
         if value is not None:
             headers.append(f"{injection.header}: {value}")
@@ -593,41 +496,31 @@ class Gateway:
         # A WebSocket (Develocity's test distribution) asks to keep the connection, as something else.
         upgrade = "upgrade" in parsed and "upgrade" in _tokens(parsed.get("connection", ""))
         return Request(
-            method, tunnel.host, tunnel.port,
+            method, name, port,
             _upstream_head(method, path, version, headers, "Upgrade" if upgrade else "close") + (body or b""),
-            url.path or "/", url.query, parsed, terminated=True, injected=value is not None or bool(rewritten) or in_body,
+            url.path or "/", injected=value is not None or bool(rewritten) or in_body,
         )
 
-    async def _addresses(self, name: str, port: int) -> set[IPAddress]:
-        """Where `name` leads that the policy allows, as addresses, so IPv6's many spellings compare equal."""
-        return {ipaddress.ip_address(a.partition("%")[0]) for a in await self._allowed(name, port, private=False)}
-
-    async def _allowed(self, host: str, port: int, private: bool) -> list[str]:
-        """The addresses `host` resolves to that the policy lets the bottle reach; refused if none."""
+    async def _allowed(self, host: str, port: int) -> list[str]:
+        """The addresses `host` resolves to that a credential's host may be at (reachable); refused if none."""
         try:
             addresses = await self.resolve(host, port)
         except OSError:
             raise Refused(502, "Bad Gateway: cannot resolve host", "unresolved") from None
-        allowed = [a for a in addresses if self.policy.allows(host, ipaddress.ip_address(a), private=private)]
+        allowed = [a for a in addresses if self.reachable(ipaddress.ip_address(a.partition("%")[0]))]
         if not allowed:
             raise Refused(403, "Forbidden: destination not allowed", "denied")
         return allowed
 
-    async def _open(
-        self, request: Request, allowed: list[str] | None = None,
-    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
-        """Connect to the request's destination, at `allowed` when it has already been judged."""
+    async def _open(self, request: Request, allowed: list[str]) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to the request's host, at the addresses already judged (`allowed`), so a second lookup can't
+        swap them; always over TLS: a credential is never put on a request that leaves here in the clear, and one
+        without it was TLS when the bottle sent it."""
         host, port = request.host, request.port
-        # Connect to the exact addresses we checked, so a second lookup can't swap them.
-        if allowed is None:
-            allowed = await self._allowed(host, port, private=request.terminated)
-        # The machine's end of a terminated tunnel is always TLS: a credential
-        # is never put on a request that leaves here in the clear, and one
-        # without it was TLS when the bottle sent it.
-        context = _tls_context() if request.terminated else None
+        context = _tls_context()
         for address in allowed:
             try:
-                connect = asyncio.open_connection(address, port, ssl=context, server_hostname=host if context else None)
+                connect = asyncio.open_connection(address, port, ssl=context, server_hostname=host)
                 reader, writer = await asyncio.wait_for(connect, CONNECT_TIMEOUT)
                 return address, reader, writer
             except ssl.SSLError as e:
@@ -684,7 +577,7 @@ def _upstream_head(method: str, path: str, version: str, headers: list[str], con
     return "\r\n".join([f"{method} {path} {version}", *headers, f"Connection: {connection}", "", ""]).encode("latin-1")
 
 
-async def _request_body(reader: "_Reader", writer: asyncio.StreamWriter, headers: dict[str, str]) -> bytes:
+async def _request_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str]) -> bytes:
     """All of a request's body, by its Content-Length or chunked; refused past MAX_BODY_BYTES, or when it isn't all there."""
     if "100-continue" in _tokens(headers.get("expect", "")):
         # The bottle waits to be told to send it, and it's read here, not by the server.
@@ -948,141 +841,3 @@ async def _respond(writer: asyncio.StreamWriter, status: int, reason: str, body:
         await writer.drain()
     except (ConnectionError, OSError):
         pass
-
-
-# --- names in a flow's first bytes ---------------------------------------------
-
-
-def name_in(first: bytes) -> str | None:
-    """The destination's name in a flow's first bytes: a TLS ClientHello's SNI, or an HTTP request's Host."""
-    return sni(first) if first[:1] == b"\x16" else http_host(first)
-
-
-def sni(record: bytes) -> str | None:
-    """The server name in a TLS ClientHello record, or None if there's none, or it isn't one.
-
-    What the bottle sent, so anything may be here: every length is checked
-    against what's there before it's followed.
-    """
-    try:
-        if record[0] != 0x16 or len(record) < 9 or record[5] != 0x01:  # handshake record, ClientHello
-            return None
-        body = record[9:5 + int.from_bytes(record[3:5], "big")]
-        at = 2 + 32  # client version, random
-        at += 1 + body[at]  # session id
-        at += 2 + int.from_bytes(body[at:at + 2], "big")  # cipher suites
-        at += 1 + body[at]  # compression methods
-        end = min(len(body), at + 2 + int.from_bytes(body[at:at + 2], "big"))
-        at += 2
-        while at + 4 <= end:
-            kind, length = int.from_bytes(body[at:at + 2], "big"), int.from_bytes(body[at + 2:at + 4], "big")
-            at += 4
-            if kind == 0:  # server_name: a list of (type, name)
-                names, inner = body[at:at + length], 2
-                while inner + 3 <= len(names):
-                    name_type, name_length = names[inner], int.from_bytes(names[inner + 1:inner + 3], "big")
-                    name = names[inner + 3:inner + 3 + name_length]
-                    if name_type == 0 and len(name) == name_length:
-                        return _hostname(name)
-                    inner += 3 + name_length
-                return None
-            at += length
-    except IndexError:
-        pass
-    return None
-
-
-def http_host(head: bytes) -> str | None:
-    """The Host of an HTTP request whose head starts `head`, without its port; None if it has none."""
-    lines = head.split(b"\r\n")
-    request_line = lines[0].split(b" ")
-    if len(request_line) != 3 or not request_line[2].startswith(b"HTTP/"):
-        return None
-    for line in lines[1:-1]:  # the last may be cut off
-        if not line:
-            break
-        name, _, value = line.partition(b":")
-        if name.strip().lower() == b"host":
-            value = value.strip()
-            if value.startswith(b"["):
-                value = value[1:value.find(b"]")] if b"]" in value else b""
-            else:
-                value = value.rpartition(b":")[0] if b":" in value else value
-            return _hostname(value)
-    return None
-
-
-def _hostname(name: bytes) -> str | None:
-    try:
-        text = name.decode("ascii").rstrip(".").lower()
-    except UnicodeDecodeError:
-        return None
-    return text if text and len(text) <= 253 and all(c.isalnum() or c in "-.:_" for c in text) else None
-
-
-# --- streams --------------------------------------------------------------------
-
-
-class _Reader:
-    """The parts of asyncio.StreamReader this module uses, over chunks from `receive`, starting with `first`.
-
-    For a stream whose first bytes have already been read (a decider's flow),
-    and for the plaintext inside TLS this module terminates itself. Reads
-    from `receive` only when asked, so a slow consumer slows the sender.
-    """
-
-    def __init__(self, receive: Callable[[int], Awaitable[bytes]], first: bytes = b"", limit: int = MAX_HEADER_BYTES):
-        self._receive = receive
-        self._buffer = bytearray(first)
-        self._eof = False
-        self._limit = limit
-
-    async def _more(self) -> bool:
-        if self._eof:
-            return False
-        data = await self._receive(64 * 1024)
-        if not data:
-            self._eof = True
-            return False
-        self._buffer += data
-        return True
-
-    async def read(self, n: int = -1) -> bytes:
-        if n < 0:
-            while await self._more():
-                pass
-            n = len(self._buffer)
-        elif not self._buffer:
-            await self._more()
-        data = bytes(self._buffer[:n])
-        del self._buffer[:n]
-        return data
-
-    async def at_eof(self) -> bool:
-        """Whether there's nothing more to read: waits for more, or for the end."""
-        return not self._buffer and not await self._more()
-
-    async def readuntil(self, separator: bytes = b"\n") -> bytes:
-        while (at := self._buffer.find(separator)) < 0:
-            if len(self._buffer) > self._limit:
-                raise asyncio.LimitOverrunError("separator not found within the limit", len(self._buffer))
-            if not await self._more():
-                partial = bytes(self._buffer)
-                self._buffer.clear()
-                raise asyncio.IncompleteReadError(partial, None)
-        return await self.read(at + len(separator))
-
-    async def readline(self) -> bytes:
-        try:
-            return await self.readuntil(b"\n")
-        except asyncio.IncompleteReadError as e:
-            return e.partial
-
-    async def readexactly(self, n: int) -> bytes:
-        while len(self._buffer) < n:
-            if not await self._more():
-                partial = bytes(self._buffer)
-                self._buffer.clear()
-                raise asyncio.IncompleteReadError(partial, n)
-        return await self.read(n)
-

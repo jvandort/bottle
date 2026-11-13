@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import egress
-from bottle.egress import Direct, Flow, Gateway, Policy, Refused
+from bottle.egress import Flow, Gateway, Refused
 
 # The address a bottle connected to for the credential's host: never where it goes.
 CONNECTED_TO = "203.0.113.5"
@@ -22,41 +22,19 @@ def ip(address: str):
     return ipaddress.ip_address(address)
 
 
-class PolicyTest(unittest.TestCase):
-    policy = Policy(allow_private=("*.corp.example.com",))
-
-    def test_public_allowed(self) -> None:
-        self.assertTrue(self.policy.allows("example.com", ip("93.184.216.34")))
-        self.assertTrue(self.policy.allows("example.com", ip("2606:4700::1")))
-
-    def test_private_denied(self) -> None:
-        for address in ("10.0.0.5", "172.16.0.2", "192.168.1.1", "100.64.0.1", "fd00::1"):
+class ReachableTest(unittest.TestCase):
+    def test_a_credentials_host_may_be_anywhere_but_here(self) -> None:
+        for address in ("93.184.216.34", "2606:4700::1", "10.0.0.5", "192.168.1.1", "fd00::1"):
             with self.subTest(address):
-                self.assertFalse(self.policy.allows("example.com", ip(address)))
-
-    def test_private_allowed_for_allowlisted_host(self) -> None:
-        self.assertTrue(self.policy.allows("ci.corp.example.com", ip("10.1.2.3")))
-        self.assertTrue(self.policy.allows("CI.CORP.EXAMPLE.COM", ip("10.1.2.3")))
-
-    def test_allowlist_needs_a_match(self) -> None:
-        self.assertFalse(self.policy.allows("corp.example.com.evil.com", ip("10.1.2.3")))
-        self.assertFalse(self.policy.allows("10.1.2.3", ip("10.1.2.3")))
-
-    def test_host_itself_never_allowed(self) -> None:
-        for address in ("127.0.0.1", "::1", "169.254.169.254", "fe80::1", "0.0.0.0", "224.0.0.251"):
+                self.assertTrue(egress.reachable(ip(address)))
+        for address in ("127.0.0.1", "::1", "169.254.169.254", "fe80::1", "0.0.0.0", "224.0.0.251", "::ffff:127.0.0.1"):
             with self.subTest(address):
-                self.assertFalse(self.policy.allows("ci.corp.example.com", ip(address)))
-
-    def test_ipv4_mapped_addresses_are_unwrapped(self) -> None:
-        self.assertFalse(self.policy.allows("example.com", ip("::ffff:192.168.1.1")))
-        self.assertFalse(self.policy.allows("ci.corp.example.com", ip("::ffff:127.0.0.1")))
+                self.assertFalse(egress.reachable(ip(address)))
 
 
-class LoopbackPolicy(Policy):
-    """Treats 127.0.0.1 as public, so tests can reach their servers there."""
-
-    def allows(self, host, address, private=False) -> bool:
-        return address == ip("127.0.0.1") or super().allows(host, address, private)
+def loopback_too(address) -> bool:
+    """Reachable, and 127.0.0.1 too, so tests can reach their servers there."""
+    return address == ip("127.0.0.1") or egress.reachable(address)
 
 
 HOSTS = {"upstream.test": ["127.0.0.1"], "elsewhere.test": ["127.0.0.1"], "private.test": ["10.0.0.5"], "mixed.test": ["10.0.0.5", "127.0.0.1"],
@@ -149,12 +127,11 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        self.asked: list[tuple[str, bool]] = []
         injection = egress.Injection(
             host="upstream.test", header="Authorization", value="Bearer real-token", port=self.upstream_port,
             standin="stand-in", credential="real-token",
         )
-        self.gateway = Gateway("test", self.recording_policy(), fake_resolve, injections=(injection,))
+        self.gateway = Gateway("test", injections=(injection,), resolve=fake_resolve, reachable=loopback_too)
         server = await asyncio.start_server(self.routed, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, server)
         self.port = server.sockets[0].getsockname()[1]
@@ -162,24 +139,9 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
     connected_to = CONNECTED_TO
 
     async def routed(self, reader, writer) -> None:
-        """What bottled does with a flow a machine routes to it (services.py): decide, and serve it."""
-        flow = Flow(self.connected_to, self.connected_port, name=self.asked_for, unwrapped=True)
-        try:
-            decision = await self.gateway.decide(flow)
-        except Refused:
-            writer.close()
-            return
-        await self.gateway.serve(flow, decision, reader, writer)
-
-    def recording_policy(self) -> Policy:
-        asked = self.asked
-
-        class Recording(LoopbackPolicy):
-            def allows(self, host, address, private=False):
-                asked.append((host, private))
-                return super().allows(host, address, private)
-
-        return Recording()
+        """What folio serve does with a flow a machine routes to it (services.py)."""
+        await self.gateway.serve(Flow(self.connected_to, self.connected_port, name=self.asked_for, unwrapped=True),
+                                 reader, writer)
 
     upstream = Upstream.upstream
 
@@ -295,17 +257,10 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(response.startswith(b"HTTP/1.1 405 "))
                 self.assertTrue(self.received.empty())
 
-    async def test_a_credentials_host_may_be_private_but_only_for_an_injected_request(self) -> None:
-        await self.head_of(b"GET / HTTP/1.1\r\n\r\n")
-        self.assertEqual(self.asked[-1], ("upstream.test", True))
-        # Another port is an ordinary flow, judged by the policy alone.
-        await self.gateway.decide(Flow("127.0.0.1", 1, name="upstream.test", unwrapped=True))
-        self.assertEqual(self.asked[-1], ("upstream.test", False))
-
     async def test_a_destination_the_bottle_may_not_reach_is_refused_before_anything_is_read(self) -> None:
         injections = tuple(egress.Injection(host=h, header="Authorization", value="Bearer real-token")
                            for h in ("metadata.test", "nowhere.test"))
-        gateway = Gateway("test", LoopbackPolicy(), fake_resolve, injections=injections)
+        gateway = Gateway("test", injections=injections, resolve=fake_resolve, reachable=loopback_too)
         for name, status in (("metadata.test", 403), ("nowhere.test", 502)):
             with self.subTest(name), self.assertRaises(Refused) as refused:
                 await gateway.decide(Flow(CONNECTED_TO, 443, name=name, unwrapped=True))
@@ -313,10 +268,9 @@ class InjectionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_plain_http_to_a_credentials_host_and_port_gets_no_credential(self) -> None:
         # A credential goes only on TLS: a Host header doesn't claim one.
-        decision = await self.gateway.decide(
-            Flow("127.0.0.1", self.upstream_port, b"GET / HTTP/1.1\r\nHost: upstream.test\r\n\r\n"))
-        self.assertEqual(decision, Direct(("127.0.0.1",)))
-        self.assertTrue(all(private is False for _, private in self.asked))
+        with self.assertRaises(Refused) as refused:
+            await self.gateway.decide(Flow("127.0.0.1", self.upstream_port, name="upstream.test"))
+        self.assertEqual(refused.exception.outcome, "not-a-service")
 
 
     def with_routes(self, **routes) -> None:
@@ -535,7 +489,7 @@ class InjectionMatchTest(unittest.TestCase):
     )
 
     def injection_for(self, target: str) -> egress.Injection | None:
-        gateway = Gateway("test", Policy(), fake_resolve, injections=self.injections)
+        gateway = Gateway("test", injections=self.injections, resolve=fake_resolve)
         host, _, port = target.rpartition(":")
         return gateway._injection_at(host, int(port))
 

@@ -74,7 +74,6 @@ class ServicesTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = Path(tmp)
         for patcher in (
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
-            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
             mock.patch.object(daemon, "bound_bottles", return_value=[]),
         ):
             patcher.start()

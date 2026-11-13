@@ -3,19 +3,16 @@
 It's folio's, run as `folio serve`, its sockets and log in folio's home (home()); its code is bottle's still,
 shared, until it moves with the rest of what's folio's.
 
-It runs on the controller alone, for every runner's bottles: the services
-socket and each bottle's gateway (Daemon), and what stays with the user
-(Controller): credentials, pushes into hubs, and messages between bottles.
-A remote runner's machines reach the socket through ones on the runner that
-bottle-cli forwards here.
+It runs on the controller alone, for every runner's bottles (Daemon): a remote
+runner's machines reach its sockets through ones on the runner that bottle-cli
+forwards here.
 
 bottle-cli decides a bottle's connections itself, by the policy its machine
-was made with (services.network), and gives bottled the ones that policy
-routes to it, on a unix socket in $BOTTLE_HOME (services.py): bottle.host's
-services, ssh to bottles, and credentials' hosts. Commands don't manage it
-directly: bind() has it answer a bottle's machine, starting bottled if it isn't
-running, and release_egress() stops it. It listens on another Unix socket in
-$BOTTLE_HOME and speaks one JSON line per request.
+was made with (services.network), and gives folio serve the ones that policy
+routes to it, on a socket per service (services.py): bottle.host's services,
+ssh to bottles, and credentials' hosts. Commands don't manage it directly:
+bind() has it answer a bottle's machine, starting it if it isn't running, and
+release_egress() stops that. Its control socket speaks one JSON line per request.
 """
 
 import asyncio
@@ -29,11 +26,10 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 
-from bottle import auth, cache, egress, messages, services as services_, specs
-from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
+from bottle import auth, egress, messages, services as services_, specs
+from bottle.host import HostServices, Remote, Served, ServiceError
 from bottle.errors import BottleError
 from bottle.store import folio_home, log_path, open_log
 
@@ -254,42 +250,98 @@ def _start_daemon() -> None:
 # --- server -------------------------------------------------------------------
 
 
-class Controller:
-    """bottled's controller half: what a bottle's gateway hands to the controller, wherever the bottle runs.
+class Daemon:
+    """folio serve: the services sockets, each bottle's gateway, and what those hand it: ssh to bottles, and
+    messages between them."""
 
-    Credentials, pushes into the hub (HubGit), and messages between bottles. `running` says whether a
-    bottle's machine is running: its runner's to know.
-    """
-
-    def __init__(self, policy: egress.Policy, running: Callable[[str], bool]) -> None:
-        self.policy = policy
-        self._running = running
+    def __init__(self, services: services_.Services | None = None,
+                 services_paths: dict[str, Path] | None = None) -> None:
+        self.services = services or services_.Services()
+        self.services_paths = services_paths
+        self.stopping = asyncio.Event()
+        # Serializes work per bottle: startup restore and requests may overlap.
+        self.locks: dict[str, asyncio.Lock] = {}
+        # The code it runs, by its hash, as it was when it started: what a command checks it against.
+        self.code = code_hash()
 
     def running(self, bottle: str) -> bool:
-        return self._running(bottle)
+        """Whether `bottle` is bound here: its machine is running, as far as folio serve knows."""
+        return self.services.bound(bottle)
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        line = await reader.readline()
+        if not line:  # a liveness probe: connected and hung up
+            writer.close()
+            return
+        try:
+            message = json.loads(line)
+            match message.get("op"):
+                case "ping":
+                    reply = {"ok": True, "code": self.code}
+                case "bind":
+                    repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
+                                         tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
+                                  for r in message.get("repos", ()))
+                    await self.bind(message["bottle"], message["machine"], repos, tuple(message.get("features", ())))
+                    reply = {"ok": True}
+                case "release":
+                    await self.release(message["bottle"])
+                    reply = {"ok": True}
+                case "shutdown":
+                    log.info("shutdown requested")
+                    self.stopping.set()
+                    reply = {"ok": True}
+                case op:
+                    reply = {"ok": False, "error": f"unknown op {op!r}"}
+        except BottleError as e:
+            reply = {"ok": False, "error": str(e)}
+        except Exception as e:
+            log.exception("request failed")
+            reply = {"ok": False, "error": f"internal error: {e}"}
+        writer.write(json.dumps(reply).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+    async def bind(self, bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = ()) -> None:
+        """Answer what `machine` routes here as `bottle`'s.
+
+        Its credentials are read now, each time it's bound, so a credential set
+        or removed reaches a bottle when it next starts, or folio serve does.
+        Only for the hosts its machine routes here, which it was made with:
+        those its features name since then go direct until it's made again.
+        """
+        async with self.locks.setdefault(bottle, asyncio.Lock()):
+            injections = tuple(await asyncio.to_thread(auth.injections_for, features))
+            services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers)
+            gateway = egress.Gateway(bottle, services, injections, ssh=functools.partial(self.ssh, bottle))
+            self.services.bind(bottle, machine, gateway)
 
     async def release(self, bottle: str) -> None:
-        """A bottle here has stopped: nothing to do, since its side here is made again each time it's bound."""
+        """Stop answering `bottle`'s machine: it's gone (deleted, or its thread paused). With none left to answer,
+        folio serve stops: the next bottle made starts it again."""
+        async with self.locks.setdefault(bottle, asyncio.Lock()):
+            self.services.release(bottle)
+        if not self.services.bindings:
+            log.info("no bottle left to answer: stopping")
+            self.stopping.set()
 
-    async def egress(
-        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...],
-    ) -> tuple[tuple[egress.Injection, ...], tuple[cache.Cached, ...], HostServices, egress.Gateway]:
-        """What a runner needs to bind `bottle`: where its credentials are for, the hosts whose downloads are
-        kept for it (the features say, and the runner doesn't have them), its bottle.host, and its gateway
-        here, which serves its credentials' flows.
+    async def restore(self, bound: list[tuple]) -> list[tuple]:
+        """Answer the machines of bottles there were before folio serve started.
 
-        Credentials are read here, each time a bottle is bound, so logging
-        in or out reaches a bottle when it's next bound: when it starts, or
-        bottled does. Only for the hosts its machine routes here, which it was
-        made with: those its features name since then go direct until it's made again.
+        Each is (name, machine, the repos it's served, features), as
+        bound_bottles() gives them. Returns those it couldn't bind.
         """
-        injections = tuple(await asyncio.to_thread(auth.injections_for, features))
-        gateway = egress.Gateway(bottle, self.policy, injections=injections, ssh=functools.partial(self.ssh, bottle))
-        services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
-        # Where each credential is for, and nothing of the credential itself.
-        where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
-        caches = tuple(await asyncio.to_thread(cache.cached_for, features))
-        return where, caches, services, gateway
+        unrestored = []
+        for binding in bound:
+            bottle, machine, repos, features = binding
+            if self.services.bound(bottle):
+                continue
+            try:
+                await self.bind(bottle, machine, repos, features)
+            except Exception as e:  # one bad bottle mustn't stop the rest
+                log.warning("%s: couldn't restore its decisions: %s", bottle, e)
+                unrestored.append(binding)
+        return unrestored
 
     async def ssh(self, bottle: str, address: str) -> list[str]:
         """The command line that runs sshd -i in the bottle `bottle` may ssh to at `address`, wherever that runs;
@@ -356,98 +408,6 @@ class Controller:
         return [{"name": name, "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
                  "labels": specs.labels(bottle.spec)}
                 for name, bottle in sorted(registry.items()) if name != asker and self.running(name)]
-
-
-class Daemon:
-    """bottled's runner half: the services socket, and each bottle's gateway, which hands the controller what's
-    its."""
-
-    def __init__(
-        self, policy: egress.Policy | None = None, services: services_.Services | None = None,
-        services_paths: dict[str, Path] | None = None, controller: Controller | None = None,
-    ) -> None:
-        self.policy = policy or egress.Policy()
-        self.services = services or services_.Services()
-        self.services_paths = services_paths
-        self.stopping = asyncio.Event()
-        # Serializes work per bottle: startup restore and requests may overlap.
-        self.locks: dict[str, asyncio.Lock] = {}
-        # The code it runs, by its hash, as it was when it started: what a command checks it against.
-        self.code = code_hash()
-        # The controller's half, in this process.
-        self.controller = controller or Controller(self.policy, self.services.bound)
-
-    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        line = await reader.readline()
-        if not line:  # a liveness probe: connected and hung up
-            writer.close()
-            return
-        try:
-            message = json.loads(line)
-            match message.get("op"):
-                case "ping":
-                    reply = {"ok": True, "code": self.code}
-                case "bind":
-                    repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
-                                         tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
-                                  for r in message.get("repos", ()))
-                    await self.bind(message["bottle"], message["machine"], repos, tuple(message.get("features", ())))
-                    reply = {"ok": True}
-                case "release":
-                    await self.release(message["bottle"])
-                    reply = {"ok": True}
-                case "shutdown":
-                    log.info("shutdown requested")
-                    self.stopping.set()
-                    reply = {"ok": True}
-                case op:
-                    reply = {"ok": False, "error": f"unknown op {op!r}"}
-        except BottleError as e:
-            reply = {"ok": False, "error": str(e)}
-        except Exception as e:
-            log.exception("request failed")
-            reply = {"ok": False, "error": f"internal error: {e}"}
-        writer.write(json.dumps(reply).encode() + b"\n")
-        await writer.drain()
-        writer.close()
-
-    async def bind(self, bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = ()) -> None:
-        """Answer what `machine` routes here as `bottle`'s."""
-        async with self.locks.setdefault(bottle, asyncio.Lock()):
-            injections, cached, services, controller_gateway = await self.controller.egress(bottle, repos, features)
-            gateway = egress.Gateway(
-                bottle, self.policy, services=services, injections=injections, caches=cached,
-                hand_off=controller_gateway.serve_handed_off,
-            )
-            self.services.bind(bottle, machine, gateway)
-
-    async def release(self, bottle: str) -> None:
-        """Stop answering `bottle`'s machine: it's gone (deleted, or its thread paused). With none left to answer,
-        folio serve stops: the next bottle made starts it again."""
-        async with self.locks.setdefault(bottle, asyncio.Lock()):
-            self.services.release(bottle)
-        await self.controller.release(bottle)
-        if not self.services.bindings:
-            log.info("no bottle left to answer: stopping")
-            self.stopping.set()
-
-    async def restore(self, bound: list[tuple]) -> list[tuple]:
-        """Answer the machines of bottles there were before bottled started.
-
-        Each is (name, machine, the repos it's served, features), as
-        bound_bottles() gives them. Returns those it couldn't bind.
-        """
-        unrestored = []
-        for binding in bound:
-            bottle, machine, repos, features = binding
-            if self.services.bound(bottle):
-                continue
-            try:
-                await self.bind(bottle, machine, repos, features)
-            except Exception as e:  # one bad bottle mustn't stop the rest
-                log.warning("%s: couldn't restore its decisions: %s", bottle, e)
-                unrestored.append(binding)
-        return unrestored
 
 
 def _permissions(bottle) -> list[str]:

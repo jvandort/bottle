@@ -34,10 +34,9 @@ with one writer, so neither side's push is ever rejected for what the other
 did: the bottle writes one lane, and whoever created it writes the other,
 directly in its own repo. bottled never serves that direction.
 
-Fetches are served from the hub itself, or from a mirror of it that
-a bottle's runner keeps, brought up to date as each fetch starts (see Git):
-either way, a fetch sees the repo as it is right now. Pushes always go into
-the hub, on the controller, with every rule here.
+Fetches and pushes are the hub's, on the controller, wherever the bottle runs:
+a fetch sees the repo as it is right now, and a push goes in with every rule
+here.
 
 After a push, the hub's checked-out branches follow it (hooks/follow.py):
 one whose upstream is a remote reading the push's namespace (folio's
@@ -74,8 +73,7 @@ import sys
 import tempfile
 import zlib
 from collections.abc import Awaitable, Callable
-from typing import Protocol
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http.client import parse_headers
 from pathlib import Path
 
@@ -88,22 +86,24 @@ HOST = "bottle.host"
 # /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
 # uses, which the bottle's machine routes to bottled (services.network).
 ADDRESS = "192.0.2.1"
-# Where a bottle reaches the bottles it may ssh to (`bottle new --ssh`): the rest
+# Where a bottle reaches the bottles it may ssh to (a thread's, its sidecar): the rest
 # of TEST-NET-1, an address for each, under the name its creator gave it.
 SSH_NETWORK = "192.0.2.0/24"
 SSH_PORT = 22
 MAX_SSH = 250
 
 
-def ssh_address(index: int) -> str:
-    """The address of a bottle's `index`th ssh grant: 192.0.2.2 onwards."""
-    return f"192.0.2.{2 + index}"
 GIT_PATH = "/git"
 MESSAGES_PATH = "/messages"
 BOTTLES_PATH = "/bottles"
 MAX_BODY = 64 * 1024 * 1024
 MAX_MESSAGE = 1024 * 1024
 HOOKS = Path(__file__).resolve().parent / "hooks"
+
+
+def ssh_address(index: int) -> str:
+    """The address of a bottle's `index`th ssh grant: 192.0.2.2 onwards."""
+    return f"192.0.2.{2 + index}"
 
 
 # What a remote's fetch can see: the upstream (served as origin is), the repo's
@@ -206,8 +206,6 @@ class HostServices:
     deliver: Callable[[str, str, str], Awaitable[None]] | None = None
     # The running bottles the asker may see: (asker) -> [{name, repo, thread}]; raises ServiceError.
     peers: Callable[[str], Awaitable[list[dict]]] | None = None
-    # Where its git is served from and goes to: the hub, unless its runner says otherwise.
-    git: "Git" = field(default_factory=lambda: HubGit())
 
     def route(self, path: str) -> tuple[Served, Remote, str] | None:
         """The repo, remote and rest of path a /git/... request is for; None if none is served there."""
@@ -276,62 +274,16 @@ class HostServices:
             await _respond(writer, 403, "Forbidden", f"read-only{hint}\n".encode())
             return "denied"
         if push:
-            try:
-                out = await self.git.push(repo, remote, path_info, request)
-            except BottleError as e:  # the hub is elsewhere, and couldn't be reached
-                await _respond(writer, 503, "Service Unavailable", f"{e}\n".encode())
-                return "unavailable"
+            out = await receive(repo.git_dir, remote, path_info, request)
         else:
-            if "info/refs" in path_info:  # once per fetch, at its start
-                try:
-                    await self.git.before_fetch(repo, remote)
-                except BottleError as e:
-                    # Never served stale: a fetch sees the hub as it is, or fails saying why.
-                    await _respond(writer, 503, "Service Unavailable", f"{e}\n".encode())
-                    return "unavailable"
-            out = await self.git.fetch(repo, remote, path_info, request)
+            if "info/refs" in path_info and remote.fetch == UPSTREAM:  # once per fetch, at its start
+                await pull_through(repo.git_dir)
+            out = await fetch(repo.git_dir, repo, remote, path_info, request)
         if out is None:
             await _respond(writer, 500, "Internal Server Error", b"git http-backend failed\n")
             return "failed"
         await _relay_cgi(out, writer)
         return "pushed" if push else "ok"
-
-
-class Git(Protocol):
-    """Where a bottle's git goes: fetches served from a repo its runner has, and pushes into the hub.
-
-    The hub, on the controller, is the only repo pushes go into, with every rule; fetches
-    can be served from a mirror of it, kept current before each.
-    """
-
-    async def before_fetch(self, repo: Served, remote: Remote) -> None:
-        """Bring what fetches of `remote` are served from up to date, as a fetch starts; BottleError if it can't be."""
-
-    async def fetch(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-        """A fetch of `remote`'s view; git http-backend's output, or None if it failed."""
-
-    async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-        """A push to `remote`, into the hub; git http-backend's output, or None if it failed."""
-
-
-class HubGit:
-    """A bottle on the controller itself: everything is the hub's, served and written in place."""
-
-    def fetch_dir(self, repo: Served) -> Path:
-        assert repo.git_dir is not None
-        return repo.git_dir
-
-    async def before_fetch(self, repo: Served, remote: Remote) -> None:
-        if remote.fetch == UPSTREAM:
-            assert repo.git_dir is not None
-            await pull_through(repo.git_dir)
-
-    async def fetch(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-        return await fetch(self.fetch_dir(repo), repo, remote, path_info, request)
-
-    async def push(self, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:
-        assert repo.git_dir is not None
-        return await receive(repo.git_dir, remote, path_info, request)
 
 
 async def fetch(git_dir: Path, repo: Served, remote: Remote, path_info: str, request: HttpRequest) -> bytes | None:

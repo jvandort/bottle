@@ -73,7 +73,6 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         for patcher in (
             # The features these tests name aren't resolved: what a credential claims is mocked where it matters.
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
-            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
             mock.patch.object(daemon, "bound_bottles", return_value=[]),
         ):
             patcher.start()
@@ -101,7 +100,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.services.stat().st_mode & 0o777, 0o600)
 
-    async def test_a_bottles_credentials_reach_the_controllers_gateway_and_go_no_further(self) -> None:
+    async def test_a_bottles_credentials_reach_its_gateway_and_go_no_further(self) -> None:
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections) as looked_up:
             reply = await self.request({"op": "bind", "bottle": "b", "machine": "b-m",
@@ -110,9 +109,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("the-real-credential", json.dumps(reply))
         self.assertEqual(list(self.daemon.services.bindings), ["b-m"])  # by its machine
         [binding] = self.daemon.services.bindings.values()
-        # The runner's gateway knows where the credential is for, and hands those flows to the controller's.
-        self.assertEqual([(i.host, i.port, i.value) for i in binding.gateway.injections], [("ci.test", 443, "")])
-        self.assertEqual(binding.gateway.hand_off.__self__.injections, tuple(injections))
+        self.assertEqual(binding.gateway.injections, tuple(injections))
 
     async def test_binding_again_reads_the_credentials_again(self) -> None:
         for value in ("Bearer old", "Bearer new"):
@@ -120,7 +117,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
                 await self.request({"op": "bind", "bottle": "b", "machine": "b-m", "features": ["teamcity"]})
         [binding] = self.daemon.services.bindings.values()
-        self.assertEqual(binding.gateway.hand_off.__self__.injections[0].value, "Bearer new")
+        self.assertEqual(binding.gateway.injections[0].value, "Bearer new")
 
     async def test_shutdown_removes_the_sockets(self) -> None:
         await self.request({"op": "bind", "bottle": "b", "machine": "b-m"})
@@ -158,7 +155,6 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
         for patcher in (
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
-            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -187,11 +183,11 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
 
     async def refused(self, sender: str, to: str) -> daemon.ServiceError:
         with self.assertRaises(daemon.ServiceError) as raised:
-            await self.daemon.controller.deliver(sender, to, "hi")
+            await self.daemon.deliver(sender, to, "hi")
         return raised.exception
 
     async def test_a_bottle_with_message_any_sends_by_name_from_an_address_issued_to_the_recipient(self) -> None:
-        await self.daemon.controller.deliver("broker", "app-1a2b3c4d-foo", "status?\nall of it")
+        await self.daemon.deliver("broker", "app-1a2b3c4d-foo", "status?\nall of it")
         machine, argv, stdin = self.ran()
         self.assertEqual("bottle-app-1a2b3c4d-foo", machine)
         reply_to = messages.address("broker", holder="app-1a2b3c4d-foo")
@@ -199,7 +195,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("status?\nall of it", stdin)
 
     async def test_the_recipient_answers_by_the_address_it_was_given(self) -> None:
-        await self.daemon.controller.deliver("app-1a2b3c4d-foo", messages.address("broker", holder="app-1a2b3c4d-foo"), "done")
+        await self.daemon.deliver("app-1a2b3c4d-foo", messages.address("broker", holder="app-1a2b3c4d-foo"), "done")
         machine, argv, _ = self.ran()
         self.assertEqual("bottle-broker", machine)
         self.assertEqual(messages.address("app-1a2b3c4d-foo", holder="broker"), argv[-1])
@@ -248,11 +244,11 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         # Their labels; one recorded before labels, its thread as the label thread.
         self.assertEqual([{"name": "app-1a2b3c4d-bar", "repo": "app", "labels": {"thread": "bar"}},
                           {"name": "app-1a2b3c4d-foo", "repo": "app", "labels": {"thread": "foo"}}],
-                         await self.daemon.controller.peers("broker"))
+                         await self.daemon.peers("broker"))
 
     async def test_listing_bottles_needs_list_bottles(self) -> None:
         with self.assertRaises(daemon.ServiceError) as raised:
-            await self.daemon.controller.peers("app-1a2b3c4d-foo")
+            await self.daemon.peers("app-1a2b3c4d-foo")
         self.assertEqual(403, raised.exception.status)
 
 
@@ -260,7 +256,6 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         for patcher in (
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
-            mock.patch.object(daemon.cache, "cached_for", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -283,15 +278,16 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_one_failure_doesnt_stop_the_rest(self) -> None:
         d = Daemon()
-        real = d.controller.egress
+        real = daemon.auth.injections_for
 
-        async def egress(bottle, *args):
-            if bottle == "bad":
-                raise OSError("its repo is gone")
-            return await real(bottle, *args)
+        def injections_for(features):
+            if features == ("bad",):
+                raise OSError("its features are gone")
+            return real(features)
 
-        with mock.patch.object(d.controller, "egress", side_effect=egress), self.assertLogs("bottle.daemon", "WARNING"):
-            unrestored = await d.restore([("bad", "bad-m", (), ()), ("good", "good-m", (), ())])
+        with mock.patch.object(daemon.auth, "injections_for", side_effect=injections_for), \
+                self.assertLogs("bottle.daemon", "WARNING"):
+            unrestored = await d.restore([("bad", "bad-m", (), ("bad",)), ("good", "good-m", (), ())])
         self.assertEqual([binding.bottle for binding in d.services.bindings.values()], ["good"])
         self.assertEqual([b[0] for b in unrestored], ["bad"])
 

@@ -1,4 +1,4 @@
-"""Services: where bottle-cli gives bottled the connections a machine's policy routes to it.
+"""Services: where bottle-cli gives folio serve the connections a machine's policy routes to it.
 
 A machine's policy (its network.json, given when bottle makes it: see
 network()) routes some of its connections to a unix socket here:
@@ -8,20 +8,19 @@ with a PROXY protocol header, version 2 (haproxy's proxy-protocol.txt): the
 address and port the bottle connected to, then, as fields, the name it asked
 for (SNI or Host), whether it spoke TLS (which bottle-cli has taken off, so
 what follows is the plain conversation), and, in a field of bottle's own, the
-machine it's from. bottled answers it as the gateway of the bottle that machine
-is (see egress.py), bound when the bottle was made or bottled started; a
+machine it's from. folio serve answers it as the gateway of the bottle that machine
+is (see egress.py), bound when the bottle was started or folio serve was; a
 connection from a machine no bottle has is dropped.
 """
 
 import asyncio
 import ipaddress
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from bottle import cache, host
-from bottle.egress import Direct, Flow, Gateway, Refused
+from bottle.egress import Flow, Gateway
 
 log = logging.getLogger("bottle.services")
 log.addHandler(logging.NullHandler())
@@ -134,7 +133,6 @@ class Services:
         return server
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        started = time.monotonic()
         try:
             header = await asyncio.wait_for(read_header(reader), HEADER_TIMEOUT)
         except (ValueError, asyncio.IncompleteReadError, TimeoutError, ConnectionError) as e:
@@ -147,21 +145,5 @@ class Services:
             log.warning("services: refused %s from %s, which no bottle here is", target, header.machine)
             writer.close()
             return
-        gateway = binding.gateway
-        flow = Flow(header.address, header.port, name=header.name, unwrapped=header.tls)
-        try:
-            decision = await gateway.decide(flow)
-        except Refused as e:
-            gateway.log_flow(target, None, e.outcome, None, [0], [0], started)
-            writer.close()
-            return
-        except Exception:
-            log.exception("%s: deciding %s", binding.bottle, target)
-            writer.close()
-            return
-        if isinstance(decision, Direct):
-            # Routed here, but none of bottled's: the machine's policy is out of date.
-            gateway.log_flow(target, None, "not-a-service", None, [0], [0], started)
-            writer.close()
-            return
-        await gateway.serve(flow, decision, reader, writer)
+        await binding.gateway.serve(Flow(header.address, header.port, name=header.name, unwrapped=header.tls),
+                                    reader, writer)
