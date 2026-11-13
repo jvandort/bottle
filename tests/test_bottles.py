@@ -623,7 +623,7 @@ class OwnershipTest(BottleTestCase):
     def test_new_refuses_a_taken_name_and_leaves_it_alone(self) -> None:
         fake = self.fake()
         fake.machines[bottles.namespace() + "example"] = "running"
-        with self.assertRaisesRegex(BottleError, "already exists; choose another name"):
+        with self.assertRaisesRegex(BottleError, "a machine named .* already exists"):
             self.create()
         self.assertEqual(fake.machines, {bottles.namespace() + "example": "running"})
         self.assertEqual(bottles.load(), {})
@@ -1087,8 +1087,8 @@ class SshTest(BottleTestCase):
         self.assertEqual((known[0], known[3]), (main.machine, f"sidecar.host ssh-ed25519 KEY-OF-{self.big.machine}\n"))
 
     def test_only_a_bottle_that_exists_under_a_host_name(self) -> None:
-        for ssh, why in (({"x": "nope"}, "no bottle named 'nope'"), ({"Bad Name": "big"}, "invalid --ssh name"),
-                         ({"bottle.host": "big"}, "invalid --ssh name"), ({"10.0.0.5:22": "big"}, "invalid --ssh name")):
+        for ssh, why in (({"x": "nope"}, "no bottle named 'nope'"), ({"Bad Name": "big"}, "invalid ssh name"),
+                         ({"bottle.host": "big"}, "invalid ssh name"), ({"10.0.0.5:22": "big"}, "invalid ssh name")):
             with self.subTest(ssh), self.assertRaisesRegex(BottleError, why):
                 self.granted(**ssh)
         self.assertEqual(sorted(bottles.load()), ["big"])
