@@ -576,20 +576,23 @@ drone's, in the runner's).
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
 one downloads every dependency again. A feature can name hosts whose
-downloads bottled keeps: it terminates the bottle's TLS to them with the egress
-CA, as for a credential's host, and answers a GET or HEAD from
+downloads are kept: bottle-cli, which carries the bottle's connections,
+terminates the bottle's TLS to them with the machine's caching CA (made by
+`bottle-cli ca`, constrained to those hosts, and trusted by the bottle beside
+bottled's egress CA), and answers a GET or HEAD from
 `~/.bottle/cache/http/<host>/<path>` when it has the file, for every bottle.
 Only whole 200s are kept, without headers (a hit has no `Content-Type`), unless
 the server marks them `no-store`, `no-cache` or `private`, from GETs with no query, range,
-`Authorization` or cookie, and bottled fetches them with a request of its own,
+`Authorization` or cookie, and bottle-cli fetches them with a request of its own,
 following redirects, so a file is the same whoever asked first. Anything else
 goes to the host as it was sent, but that a cached host's cookies are never
 passed on: a bottle that sent one back would never be answered from the
 cache. A kept file is never refreshed, so a feature
 excludes the paths a host changes, such as an index of a package's versions; a request
 with `Cache-Control: no-cache` fetches it again. A file no bottle has used for
-a week is removed, when bottled starts and every 6 hours after; delete the
-directory to empty it sooner. bottled logs each request to a cached host, and
+a week is removed, when a bottle starts and every 6 hours while it runs; delete
+the directory to empty it sooner. bottle-cli logs each request to a cached host
+in the machine's `boot.log` (`~/.bottle/krun/machines/<machine>/boot.log`), and
 whether it was a `hit`, `stored`, or `passed` on.
 
 **apt's packages are kept too**, with nothing for a feature to name: bottle
@@ -597,11 +600,11 @@ knows Debian's repositories and those features declare, and keeps their
 packages (each repository's `.deb` files, whose names carry their versions;
 never its indexes), for every image built and every bottle, whatever the
 server says about keeping them, since apt checks each against the signed
-index. Debian's are asked over plain http, which bottled answers without
+index. Debian's are asked over plain http, which bottle-cli answers without
 terminating anything and fetches over https. An https repository at build
-time is answered behind a CA builds share (`bottle-builds`), which the build's
-apt step trusts for those hosts alone; a bottle trusts its own egress CA for
-them, as for any cached host.
+time is answered behind a caching CA builds share (`bottle-builds`), which the
+build's apt step trusts for those hosts alone; a bottle trusts its machine's
+caching CA for them, as for any cached host.
 
 bottled starts automatically when a command needs it, and when it starts it
 picks up the bottles that were running. While it's stopped, running bottles

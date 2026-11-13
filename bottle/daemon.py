@@ -1,7 +1,7 @@
 """bottled: the daemon that decides every bottle's connections.
 
 It's two halves in one process. The runner's (Daemon) is what has to sit
-next to the machines: the decider, each bottle's gateway, and the HTTP cache.
+next to the machines: the decider and each bottle's gateway.
 The controller's (Controller) is what stays with the user: credentials,
 pushes into hubs, and messages between bottles. A runner elsewhere runs the
 first half alone, and reaches the controller's over its link; here the two
@@ -37,8 +37,6 @@ log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
 
 START_TIMEOUT = 5
-# How often the HTTP cache's unused files are removed, after once at start.
-CACHE_EXPIRY_INTERVAL = 6 * 60 * 60
 # How long a message between bottles waits for its bottle's session to take it,
 # and how much longer bottled gives the exec that waits, which starts a process
 # in the bottle, before giving up on it.
@@ -520,8 +518,6 @@ class Daemon:
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
-        # Every bottle's cached downloads, in one place: what one fetched, the next is answered with.
-        self.store = cache.Store()
         # The code it runs, by its hash, as it was when it started: what a command checks it against.
         self.code = ssh.code_hash()
         # The controller's half: here, in this process, unless the controller is elsewhere.
@@ -579,16 +575,11 @@ class Daemon:
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             injections, cached, services, controller_gateway = await self.controller.egress(
                 bottle, repos, features, build)
-            # The cached hosts are answered by the driver, bottle-cli, behind the machine's caching CA (see
-            # bottle-cli ca). Here, only those it hands over for their credentials, or asks about when it has no
-            # policy: over https only for the hosts this machine's CA for the bottle covers, which bottle made
-            # when it started the bottle (a build has none). Plain http needs none.
-            intercepted = () if build else tuple(await asyncio.to_thread(ca.hosts, bottle))
-            caches = tuple(c for c in cached if c.host in intercepted or cache.HTTPS_PORT not in c.ports)
-            certificates = functools.partial(ca.server_context, bottle, intercepted)
+            # Its cached hosts are the driver's, bottle-cli's, which answers them behind the machine's caching CA
+            # (see bottle-cli ca): bottled only tells it which (Gateway.driver_policy).
             gateway = egress.Gateway(
-                bottle, self.policy, services=services, injections=injections, certificates=certificates,
-                caches=caches, store=self.store, hand_off=controller_gateway.serve_handed_off, driver_caches=cached,
+                bottle, self.policy, services=services, injections=injections, caches=cached,
+                hand_off=controller_gateway.serve_handed_off,
             )
             if self.remembered is not None:
                 self._remember(bottle, (bottle, link.served_to_json(repos), list(features), build))
@@ -657,16 +648,6 @@ async def _keep_restoring(daemon: Daemon, unrestored: list[tuple]) -> None:
         unrestored = await daemon.restore(unrestored)
 
 
-async def _expire_cache(store: cache.Store) -> None:
-    """Remove the cache's unused files now, and every CACHE_EXPIRY_INTERVAL after."""
-    while True:
-        try:
-            await asyncio.to_thread(store.expire)
-        except Exception:
-            log.exception("couldn't expire the HTTP cache")
-        await asyncio.sleep(CACHE_EXPIRY_INTERVAL)
-
-
 def raise_open_files(wanted: int = OPEN_FILES) -> int:
     """Raise this process's limit on open files towards `wanted`, as far as the system lets it; the limit it has.
 
@@ -722,7 +703,6 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     else:
         # The link may not be up yet: those that can't be bound now are tried again until they are.
         retrying = asyncio.create_task(_keep_restoring(daemon, await daemon.restore(daemon.remembered_bindings())))
-    expiring = asyncio.create_task(_expire_cache(daemon.store))
     server = await asyncio.start_unix_server(daemon.handle, str(path))
     os.chmod(path, 0o600)
     log.info("bottled %d listening on %s", os.getpid(), path)
@@ -730,7 +710,6 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
         async with server:
             await daemon.stopping.wait()
     finally:
-        expiring.cancel()
         if retrying is not None:
             retrying.cancel()
         if isinstance(daemon.controller, Controller):

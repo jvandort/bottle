@@ -207,6 +207,7 @@ pub fn serve(
     let scheme = if plain { "http" } else { "https" };
     let server = Server {
         name,
+        scheme,
         rule,
         ctx,
         reachable,
@@ -221,12 +222,12 @@ pub fn serve(
                 return Ok(());
             }
         };
-        match server.answer(&head, scheme, &mut bottle) {
+        match server.answer(&head, &mut bottle) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
             Err(Refused(Some((status, reason)), why)) => {
                 eprintln!(
-                    "bottle-cli: {} https://{name}{} refused: {why}",
+                    "bottle-cli: {} {scheme}://{name}{} refused: {why}",
                     head.method, head.target
                 );
                 let body = format!("{status} {reason}: {why}\n");
@@ -242,7 +243,7 @@ pub fn serve(
             }
             Err(Refused(None, why)) => {
                 eprintln!(
-                    "bottle-cli: {} https://{name}{}: {why}",
+                    "bottle-cli: {} {scheme}://{name}{}: {why}",
                     head.method, head.target
                 );
                 return Ok(());
@@ -560,20 +561,26 @@ type Upstream = BufReader<StreamOwned<ClientConnection, TcpStream>>;
 
 struct Server<'a> {
     name: &'a str,
+    /// What the bottle asked it with: https, or plain http.
+    scheme: &'static str,
     rule: &'a Cached,
     ctx: &'a Context,
     reachable: &'a dyn Fn(&str) -> Vec<IpAddr>,
 }
 
 impl Server<'_> {
+    fn log(&self, method: &str, path: &str, outcome: &str, status: u16) {
+        let (scheme, name) = (self.scheme, self.name);
+        eprintln!("bottle-cli: {method} {scheme}://{name}{path} {outcome} {status}");
+    }
+
     /// Answers one request: whether the connection takes another.
     fn answer(
         &self,
         head: &Head,
-        scheme: &str,
         bottle: &mut BufReader<Box<dyn Duplex>>,
     ) -> Result<bool, Refused> {
-        let name = self.name;
+        let (name, scheme) = (self.name, self.scheme);
         // Its target: origin-form, or absolute-form for this host and scheme.
         let (url_scheme, authority, path_and_query) = split_target(&head.target);
         if head.method == "CONNECT"
@@ -636,7 +643,7 @@ impl Server<'_> {
                 out.flush()
             })();
             sent.map_err(|e| Refused(None, format!("the bottle went away: {e}")))?;
-            log(&head.method, name, path, "hit", 200);
+            self.log(&head.method, path, "hit", 200);
             return Ok(keep);
         }
         let fetching = cacheable && head.method == "GET";
@@ -720,7 +727,7 @@ impl Server<'_> {
         } else {
             "passed"
         };
-        log(&head.method, name, path_and_query, outcome, response.status);
+        self.log(&head.method, path_and_query, outcome, response.status);
         sent.map_err(|e| Refused(None, format!("serving it: {e}")))?;
         Ok(keep)
     }
@@ -782,7 +789,7 @@ impl Server<'_> {
         io::copy(&mut upstream, out)
             .map_err(|e| Refused(None, format!("relaying a response: {e}")))?;
         let _ = out.flush();
-        log(&head.method, self.name, path_and_query, "passed", 0);
+        self.log(&head.method, path_and_query, "passed", 0);
         Ok(())
     }
 
@@ -937,10 +944,6 @@ fn split_target_with(scheme: &str, rest: &str) -> (String, String, String) {
         .find('/')
         .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
     (scheme.into(), authority.into(), path.into())
-}
-
-fn log(method: &str, name: &str, path: &str, outcome: &str, status: u16) {
-    eprintln!("bottle-cli: {method} https://{name}{path} {outcome} {status}");
 }
 
 #[cfg(test)]

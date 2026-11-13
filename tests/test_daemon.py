@@ -116,19 +116,17 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(daemon.ca, "server_context") as server_context:
             await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
             [binding] = self.daemon.decider.bindings.values()
-            binding.gateway.certificates("ci.test")
+            # The controller's gateway, which the runner's hands credentials' flows to.
+            binding.gateway.hand_off.__self__.certificates("ci.test")
         server_context.assert_called_once_with("b", ("ci.test",), "ci.test")
 
     async def test_only_what_the_bottles_ca_covers_is_terminated(self) -> None:
         # Named by its features since the bottle started, whose CA doesn't cover them: reached directly.
         injections = [daemon.egress.Injection(h, "Authorization", "Bearer x") for h in ("ci.test", "new-ci.test")]
-        caches = [daemon.cache.Cached(h) for h in ("ci.test", "new-files.test")]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
-                mock.patch.object(daemon.cache, "cached_for", return_value=caches):
+        with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
             await self.request({"op": "bind", "bottle": "b", "features": ["f"]})
         [binding] = self.daemon.decider.bindings.values()
         self.assertEqual([i.host for i in binding.gateway.injections], ["ci.test"])
-        self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test"])
 
     async def test_a_build_keeps_its_apt_downloads_and_gets_none_of_its_features_credentials(self) -> None:
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
@@ -142,18 +140,9 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(binding.gateway.injections, ())
         self.assertEqual(binding.gateway.hand_off.__self__.injections, ())
         # Answered by bottle-cli, behind the caching CA builds have, which their apt steps trust: bottled reads
-        # none of a build's TLS, and keeps only what's asked of it over plain http.
+        # none of a build's TLS.
         self.assertNotIn(mock.call(daemon.ca.BUILDS), hosts.call_args_list)
-        self.assertEqual([c.host for c in binding.gateway.driver_caches], ["ci.test", "deb.test"])
-        self.assertEqual([c.host for c in binding.gateway.caches], ["deb.test"])
-
-    async def test_plain_http_is_kept_whatever_the_bottles_ca_covers(self) -> None:
-        caches = [daemon.cache.Cached("files.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=[]), \
-                mock.patch.object(daemon.cache, "cached_for", return_value=caches):
-            await self.request({"op": "bind", "bottle": "b", "features": []})
-        [binding] = self.daemon.decider.bindings.values()
-        self.assertEqual([c.host for c in binding.gateway.caches], ["deb.test"])
+        self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test", "deb.test"])
 
     async def test_binding_again_reads_the_credentials_again(self) -> None:
         for value in ("Bearer old", "Bearer new"):

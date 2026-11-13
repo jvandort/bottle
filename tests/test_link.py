@@ -71,8 +71,8 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         [binding] = runner.decider.bindings.values()
         self.assertEqual([(i.host, i.header, i.value, i.feature) for i in binding.gateway.injections],
                          [("ci.test", "Authorization", "", "teamcity")])
-        # What the features say is cached, from the controller, which has them: kept here.
-        self.assertEqual(binding.gateway.caches, (daemon.cache.Cached("ci.test", ("*/index.json",)),))
+        # What the features say is cached, from the controller, which has them: for bottle-cli here to keep.
+        self.assertEqual(binding.gateway.caches, tuple(cached))
         await runner.release("b")
         self.assertFalse(server.bound("b"))
 

@@ -1,16 +1,22 @@
 //! The HTTP cache's files, as bottled keeps them (bottle/cache.py): $BOTTLE_HOME/cache/http/<host>/<path>,
 //! the path as the bottle asked for it. Only a whole 200 is kept, so a file is all there is: no
-//! headers, no status. A file's modification time is when a bottle last used it, which bottled's
-//! expiry goes by. A file being downloaded is written in .partial/ and put in place only once
+//! headers, no status. A file's modification time is when a bottle last used it: one unused for
+//! EXPIRY is removed (Store::expire). A file being downloaded is written in .partial/ and put in place only once
 //! it's complete, so a reader never sees half of one.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Where files are written before they're complete; a hidden name, which no host has.
 const PARTIAL: &str = ".partial";
+/// A kept file unused for this long is removed: long enough for the threads of a day's work on one
+/// project to share their downloads.
+pub const EXPIRY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// A partial file this old was left by a process that stopped mid-download.
+const PARTIAL_EXPIRY: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct Store {
     pub root: PathBuf,
@@ -85,6 +91,54 @@ impl Store {
             out: Some(out),
         })
     }
+}
+
+impl Store {
+    /// Removes the files no bottle has used for EXPIRY, partial files older than PARTIAL_EXPIRY,
+    /// and the directories that leaves empty. A file being sent as it's removed is still sent
+    /// whole.
+    pub fn expire(&self) {
+        let now = SystemTime::now();
+        expire_under(&self.root, &self.root, now);
+    }
+}
+
+/// Expires what's under `dir`; whether it's empty after.
+fn expire_under(root: &Path, dir: &Path, now: SystemTime) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let expiry = if dir == root.join(PARTIAL) {
+        PARTIAL_EXPIRY
+    } else {
+        EXPIRY
+    };
+    let mut empty = true;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            empty = false;
+            continue;
+        };
+        if meta.is_dir() {
+            if expire_under(root, &path, now)
+                && path != root.join(PARTIAL)
+                && fs::remove_dir(&path).is_ok()
+            {
+                continue;
+            }
+        } else if meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > expiry)
+            && fs::remove_file(&path).is_ok()
+        {
+            continue;
+        }
+        empty = false;
+    }
+    empty
 }
 
 /// A host's name as a store's directory: a name of letters, digits and hyphens between dots.
@@ -244,6 +298,41 @@ mod tests {
         drop(partial);
         assert!(store.open("repo.example", "/a.jar").is_none());
         assert_eq!(fs::read_dir(root.join(PARTIAL)).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn what_goes_unused_is_removed_with_the_directories_it_leaves_empty() {
+        let (store, root) = store();
+        for path in ["/old/a.jar", "/new/b.jar"] {
+            let mut partial = store.partial("repo.example", path).unwrap();
+            partial.write(b"x").unwrap();
+            assert!(partial.commit());
+        }
+        let left = store.partial("repo.example", "/c.jar").unwrap();
+        std::mem::forget(left); // as a process that stopped mid-download leaves it
+        let long_ago = SystemTime::now() - EXPIRY - Duration::from_secs(60);
+        let age = |path: &Path| {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap()
+        };
+        age(&root.join("repo.example/old/a.jar"));
+        let partial = fs::read_dir(root.join(PARTIAL))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        age(&partial);
+        store.expire();
+        assert!(!root.join("repo.example/old").exists());
+        assert!(root.join("repo.example/new/b.jar").exists());
+        assert!(!partial.exists());
+        assert!(root.join(PARTIAL).exists());
         let _ = fs::remove_dir_all(root);
     }
 

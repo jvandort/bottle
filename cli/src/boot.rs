@@ -39,6 +39,9 @@ pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--s
                          [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct] \
                          [--ca NAME] [--run JSON]";
 
+/// How often a bottle's network removes what's gone unused from the HTTP cache, after once at start.
+const CACHE_EXPIRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
 /// The vsock port the agent listens on.
 const AGENT_PORT: u32 = 1024;
 
@@ -283,6 +286,15 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             let listener = std::os::unix::net::UnixListener::bind(&path)
                 .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
             std::thread::spawn(move || bottle_agent_client::net::serve(listener, decider));
+            if matches!(net, Net::Decider(_)) {
+                // The cache it answers from loses what's gone unused, now and every few hours.
+                std::thread::spawn(|| {
+                    loop {
+                        bottle_agent_client::store::Store::at_home().expire();
+                        std::thread::sleep(CACHE_EXPIRY_INTERVAL);
+                    }
+                });
+            }
             Some(c(&path.to_string_lossy())?)
         }
     };
