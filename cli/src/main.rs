@@ -63,6 +63,17 @@ fn usage_error(problem: &str) -> ExitCode {
     ExitCode::from(FAILED)
 }
 
+/// `tar`, to pack an archive for a Linux machine: on a Mac, bsdtar without the extended attributes
+/// and Mac metadata it adds (com.apple.provenance, say), which GNU tar there warns of, file by file.
+fn packing_tar() -> std::process::Command {
+    let mut tar = std::process::Command::new("tar");
+    if cfg!(target_os = "macos") {
+        tar.args(["--no-xattrs", "--no-mac-metadata"])
+            .env("COPYFILE_DISABLE", "1");
+    }
+    tar
+}
+
 /// The mke2fs bottle runs: $BOTTLE_MKE2FS, else the one beside this program.
 fn mke2fs() -> std::io::Result<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("BOTTLE_MKE2FS") {

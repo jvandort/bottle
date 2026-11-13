@@ -111,7 +111,7 @@ fn copy(src: Side, dst: Side, src_arg: &str, dst_arg: &str) -> io::Result<String
                     }
                 }
             };
-            let mut pack = Command::new("tar")
+            let mut pack = crate::packing_tar()
                 .arg("-C")
                 .arg(&parent)
                 .args(["-cf", "-", "--"])

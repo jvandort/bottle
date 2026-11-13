@@ -381,7 +381,7 @@ impl Runner {
                 names(&changed),
                 self.name
             );
-            let tar = Command::new("tar")
+            let tar = crate::packing_tar()
                 .args(["-czf", "-", "-C"])
                 .arg(&dist)
                 .arg("--")
@@ -834,7 +834,7 @@ fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<
         {
             fs::copy(network, staged.join("network.json"))?;
         }
-        let tar = Command::new("tar")
+        let tar = crate::packing_tar()
             .arg("-cf")
             .arg("-")
             .arg("-C")
