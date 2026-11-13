@@ -54,9 +54,9 @@ folio configure --feature claude
 folio claude fix-it       # A thread: a bottle, a lane for its commits, and Claude in it
 ```
 
-`bottle` itself is bottle-cli, which runs every bottle's VM, its *machine*, here and on your
-runners: `bottle ls` lists them (a thread's say which, as a label), and `bottle shell MACHINE`
-opens a shell in one.
+`bottle` itself is bottle-cli, which runs every bottle's VM, its *machine*: `bottle ls` lists
+this machine's (a thread's say which, as a label), and `bottle shell MACHINE` opens a shell in
+one. A runner's are its own bottle-cli's, which folio runs there.
 
 ## Prerequisites
 
@@ -70,118 +70,36 @@ Bottle builds bottle-cli, which runs its VMs, from this repo (`cargo xtask
 dist`, into `target/dist`) when it's missing or its sources have changed;
 `BOTTLE_CLI` names another to use instead.
 
-A runner, for bottles on another machine, needs:
-
-- Linux, with `/dev/kvm` usable by the user bottle logs in as (the `kvm` group)
-- x86_64 or arm64
-- git
-- ssh from your Mac without a prompt: a key whose passphrase is in your
-  Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since bottle
-  runs ssh in batch mode
-
-Nothing else, and no root: bottle copies bottle-cli there, built on your Mac
-for the runner's architecture: static, so it runs on any distribution. It's
-all a runner has of bottle. Your Mac builds Linux's, for both architectures,
-in a Linux VM of its own bottle-cli, whenever it builds its own (in a
-checkout, `bin/bottle` does; the first time takes a while). (Untested on a
-real runner yet.)
+bottle-cli is built for Linux too, x86_64 and arm64, static, so it runs on any
+distribution: what [folio](folio/README.md#runners) copies to a runner, the
+other machines it makes bottles on, where it's all there is of bottle. Your
+Mac builds Linux's in a Linux VM of its own bottle-cli, whenever it builds its
+own (in a checkout, `bin/bottle` does; the first time takes a while).
 
 ## Commands
 
-`bottle` is bottle-cli: machines, by their names, here and on every runner. Bottles -- a machine
-with a repo, served its remotes, its features and credentials -- are [folio](folio/README.md)'s,
-one for each thread (and its sidecar), as are credentials, features, and `folio serve`.
+`bottle` is bottle-cli: this machine's machines, by their names. Bottles -- a machine with a
+repo, served its remotes, its features and credentials -- are [folio](folio/README.md)'s, one for
+each thread (and its sidecar), as are credentials, features, `folio serve`, and runners: other
+machines, where folio runs their bottle-cli over ssh.
 
 | Command | |
 | --- | --- |
-| `bottle ls` / `status MACHINE` | List machines, here and on every runner, and their state |
+| `bottle ls` / `status MACHINE` | List machines, and their state |
 | `bottle shell MACHINE` | Open a shell in a machine, at its workdir |
 | `bottle exec MACHINE` | Run one command in a machine |
 | `bottle cp SRC DST` | Copy into, out of, or between machines |
 | `bottle start` / `stop MACHINE` | Start or stop a machine |
-| `bottle runner add` / `ls` / `check` / `detach` / `attach` / `rm` | The machines bottles run on: this one, and others over ssh |
 | `bottle create` / `configure` / `rename` / `delete MACHINE` | A machine itself, as folio makes one |
 
 <details>
 <summary><b>Full reference</b> — every command, its arguments and its rules.</summary>
 
-### `bottle runner add RUNNER --ssh DESTINATION` / `ls` / `check` / `detach` / `attach` / `rm`
-
-A **runner** is a machine bottles run on. `local` is this Mac; another is a
-Linux machine reached over ssh, and a bottle on one is a **drone**. Your Mac
-stays the **controller**: your credentials and your repos are here, and what
-a drone needs of them comes here. A repo's threads run on any runner
-bottle-cli has (`folio configure --runner RUNNER`).
-
-- **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
-  it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
-  `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
-  can't set up itself, and copies bottle-cli's distribution for the
-  machine's architecture over, built here (see above). Before each use of
-  the runner, what differs of it is copied again, file by file: each file's
-  sha256, from the manifest the build wrote beside it, against what the
-  runner's `sha256sum` says of its copy, and only the files that differ are
-  sent. Nothing is built then: every distribution is there already, built
-  with bottle-cli (in a checkout, `bin/bottle-build` builds them all).
-- **`bottle runner ls`** lists them; **`bottle runner check RUNNER`** says
-  what one is and lacks.
-- **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
-  it names the machines running there and asks before stopping them (in a
-  terminal; told no, or with no one to ask, it stops nothing and leaves the
-  runner attached, so you can have their agents wrap up first), and lets it
-  go, then says it's safe to turn off. Until it's attached again, nothing
-  asks it anything: `bottle ls` shows its machines as `detached`, at once.
-  Using one of them again (a `bottle` command for it, or folio's `claude`,
-  `shell`, and the like) attaches it again if it answers, and says it's still
-  off if it doesn't. `--offline` marks one that's off already, unasked.
-- **`bottle runner attach RUNNER`** attaches a detached runner again, once it
-  answers, and names the machines detaching it stopped.
-- **`bottle runner rm RUNNER`** forgets a runner with no machines. Nothing
-  on the machine is touched.
-
-On a runner, everything bottle keeps is in `~/.bottle`: bottle-cli's
-distribution (`~/.bottle/dist`), the images built there, the machines and the
-HTTP cache. (folio keeps a bare mirror there of each repo its bottles use, in
-`~/.folio/git`, which your Mac pushes into as a drone is made, so its checkout
-borrows objects from the runner's disk.) Runners are bottle-cli's (`bottle-cli runner`): it
-runs itself there over ssh, and a runner's machines are your Mac's by
-`RUNNER/NAME` (`bottle shell desktop/foo`; `bottle ls` lists every
-machine, here and on each runner); nothing else of bottle's runs there.
-
-A drone works as a local bottle does, with these differences:
-
-- **Its connections are decided on the runner**, by bottle-cli there and its
-  machine's policy, so public destinations go straight from the runner, and
-  "private" means the runner's network: a drone doesn't get your Mac's VPN
-  routes. DNS is the runner's. The cached hosts are answered on the runner.
-- **What its policy routes comes to your Mac**: its git (fetches served from
-  your repo, its `origin` fetched first for `upstream`; pushes into it, under
-  the same rules as a local bottle's), its credentialed requests, ssh and
-  messages, to folio serve here, through sockets of its own on the runner
-  (`~/.bottle/routes`) that ssh forwards back. The runner never holds a
-  credential.
-- **Those forwards are one ssh connection per drone**, kept by a process of
-  bottle-cli's on your Mac while the drone runs, as a local machine has its
-  own (its log: `~/.bottle/krun/runners/RUNNER/NAME/forward.log`). If it
-  drops, the drone keeps its public network, while what's routed is refused
-  until it's back: it connects again, waiting up to a minute between tries,
-  and ends when the drone stops.
-
-A runner that's off is unreachable, not broken: folio shows its
-bottles as `unreachable`, a command for one fails at once, saying so, and
-nothing else waits on it.
-
-On a Mac, ssh's "No route to host" for a machine on your network is often
-macOS refusing the local network to the process that asked: give the app you
-run bottle from the Local Network permission (System Settings > Privacy &
-Security > Local Network). folio serve has the permission of whatever started it.
-
 ### `bottle shell MACHINE`
 
 Opens a login shell in the machine, at its workdir, as its user (a bottle's:
 its first repo, as `genie`), starting it if it's stopped and it has its
-network. `MACHINE` is its name as `bottle ls` has it: `RUNNER/NAME` for one on
-a runner.
+network. `MACHINE` is its name as `bottle ls` has it.
 
 ### `bottle exec MACHINE [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...`
 
@@ -198,8 +116,7 @@ bottle exec foo -- cat /workspace/report.json | jq .failures
 
 Copies SRC, a file or a directory, to DST, as `cp -r` would: into DST if it's
 a directory, else as DST. `MACHINE:PATH` is a path in that machine (a relative
-one is from its workdir), `RUNNER/NAME:PATH` one on a runner; any other is a
-path here (`./a:b` is one). One side at least is in a machine: out of one, into
+one is from its workdir); any other is a path here (`./a:b` is one). One side at least is in a machine: out of one, into
 one, or between two, by way of this machine. A shorthand for `exec`, as
 `shell` is: tar packs it on one side and unpacks it on the other, as the
 machine's user there, and this machine's tar, which keeps it to where it's
@@ -209,7 +126,7 @@ fails leaves DST as it was.
 ```sh
 bottle cp foo:build/reports/tests .
 bottle cp ./fixtures foo:/workspace/src/test/
-bottle cp foo:build/libs/app.jar desktop/foo-sidecar:
+bottle cp foo:build/libs/app.jar bar:
 ```
 
 ### `bottle start MACHINE` / `bottle stop MACHINE`
@@ -293,7 +210,9 @@ then one `cargo xtask dist` for every distribution whose sources differ,
 which builds and copies only what's changed: this machine's and the ones
 runners take, on a Mac Linux's two, by one cargo in a Linux VM, and on Linux
 the other architecture's, by the same cargo as its own, with Debian's cross
-gcc), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
-else builds it: folio runs `$BOTTLE_CLI`, else `bottle-cli` on `PATH`. folio's tests,
+gcc), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. `bin/folio`
+builds folio-cli too, the same way (`bin/folio-build`, its own sources' hash),
+and sets `FOLIO_CLI`. Nothing else builds them: folio runs `$BOTTLE_CLI`, else
+`bottle-cli` on `PATH`, and `$FOLIO_CLI`, else `folio-cli` on `PATH`. folio's tests,
 the suites that drive bottle-cli from folio's side among them, are in
 [folio](folio/README.md#development).

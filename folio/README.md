@@ -84,9 +84,11 @@ then, so a resume is also how a thread gets features added since.
 
 ## Runners
 
-A thread's bottle can run on another machine of yours, a runner added with
-`bottle runner add` (see bottle's README): its sessions, lane, notes and
-pause work as here, over ssh. A repo's threads are made on the repo's runner
+A thread's bottle can run on another machine of yours, a **runner** added with
+`folio runner add`: its sessions, lane, notes and pause work as here, over
+ssh. A bottle on one is a **drone**; your Mac stays the **controller**: your
+credentials and your repos are here, and what a drone needs of them comes
+here. A repo's threads are made on the repo's runner
 (`folio configure --runner desktop`), else here; a thread can have its
 own (`folio new fix-it --runner desktop`). It applies whenever the thread's
 bottle is made, so moving a thread is pausing it and resuming it where it's
@@ -97,6 +99,81 @@ first. `folio list` shows where each thread runs, or will.
 
 A drone's Claude gets its credential through this machine, so it can't reach
 Claude while this machine is asleep or can't reach the runner.
+
+A runner needs:
+
+- Linux, with `/dev/kvm` usable by the user folio logs in as (the `kvm` group)
+- x86_64 or arm64
+- git
+- ssh from your Mac without a prompt: a key whose passphrase is in your
+  Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since folio
+  runs ssh in batch mode
+
+Nothing else, and no root: folio copies bottle-cli there, the build for the
+runner's architecture that comes with the bottle-cli it runs here (static, so
+it runs on any distribution), and runs it over ssh. It's all a runner has of
+bottle. (Untested on a real runner yet.)
+
+- **`folio runner add RUNNER --ssh DESTINATION`** checks a machine and adds
+  it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
+  `~/.ssh/config`, or `user@host`. It says what the machine lacks that folio
+  can't set up itself, and copies bottle-cli over. Before each use of the
+  runner, what differs of it is copied again, file by file: each file's
+  sha256, from the manifest bottle-cli's build wrote beside it, against what
+  the runner's `sha256sum` says of its copy, and only the files that differ
+  are sent.
+- **`folio runner ls`** lists them; **`folio runner check RUNNER`** says
+  what one is and lacks; **`folio runner ssh RUNNER [COMMAND]`** is ssh there,
+  on the connection folio shares for it.
+- **`folio runner detach RUNNER [--offline]`** is for turning a runner off:
+  it names the machines running there and asks before stopping them (in a
+  terminal; told no, or with no one to ask, it stops nothing and leaves the
+  runner attached, so you can have their agents wrap up first), and lets it
+  go, then says it's safe to turn off. Until it's attached again, nothing
+  asks it anything: `folio list` shows its bottles as `detached`, at once.
+  Using one of them again (`folio claude`, `shell`, and the like) attaches it
+  again if it answers, and says it's still off if it doesn't. `--offline`
+  marks one that's off already, unasked.
+- **`folio runner attach RUNNER`** attaches a detached runner again, once it
+  answers, and names the machines detaching it stopped.
+- **`folio runner rm RUNNER`** forgets a runner folio has no bottles on.
+  Nothing on the machine is touched.
+
+Runners are listed in `~/.folio/runners.json`. On a runner, bottle-cli keeps
+everything of its own in `~/.bottle`: its distribution (`~/.bottle/dist`),
+the images built there, the machines and the HTTP cache; and folio keeps a
+bare mirror there of each repo its bottles use, in `~/.folio/git`, which your
+Mac pushes into as a drone is made, so its checkout borrows objects from the
+runner's disk. A drone's machine is its runner's bottle-cli's, by its own
+name there (`bottle ls` here lists only this machine's).
+
+A drone works as a local bottle does, with these differences:
+
+- **Its connections are decided on the runner**, by bottle-cli there and its
+  machine's policy, so public destinations go straight from the runner, and
+  "private" means the runner's network: a drone doesn't get your Mac's VPN
+  routes. DNS is the runner's. The cached hosts are answered on the runner.
+- **What its policy routes comes to your Mac**: its git (fetches served from
+  your repo, its `origin` fetched first for `upstream`; pushes into it, under
+  the same rules as a local bottle's), its credentialed requests, ssh and
+  messages, to folio serve here, through folio serve's sockets on the runner
+  (`~/.folio/services/KEY/`, KEY naming this Mac) that ssh forwards back. The
+  runner never holds a credential.
+- **Those forwards are one ssh connection per runner**, which folio serve
+  keeps from the first of its bottles there it answers to the last (its log:
+  `~/.folio/logs/forward-RUNNER.log`). If it drops, the drones keep their
+  public network, while what's routed is refused until it's back: it connects
+  again, waiting up to a minute between tries.
+
+A runner that's off is unreachable, not broken: folio shows its bottles as
+`unreachable`, a command for one fails at once, saying so, and nothing else
+waits on it.
+
+On a Mac, ssh's "No route to host" for a machine on your network is often
+macOS refusing the local network to the process that asked: give the app you
+run folio from the Local Network permission (System Settings > Privacy &
+Security > Local Network). folio serve has the permission of whatever started
+it.
 
 ## Sidecars
 
@@ -127,7 +204,7 @@ deleted with it, a pause included, which keeps nothing of it: what's worth
 keeping there is pushed before. So a thread that has a bottle gets its new
 sidecar, or loses its old one, when it's paused and resumed. `folio list`
 shows each thread's sidecar's runner, and its state (`running`, `stopped`, or
-`detached` while its runner is turned off: see `bottle runner detach`).
+`detached` while its runner is turned off: see `folio runner detach`).
 
 A sidecar's runner that's off holds nothing up. `folio claude` and `folio
 shell` go on without the sidecar, saying so. A pause leaves it there, to be
@@ -432,7 +509,7 @@ A repo given none gets `origin` (`upstream`) and `host` (`heads`), both read-onl
 after that, what its maker adds: folio's say how to work in a thread.
 
 Its machine runs on a runner: `local`, this machine, by default, or one added
-with `bottle runner add`. The image is built there if it isn't yet, and the
+with `folio runner add`. The image is built there if it isn't yet, and the
 spec's memory must fit that machine.
 
 A bottle can be let ssh to another (folio's thread, to its sidecar), which must
@@ -444,8 +521,8 @@ too. Bottle doesn't start it: start both. The two may push into the same
 namespaces, as two people share a branch: a push that lost a race is refused,
 not lost.
 
-bottle-cli keeps its state (machines, images, the HTTP cache, runners) in
-`~/.bottle`, and folio its own in `~/.folio`; `BOTTLE_HOME` and `FOLIO_HOME`
+bottle-cli keeps its state (machines, images, the HTTP cache) in
+`~/.bottle`, and folio its own (threads, bottles' records, runners) in `~/.folio`; `BOTTLE_HOME` and `FOLIO_HOME`
 name others.
 
 ## folio serve
@@ -487,6 +564,7 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio sidecar configure` / `remove` / `shell [THREAD]` | A thread's sidecar (see Sidecars) |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` (`ls`) | Every repo folio has state for |
+| `folio runner add` / `ls` / `check` / `ssh` / `detach` / `attach` / `rm` | The other machines folio makes bottles on (see Runners) |
 | `folio auth set` / `list` / `rm` | Credentials bottles get (see Credentials) |
 | `folio serve start` / `stop` | What bottles' machines route to folio: their git, credentials, ssh and messages; it stops itself once every thread is paused |
 
@@ -527,7 +605,14 @@ folio configure --no-feature jvm
 
 ```sh
 cd folio && python3 -m unittest discover -s tests -t .
+cargo test -p folio-cli
 ```
+
+folio is becoming a Rust program, folio-cli (`cli/`, in bottle's Cargo
+workspace), which folio's Python is a front end for, as bottle's Python was
+for bottle-cli: so far, runners (`folio runner`, `cli/src/runner.rs`). It
+runs bottle's code only by running bottle-cli, never by linking bottle's
+crates (`cli/tests/boundary.rs` checks).
 
 Folio makes its bottles with bottle's code, in its own process (`folio/engine.py`,
 calling `folio/bottle/bottles.py`). The tests stand `tests/fake_bottle.py` in for it, a
