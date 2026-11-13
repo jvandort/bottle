@@ -211,8 +211,18 @@ fn agents(arches: &[&str]) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-/// The Mac's distribution, built on a Mac.
+/// The Mac's distribution, built on a Mac. mke2fs and the kernel, while cargo builds.
 fn mac_dist(out: &Path) -> Result<()> {
+    std::thread::scope(|scope| {
+        let beside = scope.spawn(|| beside_cli("aarch64-apple-darwin", env::consts::ARCH, None, out));
+        let built = mac_cli(out);
+        let beside = beside.join().map_err(|_| "building mke2fs or the kernel panicked")?;
+        built.and(beside)
+    })
+}
+
+/// The Mac's bottle-cli, the agent built in, signed.
+fn mac_cli(out: &Path) -> Result<()> {
     let agent = agents(&[env::consts::ARCH])?.remove(0);
     step("bottle-cli, the agent built in");
     cargo(
@@ -231,15 +241,22 @@ fn mac_dist(out: &Path) -> Result<()> {
         // Signing changed it: its time says again what it's a copy of (see copy).
         same_time(&built, &cli)?;
     }
-    let mke2fs = mke2fs(&target().join("mke2fs"), "aarch64-apple-darwin", None)?;
+    Ok(())
+}
+
+/// What a distribution has beside bottle-cli, none of it cargo's: mke2fs, built for `triple`, and
+/// the kernel for `arch`, the VMs' architecture.
+fn beside_cli(triple: &str, arch: &str, c: Option<&LinuxC>, out: &Path) -> Result<()> {
+    let mke2fs = mke2fs(&target().join("mke2fs"), triple, c)?;
     copy(&mke2fs, &out.join("mke2fs"))?;
-    kernel(env::consts::ARCH, &target().join("kernel"), out)
+    kernel(arch, &target().join("kernel"), out)
 }
 
 /// Linux's distributions, each target's into its directory, built on Linux: static, with musl,
 /// their C built by `LinuxC`. One cargo builds the agent for all of them, then one bottle-cli for
 /// all of them, so what they share (build scripts, proc macros, for this machine) is built once and
-/// the rest in parallel, as cargo sees fit.
+/// the rest in parallel, as cargo sees fit; each's mke2fs and kernel meanwhile, on threads of their
+/// own.
 fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
     let arches: Vec<&str> = dists
         .iter()
@@ -249,7 +266,27 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
         .iter()
         .map(|arch| LinuxC::new(arch))
         .collect::<Result<Vec<_>>>()?;
-    let agents = agents(&arches)?;
+    std::thread::scope(|scope| {
+        let beside: Vec<_> = dists
+            .iter()
+            .zip(&cs)
+            .zip(&arches)
+            .map(|(((triple, out), c), arch)| {
+                scope.spawn(move || beside_cli(triple, arch, Some(c), out))
+            })
+            .collect();
+        let built = linux_clis(dists, &arches, &cs);
+        let beside = beside
+            .into_iter()
+            .map(|b| b.join().map_err(|_| "building mke2fs or the kernel panicked".to_string())?)
+            .collect::<Result<Vec<()>>>();
+        built.and(beside.map(drop))
+    })
+}
+
+/// Linux's bottle-clis, for each of `dists`' targets, by one cargo, each with its agent built in.
+fn linux_clis(dists: &[(String, PathBuf)], arches: &[&str], cs: &[LinuxC]) -> Result<()> {
+    let agents = agents(arches)?;
     let triples: Vec<&str> = dists.iter().map(|(t, _)| t.as_str()).collect();
     step(&format!(
         "bottle-cli, for {}, the agent built in",
@@ -257,7 +294,7 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
     ));
     let mut args = vec!["build", "--release", "-p", "bottle-cli"];
     let mut env: Vec<(String, OsString)> = vec![];
-    for ((triple, c), agent) in triples.iter().zip(&cs).zip(&agents) {
+    for ((triple, c), agent) in triples.iter().zip(cs).zip(&agents) {
         args.extend(["--target", triple]);
         // Its agent; and what cc-rs builds for libkrun (its x86_64 kernel decoders' C) with
         // musl's headers.
@@ -270,14 +307,11 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
         ]);
     }
     cargo(&args, &env)?;
-    for (((triple, out), c), arch) in dists.iter().zip(&cs).zip(&arches) {
+    for (triple, out) in dists {
         copy(
             &target().join(triple).join("release/bottle-cli"),
             &out.join("bottle-cli"),
         )?;
-        let mke2fs = mke2fs(&target().join("mke2fs"), triple, Some(c))?;
-        copy(&mke2fs, &out.join("mke2fs"))?;
-        kernel(arch, &target().join("kernel"), out)?;
     }
     Ok(())
 }
@@ -637,7 +671,10 @@ fn elf_kernel(image: &[u8], load: u64, entry: u64) -> Vec<u8> {
 fn fetch(cache: &Path, (url, sha256): (&str, &str)) -> Result<PathBuf> {
     let file = cache.join(url.rsplit('/').next().unwrap());
     if !file.exists() || digest(&file)? != sha256 {
-        let partial = file.with_extension("partial");
+        // Its own partial: two threads may fetch one file at once (e2fsprogs', for two targets).
+        static FETCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = FETCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let partial = file.with_extension(format!("partial-{}-{n}", std::process::id()));
         run(Command::new("curl")
             .args(["-fsSL", "-o"])
             .arg(&partial)
