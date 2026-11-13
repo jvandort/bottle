@@ -1038,8 +1038,8 @@ class StatusTest(BottleTestCase):
         self.assertEqual([(r["name"], r["state"]) for r in bottles.status()], [("example", "running"), ("spec", "stopped")])
         [row, missing] = bottles.status(["spec", "gone"])
         self.assertEqual(missing, {"name": "gone", "state": "missing"})
-        self.assertEqual(row | {"created": None}, {
-            "name": "spec", "state": "stopped", "created": None, "runner": "local", "machine": b.machine,
+        self.assertEqual(row | {"created": None, "last_active": None}, {
+            "name": "spec", "state": "stopped", "created": None, "last_active": None, "runner": "local", "machine": b.machine,
             "features": [], "memory": "2G", "ssh": {},
             "spec": {"features": [], "memory": "2G"},
             "mounts": [{"path": "/workspace", "repo": str(self.repo_path), "branch": "main", "commit": self.head,
