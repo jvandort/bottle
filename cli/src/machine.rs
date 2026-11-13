@@ -806,6 +806,12 @@ pub fn top(command: &str, args: Vec<String>) -> ExitCode {
         _ => return crate::usage_error(&format!("{command} needs a machine's name")),
     };
     let named = |rest: Vec<String>| [vec!["--name".to_string(), name.clone()], rest].concat();
+    if matches!(command, "exec" | "shell")
+        && let Err(e) = Machine::new(&name).and_then(|m| m.up())
+    {
+        eprintln!("bottle-cli: {e}");
+        return ExitCode::from(FAILED);
+    }
     let result = match command {
         "ls" => ls(&rest),
         "status" => status(&named(rest)),
@@ -813,7 +819,6 @@ pub fn top(command: &str, args: Vec<String>) -> ExitCode {
             Machine::new(&name).and_then(|m| m.start(&crate::boot::Net::None))
         }
         "stop" => Machine::new(&name).and_then(|m| m.stop()),
-        "exec" | "shell" if let Err(e) = Machine::new(&name).and_then(|m| m.up()) => Err(e),
         "exec" => return exec(named(rest)),
         "shell" => {
             if !rest.is_empty() {
