@@ -1,10 +1,8 @@
 //! The host's side of a bottle's network (see bottle_agent_proto::net): each connection the bottle
-//! makes arrives as a stream from its agent, and is decided before it goes anywhere: connected from
-//! here directly, handed to bottled, which is then its far end, or refused. Decided here, by the
-//! policy bottled gives once (see policy.rs), unless it's one bottled must see; asked of bottled's
-//! decider (see bottle/decider.py), as smolvm asked it, when it is, or when bottled hasn't given a
-//! policy. A connection to a host the policy says to cache is answered here (see cache.rs). Names
-//! the bottle looks up are resolved here, by this machine's own resolver, at the time.
+//! makes arrives as a stream from its agent, and is decided before it goes anywhere, by its
+//! machine's network policy (see policy.rs): connected from here directly, answered here from the
+//! cache (see cache.rs), given to the service its policy routes it to, or refused. Names the bottle
+//! looks up are resolved here, by this machine's own resolver, at the time.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
@@ -19,8 +17,8 @@ use crate::policy::{Local, Policy};
 pub use bottle_agent_proto::net::PORT;
 use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};
 
-/// The most of a connection's first bytes the decider is given, and how long they're waited for:
-/// a protocol whose server speaks first gives none.
+/// The most of a connection's first bytes read to decide it, and how long they're waited for: a
+/// protocol whose server speaks first gives none.
 const FIRST_BYTES: usize = 8192;
 const FIRST_WAIT: Duration = Duration::from_millis(100);
 /// How long more of an opening whose name decides it is waited for, and the most of it read.
@@ -28,55 +26,22 @@ const OPENING_WAIT: Duration = Duration::from_secs(3);
 const MAX_OPENING: usize = 5 + (1 << 14);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the decider gets to answer.
-const DECIDE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Where flows are asked about, and as whom: the decider's address, and the token bottled gave the
-/// bottle. Each launch is a machine of its own, with an identity minted for it.
-#[derive(Clone)]
-pub struct Decider {
-    pub address: SocketAddr,
-    pub token: [u8; 32],
-    pub machine: [u8; 16],
-    policy: PolicyState,
-}
-
-/// How a bottle's connections are decided: by its machine's own policy (its network.json), or by
-/// bottled's, asking it what that policy hands over.
+/// How a bottle's connections are decided: its machine's network policy (its network.json).
 pub struct Network {
-    rules: Rules,
+    policy: Policy,
     /// The machine's name: whose caching CA a cached or routed host's TLS is terminated with (see
     /// ca.rs), and who a service is told its connections are from.
     pub machine: Option<String>,
     cache: OnceLock<cache::Context>,
 }
 
-enum Rules {
-    Fixed(Arc<Policy>),
-    Bottled(Decider),
-}
-
 impl Network {
-    pub fn fixed(policy: Policy, machine: Option<String>) -> Network {
+    pub fn new(policy: Policy, machine: Option<String>) -> Network {
         Network {
-            rules: Rules::Fixed(Arc::new(policy)),
+            policy,
             machine,
             cache: OnceLock::new(),
-        }
-    }
-
-    pub fn bottled(decider: Decider, machine: Option<String>) -> Network {
-        Network {
-            rules: Rules::Bottled(decider),
-            machine,
-            cache: OnceLock::new(),
-        }
-    }
-
-    fn policy(&self) -> Option<Arc<Policy>> {
-        match &self.rules {
-            Rules::Fixed(policy) => Some(Arc::clone(policy)),
-            Rules::Bottled(decider) => decider.policy(),
         }
     }
 
@@ -85,125 +50,11 @@ impl Network {
         self.cache
             .get_or_init(|| cache::Context::new(self.machine.clone()))
     }
-
-    /// What's done with what the policy doesn't decide: asked of bottled, if it's bottled's;
-    /// refused, if it's the machine's own (an IPv6 address, which the bottle has no route to).
-    fn hand(&self, to: SocketAddr, first: &[u8]) -> Decision {
-        match &self.rules {
-            Rules::Bottled(decider) => decider.decide(to, first).unwrap_or(Decision::Deny),
-            Rules::Fixed(_) => {
-                eprintln!("bottle-cli: refused {to}: not allowed");
-                Decision::Deny
-            }
-        }
-    }
-}
-
-/// The policy bottled gave, once it has; when it was last asked for.
-type PolicyState = Arc<Mutex<(Option<Arc<Policy>>, Option<Instant>)>>;
-
-/// What the decider said of a flow.
-enum Decision {
-    Direct,
-    Redirect(TcpStream),
-    Deny,
-}
-
-const MAGIC: &[u8] = b"SMOLMEG2";
-const POLICY_MAGIC: &[u8] = b"BOTTLPOL";
-/// How long bottled gets to give its policy (one that doesn't know the question waits for more,
-/// then hangs up), and how long after it didn't before it's asked again.
-const POLICY_WAIT: Duration = Duration::from_secs(3);
-const POLICY_RETRY: Duration = Duration::from_secs(30);
-
-impl Decider {
-    pub fn new(address: SocketAddr, token: [u8; 32], machine: [u8; 16]) -> Decider {
-        Decider {
-            address,
-            token,
-            machine,
-            policy: Default::default(),
-        }
-    }
-
-    /// The policy bottled gives, asked for the first time it's needed, and again after
-    /// POLICY_RETRY if it wasn't given; None meanwhile, when every connection is asked of bottled.
-    fn policy(&self) -> Option<Arc<Policy>> {
-        let mut state = self.policy.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(policy) = &state.0 {
-            return Some(Arc::clone(policy));
-        }
-        if state.1.is_some_and(|asked| asked.elapsed() < POLICY_RETRY) {
-            return None;
-        }
-        state.1 = Some(Instant::now());
-        match self.ask_policy() {
-            Ok(policy) => {
-                let policy = Arc::new(policy);
-                state.0 = Some(Arc::clone(&policy));
-                Some(policy)
-            }
-            Err(e) => {
-                eprintln!(
-                    "bottle-cli: no policy from bottled ({e}): asking it of every connection"
-                );
-                None
-            }
-        }
-    }
-
-    fn ask_policy(&self) -> io::Result<Policy> {
-        let mut conn = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)?;
-        conn.set_read_timeout(Some(POLICY_WAIT))?;
-        conn.write_all(&[POLICY_MAGIC, &self.token, &self.machine].concat())?;
-        let mut length = [0; 4];
-        conn.read_exact(&mut length)?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length == 0 {
-            return Err(io::Error::other("refused"));
-        }
-        let mut json = vec![0; length];
-        conn.read_exact(&mut json)?;
-        serde_json::from_slice(&json).map_err(io::Error::other)
-    }
-
-    fn decide(&self, to: SocketAddr, first: &[u8]) -> io::Result<Decision> {
-        let mut conn = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)?;
-        conn.set_read_timeout(Some(DECIDE_TIMEOUT))?;
-        let mut prelude = Vec::with_capacity(96 + first.len());
-        prelude.extend_from_slice(MAGIC);
-        prelude.extend_from_slice(&self.token);
-        prelude.extend_from_slice(&self.machine);
-        prelude.extend_from_slice(&[0; 16]);
-        match to.ip() {
-            IpAddr::V4(ip) => {
-                prelude.push(4);
-                prelude.extend_from_slice(&to.port().to_be_bytes());
-                prelude.extend_from_slice(&ip.octets());
-            }
-            IpAddr::V6(ip) => {
-                prelude.push(6);
-                prelude.extend_from_slice(&to.port().to_be_bytes());
-                prelude.extend_from_slice(&ip.octets());
-            }
-        }
-        prelude.extend_from_slice(&(first.len() as u16).to_be_bytes());
-        prelude.extend_from_slice(first);
-        conn.write_all(&prelude)?;
-        let mut answer = [0];
-        conn.read_exact(&mut answer)?;
-        conn.set_read_timeout(None)?;
-        Ok(match answer[0] {
-            0 => Decision::Direct,
-            2 => Decision::Redirect(conn),
-            _ => Decision::Deny,
-        })
-    }
 }
 
 /// The most files the process carrying a bottle's network should have open: each connection the
-/// bottle makes takes several here (libkrun's end of it, ours, the far end, their clones, the
-/// decider's), and macOS gives a process a shell starts 256.
+/// bottle makes takes several here (libkrun's end of it, ours, the far end, their clones), and
+/// macOS gives a process a shell starts 256.
 const OPEN_FILES: u64 = 1 << 20;
 
 /// Raises this process's limit on open files toward OPEN_FILES, as far as the system lets it:
@@ -318,68 +169,51 @@ fn connect(mut conn: UnixStream, to: SocketAddr, network: Option<&Network>) -> i
         Resolved::Addresses(ips) => ips,
         _ => Vec::new(),
     };
-    let decision = match network {
-        None => Decision::Direct,
-        Some(network) => {
-            let policy = network.policy();
-            let mut local = policy.as_ref().map(|p| p.decide(to, &first, ips));
-            if local == Some(Local::Unread) {
-                read_opening(&mut conn, &mut first)?;
-                local = policy
-                    .as_ref()
-                    .map(|p| p.decide_opened(to, &first, ips, true));
+    let Some(network) = network else {
+        return direct(conn, to, &first);
+    };
+    let policy = &network.policy;
+    let mut local = policy.decide(to, &first, ips);
+    if local == Local::Unread {
+        read_opening(&mut conn, &mut first)?;
+        local = policy.decide_opened(to, &first, ips, true);
+    }
+    match local {
+        Local::Direct => direct(conn, to, &first),
+        Local::Cache(i) => {
+            let name = crate::policy::name_in(&first).unwrap_or_default();
+            let plain = first.first() != Some(&0x16);
+            let ctx = network.cache();
+            if !plain && !ctx.terminates(&name) {
+                eprintln!(
+                    "bottle-cli: {name} is cached, but {} has no caching CA for it: not cached",
+                    network.machine.as_deref().unwrap_or("this machine")
+                );
+                return direct(conn, to, &first);
             }
-            match local {
-                Some(Local::Direct) => Decision::Direct,
-                Some(Local::Deny) => {
-                    let name = crate::policy::name_in(&first);
-                    eprintln!(
-                        "bottle-cli: refused {to}{}: not allowed",
-                        name.map_or(String::new(), |n| format!(" ({n})"))
-                    );
-                    Decision::Deny
-                }
-                Some(Local::Cache(i)) => {
-                    let policy = policy.as_ref().unwrap();
-                    let name = crate::policy::name_in(&first).unwrap_or_default();
-                    let plain = first.first() != Some(&0x16);
-                    let ctx = network.cache();
-                    if plain || ctx.terminates(&name) {
-                        conn.write_all(&[CONNECTED])?;
-                        let reachable = |host: &str| policy.reachable(host, ips);
-                        let rule = &policy.cache[i];
-                        return cache::serve(conn, first, &name, rule, plain, ctx, &reachable);
-                    }
-                    eprintln!(
-                        "bottle-cli: {name} is cached, but {} has no caching CA for it: not cached",
-                        network.machine.as_deref().unwrap_or("this machine")
-                    );
-                    match &network.rules {
-                        Rules::Bottled(_) => network.hand(to, &first),
-                        Rules::Fixed(_) => Decision::Direct,
-                    }
-                }
-                Some(Local::Route(i)) => {
-                    let policy = policy.as_ref().unwrap();
-                    return route(conn, to, first, policy.routes[i].socket(), network);
-                }
-                // Unread even after waiting for it: decided as it stands.
-                Some(Local::Hand | Local::Unread) | None => network.hand(to, &first),
-            }
+            conn.write_all(&[CONNECTED])?;
+            let reachable = |host: &str| policy.reachable(host, ips);
+            cache::serve(conn, first, &name, &policy.cache[i], plain, ctx, &reachable)
         }
+        Local::Route(i) => route(conn, to, first, policy.routes[i].socket(), network),
+        // Unread even after waiting for it: as it stands, it's refused.
+        Local::Deny | Local::Unread => {
+            let name = crate::policy::name_in(&first);
+            eprintln!(
+                "bottle-cli: refused {to}{}: not allowed",
+                name.map_or(String::new(), |n| format!(" ({n})"))
+            );
+            refuse(conn)
+        }
+    }
+}
+
+/// Connects `to` from here, and passes the bottle's bytes, `first` first, both ways.
+fn direct(mut conn: UnixStream, to: SocketAddr, first: &[u8]) -> io::Result<()> {
+    let Ok(mut far) = TcpStream::connect_timeout(&to, CONNECT_TIMEOUT) else {
+        return refuse(conn);
     };
-    let far = match decision {
-        Decision::Direct => match TcpStream::connect_timeout(&to, CONNECT_TIMEOUT) {
-            Ok(mut far) => {
-                far.write_all(&first)?;
-                far
-            }
-            Err(_) => return refuse(conn),
-        },
-        // bottled has the first bytes, from the prelude: the rest follows.
-        Decision::Redirect(far) => far,
-        Decision::Deny => return refuse(conn),
-    };
+    far.write_all(first)?;
     conn.write_all(&[CONNECTED])?;
     splice(conn, far)
 }
@@ -692,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_goes_directly_without_a_decider() {
+    fn a_connection_goes_directly_without_a_network() {
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let to = server.local_addr().unwrap();
         thread::spawn(move || {
@@ -712,115 +546,13 @@ mod tests {
     }
 
     #[test]
-    fn the_decider_is_asked_with_the_first_bytes_and_can_refuse() {
-        let decider = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = decider.local_addr().unwrap();
-        let asked = thread::spawn(move || {
-            // Asked for a policy first: none is given, so the flow is asked about.
-            let (mut s, _) = decider.accept().unwrap();
-            let mut question = [0; 8 + 32 + 16];
-            s.read_exact(&mut question).unwrap();
-            assert_eq!(&question[..8], POLICY_MAGIC);
-            s.write_all(&[0; 4]).unwrap();
-            let (mut s, _) = decider.accept().unwrap();
-            let mut fixed = [0; 8 + 32 + 32 + 1 + 2 + 4 + 2];
-            s.read_exact(&mut fixed).unwrap();
-            let mut first = vec![0; u16::from_be_bytes([fixed[79], fixed[80]]) as usize];
-            s.read_exact(&mut first).unwrap();
-            s.write_all(&[1]).unwrap();
-            (fixed, first)
-        });
-        let d = Network::bottled(Decider::new(address, [7; 32], [9; 16]), None);
-        let (mut agent, host) = pair();
-        thread::spawn(move || handle(host, Some(&d)));
-        Request::Connect("192.0.2.9:443".parse().unwrap())
-            .write(&mut agent)
-            .unwrap();
-        agent.write_all(b"GET / HTTP/1.1\r\n").unwrap();
-        let mut answer = [0];
-        agent.read_exact(&mut answer).unwrap();
-        assert_eq!(answer[0], REFUSED);
-        let (fixed, first) = asked.join().unwrap();
-        assert_eq!(&fixed[..8], MAGIC);
-        assert_eq!(&fixed[8..40], &[7; 32]);
-        assert_eq!(&fixed[40..56], &[9; 16]);
-        assert_eq!(fixed[72], 4);
-        assert_eq!(u16::from_be_bytes([fixed[73], fixed[74]]), 443);
-        assert_eq!(&fixed[75..79], &[192, 0, 2, 9]);
-        assert_eq!(first, b"GET / HTTP/1.1\r\n");
-    }
-
-    #[test]
-    fn with_a_policy_only_what_bottled_must_see_is_asked_of_it() {
-        let far = TcpListener::bind("127.0.0.1:0").unwrap();
-        let decider = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = decider.local_addr().unwrap();
-        let asked = thread::spawn(move || {
-            let (mut s, _) = decider.accept().unwrap();
-            let mut question = [0; 8 + 32 + 16];
-            s.read_exact(&mut question).unwrap();
-            assert_eq!(
-                (&question[..8], &question[8..40]),
-                (POLICY_MAGIC, &[7; 32][..])
-            );
-            let policy =
-                br#"{"allow_private": [], "hand": [{"name": "handed.example", "port": 443}]}"#;
-            s.write_all(&(policy.len() as u32).to_be_bytes()).unwrap();
-            s.write_all(policy).unwrap();
-            // Then only the handed flow is asked about.
-            let (mut s, _) = decider.accept().unwrap();
-            let mut magic = [0; 8];
-            s.read_exact(&mut magic).unwrap();
-            s.write_all(&[1]).unwrap();
-            magic
-        });
-        let d = Arc::new(Network::bottled(
-            Decider::new(address, [7; 32], [9; 16]),
-            None,
-        ));
-        let connect = |to: SocketAddr, first: &[u8]| {
-            let (mut agent, host) = pair();
-            let d = Arc::clone(&d);
-            thread::spawn(move || handle(host, Some(&d)));
-            Request::Connect(to).write(&mut agent).unwrap();
-            agent.write_all(first).unwrap();
-            let mut answer = [0];
-            agent.read_exact(&mut answer).unwrap();
-            answer[0]
-        };
-        // Private, by no name allowed private: refused here. (The loopback stands in for the internet.)
-        assert_eq!(
-            connect(
-                "10.0.0.1:80".parse().unwrap(),
-                b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
-            ),
-            REFUSED
-        );
-        let handed = b"GET / HTTP/1.1\r\nHost: handed.example\r\n\r\n";
-        assert_eq!(
-            connect("93.184.216.34:443".parse().unwrap(), handed),
-            REFUSED
-        );
-        assert_eq!(&asked.join().unwrap(), MAGIC);
-        drop(far);
-    }
-
-    #[test]
     fn a_cached_hosts_connection_is_answered_here() {
         crate::ca::in_home(|home| {
             let kept = home.join("cache/http/deb.example/dists/InRelease");
             std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
             std::fs::write(&kept, "release").unwrap();
-            let decider = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = decider.local_addr().unwrap();
-            let gave = thread::spawn(move || {
-                let (mut s, _) = decider.accept().unwrap();
-                s.read_exact(&mut [0; 8 + 32 + 16]).unwrap();
-                let policy = br#"{"cache": [{"host": "deb.example", "ports": [80]}]}"#;
-                s.write_all(&(policy.len() as u32).to_be_bytes()).unwrap();
-                s.write_all(policy).unwrap();
-            });
-            let d = Network::bottled(Decider::new(address, [7; 32], [9; 16]), Some("m1".into()));
+            let policy = r#"{"cache": [{"host": "deb.example", "ports": [80]}]}"#;
+            let d = Network::new(serde_json::from_str(policy).unwrap(), Some("m1".into()));
             let (mut agent, host) = pair();
             thread::spawn(move || handle(host, Some(&d)));
             Request::Connect("93.184.216.34:80".parse().unwrap())
@@ -833,7 +565,6 @@ mod tests {
             agent.read_to_string(&mut answer).unwrap();
             assert!(answer.starts_with("\0HTTP/1.1 200 OK\r\n"), "{answer:?}");
             assert!(answer.ends_with("\r\n\r\nrelease"), "{answer:?}");
-            gave.join().unwrap();
         });
     }
 
@@ -894,7 +625,7 @@ mod tests {
             socket.display(),
             dir.display()
         );
-        let network = Arc::new(Network::fixed(
+        let network = Arc::new(Network::new(
             serde_json::from_str(&policy).unwrap(),
             Some("gpu".into()),
         ));
@@ -948,7 +679,7 @@ mod tests {
             let pem = crate::ca::certificate("gpu", &policy.terminated_hosts())
                 .unwrap()
                 .unwrap();
-            let network = Network::fixed(policy, Some("gpu".into()));
+            let network = Network::new(policy, Some("gpu".into()));
             let (mut agent, host) = pair();
             thread::spawn(move || handle(host, Some(&network)));
             Request::Connect("1.2.3.4:443".parse().unwrap())

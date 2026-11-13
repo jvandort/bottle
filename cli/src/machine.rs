@@ -4,7 +4,7 @@
 //!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
 //!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
 //!                               [--workdir DIR] [--label NAME=VALUE]... [--network FILE]
-//!     bottle-cli machine start --name NAME [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli machine start --name NAME [--net-direct]
 //!     bottle-cli machine stop --name NAME
 //!     bottle-cli machine delete --name NAME [-f]
 //!     bottle-cli machine rename --name NAME --to NEW
@@ -23,9 +23,8 @@
 //! try this without VMs); start returns once its agent answers. Its network is the policy it was
 //! made with (--network: kept as its network.json, see bottle-agent-client's policy), every
 //! connection decided by it, cached and routed hosts' TLS answered with its own caching CA (see
-//! `bottle-cli ca`), made for that policy's hosts as it starts. Without one, it's start's options:
-//! with --decider, every connection is asked of bottled's decider, as the bottle whose token is in
-//! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection's allowed; without either, it has none. A machine is "created" until it's
+//! `bottle-cli ca`), made for that policy's hosts as it starts. Without one, with --net-direct,
+//! every connection's allowed; otherwise, it has none. A machine is "created" until it's
 //! first started, then "running" or "stopped". --user and --workdir are who and where `exec` runs a
 //! command unless it says; labels are its creator's, shown by `ls`.
 //!
@@ -279,9 +278,7 @@ impl Machine {
         boot.args(net.args())
             .args(match net {
                 // A cached host's https answered with the machine's own caching CA.
-                crate::boot::Net::Decider(_) | crate::boot::Net::Policy(_) => {
-                    vec!["--ca", &self.name]
-                }
+                crate::boot::Net::Policy(_) => vec!["--ca", &self.name],
                 _ => vec![],
             })
             .arg(&socket)
@@ -510,8 +507,8 @@ fn image_of(disk: &Path) -> io::Result<Image> {
     ))
 }
 
-/// `machine start --name NAME [--decider ADDRESS:PORT | --net-direct]`: the network is the start's,
-/// as a decider and token are a launch's (the token in $BOTTLE_DECIDER_TOKEN, which boot gets).
+/// `machine start --name NAME [--net-direct]`: the network is its policy's, if it has one; else
+/// the start's.
 fn start(args: &[String]) -> io::Result<()> {
     let mut net = crate::boot::Net::None;
     let mut rest = Vec::new();

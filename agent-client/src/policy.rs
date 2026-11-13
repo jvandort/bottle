@@ -1,20 +1,16 @@
-//! What the host's side of a bottle's network decides itself about each connection the bottle makes,
-//! as bottled's decider would (Gateway.decide in bottle/egress.py), from the policy bottled gives
-//! it (Gateway.driver_policy): the connections bottled must still see, which are handed to it, and
-//! the private addresses the bottle may reach by name. Everything else is connected from here, or
-//! refused, without asking.
+//! What the host's side of a bottle's network decides about each connection the bottle makes, by
+//! its machine's network policy (its network.json, given when it's made: see bottle/services.py's
+//! network): which hosts' downloads are kept here (cache.rs), which connections a service answers
+//! (routes, each to a unix socket: see net.rs), and the private addresses the bottle may reach by
+//! name.
 //!
-//! A connection is handed to bottled when it goes to an address or network the policy names, or
-//! when its first bytes give a name the policy names on that port: a TLS ClientHello's server name,
-//! or an HTTP request's Host. One whose name can't be told yet (nothing sent, or part of a TLS
-//! record) is handed over too when any name is to be handed on its port, as bottled then waits for
-//! the rest. Otherwise: loopback, link-local, multicast and unspecified addresses are refused;
-//! public ones are connected; a private one only by a name `allow_private` matches, that leads
-//! there. IPv6 is always handed over: the bottle has no route for it, and bottled judges it.
-//!
-//! A machine's own policy (its network.json, given when it's made) has no bottled to hand to: what
-//! it routes, by address, network or name on a port, goes to a service's unix socket (see net.rs),
-//! and what it would hand is refused.
+//! A connection is routed when it goes to an address or network a route names, or when its first
+//! bytes give a name a route names on that port: a TLS ClientHello's server name, or an HTTP
+//! request's Host; it's cached when its name is a cached host's. One whose name can't be told yet
+//! (nothing sent, or part of a TLS record) is read further first when a name may decide it on its
+//! port. Otherwise: loopback, link-local, multicast and unspecified addresses are refused; public
+//! ones are connected; a private one only by a name `allow_private` matches, that leads there.
+//! IPv6 is refused: the bottle has no route for it.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -25,8 +21,6 @@ use serde::Deserialize;
 pub struct Policy {
     #[serde(default)]
     pub allow_private: Vec<String>,
-    #[serde(default)]
-    pub hand: Vec<Hand>,
     /// The hosts whose downloads are kept here (see cache.rs), as bottled's cache.Cached has them.
     #[serde(default)]
     pub cache: Vec<Cached>,
@@ -110,19 +104,8 @@ impl Cached {
     }
 }
 
-/// A connection bottled must see: to an address, into a network, or by name, each on a port.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum Hand {
-    Address { address: IpAddr, port: u16 },
-    Network { network: String, port: u16 },
-    Name { name: String, port: u16 },
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Local {
-    /// bottled decides: ask it.
-    Hand,
     Direct,
     Deny,
     /// Answered here, from the store where it can be: the policy's cache entry for its host.
@@ -156,22 +139,11 @@ impl Policy {
         let ip = match to.ip() {
             IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
                 Some(v4) => IpAddr::V4(v4),
-                None => return Local::Hand,
+                None => return Local::Deny,
             },
             v4 => v4,
         };
         let port = to.port();
-        for rule in &self.hand {
-            match rule {
-                Hand::Address { address, port: p } if *address == ip && *p == port => {
-                    return Local::Hand;
-                }
-                Hand::Network { network, port: p } if *p == port && in_network(ip, network) => {
-                    return Local::Hand;
-                }
-                _ => {}
-            }
-        }
         for (i, route) in self.routes.iter().enumerate() {
             match route {
                 Route::Address {
@@ -187,16 +159,10 @@ impl Policy {
                 _ => {}
             }
         }
-        let named_here = |name: &str| {
-            self.hand.iter().any(|rule| {
-                matches!(rule, Hand::Name { name: pattern, port: p } if *p == port && glob(pattern, name))
-            })
-        };
         let name = name_in(first);
         // Over https, the name a ClientHello claims; over plain http, an HTTP request's Host.
         let tls = first.first() == Some(&0x16);
         match &name {
-            Some(name) if named_here(name) => return Local::Hand,
             Some(name) => {
                 if let Some(i) = self.routes.iter().position(
                     |r| matches!(r, Route::Host { host, port: p, .. } if *p == port && glob(host, name)),
@@ -208,15 +174,6 @@ impl Policy {
                 }) {
                     return Local::Cache(i);
                 }
-            }
-            // bottled reads the rest of what it's handed.
-            None if opening_unread(first)
-                && self
-                    .hand
-                    .iter()
-                    .any(|r| matches!(r, Hand::Name { port: p, .. } if *p == port)) =>
-            {
-                return Local::Hand;
             }
             None if !opened
                 && opening_unread(first)
@@ -231,7 +188,7 @@ impl Policy {
             None => {}
         }
         let IpAddr::V4(v4) = ip else {
-            return Local::Hand;
+            return Local::Deny;
         };
         if v4.is_loopback() || v4.is_link_local() || v4.is_multicast() || v4.is_unspecified() {
             return Local::Deny;
@@ -512,47 +469,9 @@ mod tests {
         record
     }
 
-    const POLICY: &str = r#"{"version": 1, "allow_private": ["*.corp.example"], "hand": [
-        {"address": "192.0.2.1", "port": 80}, {"network": "192.0.2.0/24", "port": 22},
-        {"name": "github.com", "port": 443}, {"name": "*.maven.example", "port": 443},
-        {"name": "deb.debian.org", "port": 80}]}"#;
-
-    #[test]
-    fn what_bottled_must_see_is_handed_to_it() {
-        let p = policy(POLICY);
-        let nothing = |_: &str| vec![];
-        assert_eq!(p.decide(to("192.0.2.1", 80), b"", nothing), Local::Hand);
-        assert_eq!(p.decide(to("192.0.2.7", 22), b"", nothing), Local::Hand);
-        assert_eq!(
-            p.decide(
-                to("140.82.112.3", 443),
-                &client_hello("github.com"),
-                nothing
-            ),
-            Local::Hand
-        );
-        assert_eq!(
-            p.decide(
-                to("1.2.3.4", 443),
-                &client_hello("repo.maven.example"),
-                nothing
-            ),
-            Local::Hand
-        );
-        let get = b"GET /debian/pool/x.deb HTTP/1.1\r\nHost: deb.debian.org\r\n\r\n";
-        assert_eq!(p.decide(to("151.101.2.132", 80), get, nothing), Local::Hand);
-        // Its name not told yet, on a port names are handed on: bottled waits for it.
-        assert_eq!(
-            p.decide(
-                to("140.82.112.3", 443),
-                &client_hello("github.com")[..20],
-                nothing
-            ),
-            Local::Hand
-        );
-        assert_eq!(p.decide(to("140.82.112.3", 443), b"", nothing), Local::Hand);
-        assert_eq!(p.decide(to("::1", 443), b"", nothing), Local::Hand); // IPv6: bottled's
-    }
+    const POLICY: &str = r#"{"allow_private": ["*.corp.example"], "routes": [
+        {"address": "192.0.2.1", "port": 80, "socket": "/s"},
+        {"host": "github.com", "port": 443, "socket": "/s"}]}"#;
 
     #[test]
     fn the_rest_is_decided_here() {
@@ -570,6 +489,7 @@ mod tests {
             p.decide(to("93.184.216.34", 22), b"", nothing),
             Local::Direct
         ); // nothing named on 22
+        assert_eq!(p.decide(to("::1", 443), b"", nothing), Local::Deny); // IPv6: no route for it
         assert_eq!(
             p.decide(
                 to("140.82.112.3", 8080),
@@ -620,9 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_hosts_connections_are_answered_here_unless_bottled_must_see_them() {
+    fn a_cached_hosts_connections_are_answered_here_unless_theyre_routed() {
         let p = policy(
-            r#"{"hand": [{"name": "both.example", "port": 443}], "cache": [
+            r#"{"routes": [{"host": "both.example", "port": 443, "socket": "/s"}], "cache": [
                 {"host": "repo.maven.example", "exclude": ["*/maven-metadata.xml*"]},
                 {"host": "both.example"},
                 {"host": "deb.debian.example", "include": ["/debian/*.deb"], "ports": [80], "immutable": true}]}"#,
@@ -638,10 +558,10 @@ mod tests {
             p.decide(to("1.2.3.4", 80), &get("deb.debian.example"), nothing),
             Local::Cache(2)
         );
-        // A credential's host is bottled's, cached or not.
+        // A routed host is its service's, cached or not.
         assert_eq!(
             p.decide(to("1.2.3.4", 443), &client_hello("both.example"), nothing),
-            Local::Hand
+            Local::Route(0)
         );
         // Plain http on the https port, or TLS on the plain one, isn't the cache's.
         assert_eq!(

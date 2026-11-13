@@ -1,7 +1,8 @@
 //! The bottle's network, out of a VM: the agent in PID, mount, UTS and network namespaces of its
 //! own (this machine's own network untouched), its host side (bottle-agent-client's net) served
-//! here on a unix socket mounted into the bottle, and a decider here that allows one port, denies
-//! another, and takes a third itself, as bottled does a redirected flow.
+//! here on a unix socket mounted into the bottle, deciding by a policy that routes one port to a
+//! service here, as bottled is one, and refuses what else it can't allow (a private address no name
+//! leads to).
 //!
 //! Needs root, loop devices, mke2fs and python3, so it's skipped otherwise; to run it, as root but
 //! built as you:
@@ -10,7 +11,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
+use std::net::{IpAddr, UdpSocket};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bottle_agent_client::net::{Decider, Network, serve};
+use bottle_agent_client::net::{Network, serve};
 use bottle_agent_proto::{Exit, Start, ToGuest, ToHost};
 
 fn root() -> bool {
@@ -101,53 +102,32 @@ impl Drop for Bottle {
     }
 }
 
-/// What the decider was asked: (address, port, first bytes) of each flow.
-type Asked = Arc<Mutex<Vec<(IpAddr, u16, Vec<u8>)>>>;
+/// What the service was given: the destination its PROXY header named, and the bytes after it.
+type Given = Arc<Mutex<Vec<(IpAddr, u16, Vec<u8>)>>>;
 
-/// A decider: port `allow` allowed directly, `redirect` taken (it answers "bottled here" and what
-/// it was sent first), anything else denied.
-fn decider(allow: u16, redirect: u16) -> (SocketAddr, Asked) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let asked: Asked = Arc::default();
-    let log = Arc::clone(&asked);
+/// A service at `socket`: it answers "bottled here, you said: " and the two bytes it was sent.
+fn service(socket: &std::path::Path) -> Given {
+    let listener = UnixListener::bind(socket).unwrap();
+    let given: Given = Arc::default();
+    let log = Arc::clone(&given);
     thread::spawn(move || {
         for conn in listener.incoming() {
             let mut s = conn.unwrap();
-            let mut fixed = [0; 8 + 32 + 16 + 16 + 1 + 2];
-            s.read_exact(&mut fixed[..8]).unwrap();
-            if &fixed[..8] == b"BOTTLPOL" {
-                // No policy: every connection is asked about, as this test wants.
-                let mut rest = [0; 32 + 16];
-                s.read_exact(&mut rest).unwrap();
-                s.write_all(&[0; 4]).unwrap();
-                continue;
-            }
-            s.read_exact(&mut fixed[8..]).unwrap();
-            assert_eq!(&fixed[..8], b"SMOLMEG2");
-            assert_eq!(&fixed[8..40], &[7; 32], "the bottle's token");
-            let port = u16::from_be_bytes([fixed[73], fixed[74]]);
-            let mut ip = [0; 4];
-            s.read_exact(&mut ip).unwrap();
-            let mut len = [0; 2];
-            s.read_exact(&mut len).unwrap();
-            let mut first = vec![0; u16::from_be_bytes(len) as usize];
+            let mut fixed = [0; 16];
+            s.read_exact(&mut fixed).unwrap();
+            assert_eq!(&fixed[..12], b"\r\n\r\n\0\r\nQUIT\n");
+            let mut body = vec![0; u16::from_be_bytes([fixed[14], fixed[15]]) as usize];
+            s.read_exact(&mut body).unwrap();
+            let ip = IpAddr::from(<[u8; 4]>::try_from(&body[4..8]).unwrap());
+            let port = u16::from_be_bytes([body[10], body[11]]);
+            let mut first = vec![0; 2];
             s.read_exact(&mut first).unwrap();
-            log.lock()
-                .unwrap()
-                .push((IpAddr::from(ip), port, first.clone()));
-            if port == allow {
-                s.write_all(&[0]).unwrap();
-            } else if port == redirect {
-                s.write_all(&[2]).unwrap();
-                s.write_all(b"bottled here, you said: ").unwrap();
-                s.write_all(&first).unwrap();
-            } else {
-                s.write_all(&[1]).unwrap();
-            }
+            log.lock().unwrap().push((ip, port, first.clone()));
+            s.write_all(b"bottled here, you said: ").unwrap();
+            s.write_all(&first).unwrap();
         }
     });
-    (address, asked)
+    given
 }
 
 /// Connects to `to` from the bottle, sends "hi", and says what came back, or how it failed.
@@ -174,26 +154,18 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
         return;
     }
     let host = host_address();
-    let server = TcpListener::bind((host, 0)).unwrap();
-    let allow = server.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for conn in server.incoming() {
-            let mut s = conn.unwrap();
-            let mut hi = [0; 2];
-            s.read_exact(&mut hi).unwrap();
-            s.write_all(b"hello from the host").unwrap();
-        }
-    });
-    let (redirect, deny) = (allow.wrapping_add(1), allow.wrapping_add(2));
-    let (decider_address, asked) = decider(allow, redirect);
+    let (routed, refused) = (4711, 4712);
 
     // Short: overlayfs takes only so many characters of lowerdir.
     let dir = PathBuf::from(format!("/tmp/ban{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("h")).unwrap();
+    let given = service(&dir.join("service.sock"));
+    let policy = serde_json::json!({"routes": [
+        {"address": host, "port": routed, "socket": dir.join("service.sock")}]});
     let listener = UnixListener::bind(dir.join("h/net.sock")).unwrap();
-    let d = Decider::new(decider_address, [7; 32], [9; 16]);
-    thread::spawn(move || serve(listener, Some(Network::bottled(d, None))));
+    let network = Network::new(serde_json::from_value(policy).unwrap(), Some("ban".into()));
+    thread::spawn(move || serve(listener, Some(network)));
 
     let upper = dir.join("rw.ext4");
     let mke2fs = std::env::var("BOTTLE_MKE2FS").unwrap_or("mke2fs".into());
@@ -245,16 +217,17 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
     assert!(ruleset.contains("redirect to :1"), "{ruleset}");
     let host = host.to_string();
     let connect = |port: u16| bottle.ok(&["python3", "-c", CLIENT, &host, &port.to_string()]);
-    assert_eq!(connect(allow), "hello from the host\n");
-    assert_eq!(connect(redirect), "bottled here, you said: hi\n");
-    assert_eq!(connect(deny), "reset\n");
-    let asked = asked.lock().unwrap().clone();
-    assert_eq!(asked.len(), 3);
-    for ((ip, port, first), want) in asked.iter().zip([allow, redirect, deny]) {
-        assert_eq!(ip.to_string(), host);
-        assert_eq!(*port, want);
-        assert_eq!(first, b"hi", "the decider is given the first bytes");
-    }
+    assert_eq!(connect(routed), "bottled here, you said: hi\n");
+    // A private address no name allowed private leads to: refused, as a reset.
+    assert_eq!(connect(refused), "reset\n");
+    let given = given.lock().unwrap().clone();
+    assert_eq!(given.len(), 1);
+    let (ip, port, first) = &given[0];
+    assert_eq!((ip.to_string(), *port), (host.clone(), routed));
+    assert_eq!(
+        first, b"hi",
+        "the service is given the bytes after the header"
+    );
 
     // The bottle's own names, then the host's: bottle.host, struck from the bottle's /etc/hosts.
     assert_eq!(

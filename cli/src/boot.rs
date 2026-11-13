@@ -4,7 +4,7 @@
 //!     bottle-cli boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB]
 //!                     [--hostname NAME] [--console FILE] [--env NAME=VALUE]...
 //!                     [--mount SOURCE:TARGET]...
-//!                     [--network FILE | --decider ADDRESS:PORT | --net-direct] [--ca NAME]
+//!                     [--network FILE | --net-direct] [--ca NAME]
 //!
 //! DISKs are the bottle's stage disks, bottom first, as `bottle-cli disk` prints them; UPPER is its
 //! own, read-write, made (--size GIB, sparse) if it isn't there. SOCKET is where the agent is
@@ -12,10 +12,8 @@
 //! host directory, read-only at TARGET (virtio-fs). With --network, the bottle has a network,
 //! every connection it makes decided by FILE's policy (see bottle-agent-client's policy): cached
 //! hosts answered here and routed ones given to their services, their TLS with NAME's caching CA
-//! (see `bottle-cli ca`), NAME being who a service is told they're from. With --decider, the same
-//! by bottled's policy, asked of its decider there as the bottle whose token is
-//! $BOTTLE_DECIDER_TOKEN, and what it hands over asked of it. With --net-direct, every
-//! connection's allowed; without any, there's none.
+//! (see `bottle-cli ca`), NAME being who a service is told they're from. With --net-direct,
+//! every connection's allowed; without either, there's none.
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
 //! it's up. While it runs, its clock is set from this machine's and its freed memory given back
 //! (see upkeep).
@@ -40,7 +38,7 @@ use crate::FAILED;
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
                          [--mount SOURCE:TARGET]... \
-                         [--network FILE | --decider ADDRESS:PORT | --net-direct] \
+                         [--network FILE | --net-direct] \
                          [--ca NAME] [--run JSON]";
 
 /// How often a bottle's network removes what's gone unused from the HTTP cache, after once at start.
@@ -118,12 +116,11 @@ struct Args {
     run: Option<Vec<String>>,
 }
 
-/// The bottle's network: every connection decided by a policy in a file, or by a decider's
-/// (bottled's), every connection allowed (for trying a machine out), or none.
+/// The bottle's network: every connection decided by a policy in a file, every connection allowed
+/// (for trying a machine out), or none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Net {
     Policy(PathBuf),
-    Decider(std::net::SocketAddr),
     Direct,
     None,
 }
@@ -137,15 +134,6 @@ impl Net {
         mut next: impl FnMut() -> Option<String>,
     ) -> Option<Result<(), String>> {
         match arg {
-            "--decider" => Some(
-                next()
-                    .ok_or("--decider needs ADDRESS:PORT".to_string())
-                    .and_then(|a| {
-                        a.parse()
-                            .map_err(|_| format!("--decider {a}: not ADDRESS:PORT"))
-                    })
-                    .map(|a| *self = Net::Decider(a)),
-            ),
             "--network" => Some(
                 next()
                     .ok_or("--network needs FILE".to_string())
@@ -162,7 +150,6 @@ impl Net {
     /// As options again, for a `boot` to come.
     pub fn args(&self) -> Vec<String> {
         match self {
-            Net::Decider(a) => vec!["--decider".into(), a.to_string()],
             Net::Policy(path) => vec!["--network".into(), path.display().to_string()],
             Net::Direct => vec!["--net-direct".into()],
             Net::None => Vec::new(),
@@ -290,11 +277,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         Net::None => None,
         net => {
             let network = match net {
-                Net::Decider(address) => Some(bottle_agent_client::net::Network::bottled(
-                    decider(*address)?,
-                    args.ca.clone(),
-                )),
-                Net::Policy(path) => Some(bottle_agent_client::net::Network::fixed(
+                Net::Policy(path) => Some(bottle_agent_client::net::Network::new(
                     policy(path)?,
                     args.ca.clone(),
                 )),
@@ -305,7 +288,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
             let listener = std::os::unix::net::UnixListener::bind(&path)
                 .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
             std::thread::spawn(move || bottle_agent_client::net::serve(listener, network));
-            if matches!(net, Net::Decider(_) | Net::Policy(_)) {
+            if matches!(net, Net::Policy(_)) {
                 // The cache it answers from loses what's gone unused, now and every few hours.
                 std::thread::spawn(|| {
                     loop {
@@ -494,31 +477,6 @@ pub fn policy(path: &Path) -> io::Result<bottle_agent_client::policy::Policy> {
     serde_json::from_slice(&json).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
 }
 
-/// The decider at `address`, asked as the bottle whose token is $BOTTLE_DECIDER_TOKEN (hex, not
-/// an argument, which anyone can read in ps), as a machine of its own, this launch.
-fn decider(address: std::net::SocketAddr) -> io::Result<bottle_agent_client::net::Decider> {
-    let hex = env::var("BOTTLE_DECIDER_TOKEN").map_err(|_| {
-        io::Error::other("--decider needs the bottle's token, in $BOTTLE_DECIDER_TOKEN")
-    })?;
-    let bytes: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            hex.get(i..i + 2)
-                .and_then(|b| u8::from_str_radix(b, 16).ok())
-        })
-        .collect::<Option<_>>()
-        .unwrap_or_default();
-    let token: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| io::Error::other("$BOTTLE_DECIDER_TOKEN: not 32 bytes in hex"))?;
-    let mut machine = [0; 16];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut machine))?;
-    Ok(bottle_agent_client::net::Decider::new(
-        address, token, machine,
-    ))
-}
-
 /// Pointers to `strings`, then NULL, as C wants an array of strings.
 fn nul_terminated(strings: &[CString]) -> Vec<*const c_char> {
     strings
@@ -584,21 +542,18 @@ mod tests {
     }
 
     #[test]
-    fn the_network_is_a_decider_direct_or_none() {
+    fn the_network_is_a_policy_direct_or_none() {
         assert_eq!(args("/s /rw").unwrap().net, Net::None);
         assert_eq!(args("/s /rw --net-direct").unwrap().net, Net::Direct);
-        let a = args("/s --decider 127.0.0.1:47329 /rw").unwrap();
-        assert_eq!(a.net, Net::Decider("127.0.0.1:47329".parse().unwrap()));
-        assert_eq!(a.net.args(), ["--decider", "127.0.0.1:47329"]);
-        assert_eq!(a.ca, None);
-        let a = args("/s --decider 127.0.0.1:47329 --ca m1 /rw").unwrap();
-        assert_eq!(a.ca.as_deref(), Some("m1"));
         let a = args("/s --network /m/network.json /rw").unwrap();
         assert_eq!(a.net, Net::Policy("/m/network.json".into()));
         assert_eq!(a.net.args(), ["--network", "/m/network.json"]);
+        assert_eq!(a.ca, None);
+        let a = args("/s --network /m/network.json --ca m1 /rw").unwrap();
+        assert_eq!(a.ca.as_deref(), Some("m1"));
         assert_eq!(
-            args("/s /rw --decider nope").unwrap_err(),
-            "--decider nope: not ADDRESS:PORT"
+            args("/s /rw --network").unwrap_err(),
+            "--network needs FILE"
         );
     }
 

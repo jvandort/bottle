@@ -2,11 +2,11 @@
 //! build), each printing the disks of the image it made, bottom first, as `boot` takes them; and
 //! `gc`, which deletes the stages nothing needs.
 //!
-//!     bottle-cli build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]
-//!     bottle-cli import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]
-//!     bottle-cli pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli build RECIPE STORE [--network FILE | --net-direct]
+//!     bottle-cli import ARCHIVE STORE [--network FILE | --net-direct]
+//!     bottle-cli pull REFERENCE STORE [--network FILE | --net-direct]
 //!     bottle-cli gc STORE [IMAGE]...
-//!     bottle-cli image build RECIPE STORE [--tag TAG] [--decider ADDRESS:PORT | --net-direct]
+//!     bottle-cli image build RECIPE STORE [--tag TAG] [--network FILE | --net-direct]
 //!     bottle-cli image tag IMAGE TAG STORE
 //!     bottle-cli image rm TAG STORE
 //!     bottle-cli images STORE [--json]
@@ -40,11 +40,11 @@ use crate::boot::Net;
 /// The caching CA builds' cached hosts are answered with: bottle/ca.py's BUILDS.
 const BUILDS_CA: &str = "bottle-builds";
 
-pub const BUILD_USAGE: &str = "build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]";
-pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]";
-pub const PULL_USAGE: &str = "pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]";
+pub const BUILD_USAGE: &str = "build RECIPE STORE [--network FILE | --net-direct]";
+pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--network FILE | --net-direct]";
+pub const PULL_USAGE: &str = "pull REFERENCE STORE [--network FILE | --net-direct]";
 pub const GC_USAGE: &str = "gc STORE [IMAGE]...";
-pub const IMAGE_USAGE: &str = "image build RECIPE STORE [--tag TAG] [--decider ADDRESS:PORT | --net-direct] \
+pub const IMAGE_USAGE: &str = "image build RECIPE STORE [--tag TAG] [--network FILE | --net-direct] \
     | image tag IMAGE TAG STORE | image rm TAG STORE";
 pub const IMAGES_USAGE: &str = "images STORE [--json]";
 
@@ -373,7 +373,7 @@ impl Launch for Boot {
             .args(self.net.args())
             .args(match self.net {
                 // An image's apt repositories' https answered with the builds' caching CA.
-                Net::Decider(_) | Net::Policy(_) => vec!["--ca", BUILDS_CA],
+                Net::Policy(_) => vec!["--ca", BUILDS_CA],
                 _ => vec![],
             })
             .args(mount.into_iter().flat_map(|m| {
