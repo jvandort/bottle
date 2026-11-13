@@ -13,6 +13,13 @@ bottle-agent-proto = { path = "agent-proto" }
 bottle-disk = { path = "disk" }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
+# The host side's caching: TLS with ring's crypto (no OpenSSL: macOS has none to link, and the
+# distribution is one static binary), certificates minted from bottle-cli's caching CA, and the
+# system's trust store for the hosts it fetches from.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8.5"
+time = { version = "0.3", default-features = false }
 # libkrun, linked: its C API, called directly. Its own init is ours instead (bottle-agent), so not
 # its init-blob; disks, not its network devices (bottle's network is the agent's, over vsock).
 libkrun = { git = "https://github.com/containers/libkrun", tag = "v1.19.8", default-features = false, features = ["blk"] }

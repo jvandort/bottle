@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 mod boot;
 mod build;
+mod ca;
 mod exec;
 mod machine;
 mod upkeep;
@@ -24,6 +25,7 @@ fn main() -> ExitCode {
         Some("image") => build::image(args),
         Some("images") => build::images(args),
         Some("machine") => machine::main(args),
+        Some("ca") => ca::main(args),
         Some("exec") => {
             let args: Vec<String> = args.collect();
             match args.split_first() {
@@ -46,6 +48,7 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("usage: bottle-cli {}", machine::TOP_USAGE);
     eprintln!("   or: bottle-cli {}", exec::USAGE);
     eprintln!("   or: bottle-cli {}", boot::USAGE);
+    eprintln!("   or: bottle-cli {}", ca::USAGE);
     eprintln!("   or: bottle-cli {}", build::BUILD_USAGE);
     eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);
     eprintln!("   or: bottle-cli {}", build::PULL_USAGE);
