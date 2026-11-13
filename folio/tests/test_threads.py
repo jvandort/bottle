@@ -34,6 +34,7 @@ class NewTest(FolioTestCase):
         self.assertIn("**Fetch `user`** when you get a prompt", bottle["context"])
         self.assertIn("this thread's first is\n`genie/fix-it-1`", bottle["context"])
         self.assertIn("**Push as you go**, without being asked", bottle["context"])
+        self.assertIn("`folio cp fix-it:<path> .`", bottle["context"])
         self.assertNotIn("work`", bottle["context"])
         self.assertEqual(git("-C", str(self.repo), "config", "remote.bottle/fix-it.uploadpack"),
                          "git --namespace=fix-it-out upload-pack")

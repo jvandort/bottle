@@ -555,6 +555,8 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio new THREAD [--from BRANCH] [--runner RUNNER]` | Start a thread: its bottle and its lane |
 | `folio claude [THREAD] [--runner RUNNER]` | Attach to the thread's Claude, starting the thread if it's new |
 | `folio shell [THREAD] [--runner RUNNER]` | Attach to the thread's shell, starting the thread if it's new |
+| `folio exec [--sidecar] [-t] THREAD [--] COMMAND...` | Run one command in a thread's bottle (or its sidecar), wherever it runs, and exit with its status |
+| `folio cp [--sidecar] SRC DST` | Copy into or out of a thread's bottle (or its sidecar), wherever it runs: `THREAD:PATH`, or a path here |
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |

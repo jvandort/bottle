@@ -48,6 +48,9 @@ def main(argv: list[str]) -> int:
     state = load()
     state["calls"].append(argv)
     save(state)
+    # A terminal, asked for: the call log has it.
+    if argv[:2] == ["exec", "-t"]:
+        argv = ["exec", *argv[2:]]
     bottles = state["bottles"]
     # A runner that's off (detached): its bottles show as such, and can't be made, started or deleted.
     off = os.environ.get("FAKE_BOTTLE_OFF")

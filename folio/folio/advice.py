@@ -37,6 +37,9 @@ After a push, tell the user the branch and how to pick it up:
 - **The history is a transcript** of the exchange: merge commits, typos and
   undos are expected, not something to apologise for or tidy.
 - **Squash only when the user asks**, pushing the result as the next N.
+- **To hand the user a file or a directory**, give them the command that
+  copies it out of this bottle to their current directory:
+  `folio cp {thread}:<path> .`
 """
 
 # What survives a pause, for every bottle folio makes (the broker's too): what
@@ -130,6 +133,8 @@ remotes: a push from here lands in the thread's lane, which the thread's bottle
 pushes into too, so fetch and merge before you push, and a push refused as not
 a fast-forward lost a race: fetch, merge, push again. It's scratch: a pause of
 the thread deletes it and keeps nothing of it, so push what's worth keeping.
+To hand the user a file or a directory from here, give them the command that
+copies it to their current directory: `folio cp --sidecar {thread}:<path> .`
 """
 
 

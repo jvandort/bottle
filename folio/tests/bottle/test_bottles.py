@@ -246,7 +246,7 @@ class CreateTest(BottleTestCase):
         self.assertIn(f"You're `genie`, running in bottle `{bottle.name}`", context)
         self.assertIn("passwordless sudo", context)
         self.assertIn("The network works as usual", context)
-        self.assertIn(f"`bottle cp {bottle.machine}:<path> .`", context)
+        self.assertNotIn("bottle cp", context)   # how to copy out of it is its maker's to say (folio: `folio cp`)
 
     def test_context_for_a_detached_commit(self) -> None:
         bottle = bottles.Bottle("b", "id", "base", 0.0, mounts=(bottles.Mount("/workspace", "/src/r", None, "c" * 40),))

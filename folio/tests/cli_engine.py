@@ -120,10 +120,43 @@ def run_from_file(name: str, argv: list[str], path: Path) -> None:
         raise failed(["exec", name], result.returncode)
 
 
-def attach(name: str, argv: list[str]) -> NoReturn:
+def attach(name: str, argv: list[str], tty: bool | None = None) -> NoReturn:
     """Replace folio with a command in the bottle, on this terminal."""
-    cmd = [*command(), "exec", name, "--", *argv]
+    cmd = [*command(), "exec", *(["-t"] if tty else []), name, "--", *argv]
     os.execvp(cmd[0], cmd)
+
+
+def copy(src: tuple[str | None, str], dst: tuple[str | None, str]) -> str:
+    """Copy as `cp -r` would, between here and bottles: a bottle's path is in its mounts' clones, a relative one
+    from its first mount (as exec runs there). Where it went, as the bottle has it if it's in one."""
+    import shutil
+
+    bottles_ = json.loads(Path(os.environ["FAKE_BOTTLE_STATE"]).read_text())["bottles"]
+
+    def mounts(name: str) -> list[dict]:
+        return sorted(bottles_[name]["mounts"], key=lambda m: len(m["path"]), reverse=True)
+
+    def here(name: str | None, path: str) -> Path:
+        if name is None:
+            return Path(path)
+        path = path if path.startswith("/") else f"{bottles_[name]['mounts'][0]['path']}/{path}"
+        for mount in mounts(name):
+            if path.startswith(mount["path"]):
+                return Path(mount["dir"] + path[len(mount["path"]):])
+        raise FolioError(f"{path} isn't in {name}'s mounts")
+
+    from_, to = here(*src), here(*dst)
+    target = to / from_.name if to.is_dir() else to
+    if from_.is_dir():
+        shutil.copytree(from_, target)
+    else:
+        shutil.copy2(from_, target)
+    if dst[0] is None:
+        return str(target)
+    for mount in mounts(dst[0]):
+        if str(target).startswith(mount["dir"]):
+            return mount["path"] + str(target)[len(mount["dir"]):]
+    return str(target)
 
 
 @contextmanager

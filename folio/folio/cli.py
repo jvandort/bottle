@@ -43,6 +43,29 @@ def main(argv: list[str] | None = None) -> int:
         attach.add_argument("--runner", metavar="RUNNER", help=RUNNER_HELP + "; a paused thread resumes there")
         attach.set_defaults(run=_attach, command=name, session=session)
 
+    exec_ = commands.add_parser(
+        "exec", help="run a command in a thread's bottle",
+        description="Run a command in the thread's bottle, as genie, at its first mount, and exit with its status: "
+        "the thread brought to running first, as `folio shell` does. --sidecar runs it in the thread's sidecar, "
+        "while the thread runs. Put -- before the command if it takes options of its own.",
+    )
+    exec_.add_argument("--sidecar", action="store_true", help="in the thread's sidecar")
+    exec_.add_argument("-t", dest="tty", action="store_true", help="give it a terminal")
+    exec_.add_argument("thread", metavar="THREAD", help="the thread")
+    exec_.add_argument("argv", nargs=argparse.REMAINDER, metavar="COMMAND", help="the command, and its arguments")
+    exec_.set_defaults(run=_exec)
+
+    cp = commands.add_parser(
+        "cp", help="copy into or out of a thread's bottle",
+        description="Copy a file or a directory as `cp -r` would: into DST if it's a directory, else as DST. "
+        "THREAD:PATH is a path in the thread's bottle (a relative one from its first mount), wherever it runs; "
+        "any other is a path here. The thread is brought to running first. --sidecar: its sidecar's, instead.",
+    )
+    cp.add_argument("--sidecar", action="store_true", help="THREAD:PATH is in the thread's sidecar")
+    cp.add_argument("src", metavar="SRC", help="THREAD:PATH, or a path here")
+    cp.add_argument("dst", metavar="DST", help="THREAD:PATH, or a path here")
+    cp.set_defaults(run=_cp)
+
     pause = commands.add_parser(
         "pause", help="snapshot a thread and delete its bottle",
         description="Snapshot the thread -- its workspace, every branch and stash, uncommitted changes, and "
@@ -172,6 +195,32 @@ def main(argv: list[str] | None = None) -> int:
     except (FolioError, engine.BottleError) as e:
         print(f"folio: error: {e}", file=sys.stderr)
         return 1
+
+
+def _exec(args: argparse.Namespace) -> int:
+    repo = repos.current()
+    argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+    if not argv:
+        raise FolioError("give the command to run: `folio exec THREAD -- COMMAND`")
+    threads.exec_(repo, threads.load(repo, args.thread), argv, sidecar=args.sidecar, tty=args.tty)
+
+
+def _cp(args: argparse.Namespace) -> int:
+    repo = repos.current()
+
+    def side(arg: str) -> tuple[threads.Thread | None, str]:
+        """THREAD:PATH, if what's before the first colon is a thread of the repo's; else a path here."""
+        name, colon, path = arg.partition(":")
+        if colon and threads.exists(repo, name):
+            return threads.load(repo, name), path or "."
+        return None, arg
+
+    src, dst = side(args.src), side(args.dst)
+    if src[0] is None and dst[0] is None:
+        raise FolioError("cp copies into or out of a thread's bottle: name one, THREAD:PATH")
+    went = threads.copy(repo, src, dst, sidecar=args.sidecar)
+    print(f"{dst[0].name}:{went}" if dst[0] is not None else went)
+    return 0
 
 
 def _runner_command(args: argparse.Namespace) -> int:

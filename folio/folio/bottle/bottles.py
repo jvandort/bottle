@@ -551,8 +551,6 @@ def context(bottle: Bottle) -> str:
                      "scp, git over ssh.")
     lines.append("- The network works as usual, DNS included. Every connection is decided by\n"
                  "  the host: private addresses are blocked, and a refused one is reset. `bottle.host` is the host.")
-    lines.append(f"- To hand the user a file or a directory, give them the command that copies it out of this\n"
-                 f"  bottle to their current directory: `bottle cp {bottle.qualified}:<path> .`")
     resolved = features_.resolve(list(bottle.features))
     if any(f.credentials for f in resolved):
         lines.append("- A credential the host attaches goes only where its feature allows: a request it refuses\n"

@@ -124,14 +124,57 @@ def run_from_file(name: str, argv: list[str], path: Path) -> None:
         raise failed(name, argv, result.returncode)
 
 
-def attach(name: str, argv: list[str]) -> NoReturn:
-    """Replace folio with a command in the bottle, on this terminal."""
-    command = _command(name, argv, tty=sys.stdin.isatty() and sys.stdout.isatty())
+def attach(name: str, argv: list[str], tty: bool | None = None) -> NoReturn:
+    """Replace folio with a command in the bottle, on this terminal: given one (`tty`; None, if this is one)."""
+    if tty is None:
+        tty = sys.stdin.isatty() and sys.stdout.isatty()
+    command = _command(name, argv, tty=tty)
     os.execvp(command[0], command)
 
 
+def copy(src: tuple[str | None, str], dst: tuple[str | None, str]) -> str:
+    """Copy a file or a directory, as `cp -r` would, between here and bottles: each side (a bottle's name, a path in
+    it; or None, a path here). Where it went: a path here, or in `dst`'s bottle."""
+    with _said():
+        sides = [_cp_side(*side) for side in (src, dst)]
+    commands = copy_commands(*sides)
+    if len(commands) == 1:
+        result = subprocess.run(commands[0], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
+        sent = 0
+    else:
+        sender = subprocess.Popen(commands[0], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        result = subprocess.run(commands[1], stdin=sender.stdout, stdout=subprocess.PIPE, text=True)
+        sender.stdout.close()
+        sent = sender.wait()
+    if result.returncode != 0 or sent != 0:
+        raise FolioError("copying failed")   # bottle-cli has said why
+    went = result.stdout.strip()
+    return went.split(":", 1)[1] if dst[0] is not None else went
+
+
+def _cp_side(name: str | None, path: str) -> tuple["krun.Cli", str]:
+    """A side of a copy, as bottle-cli's cp takes it, with the bottle-cli it's that one's: a bottle's (started, if
+    it's stopped) MACHINE:PATH, on its runner's; else a path here, on this machine's."""
+    from .bottle import krun
+
+    if name is None:
+        # A colon in a relative path here would name a machine.
+        return krun.LOCAL, path if path.startswith("/") or ":" not in path else f"./{path}"
+    bottle = bottles.ensure_running(name)
+    return bottles.runner_of(bottle).cli, f"{bottle.machine}:{path or '.'}"
+
+
+def copy_commands(src: tuple["krun.Cli", str], dst: tuple["krun.Cli", str]) -> list[list[str]]:
+    """The command lines that copy `src` to `dst`, each a side as bottle-cli's cp takes it with the bottle-cli it's
+    that one's: one cp, if they're one bottle-cli's; else two, the first's tar on stdout piped to the second."""
+    (src_cli, src_spec), (dst_cli, dst_spec) = src, dst
+    if src_cli.command([]) == dst_cli.command([]):
+        return [src_cli.command(["cp", src_spec, dst_spec])]
+    return [src_cli.command(["cp", src_spec, "-"]), dst_cli.command(["cp", "-", dst_spec])]
+
+
 STANDS_IN = ("validate_spec", "new", "status", "start", "delete", "touch", "run", "run_to_file", "run_from_file",
-             "attach")
+             "attach", "copy")
 
 if os.environ.get("FOLIO_ENGINE"):
     _spec = importlib.util.spec_from_file_location("folio_engine_stand_in", os.environ["FOLIO_ENGINE"])

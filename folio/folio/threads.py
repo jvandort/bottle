@@ -334,6 +334,11 @@ def _start_sidecar(thread: Thread) -> None:
 def sidecar_shell(repo: Repo, thread: Thread) -> NoReturn:
     """Replace folio with a login shell in the thread's sidecar, at its first mount: only while the thread is
     running, which is what the sidecar is for. Nothing keeps it: closing the terminal ends it."""
+    engine.attach(_running_sidecar(repo, thread), ["bash", "-l"])
+
+
+def _running_sidecar(repo: Repo, thread: Thread) -> str:
+    """The thread's sidecar's bottle, while the thread runs, which is what it's for; refused, saying why, else."""
     if thread.sidecar is None:
         raise FolioError(f"thread {thread.name} has no sidecar; give it one with "
                          f"`folio sidecar configure {thread.name} --runner RUNNER ...`")
@@ -346,7 +351,33 @@ def sidecar_shell(repo: Repo, thread: Thread) -> NoReturn:
             or thread.sidecar_bottle not in rows[thread.bottle].get("ssh", {}).values()):
         raise FolioError(f"thread {thread.name}'s sidecar comes with its next bottle: pause and resume it "
                          f"(`folio pause {thread.name}`, then `folio claude {thread.name}`)")
-    engine.attach(thread.sidecar_bottle, ["bash", "-l"])
+    return thread.sidecar_bottle
+
+
+def bottle_for(repo: Repo, thread: Thread, sidecar: bool = False) -> str:
+    """The bottle a command for the thread runs in: its own, the thread brought to running first (resumed, if it's
+    paused), as attach does; or, with `sidecar`, its sidecar, while the thread runs."""
+    if sidecar:
+        return _running_sidecar(repo, thread)
+    if not thread.broker:
+        lanes.register(repo.path, thread.name)
+    _ensure_running(repo, thread)
+    return thread.bottle
+
+
+def exec_(repo: Repo, thread: Thread, argv: list[str], sidecar: bool = False, tty: bool = False) -> NoReturn:
+    """Replace folio with `argv` in the thread's bottle (or its sidecar), at its first mount, as genie: its stdin,
+    stdout and exit status this process's, and a terminal, if `tty`."""
+    engine.attach(bottle_for(repo, thread, sidecar), argv, tty=tty)
+
+
+def copy(repo: Repo, src: tuple[Thread | None, str], dst: tuple[Thread | None, str], sidecar: bool = False) -> str:
+    """Copy as `cp -r` would, between here and threads' bottles (or their sidecars): each side a thread and a path
+    in its bottle, a relative one from its first mount, or None and a path here. Where it went."""
+    def side(thread: Thread | None, path: str) -> tuple[str | None, str]:
+        return (None, path) if thread is None else (bottle_for(repo, thread, sidecar), path)
+
+    return engine.copy(side(*src), side(*dst))
 
 
 def set_sidecar(repo: Repo, thread: Thread, sidecar: dict | None) -> Thread:
