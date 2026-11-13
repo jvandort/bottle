@@ -258,7 +258,12 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
     repos_ = [engine.Mount(WORKSPACE, repo.path, thread.base, lanes.bottle_remotes(thread.name)),
               engine.Mount(notes.MOUNT, notes_path, None, notes.REMOTES)]
     told, ssh = "", {}
-    if thread.sidecar is not None:
+    if thread.sidecar is None:
+        # One left from before it was taken away: it pushes into the thread's lane, as this bottle will.
+        if not _delete_sidecar(thread):
+            raise FolioError(f"thread {thread.name}'s old sidecar is left on a runner that's off, pushing "
+                             "where its bottle would: turn the runner on, then try again")
+    else:
         try:
             _make_sidecar(repo, thread, repos_)
         except FolioError as e:
@@ -275,7 +280,10 @@ def _make_bottle(repo: Repo, thread: Thread) -> None:
                    advice(thread.name, repo.name, mounts(thread), told), runner_of(repo, thread), ssh)
     except BaseException:
         if thread.sidecar is not None:
-            _delete_sidecar(thread)
+            try:
+                _delete_sidecar(thread)
+            except FolioError as e:   # what went wrong is the bottle's: this is said beside it
+                print(f"folio: {e}", file=sys.stderr)
         raise
 
 

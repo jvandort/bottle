@@ -116,6 +116,8 @@ def main(argv: list[str]) -> int:
             bottles[name]["state"] = "running"
             save(state)
         case ["delete", name]:
+            if os.environ.get("FAKE_BOTTLE_FAIL_DELETE") == name:
+                fail(f"couldn't fully delete {name}")
             shutil.rmtree(Path(bottles.pop(name)["home"]).parent)
             save(state)
         case ["exec", name, "--", *command]:

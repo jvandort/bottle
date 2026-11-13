@@ -120,10 +120,11 @@ class SidecarTest(FolioTestCase):
         self.ok("claude", "fix-it")
         self.assertEqual(sorted(self.bottles()), [self.bottle, self.sidecar])
 
-    def folio_with(self, env: dict, *args: str) -> subprocess.CompletedProcess:
+    def folio_with(self, env: dict, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         result = subprocess.run([str(FOLIO), *args], cwd=self.repo, env={**self.env, **env},
                                 capture_output=True, text=True, input="")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
         return result
 
     def test_a_resume_goes_on_without_a_sidecar_it_cant_make(self) -> None:
@@ -136,6 +137,31 @@ class SidecarTest(FolioTestCase):
         self.assertEqual(self.bottles()[self.bottle]["ssh"], {})
         self.assertNotIn("ssh sidecar", self.bottles()[self.bottle]["context"])
         self.assertIn("comes with its next bottle", self.folio("sidecar", "shell", "fix-it").stderr)
+
+    def test_one_left_when_it_was_taken_away_is_deleted_with_the_next_bottle(self) -> None:
+        self.give_it_one()
+        self.ok("pause", "fix-it")
+        self.ok("claude", "fix-it")
+        self.folio_with({"FAKE_BOTTLE_OFF": "desktop"}, "pause", "fix-it")   # left on its runner
+        self.ok("sidecar", "remove", "fix-it")
+
+        result = self.folio_with({"FAKE_BOTTLE_OFF": "desktop"}, "claude", "fix-it", check=False)
+        self.assertIn("old sidecar is left on a runner that's off", result.stderr)
+        self.assertEqual(sorted(self.bottles()), [self.sidecar])
+
+        self.ok("claude", "fix-it")
+        self.assertEqual(sorted(self.bottles()), [self.bottle])
+        self.assertEqual(self.bottles()[self.bottle]["ssh"], {})
+
+    def test_a_failed_resume_says_why_though_its_sidecar_isnt_deleted(self) -> None:
+        self.give_it_one()
+        self.ok("pause", "fix-it")
+        result = self.folio_with({"FAKE_BOTTLE_FAIL_NEW": self.bottle, "FAKE_BOTTLE_FAIL_DELETE": self.sidecar},
+                                 "claude", "fix-it", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        said = result.stderr.splitlines()
+        self.assertTrue(said[-2].startswith("folio: ") and self.sidecar in said[-2], said[-2])
+        self.assertIn(f"`bottle new {self.bottle}` failed", said[-1])
 
     def test_its_runner_turned_off_holds_nothing_up(self) -> None:
         self.give_it_one()
