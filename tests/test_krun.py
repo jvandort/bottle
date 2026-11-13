@@ -125,8 +125,7 @@ class KrunBottleTest(GitTestCase):
 
         def exec_(name, argv, user=None, workdir=None, input=None, env=None, cli=None):
             script = argv[-1]
-            what = ("contract" if "# bottle contract" in script else "trust CA" if bottles.CA_CERTIFICATE in script
-                    else "trust caching CA" if bottles.CACHE_CERTIFICATE in script
+            what = ("contract" if "# bottle contract" in script else "trust CA" if bottles.CACHE_CERTIFICATE in script
                     else "bottle.host" if host.HOST in script and "/etc/hosts" in script else "workspace")
             self.calls.append(f"{what} as {user}")
             return ""
@@ -179,7 +178,7 @@ class KrunBottleTest(GitTestCase):
         self.assertEqual(bottle.archive, "base.ext4")
         self.assertEqual(bottles.get("b").archive, "base.ext4")
         self.assertEqual(self.calls, [
-            "create", "bind b", "start", "contract as genie", "trust CA as root", "trust caching CA as root",
+            "create", "bind b", "start", "contract as genie", "trust CA as root",
             "bottle.host as root", "workspace as root", "workspace as genie",
         ])
 

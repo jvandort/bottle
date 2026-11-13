@@ -83,12 +83,9 @@ class FakeSmolvm:
         if ".ssh" in argv[-1] or "ssh_host_" in argv[-1]:   # ssh to a bottle granted, set up
             self.ssh_setup.append((name, user, argv[-1], input))
             return f"ssh-ed25519 KEY-OF-{name}\n"
-        if bottles.CA_CERTIFICATE in argv[-1]:
+        if bottles.CACHE_CERTIFICATE in argv[-1]:   # the machine's CA
             self._step("trust_egress_ca")
             self.trusted = (user, input)
-            return ""
-        if bottles.CACHE_CERTIFICATE in argv[-1]:   # the machine's caching CA, as part of trust_egress_ca
-            self.cache_trusted = (user, input)
             return ""
         if "/etc/hosts" in argv[-1]:
             self._step("point_at_host")
@@ -232,31 +229,6 @@ class CreateTest(BottleTestCase):
         self.assertEqual((fake.create_args["user"], fake.create_args["workdir"], fake.create_args["labels"]),
                          (bottles.USER, "/workspace", {}))
 
-    def test_a_bottle_made_before_keeps_its_machine(self) -> None:
-        self.fake()
-        bottle = self.create(name="old")
-        record = json.loads(bottles.records()["old"].read_text())
-        del record["machine_name"]
-        bottles.records()["old"].write_text(json.dumps(record))
-        self.assertEqual(bottles.get("old").machine, f"bottle-{bottles.namespace()}old")
-        self.assertNotEqual(bottle.machine, bottles.get("old").machine)
-
-    def test_a_bottle_made_before_has_its_machine_renamed_when_it_next_starts(self) -> None:
-        fake = self.fake()
-        self.create(name="old")
-        record = json.loads(bottles.records()["old"].read_text())
-        del record["machine_name"]
-        bottles.records()["old"].write_text(json.dumps(record))
-        legacy = f"bottle-{bottles.namespace()}old"
-        fake.machines = {legacy: "running"}
-        bottles.ensure_running("old")  # running: its name stays
-        self.assertEqual(fake.machines, {legacy: "running"})
-        fake.machines[legacy] = "stopped"
-        bottle = bottles.ensure_running("old")
-        self.assertEqual(bottle.machine, f"{bottles.namespace()}old")
-        self.assertEqual(fake.machines, {bottle.machine: "running"})
-        self.assertEqual(bottles.get("old").machine_name, bottle.machine)
-
     def test_made_with_its_network_policy_and_bottled_answering_its_machine(self) -> None:
         fake = self.fake()
         bottle = self.create()
@@ -266,7 +238,7 @@ class CreateTest(BottleTestCase):
         self.assertIn({"network": bottles.host.SSH_NETWORK, "port": bottles.host.SSH_PORT,
                        "socket": str(sockets["ssh"])}, network["routes"])
         self.assertIn("deb.debian.org", [c["host"] for c in network["cache"]])
-        self.assertTrue(bottles.get("example").networked)
+        self.assertEqual(bottles.get("example").network_version, bottles.NETWORK)
         self.assertEqual(fake.bound_machines, {"example": bottle.machine})
         self.assertEqual(fake.started[bottle.machine], 1)
 
@@ -471,12 +443,12 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         stop_bottle("example")
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
+        bottles._save(dataclasses.replace(bottles.get("example"), network_version=0))
 
         bottles.ensure_running("example")
 
         self.assertEqual(fake.configured[bottle.machine]["routes"], fake.create_args["network"]["routes"])
-        self.assertTrue(bottles.get("example").networked)
+        self.assertEqual(bottles.get("example").network_version, bottles.NETWORK)
 
     def test_starting_is_binding_and_starting_alone(self) -> None:
         # Its CA, bottle.host and what the contract checked are on its disk, from when it was made.
@@ -491,7 +463,7 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
+        bottles._save(dataclasses.replace(bottles.get("example"), network_version=0))
         fake.calls.clear()
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["bind", "start", "verify_contract", "trust_egress_ca", "point_at_host"])
@@ -508,11 +480,10 @@ class EnsureRunningTest(BottleTestCase):
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
-        bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
+        bottles._save(dataclasses.replace(bottles.get("example"), network_version=0))
         fake.trusted = None
         bottles.ensure_running("example")
-        self.assertEqual(fake.cache_trusted, ("root", "the machine's CA's certificate"))
-        self.assertEqual(fake.trusted, ("root", None))  # bottled's own, from before, taken out
+        self.assertEqual(fake.trusted, ("root", "the machine's CA's certificate"))
 
     def test_missing_machine(self) -> None:
         fake = self.fake()
@@ -736,10 +707,9 @@ class DroneCertificatesTest(BottleTestCase):
         bottle = bottles.get("there")
         bottles.trust_egress_ca(bottle)
         self.box.cache_certificate.assert_called_once_with(bottle.machine, [])  # its policy's hosts, as it has them
-        [(script, ours), (cache_script, theirs)] = self.installed
-        self.assertIn(bottles.CA_CERTIFICATE, script)
-        self.assertIn(bottles.CACHE_CERTIFICATE, cache_script)
-        self.assertEqual((ours, theirs), (None, "the runner's CA's certificate"))
+        [(script, theirs)] = self.installed
+        self.assertIn(bottles.CACHE_CERTIFICATE, script)
+        self.assertEqual(theirs, "the runner's CA's certificate")
 
 
 
@@ -1025,19 +995,6 @@ class MountsTest(BottleTestCase):
         bottles._forget("app-t")
         bottles._forget("app-t-sidecar")
         self.assertFalse((thread / "bottles").exists())   # none left there
-
-    def test_a_record_from_before_mounts_is_its_one_repo_at_workspace(self) -> None:
-        record = {"name": "old", "id": "i", "image": "base", "branch": "main", "commit": "c" * 40, "created": 0.0,
-                  "status": "ready", "git_repo": str(self.repo_path),
-                  "remotes": [{"name": "agent", "fetch": "ns/a", "push": "ns/a", "advance": "main"}]}
-        write_json(thread_dir() / "bottles" / "old.json", record)
-        [mount] = bottles.get("old").mounts
-        # Where its machine has them: objects at the old place, remotes straight under /git.
-        self.assertEqual((mount.path, mount.repo, mount.branch, mount.objects, mount.at),
-                         ("/workspace", str(self.repo_path), "main", "/mnt/repo/objects", ""))
-        self.assertEqual(mount.remotes, (host.Remote("agent", "ns/a", "ns/a"),))   # advance is gone
-        self.assertEqual(mount.url("agent"), "http://bottle.host/git/agent")
-        self.assertEqual(bottles.get("old").runner, "local")   # from before runners
 
     def test_its_runner_is_recorded(self) -> None:
         self.fake()

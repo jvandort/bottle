@@ -187,8 +187,7 @@ class Served:
 
     git_dir: Path | None  # the repo its remotes are served from; None: it's gone
     remotes: tuple[Remote, ...] = ()
-    # Where under /git its remotes are: the mount's path, without the leading /.
-    # "" puts them at /git/<remote>, as bottles made before mounts have them.
+    # Where under /git its remotes are: the mount's path, without the leading /; "" puts them at /git/<remote>.
     at: str = ""
     view_dir: Path | None = None  # where its upstream view is written (default: under BOTTLE_HOME)
 

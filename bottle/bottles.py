@@ -57,9 +57,6 @@ USER = "genie"
 HOME = f"/home/{USER}"
 # A mount's path: absolute, of name-like segments, so it's safe in a URL and a shell.
 MOUNT_PATH = re.compile(r"(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+")
-# How a bottle made before mounts had its one repo: at /workspace, its objects at
-# /mnt/repo/objects, its remotes at http://bottle.host/git/<remote>.
-LEGACY_PATH, LEGACY_OBJECTS = "/workspace", "/mnt/repo/objects"
 CONTEXT_FILE = "BOTTLE.md"  # in genie's home
 GIT_URL = f"http://{host.HOST}{host.GIT_PATH}"
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -76,8 +73,6 @@ CONTRACT = (
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
-# Where folio serve's egress CA was in a bottle's trust store, before its machine's own took its place.
-CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
 # Where a bottle has its machine's CA, which bottle-cli where it runs takes TLS off with (bottle-cli ca), in the
 # trust store whose bundle the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
 CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"
@@ -112,7 +107,7 @@ class Mount:
         return self.branch or f"({self.commit[:12]})"
 
     def url(self, remote: str) -> str:
-        return f"{GIT_URL}/{self.at}/{remote}" if self.at else f"{GIT_URL}/{remote}"
+        return f"{GIT_URL}/{self.at}/{remote}"
 
 
 @dataclass(frozen=True)
@@ -163,13 +158,10 @@ class Bottle:
     runner: str = runners.LOCAL
     # The bottles it may ssh to.
     ssh: tuple[SshGrant, ...] = ()
-    # Its machine's name, as bottle-cli has it; "" for a bottle made before it was recorded (see machine).
+    # Its machine's name, as bottle-cli here has it (see machine).
     machine_name: str = ""
-    # Whether its machine has its network policy (see network); one made before machines had their own is given
-    # it as it's next started.
-    networked: bool = False
-    # Which of network()'s policies its machine has (NETWORK the current one); 0 for none, or one from before this
-    # was recorded (1 if it was networked). One behind is given the current one as it's next started.
+    # Which of network()'s policies its machine has (NETWORK the current one); 0 for one from before this was
+    # recorded. One behind is given the current one as it's next started.
     network_version: int = 0
 
     def __post_init__(self) -> None:
@@ -190,9 +182,8 @@ class Bottle:
 
     @property
     def machine(self) -> str:
-        # Its own name (in this home's namespace), as bottle-cli lists it; one made before machines had that,
-        # bottle- and it.
-        return self.machine_name or f"bottle-{namespace()}{self.name}"
+        """Its machine's name, as bottle-cli lists it: its own, in this home's namespace."""
+        return self.machine_name
 
     @property
     def qualified(self) -> str:
@@ -219,7 +210,7 @@ def load() -> dict[str, Bottle]:
         entry = read_json(path)
         # Keys a record from an older bottle may have (its driver, say) are left out.
         if entry is not None:
-            bottles[name] = Bottle(**{k: v for k, v in _mounted(entry).items() if k in known})
+            bottles[name] = Bottle(**{k: v for k, v in entry.items() if k in known})
     return bottles
 
 
@@ -255,17 +246,6 @@ def _move_registry() -> None:
         print(f"bottle: bottles.json is moved into folio's threads; no thread had the bottles whose machines are "
               f"{', '.join(sorted(orphans))}: they're bottle-cli's now (`bottle machine delete --name MACHINE`)",
               file=sys.stderr)
-
-
-def _mounted(entry: dict) -> dict:
-    """A record from before mounts, with its one repo as the mount it always was."""
-    if "mounts" in entry or not entry.get("git_repo"):
-        return entry
-    return {**entry, "mounts": [{
-        "path": LEGACY_PATH, "repo": entry["git_repo"], "branch": entry.get("branch"),
-        "commit": entry.get("commit", ""), "remotes": entry.get("remotes", []),
-        "objects": LEGACY_OBJECTS, "at": "",
-    }]}
 
 
 def get(name: str) -> Bottle:
@@ -486,7 +466,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
         # What bottle-cli's exec and shell use unless told, and what its ls shows.
         user=USER, workdir=bottle.workdir, labels=specs.labels(bottle.spec), network=network(bottle),
     )
-    bottle = replace(bottle, networked=True, network_version=NETWORK)
+    bottle = replace(bottle, network_version=NETWORK)
     _save(bottle)
     _start_machine(bottle)
     verify_contract(bottle)
@@ -530,10 +510,6 @@ def _start_machine(bottle: Bottle) -> None:
 NETWORK = 2
 
 
-def _network_version(bottle: Bottle) -> int:
-    return bottle.network_version or (1 if bottle.networked else 0)
-
-
 def network(bottle: Bottle) -> dict:
     """The policy the bottle's machine decides its connections by (services.network): what its features cache,
     and what it routes to folio serve: bottle.host, ssh to bottles, and its credentials' hosts, logged in or not."""
@@ -574,7 +550,7 @@ def git_dir(mount: Mount) -> Path | None:
 
 def served(bottle: Bottle) -> tuple[host.Served, ...]:
     """What folio serve serves the bottle at bottle.host: each mount's repo and remotes."""
-    return tuple(host.Served(git_dir(m), m.remotes, m.at or "") for m in bottle.mounts)
+    return tuple(host.Served(git_dir(m), m.remotes, m.at) for m in bottle.mounts)
 
 
 def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, ...] | list[str] = (),
@@ -715,18 +691,17 @@ def ensure_running(name: str) -> Bottle:
     if state is None:
         raise BottleError(f"{bottle.name}'s machine is gone; delete its thread (`folio delete`)")
     if state != "running":
-        bottle = _named_machine(bottle, runner)
-        given = _network_version(bottle) < NETWORK
+        given = bottle.network_version < NETWORK
         if given:
-            # Made before machines had their own policy, or this one: given it now.
+            # Made with another policy than this one: given it now.
             runner.configure(bottle.machine, network(bottle))
-            bottle = replace(bottle, networked=True, network_version=NETWORK)
+            bottle = replace(bottle, network_version=NETWORK)
             _save(bottle)
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
         if given:
-            # What was set up in it before is set up again for its policy; one made with its policy has
-            # all it needs on its disk, as bottle-cli's start alone would find it.
+            # What's set up in it for its policy, again; one made with this policy has all it needs on its
+            # disk, as bottle-cli's start alone would find it.
             verify_contract(bottle)
             trust_egress_ca(bottle)
             point_at_host(bottle)
@@ -736,32 +711,14 @@ def ensure_running(name: str) -> Bottle:
     return bottle
 
 
-def _named_machine(bottle: Bottle, runner: runners.Runner) -> Bottle:
-    """`bottle`, its stopped machine renamed for it if it was made with bottle-'s prefix (see Bottle.machine)."""
-    if bottle.machine_name:
-        return bottle
-    named = replace(bottle, machine_name=f"{namespace()}{bottle.name}")
-    try:
-        runner.rename(bottle.machine, named.machine)
-    except BottleError as e:
-        log.warning("%s: its machine keeps its name %s (%s)", bottle.name, bottle.machine, e)
-        return bottle
-    _save(named)
-    log.info("%s: its machine %s is %s now", bottle.name, bottle.machine, named.machine)
-    return named
-
-
 def trust_egress_ca(bottle: Bottle) -> None:
-    """Make the bottle's trust store hold its machine's CA's certificate, and no other of bottle's.
+    """Make the bottle's trust store hold its machine's CA's certificate.
 
     The CA bottle-cli takes TLS off with, where the bottle runs, for the hosts
     its policy caches over https and routes by name (bottle-cli ca): what lets
-    it answer cached hosts and give folio serve credentials' requests. Each time
-    a bottle starts, so one made before, or given its policy since, trusts the
-    current one; one with no such hosts trusts none. folio serve's own egress CA,
-    from before, is taken out.
+    it answer cached hosts and give folio serve credentials' requests. One with
+    no such hosts trusts none.
     """
-    _trust(bottle, CA_CERTIFICATE, None)
     _trust(bottle, CACHE_CERTIFICATE, runner_of(bottle).cache_certificate(bottle.machine, []))
 
 

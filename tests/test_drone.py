@@ -160,7 +160,7 @@ class DroneTest(DroneCase):
         repo = self.tmp / "repo"
         run("git", "clone", "-q", upstream, repo)
         remotes = (Remote("origin", "upstream"),)
-        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", machine_name="bottle-b", mounts=(
             bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
         box = runners.get("box")
 
@@ -225,7 +225,7 @@ class DroneTest(DroneCase):
         repo = self.tmp / "repo"
         run("git", "clone", "-q", upstream, repo)
         remotes = (Remote("origin", "upstream"), Remote("work", "ns/w", "ns/w"))
-        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", mounts=(
+        write_bottles({"b": bottles.Bottle("b", "i", "base", 0.0, status="ready", runner="box", machine_name="bottle-b", mounts=(
             bottles.Mount("/workspace", str(repo), "main", run("git", "-C", repo, "rev-parse", "HEAD"), remotes),))})
         box = runners.get("box")
         box.objects(repos.Repo("repo", repo))
@@ -272,7 +272,7 @@ class DetachTest(DroneCase):
         (self.remote / ".bottle" / "dist" / "bottle-cli").write_text(STATEFUL_CLI)
         self.machines = self.remote / "machines"
         self.machines.mkdir()
-        write_bottles({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box")
+        write_bottles({name: bottles.Bottle(name, name, "base", 0.0, status="ready", runner="box", machine_name=f"bottle-{name}")
                         for name in ("a", "b")})
         self.a = self.machines / bottles.get("a").machine
         self.a.write_text("running\n")
