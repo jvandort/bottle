@@ -72,9 +72,6 @@ CONTRACT = (
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
-# Where a bottle has its machine's CA, which bottle-cli where it runs takes TLS off with (bottle-cli ca), in the
-# trust store whose bundle the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
-CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"
 
 
 @dataclass(frozen=True)
@@ -427,7 +424,6 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     _save(bottle)
     _start_machine(bottle)
     verify_contract(bottle)
-    trust_egress_ca(bottle)
     point_at_host(bottle)
     _init_mounts(bottle)
     for grant in bottle.ssh:
@@ -457,8 +453,8 @@ def _let_in(bottle: Bottle, grant: SshGrant) -> None:
 
 def _start_machine(bottle: Bottle) -> None:
     """Start the bottle's machine, folio serve answering what it routes there as this bottle's, its credentials
-    read now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, which trust_egress_ca
-    installs once it's up."""
+    read now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, and gives it to the
+    bottle to trust (the base image's entrypoint does)."""
     daemon.bind(bottle.name, bottle.machine, served(bottle), bottle.features)
     runner_of(bottle).start(bottle.machine)
 
@@ -660,39 +656,11 @@ def ensure_running(name: str) -> Bottle:
             # What's set up in it for its policy, again; one made with this policy has all it needs on its
             # disk, as bottle-cli's start alone would find it.
             verify_contract(bottle)
-            trust_egress_ca(bottle)
             point_at_host(bottle)
     else:
         # Running: folio serve, if it had stopped, binds it again as it starts.
         daemon.start()
     return bottle
-
-
-def trust_egress_ca(bottle: Bottle) -> None:
-    """Make the bottle's trust store hold its machine's CA's certificate.
-
-    The CA bottle-cli takes TLS off with, where the bottle runs, for the hosts
-    its policy caches over https and routes by name (bottle-cli ca): what lets
-    it answer cached hosts and give folio serve credentials' requests. One with
-    no such hosts trusts none.
-    """
-    _trust(bottle, CACHE_CERTIFICATE, runner_of(bottle).cache_certificate(bottle.machine, []))
-
-
-def _trust(bottle: Bottle, path: str, certificate: str | None) -> None:
-    """Have the bottle's trust store hold `certificate` at `path`, or nothing there if it's None."""
-    if certificate is None:
-        script = f"if [ -e {path} ]; then rm {path} && update-ca-certificates --fresh >/dev/null; fi"
-    else:
-        script = (
-            f"cat > {path}.new && "
-            f"if cmp -s {path}.new {path}; then rm {path}.new; "
-            f"else mv {path}.new {path} && update-ca-certificates --fresh >/dev/null; fi"
-        )
-    try:
-        _exec(bottle, ["sh", "-c", script], user="root", input=certificate)
-    except BottleError as e:
-        raise BottleError(f"installing the egress CA in {bottle.machine} failed: {e}") from None
 
 
 def verify_contract(bottle: Bottle) -> None:

@@ -122,7 +122,7 @@ class KrunBottleTest(GitTestCase):
 
         def exec_(name, argv, user=None, workdir=None, input=None, env=None, cli=None):
             script = argv[-1]
-            what = ("contract" if "# bottle contract" in script else "trust CA" if bottles.CACHE_CERTIFICATE in script
+            what = ("contract" if "# bottle contract" in script
                     else "bottle.host" if host.HOST in script and "/etc/hosts" in script else "workspace")
             self.calls.append(f"{what} as {user}")
             return ""
@@ -159,7 +159,6 @@ class KrunBottleTest(GitTestCase):
             (bottles.auth, "warn_unset", lambda specs: None),
             (bottles.auth, "standins_for", lambda specs: {"CLAUDE_CODE_OAUTH_TOKEN": "stand-in"}),
             (bottles.auth, "credential_destinations", lambda specs: []),
-            (bottles.runners.krun, "ca_certificate", lambda name, hosts, cli=None: None),
         ):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -173,7 +172,7 @@ class KrunBottleTest(GitTestCase):
     def test_a_new_bottle_is_a_machine_bound_to_folio_serve(self) -> None:
         self.create()
         self.assertEqual(self.calls, [
-            "create", "bind b", "start", "contract as genie", "trust CA as root",
+            "create", "bind b", "start", "contract as genie", 
             "bottle.host as root", "workspace as root", "workspace as genie",
         ])
 

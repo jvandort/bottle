@@ -166,7 +166,7 @@ class Injection:
     request folio serve can read, so for this host and port its machine routes the
     flow to folio serve, bottle-cli completing the TLS handshake with a certificate
     from the machine's CA, which the bottle trusts for its credentials' and
-    cached hosts only (bottle-cli ca); folio serve reads each request, and sends it
+    cached hosts only; folio serve reads each request, and sends it
     on over its own verified TLS connection. A credential is never on the wire in the clear, in the bottle
     or beyond it.
 

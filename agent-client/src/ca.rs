@@ -1,10 +1,10 @@
-//! bottle-cli's caching CA: what lets the host side read a bottle's HTTPS to the hosts whose
-//! downloads it keeps (see cache.rs), as bottled's egress CA does for a credential's (bottle/ca.py).
+//! bottle-cli's caching CA: what lets the host side read a bottle's HTTPS to the hosts its policy
+//! caches (see cache.rs) and routes by name (a credential's, given to folio serve).
 //!
-//! Each machine (and builds, together) has its own, constrained to its cached hosts by a name
-//! constraint, so a certificate it signs is good for nothing else; the bottle trusts it, beside
-//! bottled's, once bottle has installed it. Made when it's first asked for (`bottle-cli ca
-//! certificate`), kept in $BOTTLE_HOME/krun/ca/NAME/HASH/, HASH being of its hosts: other hosts
+//! Each machine (and builds, together) has its own, constrained to those hosts by a name
+//! constraint, so a certificate it signs is good for nothing else; the bottle trusts it (boot gives
+//! it at /run/bottle/ca.crt, for the image to put in its trust store). Made when it's first asked
+//! for (certificate: as a machine starts, or a build step asks), kept in $BOTTLE_HOME/krun/ca/NAME/HASH/, HASH being of its hosts: other hosts
 //! make another CA, and the old one goes. Its key never leaves bottle-cli. A host's certificate is
 //! minted from it when a connection first needs one, with one leaf key per CA, as bottled does.
 //!

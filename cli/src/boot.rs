@@ -12,7 +12,8 @@
 //! host directory, read-only at TARGET (virtio-fs). With --network, the bottle has a network,
 //! every connection it makes decided by FILE's policy (see bottle-agent-client's policy): cached
 //! hosts answered here and routed ones given to their services, their TLS with NAME's caching CA
-//! (see `bottle-cli ca`), NAME being who a service is told they're from. With --net-direct,
+//! (see bottle-agent-client's ca), NAME being who a service is told they're from; its certificate
+//! is given to the bottle at /run/bottle/ca.crt (CA_CERTIFICATE), for its image to trust. With --net-direct,
 //! every connection's allowed; without either, there's none.
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
 //! it's up. While it runs, its clock is set from this machine's and its freed memory given back
@@ -93,6 +94,11 @@ fn kernel() -> io::Result<Option<CString>> {
 const CONFIG: &std::ffi::CStr = c"bottle-init.json";
 
 /// The mount points the agent needs in the first root, which is read-only.
+/// Where a machine's caching CA's certificate is in it, as it boots: the image's to trust (the base
+/// feature's entrypoint puts it in its trust store), on /run's tmpfs, so on no disk. None for a
+/// machine whose policy terminates no TLS.
+const CA_CERTIFICATE: &str = "/run/bottle/ca.crt";
+
 const MOUNT_POINTS: [&std::ffi::CStr; 4] = [c"dev", c"proc", c"sys", c"run"];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -318,6 +324,13 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     }
     if let Some(run) = &args.run {
         config["run"] = serde_json::json!(run);
+    }
+    // Its caching CA's certificate, where the image trusts it from as it starts (CA_CERTIFICATE).
+    if let (Net::Policy(path), Some(name)) = (&args.net, &args.ca)
+        && let Some(pem) =
+            bottle_agent_client::ca::certificate(name, &policy(path)?.terminated_hosts())?
+    {
+        config["files"] = serde_json::json!([{"path": CA_CERTIFICATE, "content": pem}]);
     }
     let config: &'static [u8] = Box::leak(config.to_string().into_bytes().into_boxed_slice());
     init.extend(["--config".into(), format!("/{}", CONFIG.to_string_lossy())]);

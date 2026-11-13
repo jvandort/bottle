@@ -4,7 +4,7 @@ Every bottle starts from its image, so a build in a new one downloads every
 dependency again. A feature can name hosts whose downloads are worth keeping,
 and every apt repository an image has is kept too (see apt.py). bottle-cli,
 which carries a bottle's connections, terminates the bottle's TLS to them
-with the machine's caching CA (`bottle-cli ca`), answers what it has, and
+with the machine's caching CA, answers what it has, and
 keeps what it fetches, in $BOTTLE_HOME/cache/http, removing what's gone
 unused for a week (see bottle-agent-client's cache and store). A machine's
 policy says which hosts, and how (services.cache_rules).

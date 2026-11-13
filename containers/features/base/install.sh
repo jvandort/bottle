@@ -7,9 +7,10 @@
 #   - git: setting up /workspace, pushing work back to the host, and
 #     `bottle delete`'s check for unpushed work
 #   - sshd, for IDEs
-#   - ca-certificates, so bottle can install the egress CA (bottle/ca.py) in
-#     the trust store when the bottle starts; NODE_EXTRA_CA_CERTS points at
-#     the store's bundle, so Node tools (Claude Code among them) trust it too
+#   - ca-certificates, so the entrypoint can trust the machine's CA, which
+#     bottle-cli gives at /run/bottle/ca.crt, when the bottle starts;
+#     NODE_EXTRA_CA_CERTS points at the store's bundle, so Node tools (Claude
+#     Code among them) trust it too
 # bottle verifies it whenever a bottle starts (CONTRACT in bottle/bottles.py);
 # keep the two in sync.
 #
@@ -20,8 +21,7 @@
 #
 # Its containerEnv: LANG, and NODE_EXTRA_CA_CERTS. Node trusts its own roots,
 # and NODE_EXTRA_CA_CERTS: the system bundle, which update-ca-certificates
-# rebuilds with every CA bottle installs when a bottle starts (CA_CERTIFICATE
-# and CACHE_CERTIFICATE in bottle/bottles.py), however many there are.
+# rebuilds with the machine's CA when a bottle starts (entrypoint.sh).
 #
 # Its packages are its customizations.bottle.apt's, installed before this runs.
 set -eu

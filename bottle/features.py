@@ -70,7 +70,7 @@ those hosts (see bottle/egress.py).
   A tool in the bottle talks to the host over https as it always would: its
   machine routes the connection to folio serve, bottle-cli taking the TLS off with
   a certificate from the machine's CA, which the bottle trusts for its
-  credentials' and cached hosts and no others (bottle-cli ca), so folio serve can
+  credentials' and cached hosts and no others, so folio serve can
   read the request and put the credential in place of the stand-in, on the
   requests that present it (see below). A host is a name, an IP address, or
   `*.` and a name, since the CA's name constraint can say nothing else. Anything else the tool needs in order to believe it's

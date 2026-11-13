@@ -228,10 +228,11 @@ its name: `bottle start MACHINE` needs nothing else, and what it routes is
 refused while nothing answers there.
 
 For the hosts its policy routes by name and caches over https, a machine's
-TLS is taken off with a CA of its own, made by `bottle-cli ca` in
-`~/.bottle/krun/ca/<machine>` as it starts, and installed in that bottle's
-trust store (whose bundle `NODE_EXTRA_CA_CERTS` names, for Node tools); a
-machine with no such hosts has none. The CA carries a name constraint
+TLS is taken off with a CA of its own, made in `~/.bottle/krun/ca/<machine>`
+as it starts. Its certificate is given to the bottle at `/run/bottle/ca.crt`,
+on `/run`'s tmpfs, as it boots, for the image to trust: bottle's base image
+puts it in its trust store as it starts (whose bundle `NODE_EXTRA_CA_CERTS`
+names, for Node tools). A machine with no such hosts has none. The CA carries a name constraint
 permitting only those hosts, which the bottle's own TLS clients enforce: a
 certificate for any other site is refused, whoever signs it. A constraint on a
 host also covers the names below it (`github.com` covers `gist.github.com`);

@@ -53,6 +53,18 @@ pub struct Config {
     /// background, as root, in /.
     #[serde(default)]
     pub run: Option<Vec<String>>,
+    /// Files written into the bottle as it boots, before its image runs anything: on /run's
+    /// tmpfs, say, so they're there each boot as given and on no disk.
+    #[serde(default)]
+    pub files: Vec<File>,
+}
+
+/// A file, written by init: `content` at `path`, readable by everyone, its directories made.
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct File {
+    pub path: String,
+    pub content: String,
 }
 
 /// A directory of the host's, read-only in the bottle at `target`.
@@ -164,6 +176,9 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
     for m in under_run {
         mount_share(m, &m.target)?;
     }
+    for file in &stack.config.files {
+        write_file(file).map_err(|e| failed(&file.path, e))?;
+    }
     for (name, value) in &stack.config.env {
         // SAFETY: before any thread: the reaper and the connections start after init.
         unsafe { std::env::set_var(name, value) };
@@ -182,6 +197,16 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         run(argv);
     }
     Ok(upper)
+}
+
+/// One of the config's files, written in place, readable by everyone.
+fn write_file(file: &File) -> io::Result<()> {
+    let path = Path::new(&file.path);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, &file.content)?;
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
 }
 
 /// `name`, this machine's, in `hosts`, as Debian has it (127.0.1.1), unless it's there already:

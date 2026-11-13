@@ -78,10 +78,6 @@ class FakeSmolvm:
         if ".ssh" in argv[-1] or "ssh_host_" in argv[-1]:   # ssh to a bottle granted, set up
             self.ssh_setup.append((name, user, argv[-1], input))
             return f"ssh-ed25519 KEY-OF-{name}\n"
-        if bottles.CACHE_CERTIFICATE in argv[-1]:   # the machine's CA
-            self._step("trust_egress_ca")
-            self.trusted = (user, input)
-            return ""
         if "/etc/hosts" in argv[-1]:
             self._step("point_at_host")
             self.hosts = (user, argv[-1])
@@ -113,8 +109,6 @@ class FakeSmolvm:
         self.calls.append("daemon_start")
         return False
 
-    def ca_certificate(self, name, hosts, cli=None):
-        return "the machine's CA's certificate"  # for its policy's hosts, which bottle-cli reads
 
     def daemon_stop(self):
         self.calls.append("daemon_stop")
@@ -123,7 +117,7 @@ class FakeSmolvm:
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
             (bottles.runners.krun, ("create", "configure", "start", "stop", "rename", "delete", "state", "exec_",
-                                    "exec_command", "ca_certificate")),
+                                    "exec_command")),
             (daemon, ("bind", "release_egress")),
         ):
             for name in names:
@@ -194,8 +188,8 @@ class CreateTest(BottleTestCase):
     def test_order_bound_before_it_starts(self) -> None:
         fake = self.fake()
         self.create()
-        self.assertEqual(fake.calls, ["warn_unset", "create", "bind", "start", "verify_contract",
-                                      "trust_egress_ca", "point_at_host", "init_workspace"])
+        self.assertEqual(fake.calls, ["warn_unset", "create", "bind", "start", "verify_contract", "point_at_host",
+                                      "init_workspace"])
 
     def test_record_is_written_before_anything_is_created(self) -> None:
         fake = self.fake()
@@ -355,7 +349,7 @@ class CreateTest(BottleTestCase):
 
 class RollbackTest(BottleTestCase):
     def test_failure_at_each_step_leaves_nothing(self) -> None:
-        for step in ("create", "bind", "start", "verify_contract", "trust_egress_ca", "point_at_host", "init_workspace"):
+        for step in ("create", "bind", "start", "verify_contract", "point_at_host", "init_workspace"):
             with self.subTest(step):
                 fake = self.fake(fail=step)
                 with self.assertRaisesRegex(BottleError, f"{step} failed"):
@@ -452,7 +446,7 @@ class EnsureRunningTest(BottleTestCase):
         bottles._save(dataclasses.replace(bottles.get("example"), network_version=0))
         fake.calls.clear()
         bottles.ensure_running("example")
-        self.assertEqual(fake.calls, ["bind", "start", "verify_contract", "trust_egress_ca", "point_at_host"])
+        self.assertEqual(fake.calls, ["bind", "start", "verify_contract", "point_at_host"])
 
     def test_running_bottle_only_makes_sure_bottled_is_up(self) -> None:
         # Its token is kept: a bottled that had stopped binds it again as it starts.
@@ -461,15 +455,6 @@ class EnsureRunningTest(BottleTestCase):
         fake.calls.clear()
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["daemon_start"])
-
-    def test_given_its_policy_it_trusts_its_machines_ca_as_root(self) -> None:
-        fake = self.fake()
-        bottle = self.create()
-        fake.machines[bottle.machine] = "stopped"
-        bottles._save(dataclasses.replace(bottles.get("example"), network_version=0))
-        fake.trusted = None
-        bottles.ensure_running("example")
-        self.assertEqual(fake.trusted, ("root", "the machine's CA's certificate"))
 
     def test_missing_machine(self) -> None:
         fake = self.fake()
@@ -660,36 +645,6 @@ class UnreachableRunnerTest(BottleTestCase):
         self.assertEqual([(b.name, state) for b, state in bottles.list_all()],
                          [("here", "running"), ("there", "unreachable"), ("also-there", "unreachable")])
         self.assertEqual(len(self.asked), 1)
-
-
-class DroneCertificatesTest(BottleTestCase):
-    """A bottle on a runner elsewhere trusts its machine's CA, which bottle-cli there takes TLS off with."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.fake_smolvm = self.fake()
-        bottle = self.create(name="there")
-        records = bottles.load()
-        records["there"] = dataclasses.replace(bottle, runner="box")
-        write_bottles(records)
-        self.box = mock.Mock()
-        self.box.name = "box"
-        self.box.cache_certificate.return_value = "the runner's CA's certificate"
-        self.box.exec_.side_effect = lambda machine, argv, user=None, input=None: self.installed.append((argv[-1], input)) or ""
-        self.installed = []
-        real = bottles.runners.get
-        patcher = mock.patch.object(bottles.runners, "get", side_effect=lambda name="local": self.box if name == "box" else real(name))
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_its_runners_and_no_other(self) -> None:
-        bottle = bottles.get("there")
-        bottles.trust_egress_ca(bottle)
-        self.box.cache_certificate.assert_called_once_with(bottle.machine, [])  # its policy's hosts, as it has them
-        [(script, theirs)] = self.installed
-        self.assertIn(bottles.CACHE_CERTIFICATE, script)
-        self.assertEqual(theirs, "the runner's CA's certificate")
-
 
 
 class ExecTest(BottleTestCase):

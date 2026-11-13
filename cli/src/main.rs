@@ -6,7 +6,6 @@ use std::process::ExitCode;
 
 mod boot;
 mod build;
-mod ca;
 mod copy;
 mod exec;
 mod machine;
@@ -37,7 +36,6 @@ fn main() -> ExitCode {
         Some("image") => build::image(args),
         Some("images") => build::images(args),
         Some("gc") => build::gc(args),
-        Some("ca") => ca::main(args),
         Some("runner") => runner::main(args),
         Some("on") => runner::on(args),
         // Its own processes: a machine's VM, and a runner's machine's forwards.
@@ -62,7 +60,6 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("usage: bottle-cli {}", machine::USAGE);
     eprintln!("   or: bottle-cli {}", build::USAGE);
     eprintln!("   or: bottle-cli {}", runner::USAGE);
-    eprintln!("   or: bottle-cli {}", ca::USAGE);
     ExitCode::from(FAILED)
 }
 

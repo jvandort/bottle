@@ -328,9 +328,18 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
         "--network",
         &policy.display().to_string(),
     ]);
-    // Its caching CA, for its policy's hosts: what its creator installs in it.
-    let pem = f.ok(&["ca", "certificate", "m2"]);
-    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    // Its caching CA, for its policy's hosts, made as it starts: the one there is.
+    let ca = || {
+        let dir = f.dir.join("home/krun/ca/m2");
+        let [entry] = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        fs::read_to_string(entry.join("ca.crt")).unwrap()
+    };
     // Started with nothing but its name; the network's its own.
     let refused = f.cli(&["start", "m2", "--net-direct"]);
     assert!(!refused.status.success(), "another network than its own");
@@ -343,7 +352,8 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
         machine.join("network.json").display().to_string()
     );
     assert_eq!(options["--ca"], "m2");
-    assert_eq!(f.ok(&["ca", "certificate", "m2"]), pem); // the same CA, as it started
+    let pem = ca();
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
     // Given again, stopped only: its CA follows its hosts.
     let other = f.dir.join("other.json");
     fs::write(&other, r#"{"cache": [{"host": "other.example"}]}"#).unwrap();
@@ -352,9 +362,9 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     assert!(!refused.status.success(), "running");
     f.ok(&["stop", "m2"]);
     f.ok(&["configure", "m2", "--network", &other]);
-    assert_ne!(f.ok(&["ca", "certificate", "m2"]), pem);
     // Stopped, it's started by what needs it running: nothing else is needed.
     f.ok(&["exec", "m2", "--", "true"]);
+    assert_ne!(ca(), pem);
     assert_eq!(f.ok(&["status", "m2"]), "running\n");
     f.ok(&["stop", "m2"]);
     f.ok(&["start", "m2"]);

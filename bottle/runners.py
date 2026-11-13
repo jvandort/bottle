@@ -124,10 +124,6 @@ class Runner:
                      tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
         return krun.exec_command(self.qualified(machine), argv, user=user, workdir=workdir, tty=tty, env=env)
 
-    def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
-        """The certificate of the caching CA its bottle-cli answers `machine`'s cached https `hosts` behind, made
-        if missing; None if there are no hosts. bottle-cli deletes it with the machine."""
-        return krun.ca_certificate(machine, hosts, cli=self.cli)
 
 
 def mirror_key(git_dir: Path) -> str:

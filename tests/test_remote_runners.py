@@ -91,8 +91,7 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
         context = self.tmp / "context"
         context.mkdir()
         (context / "install.sh").write_text("the context's install.sh\n")
-        with mock.patch.object(runners.krun, "ca_certificate", return_value=None), \
-                mock.patch("sys.stderr"), self.assertRaisesRegex(BottleError, "image build failed"):
+        with mock.patch("sys.stderr"), self.assertRaisesRegex(BottleError, "image build failed"):
             images.build_recipe(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []},
                                 cli=self.box.cli)
 

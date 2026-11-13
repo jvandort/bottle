@@ -571,18 +571,6 @@ fn start(machine: &Machine, args: &[String]) -> io::Result<()> {
     machine.start(&net)
 }
 
-/// The hosts whose TLS machine `name`'s network policy has terminated here, for its caching CA;
-/// None if it has no policy of its own (or there's no such machine).
-pub fn terminated_hosts(name: &str) -> io::Result<Option<Vec<String>>> {
-    let machine = Machine::new(name)?;
-    if !machine.network().exists() {
-        return Ok(None);
-    }
-    Ok(Some(
-        crate::boot::policy(&machine.network())?.terminated_hosts(),
-    ))
-}
-
 /// The disks of every machine's image, running or not: what `gc` keeps.
 pub fn disks_in_use() -> io::Result<Vec<PathBuf>> {
     let mut disks = Vec::new();
@@ -618,7 +606,7 @@ fn delete(machine: &Machine, args: &[String]) -> io::Result<()> {
     }
     let _ = fs::remove_file(machine.socket());
     fs::remove_dir_all(&machine.dir)?;
-    // Its caching CA too (see `bottle-cli ca`): another machine of its name gets a new one.
+    // Its caching CA too (see bottle-agent-client's ca): another machine of its name gets a new one.
     bottle_agent_client::ca::forget(&machine.name)
 }
 
