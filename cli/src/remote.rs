@@ -63,9 +63,11 @@ pub fn machine(command: &str, qualified: &str, args: &[String]) -> ExitCode {
     let mut there = args.to_vec();
     report((|| -> io::Result<ExitCode> {
         let runner = Runner::named(&runner)?;
+        // Whatever's asked, of this program's own build there: one older may not know the command
+        // (a delete or a stop, with nothing created or started there since).
+        runner.ensure_dist()?;
         match command {
             "create" | "configure" => {
-                runner.ensure_dist()?;
                 let policy = give_network(&runner, &name, &mut there)?;
                 let code = pass(&runner, command, &name, &there, policy.as_deref())?;
                 if code != ExitCode::SUCCESS {
@@ -73,10 +75,7 @@ pub fn machine(command: &str, qualified: &str, args: &[String]) -> ExitCode {
                 }
                 Ok(code)
             }
-            "start" => {
-                runner.ensure_dist()?;
-                start(&runner, &name)
-            }
+            "start" => start(&runner, &name),
             "stop" => {
                 let code = pass(&runner, command, &name, &there, None)?;
                 end_forward(&runner.name, &name);

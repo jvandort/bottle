@@ -339,7 +339,16 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
         !f.cli(&["runner", "rm", "box"]).status.success(),
         "it has machines"
     );
-    f.ok(&["delete", "box/m"]);
+    // A delete brings the runner's bottle-cli up to date first, as anything asked of it does: an
+    // older one may not know the command.
+    fs::write(dist.join("kernel"), "a newer kernel").unwrap();
+    manifest(&dist);
+    let out = f.cli(&["delete", "box/m"]);
+    assert!(
+        out.status.success() && copied(&out),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!record.exists());
     f.ok(&["runner", "rm", "box"]);
     assert_eq!(f.ok(&["runner", "ls"]), "");

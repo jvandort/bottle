@@ -107,8 +107,9 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
                                               text=True).stdout.strip())
 
     def test_its_bottle_clis_failures_are_its_own_not_unreachable(self) -> None:
-        there = self.remotes / "box" / ".bottle" / "dist" / "bottle-cli"
-        there.write_text('#!/bin/sh\necho "bottle-cli: no machine m" >&2\nexit 255\n')
+        # As the distribution has it: what's there is brought up to date with it first.
+        (self.dist / "bottle-cli").write_text('#!/bin/sh\necho "bottle-cli: no machine m" >&2\nexit 255\n')
+        manifest(self.dist)
         self.assertIsNone(self.box.state("bottle-b"))
 
     def test_one_it_cant_reach_is_unreachable(self) -> None:
