@@ -37,7 +37,7 @@ import shlex
 import shutil
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import NoReturn
 
@@ -113,10 +113,12 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' "$(git r
 
 @dataclass(frozen=True)
 class Thread:
+    """A thread's configuration: written only by what changes it (new, configure, rename, a runner given), never
+    by using it. What its bottle is, and when it was last used, is the bottle's record's (bottles.py)."""
+
     name: str
     bottle: str
     created: float
-    last_active: float
     base: str | None = None  # the branch it started from, if one was asked for; None: the repo's default
     broker: bool = False  # the broker (see broker.py), whose bottle is made folio's way, not the repo's
     runner: str | None = None  # the runner its bottles are made on, if it was given one; None: the repo's
@@ -136,22 +138,44 @@ def exists(repo: Repo, name: str) -> bool:
     return NAME.fullmatch(name) is not None and store.current_slot(directory(repo, name)) is not None
 
 
+def _read(slot: Path) -> Thread:
+    known = {f.name for f in fields(Thread)}
+    # Keys a record from an older folio has (last_active, now its bottle's) are left out.
+    return Thread(**{k: v for k, v in json.loads((slot / RECORD).read_text()).items() if k in known})
+
+
 def load(repo: Repo, name: str) -> Thread:
     slot = store.current_slot(directory(repo, name)) if NAME.fullmatch(name) else None
     if slot is None:
         known = ", ".join(t.name for t in all_(repo)) or "none"
         raise FolioError(f"no thread named {name!r} in {repo.path} (threads: {known})")
-    return Thread(**json.loads((slot / RECORD).read_text()))
+    return _read(slot)
 
 
 def all_(repo: Repo) -> list[Thread]:
-    """The repo's threads, most recently active first."""
+    """The repo's threads, by name."""
     threads = []
     for entry in repo.directory.iterdir() if repo.directory.is_dir() else ():
         slot = store.current_slot(entry) if entry.is_dir() else None
         if slot is not None and (slot / RECORD).exists():
-            threads.append(Thread(**json.loads((slot / RECORD).read_text())))
-    return sorted(threads, key=lambda t: t.last_active, reverse=True)
+            threads.append(_read(slot))
+    return sorted(threads, key=lambda t: t.name)
+
+
+def last_active(repo: Repo, thread: Thread, row: dict) -> float:
+    """When the thread was last used, its state row (states) saying: its bottle's last use; a paused thread's, when
+    it was paused; else when it was made."""
+    snapshot = _snapshot(repo, thread)
+    if row.get("last_active"):
+        return row["last_active"]
+    if snapshot is not None:
+        return (snapshot / snapshots.CLAUDE_ARCHIVE).stat().st_mtime
+    return thread.created
+
+
+def recent(repo: Repo, threads: list[Thread], states: dict[str, dict]) -> list[Thread]:
+    """`threads`, most recently active first."""
+    return sorted(threads, key=lambda t: last_active(repo, t, states[t.name]), reverse=True)
 
 
 def _save(repo: Repo, thread: Thread, files: dict[str, Path | None] | None = None) -> None:
@@ -200,8 +224,7 @@ def create(repo: Repo, name: str, base: str | None = None, broker_: bool = False
         raise FolioError(f"invalid thread name {name!r}: use lowercase letters and digits, in words joined by '-'")
     if store.current_slot(directory(repo, name)) is not None:
         raise FolioError(f"thread {name} already exists; attach with `folio claude {name}`")
-    now = time.time()
-    thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", now, now, base, broker_, runner)
+    thread = Thread(name, broker.NAME if broker_ else f"{repo.key}-{name}", time.time(), base, broker_, runner)
     _make_bottle(repo, thread)
     try:
         if not broker_:
@@ -387,8 +410,10 @@ def attach(repo: Repo, thread: Thread, session: str) -> NoReturn:
         lanes.register(repo.path, thread.name)  # brings its remote up to this folio's
     _ensure_running(repo, thread)
     _ensure_session(thread, session)
+    engine.touch(thread.bottle)
     # The bottle has the work now, so a snapshot would only be out of date.
-    _save(repo, Thread(**{**asdict(thread), "last_active": time.time()}), dict.fromkeys(SNAPSHOT))
+    if _snapshot(repo, thread) is not None:
+        _save(repo, thread, dict.fromkeys(SNAPSHOT))
     # -f detaches anything else on it: closing a terminal doesn't hang up its
     # attach inside the VM.
     engine.attach(thread.bottle, ["sh", "-c", ATTACH, "attach", session, session_command(session), workdir(thread)])

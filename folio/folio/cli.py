@@ -193,9 +193,10 @@ def _thread(args: argparse.Namespace, repo: repos.Repo, new: bool = False) -> th
     if not all_ and not new:
         raise FolioError(f"{repo.path} has no threads; start one with `folio new THREAD`")
     states = threads.states(repo, all_)
+    all_ = threads.recent(repo, all_, states)
     width = max((len(t.name) for t in all_), default=0)
     choices = [picker.NEW] if new else []
-    choices += [picker.Choice(f"{t.name:<{width}}  {states[t.name]['state']:<8}  {_ago(t.last_active)}", t.name)
+    choices += [picker.Choice(f"{t.name:<{width}}  {states[t.name]['state']:<8}  {_ago(threads.last_active(repo, t, states[t.name]))}", t.name)
                 for t in all_]
     choice = picker.pick(f"folio {args.command}: choose a thread (j/k, Enter; q to leave)", choices)
     if choice is None:
@@ -295,6 +296,7 @@ def _list(args: argparse.Namespace) -> int:
     repo = repos.current()
     all_ = threads.all_(repo)
     states = threads.states(repo, all_)
+    all_ = threads.recent(repo, all_, states)
     rows = [("THREAD", "STATE", "RUNNER", "SIDECAR", "SNAPSHOT", "ACTIVE", "FEATURES")]
     for thread in all_:
         row = states[thread.name]
@@ -306,7 +308,7 @@ def _list(args: argparse.Namespace) -> int:
         if thread.sidecar:
             sidecar = thread.sidecar["runner"] + ("" if row["sidecar"] == "missing" else f" ({row['sidecar']})")
         rows.append((thread.name, row["state"], runner, sidecar, _size(size) if size is not None else "-",
-                     _ago(thread.last_active), " ".join(row.get("features", ())) or "-"))
+                     _ago(threads.last_active(repo, thread, row)), " ".join(row.get("features", ())) or "-"))
     _table(rows)
     return 0
 

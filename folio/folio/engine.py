@@ -85,6 +85,12 @@ def delete(name: str) -> None:
         bottles.delete(name)
 
 
+def touch(name: str) -> None:
+    """Record that the bottle is being used now."""
+    with _said():
+        bottles.touch(name)
+
+
 def _command(name: str, argv: list[str], tty: bool = False) -> list[str]:
     with _said():
         return bottles.exec_command(name, argv, tty)
@@ -130,7 +136,8 @@ def attach(name: str, argv: list[str]) -> NoReturn:
     os.execvp(command[0], command)
 
 
-STANDS_IN = ("validate_spec", "new", "status", "start", "delete", "run", "run_to_file", "run_from_file", "attach")
+STANDS_IN = ("validate_spec", "new", "status", "start", "delete", "touch", "run", "run_to_file", "run_from_file",
+             "attach")
 
 if os.environ.get("FOLIO_ENGINE"):
     _spec = importlib.util.spec_from_file_location("folio_engine_stand_in", os.environ["FOLIO_ENGINE"])

@@ -5,7 +5,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from folio import cli, repos, threads
+from folio import cli, repos, store, threads
 from tests.support import FolioTestCase, git
 
 
@@ -148,11 +148,15 @@ class AttachTest(FolioTestCase):
         self.assertIn("no thread named 'nope'", result.stderr)
         self.assertIn("(threads: fix-it)", result.stderr)
 
-    def test_attaching_makes_it_most_recently_active(self) -> None:
+    def test_attaching_makes_it_most_recently_active_and_leaves_its_configuration(self) -> None:
         self.ok("new", "other")
-        self.assertEqual([t.name for t in threads.all_(repos.current(self.repo))], ["other", "fix-it"])
+        repo = repos.current(self.repo)
+        recent = lambda: [t.name for t in threads.recent(repo, threads.all_(repo), threads.states(repo, threads.all_(repo)))]
+        self.assertEqual(recent(), ["other", "fix-it"])
+        slot = store.current_slot(threads.directory(repo, "fix-it"))
         self.ok("claude", "fix-it")
-        self.assertEqual([t.name for t in threads.all_(repos.current(self.repo))], ["fix-it", "other"])
+        self.assertEqual(recent(), ["fix-it", "other"])
+        self.assertEqual(store.current_slot(threads.directory(repo, "fix-it")), slot)   # thread.json not written
 
     def test_list(self) -> None:
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", "HEAD")

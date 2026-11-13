@@ -160,6 +160,8 @@ class Bottle:
     # Which of network()'s policies its machine has (NETWORK the current one); 0 for one from before this was
     # recorded. One behind is given the current one as it's next started.
     network_version: int = 0
+    # When it was last used (touch): made, or attached to.
+    last_active: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -290,8 +292,9 @@ def create(
     tag = features_.ensure_built(installed, on)
     auth.warn_unset(installed)
 
+    now = time.time()
     bottle = Bottle(
-        name, uuid.uuid4().hex, images.BASE, time.time(),
+        name, uuid.uuid4().hex, images.BASE, now, last_active=now,
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
         mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
         machine_name=name,
@@ -704,6 +707,11 @@ def verify_contract(bottle: Bottle) -> None:
         raise BottleError(f"{bottle.environment} doesn't meet the bottle contract: {problems}")
 
 
+def touch(name: str) -> None:
+    """Record that the bottle is being used now (its last_active)."""
+    _save(replace(get(name), last_active=time.time()))
+
+
 def exec_command(name: str, argv: list[str], tty: bool = False) -> list[str]:
     """The command line, for this machine, that runs `argv` in the bottle as genie, at its first mount: started if
     it's stopped, logged in first to what its features need."""
@@ -760,7 +768,8 @@ def status(names: list[str] = ()) -> list[dict]:
             continue
         bottle, state = states[name]
         rows.append({
-            "name": bottle.name, "state": state, "created": bottle.created, "runner": bottle.runner,
+            "name": bottle.name, "state": state, "created": bottle.created, "last_active": bottle.last_active,
+            "runner": bottle.runner,
             # Its machine, as bottle-cli here names it (`bottle shell MACHINE`).
             "machine": bottle.qualified,
             "features": sorted(bottle.features), "memory": bottle.memory, "spec": bottle.spec,

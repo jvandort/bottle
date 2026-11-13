@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 STATE = Path(os.environ["FAKE_BOTTLE_STATE"])
@@ -92,7 +93,7 @@ def main(argv: list[str]) -> int:
                 "state": "running", "spec": json.loads(Path(option(rest, "--spec")).read_text()),
                 "mounts": mounts, "context": Path(option(rest, "--context")).read_text(),
                 "workspace": mounts[0]["dir"] if mounts else str(root / "home"), "home": str(root / "home"),
-                "sessions": {}, "runner": option(rest, "--runner") or "local", "ssh": ssh,
+                "sessions": {}, "runner": option(rest, "--runner") or "local", "ssh": ssh, "last_active": time.time(),
             }
             save(state)
             print(f"Created bottle '{name}'")
@@ -100,6 +101,7 @@ def main(argv: list[str]) -> int:
             print(json.dumps([
                 # Each mount's objects as its clone has them (--shared: the repo's own), and its remotes' URLs.
                 {"name": n, "features": bottles[n]["spec"]["features"], "ssh": bottles[n].get("ssh", {}),
+                 "last_active": bottles[n].get("last_active", 0.0),
                  "state": "detached" if bottles[n].get("runner") == off else bottles[n]["state"],
                  "runner": bottles[n].get("runner", "local"),
                  "mounts": [{"path": m["path"], "objects": str(Path(m["repo"]) / ".git" / "objects"),
@@ -107,6 +109,9 @@ def main(argv: list[str]) -> int:
                                       for r in m["remotes"]}} for m in bottles[n]["mounts"]]}
                 if n in bottles else {"name": n, "state": "missing"} for n in names
             ]))
+        case ["touch", name]:
+            bottles[name]["last_active"] = time.time()
+            save(state)
         case ["start", name]:
             bottles[name]["state"] = "running"
             save(state)

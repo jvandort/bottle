@@ -91,6 +91,10 @@ def start(name: str) -> None:
         raise failed(["start", name], result.returncode)
 
 
+def touch(name: str) -> None:
+    _run("touch", name)
+
+
 def delete(name: str) -> None:
     _run("delete", name)
 
