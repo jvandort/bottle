@@ -862,6 +862,7 @@ impl Server<'_> {
             };
             let _ = tcp.set_read_timeout(Some(IDLE));
             let _ = tcp.set_write_timeout(Some(IDLE));
+            let _ = tcp.set_nodelay(true);
             let tls = ClientConnection::new(Arc::clone(&self.ctx.client), server.clone())
                 .map_err(|e| bad_gateway(e.to_string()))?;
             return Ok(BufReader::new(StreamOwned::new(tls, tcp)));

@@ -322,10 +322,19 @@ fn glob_case(pattern: &str, text: &str) -> bool {
     p[i..].iter().all(|&c| c == '*')
 }
 
-/// Whether `first` may be the start of a ClientHello not all here yet: nothing, or part of a TLS
-/// record.
+/// Whether `first` may be the start of an opening not all here yet, whose name may decide it:
+/// nothing; part of a TLS record (a ClientHello); or part of an HTTP request's head.
 fn opening_unread(first: &[u8]) -> bool {
-    first.is_empty() || (first[0] == 0x16 && !record_complete(first))
+    first.is_empty()
+        || (first[0] == 0x16 && !record_complete(first))
+        || (http_request(first) && !first.windows(4).any(|w| w == b"\r\n\r\n"))
+}
+
+/// Whether `first` may be the start of an HTTP request: a method (uppercase letters) and a space,
+/// or as much of one as there is.
+fn http_request(first: &[u8]) -> bool {
+    let method = first.iter().take_while(|b| b.is_ascii_uppercase()).count();
+    (1..=7).contains(&method) && first.get(method).is_none_or(|&b| b == b' ')
 }
 
 fn record_complete(data: &[u8]) -> bool {
@@ -472,6 +481,25 @@ mod tests {
     const POLICY: &str = r#"{"allow_private": ["*.corp.example"], "routes": [
         {"address": "192.0.2.1", "port": 80, "socket": "/s"},
         {"host": "github.com", "port": 443, "socket": "/s"}]}"#;
+
+    #[test]
+    fn an_http_requests_head_is_read_whole_where_its_host_may_decide() {
+        let p = policy(r#"{"cache": [{"host": "deb.example", "ports": [80]}]}"#);
+        let nothing = |_: &str| vec![];
+        let at = to("93.184.216.34", 80);
+        for part in [&b"GE"[..], b"GET /dists/InRelease HTTP/1.1\r\n"] {
+            assert_eq!(p.decide(at, part, nothing), Local::Unread, "{part:?}");
+        }
+        let head = b"GET /dists/InRelease HTTP/1.1\r\nHost: deb.example\r\n\r\n";
+        assert_eq!(p.decide(at, head, nothing), Local::Cache(0));
+        // Not HTTP: decided as it is.
+        assert_eq!(p.decide(at, b"\x00\x01binary", nothing), Local::Direct);
+        // Where no name decides, nothing is read at all.
+        assert_eq!(
+            p.decide(to("93.184.216.34", 22), b"", nothing),
+            Local::Direct
+        );
+    }
 
     #[test]
     fn the_rest_is_decided_here() {

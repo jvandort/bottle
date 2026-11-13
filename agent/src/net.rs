@@ -159,6 +159,8 @@ impl Write for Host {
 /// Refused, the connection is reset, as a refused one would be.
 fn forward(conn: TcpStream, how: &str) -> io::Result<()> {
     let to = original_destination(&conn)?;
+    // What comes back goes when it comes: the far end's TCP has decided when that is.
+    let _ = conn.set_nodelay(true);
     let mut host = match Host::dial(how) {
         Ok(host) => host,
         Err(e) => {

@@ -17,8 +17,8 @@ use crate::policy::{Local, Policy};
 pub use bottle_agent_proto::net::PORT;
 use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};
 
-/// The most of a connection's first bytes read to decide it, and how long they're waited for: a
-/// protocol whose server speaks first gives none.
+/// The most of a connection's first bytes read at once to decide it, and how long they're waited
+/// for, when its policy needs them: a protocol whose server speaks first sends none.
 const FIRST_BYTES: usize = 8192;
 const FIRST_WAIT: Duration = Duration::from_millis(100);
 /// How long more of an opening whose name decides it is waited for, and the most of it read.
@@ -163,17 +163,27 @@ fn resolve(name: &str) -> Resolved {
     }
 }
 
+/// Decides a connection, then carries it as decided: as soon as it can be, by what's arrived of it.
+/// One its address alone connects from here goes at once, before anything's read; else what the
+/// bottle sends first is read as it comes (a routed one's, to see whether it's TLS), and the
+/// opening, if a name in it may decide (a ClientHello, an HTTP request's head), until it's all
+/// there.
 fn connect(mut conn: UnixStream, to: SocketAddr, network: Option<&Network>) -> io::Result<()> {
-    let mut first = first_bytes(&mut conn)?;
     let ips = |name: &str| match resolve(name) {
         Resolved::Addresses(ips) => ips,
         _ => Vec::new(),
     };
     let Some(network) = network else {
-        return direct(conn, to, &first);
+        return direct(conn, to, &[]);
     };
     let policy = &network.policy;
+    // Refused by its address alone, it may yet be allowed by a name it gives (allow_private).
+    let mut first = Vec::new();
     let mut local = policy.decide(to, &first, ips);
+    if local != Local::Direct {
+        first = first_bytes(&mut conn)?;
+        local = policy.decide(to, &first, ips);
+    }
     if local == Local::Unread {
         read_opening(&mut conn, &mut first)?;
         local = policy.decide_opened(to, &first, ips, true);
@@ -213,6 +223,8 @@ fn direct(mut conn: UnixStream, to: SocketAddr, first: &[u8]) -> io::Result<()> 
     let Ok(mut far) = TcpStream::connect_timeout(&to, CONNECT_TIMEOUT) else {
         return refuse(conn);
     };
+    // What the bottle writes goes when it's written: its own TCP has decided when that is.
+    let _ = far.set_nodelay(true);
     far.write_all(first)?;
     conn.write_all(&[CONNECTED])?;
     splice(conn, far)
@@ -447,20 +459,18 @@ fn refuse(mut conn: UnixStream) -> io::Result<()> {
     conn.write_all(&[REFUSED])
 }
 
-/// What the bottle sends first: up to FIRST_BYTES, as long as it comes within FIRST_WAIT.
+/// What the bottle sends first, as soon as some of it comes (up to FIRST_BYTES of it), if it comes
+/// within FIRST_WAIT; nothing, if not. The rest of an opening, if it's needed, is read_opening's.
 fn first_bytes(conn: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut first = vec![0; FIRST_BYTES];
     let mut got = 0;
-    let deadline = Instant::now() + FIRST_WAIT;
-    while got < FIRST_BYTES {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        conn.set_read_timeout(Some(left))?;
-        match conn.read(&mut first[got..]) {
-            Ok(0) => break,
-            Ok(n) => got += n,
+    conn.set_read_timeout(Some(FIRST_WAIT))?;
+    loop {
+        match conn.read(&mut first) {
+            Ok(n) => {
+                got = n;
+                break;
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -543,6 +553,39 @@ mod tests {
         let mut answer = [0; 6];
         agent.read_exact(&mut answer).unwrap();
         assert_eq!(&answer, b"\0world");
+    }
+
+    #[test]
+    fn what_comes_first_is_read_as_soon_as_it_comes() {
+        let (mut agent, mut host) = pair();
+        agent.write_all(b"a ClientHello").unwrap();
+        let start = Instant::now();
+        assert_eq!(first_bytes(&mut host).unwrap(), b"a ClientHello");
+        assert!(start.elapsed() < FIRST_WAIT / 2, "{:?}", start.elapsed());
+        // Nothing, from a protocol whose server speaks first: waited for, but not forever.
+        let start = Instant::now();
+        assert_eq!(first_bytes(&mut host).unwrap(), b"");
+        assert!(start.elapsed() >= FIRST_WAIT);
+    }
+
+    #[test]
+    fn a_direct_connection_is_made_before_the_bottle_sends_anything() {
+        // Its server speaks first, so the bottle sends nothing until it has.
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let to = server.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            s.write_all(b"SSH-2.0-far").unwrap();
+            thread::sleep(Duration::from_secs(1));
+        });
+        let (mut agent, host) = pair();
+        thread::spawn(move || handle(host, None));
+        let start = Instant::now();
+        Request::Connect(to).write(&mut agent).unwrap();
+        let mut answer = [0; 12];
+        agent.read_exact(&mut answer).unwrap();
+        assert_eq!(&answer, b"\0SSH-2.0-far");
+        assert!(start.elapsed() < FIRST_WAIT / 2, "{:?}", start.elapsed());
     }
 
     #[test]
