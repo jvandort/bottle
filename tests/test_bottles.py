@@ -1,12 +1,10 @@
 import dataclasses
 import json
-import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from bottle.store import write_json
 from bottle import bottles, daemon, features as features_, host, repos
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run, stop_bottle, thread_dir, write_bottles
@@ -972,29 +970,6 @@ class MountsTest(BottleTestCase):
                 bottles.create(thread_dir(), {"features": [], "memory": "2G"}, "x",
                                [bottles.MountRequest(p, self.repo_path) for p in paths])
         self.assertEqual(bottles.load(), {})
-
-    def test_bottles_json_moves_into_folios_threads(self) -> None:
-        """Each bottle to the thread whose bottle or sidecar it is; one no thread has is left to its machine, and
-        said."""
-        home = Path(os.environ["FOLIO_HOME"])
-        thread = home / "app-1234" / "t"
-        (thread / "20260101T000000.000Z").mkdir(parents=True)
-        (thread / "20260101T000000.000Z" / "thread.json").write_text(json.dumps({"name": "t", "bottle": "app-t"}))
-        (thread / "current").symlink_to("20260101T000000.000Z")
-        record = lambda name: {"name": name, "id": name, "image": "base", "created": 0.0, "status": "ready",
-                               "machine_name": f"m-{name}"}
-        write_json(bottles.legacy_registry(), {"version": 1, "bottles": {
-            n: record(n) for n in ("app-t", "app-t-sidecar", "lone")}})
-        with mock.patch("sys.stderr") as stderr:
-            self.assertEqual(set(bottles.load()), {"app-t", "app-t-sidecar"})
-        said = "".join(c.args[0] for c in stderr.write.call_args_list)
-        self.assertIn("no thread had the bottles whose machines are m-lone", said)
-        self.assertFalse(bottles.legacy_registry().exists())
-        self.assertEqual(bottles.records(), {
-            "app-t": thread / "bottles" / "app-t.json", "app-t-sidecar": thread / "bottles" / "app-t-sidecar.json"})
-        bottles._forget("app-t")
-        bottles._forget("app-t-sidecar")
-        self.assertFalse((thread / "bottles").exists())   # none left there
 
     def test_its_runner_is_recorded(self) -> None:
         self.fake()

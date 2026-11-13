@@ -35,7 +35,6 @@ its commits (after git's grace periods, weeks to months), that checkout
 breaks, and the bottle has to be made again.
 """
 
-import fcntl
 import logging
 import re
 import shlex
@@ -48,7 +47,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from bottle import auth, cache, daemon, features as features_, host, images, krun, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
-from bottle.store import bottle_home, folio_home, namespace, read_json, write_json
+from bottle.store import folio_home, namespace, read_json, write_json
 
 log = logging.getLogger("bottle.bottles")
 
@@ -196,10 +195,7 @@ RECORDS = "bottles"
 
 
 def records() -> dict[str, Path]:
-    """Each bottle's record, by name: in its thread's directory, <repo key>/<thread>/bottles/. bottle's own
-    registry, $BOTTLE_HOME/bottles.json, from before folio kept them, is moved in first."""
-    if legacy_registry().exists():
-        _move_registry()
+    """Each bottle's record, by name: in its thread's directory, <repo key>/<thread>/bottles/."""
     return {p.stem: p for p in sorted(folio_home().glob(f"*/*/{RECORDS}/*.json"))}
 
 
@@ -212,40 +208,6 @@ def load() -> dict[str, Bottle]:
         if entry is not None:
             bottles[name] = Bottle(**{k: v for k, v in entry.items() if k in known})
     return bottles
-
-
-def legacy_registry() -> Path:
-    return bottle_home() / "bottles.json"
-
-
-def _move_registry() -> None:
-    """bottles.json's bottles, each to its thread's directory: the thread whose bottle, or sidecar, it is. One no
-    thread has is said, and left to its machine, bottle-cli's. Then bottles.json is gone. Once, whichever process
-    gets there first."""
-    home = folio_home()
-    home.mkdir(parents=True, exist_ok=True)
-    with (home / ".registry.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        data = read_json(legacy_registry())
-        if data is None:
-            return
-        owners: dict[str, Path] = {}
-        for record in home.glob("*/*/current/thread.json"):
-            thread = read_json(record) or {}
-            if thread.get("bottle"):
-                owners[thread["bottle"]] = owners[f"{thread['bottle']}-sidecar"] = record.parent.parent
-        orphans = []
-        for name, entry in data.get("bottles", {}).items():
-            if name in owners:
-                write_json(owners[name] / RECORDS / f"{name}.json", entry)
-            else:
-                orphans.append(entry.get("machine_name") or f"bottle-{namespace()}{name}")
-        legacy_registry().unlink()
-    log.info("bottles.json moved into %s; no thread had %s", home, ", ".join(orphans) or "none")
-    if orphans:
-        print(f"bottle: bottles.json is moved into folio's threads; no thread had the bottles whose machines are "
-              f"{', '.join(sorted(orphans))}: they're bottle-cli's now (`bottle machine delete --name MACHINE`)",
-              file=sys.stderr)
 
 
 def get(name: str) -> Bottle:
