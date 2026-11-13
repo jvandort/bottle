@@ -148,6 +148,25 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
     f.ok(&["runner", "add", "box", "--ssh", "box"]);
     assert!(f.there().join(".bottle/dist/bottle-cli").exists());
     assert!(f.ok(&["runner", "ls"]).starts_with("box  box"));
+    let checked: serde_json::Value =
+        serde_json::from_str(&f.ok(&["runner", "check", "box", "--json"])).unwrap();
+    assert_eq!(
+        (&checked["os"], &checked["kvm"], &checked["missing"]),
+        (
+            &serde_json::json!("Linux"),
+            &serde_json::json!(true),
+            &serde_json::json!([])
+        )
+    );
+    // Any command, there: paths its own.
+    let info: serde_json::Value =
+        serde_json::from_str(&f.ok(&["on", "box", "info", "--json"])).unwrap();
+    let home = info["home"].as_str().unwrap().to_string();
+    assert_eq!(home, f.there().join(".bottle").display().to_string());
+    assert_eq!(
+        f.ok(&["on", "box", "images", &format!("{home}/stages"), "--json"]),
+        "[]\n"
+    );
 
     // Made with a route to a socket here: there, to one of its own, forwarded while it runs.
     let here = f.dir.join("here.sock");

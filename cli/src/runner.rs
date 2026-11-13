@@ -4,6 +4,8 @@
 //!     bottle-cli runner ls [--json]
 //!     bottle-cli runner rm NAME
 //!     bottle-cli runner ssh NAME [COMMAND]...
+//!     bottle-cli runner check NAME|DESTINATION [--json]
+//!     bottle-cli on NAME COMMAND [ARG]...
 //!
 //! A runner is a Linux machine with /dev/kvm, reached as the user's own ssh reaches it: a
 //! DESTINATION from ~/.ssh/config, or user@host, with their keys and agent. ssh runs in batch mode,
@@ -15,6 +17,11 @@
 //! another build. Its machines are named
 //! `NAME/MACHINE` here (see machine.rs). `runner ssh` is its shared connection, for a command
 //! there: what git's GIT_SSH_COMMAND can be, with a URL `NAME:PATH` and GIT_SSH_VARIANT=simple.
+//! `runner check` says what a machine (a runner's, or one to add) is and what it lacks, and adds
+//! nothing. `on` runs any of this program's commands there, its output and exit status this
+//! process's (paths in its arguments are the runner's: `info` says where its $BOTTLE_HOME is),
+//! but for `image build`, whose recipe and what it mounts, and its --network file, are this
+//! machine's, sent there with it.
 //!
 //! Runners are listed in $BOTTLE_HOME/runners.json, `{"version": 1, "runners": {NAME: {"ssh":
 //! DESTINATION, ...}}}`; what else an entry says (bottle's "detached") is kept as it is.
@@ -32,7 +39,8 @@ use serde::{Deserialize, Serialize};
 use crate::FAILED;
 
 pub const USAGE: &str = "runner add NAME --ssh DESTINATION | runner ls [--json] | runner rm NAME \
-                         | runner ssh NAME [COMMAND]...";
+                         | runner ssh NAME [COMMAND]... | runner check NAME|DESTINATION [--json] \
+                         | on NAME COMMAND [ARG]...";
 
 /// ssh's own failures, connecting or authenticating, exit 255.
 const SSH_FAILED: i32 = 255;
@@ -324,19 +332,24 @@ impl Runner {
         Ok(())
     }
 
-    /// What it lacks of what it needs to run machines, each as the user would fix it.
-    fn missing(&self) -> io::Result<Vec<String>> {
+    /// What it is: its os, arch, and whether it has kvm and git.
+    fn found(&self) -> io::Result<BTreeMap<String, String>> {
         let found = self.run(
             "echo \"os=$(uname -s)\"; echo \"arch=$(uname -m)\"; \
              if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo kvm=yes; else echo kvm=no; fi; \
              if command -v git >/dev/null 2>&1; then echo git=yes; else echo git=no; fi",
             None,
         )?;
-        let found: BTreeMap<String, String> = String::from_utf8_lossy(&found.stdout)
+        Ok(String::from_utf8_lossy(&found.stdout)
             .lines()
             .filter_map(|l| l.split_once('='))
             .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+            .collect())
+    }
+
+    /// What it lacks of what it needs to run machines, each as the user would fix it.
+    fn missing(&self) -> io::Result<Vec<String>> {
+        let found = self.found()?;
         let get = |k: &str| found.get(k).map(String::as_str).unwrap_or_default();
         let mut missing = Vec::new();
         if get("os") != "Linux" {
@@ -362,6 +375,8 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         (Some("ls"), []) => ls(false),
         (Some("ls"), [flag]) if flag == "--json" => ls(true),
         (Some("rm"), [name]) => rm(name),
+        (Some("check"), [target]) => check(target, false),
+        (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
         (Some("ssh"), [name, command @ ..]) => {
             return match Runner::named(name) {
                 // Its stdin, stdout and terminal this process's: git's, say.
@@ -450,6 +465,176 @@ fn ls(json: bool) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// What runner `target` (a name), or the machine at DESTINATION `target`, is and lacks.
+fn check(target: &str, json: bool) -> io::Result<()> {
+    let runner = Runner::named(target).unwrap_or_else(|_| Runner {
+        name: target.to_string(),
+        destination: target.to_string(),
+    });
+    let found = runner.found()?;
+    let missing = runner.missing()?;
+    let get = |k: &str| found.get(k).cloned().unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"os": get("os"), "arch": get("arch"), "kvm": get("kvm") == "yes",
+                               "git": get("git") == "yes", "missing": missing})
+        );
+    } else {
+        println!("{} {}", get("os"), get("arch"));
+        for m in missing {
+            println!("missing: {m}");
+        }
+    }
+    Ok(())
+}
+
+/// `on NAME COMMAND [ARG]...`: this program's COMMAND on runner NAME, as it is here (see the
+/// module's doc): its exit status.
+pub fn on(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(name) = args.next() else {
+        return crate::usage_error(USAGE);
+    };
+    let args: Vec<String> = args.collect();
+    if args.is_empty() {
+        return crate::usage_error(USAGE);
+    }
+    let run = || -> io::Result<ExitCode> {
+        let runner = Runner::named(&name)?;
+        runner.ensure_dist()?;
+        let (mut command, input) = if args.starts_with(&["image".to_string(), "build".to_string()])
+        {
+            build_there(&runner, &args)?
+        } else {
+            (runner.cli(&args, Some(false)), None)
+        };
+        let mut child = command
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(&input)?;
+        }
+        // What it says, said here as it says it; its last lines kept, to tell ssh's failure
+        // from its own.
+        let stderr = child.stderr.take().unwrap();
+        let said = std::thread::spawn(move || {
+            let mut kept: Vec<String> = Vec::new();
+            for line in io::BufRead::lines(io::BufReader::new(stderr)).map_while(Result::ok) {
+                eprintln!("{line}");
+                kept.push(line);
+                if kept.len() > 20 {
+                    kept.remove(0);
+                }
+            }
+            kept
+        });
+        let status = child.wait()?;
+        let said = said.join().unwrap_or_default();
+        if status.code() == Some(SSH_FAILED) && !said.iter().any(|l| l.starts_with("bottle-cli: "))
+        {
+            let why = said.last().cloned().unwrap_or("ssh failed".into());
+            return Err(other(format!(
+                "runner {} is unreachable ({why})",
+                runner.name
+            )));
+        }
+        Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+    };
+    run().unwrap_or_else(|e| {
+        eprintln!("bottle-cli: {e}");
+        ExitCode::from(FAILED)
+    })
+}
+
+/// `image build RECIPE STORE ...` there: the recipe, what it mounts and its --network file sent
+/// as a tar, built from a directory there it's unpacked in.
+fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<Vec<u8>>)> {
+    let recipe_path = args
+        .get(2)
+        .ok_or_else(|| other("image build needs RECIPE"))?;
+    let mut recipe: serde_json::Value = serde_json::from_slice(&fs::read(recipe_path)?)
+        .map_err(|e| other(format!("{recipe_path}: {e}")))?;
+    let staged = env::temp_dir().join(format!("bottle-on-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staged);
+    fs::create_dir_all(&staged)?;
+    let made = (|| -> io::Result<Vec<u8>> {
+        if let Some(source) = recipe
+            .pointer("/mount/source")
+            .and_then(|s| s.as_str())
+            .map(PathBuf::from)
+        {
+            let source = if source.is_relative() {
+                PathBuf::from(recipe_path)
+                    .parent()
+                    .unwrap_or(&PathBuf::from("."))
+                    .join(source)
+            } else {
+                source
+            };
+            // A copy: what's sent is the directory's content, under a name of its own.
+            let copied = Command::new("cp")
+                .arg("-R")
+                .arg(&source)
+                .arg(staged.join("context"))
+                .status()?;
+            if !copied.success() {
+                return Err(other(format!("copying {} failed", source.display())));
+            }
+            recipe["mount"]["source"] = "context".into();
+        }
+        fs::write(
+            staged.join("recipe.json"),
+            serde_json::to_vec(&recipe).unwrap(),
+        )?;
+        if let Some(at) = args.iter().position(|a| a == "--network")
+            && let Some(network) = args.get(at + 1)
+        {
+            fs::copy(network, staged.join("network.json"))?;
+        }
+        let tar = Command::new("tar")
+            .arg("-cf")
+            .arg("-")
+            .arg("-C")
+            .arg(&staged)
+            .arg(".")
+            .output()?;
+        if !tar.status.success() {
+            return Err(other("tar of the build's recipe failed"));
+        }
+        Ok(tar.stdout)
+    })();
+    let _ = fs::remove_dir_all(&staged);
+    let tar = made?;
+    let mut there: Vec<String> = args.to_vec();
+    there[2] = "\"$d/recipe.json\"".into();
+    if let Some(at) = there.iter().position(|a| a == "--network") {
+        there[at + 1] = "\"$d/network.json\"".into();
+    }
+    let quoted: Vec<String> = there
+        .iter()
+        .map(|a| {
+            if a.starts_with("\"$d/") {
+                a.clone()
+            } else {
+                quote(a)
+            }
+        })
+        .collect();
+    let script = format!(
+        "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; tar -xf - -C \"$d\"; \
+         \"$HOME/{DIST}/bottle-cli\" {}",
+        quoted.join(" ")
+    );
+    let mut ssh = runner.ssh(Some(false));
+    ssh.arg(script);
+    Ok((ssh, Some(tar)))
 }
 
 /// Forgets runner `name`. Nothing there is touched; refused while this machine knows of machines

@@ -38,7 +38,8 @@
 //!     bottle-cli exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!     bottle-cli shell NAME
 //!
-//! `info` is this machine's: its memory and cores, what machines here can have. `shell` is a login
+//! `info` is this machine's: its memory and cores, what machines here can have, and its
+//! $BOTTLE_HOME. `shell` is a login
 //! shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
 //! terminal. `start` starts a machine with its own network policy, if it has one, and nothing else;
 //! `shell` and `exec` start one that has, if it's stopped. One made without (a machine of bottle's
@@ -803,7 +804,8 @@ fn exec(args: Vec<String>) -> ExitCode {
     crate::exec::main(std::iter::once(socket).chain(defaults).chain(rest))
 }
 
-/// `info [--json]`: this machine's memory (MiB) and cores.
+/// `info [--json]`: this machine's memory (MiB) and cores, and where bottle's things are on it
+/// ($BOTTLE_HOME).
 pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.collect();
     if !(args.is_empty() || args == ["--json"]) {
@@ -818,12 +820,16 @@ pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let memory_mib = (pages.max(0) as u64 * page.max(0) as u64) >> 20;
     let cpus = thread::available_parallelism().map_or(1, |n| n.get());
+    let home = crate::runner::home();
     if args.is_empty() {
-        println!("memory  {memory_mib} MiB\ncpus    {cpus}");
+        println!(
+            "memory  {memory_mib} MiB\ncpus    {cpus}\nhome    {}",
+            home.display()
+        );
     } else {
         println!(
             "{}",
-            serde_json::json!({"memory_mib": memory_mib, "cpus": cpus})
+            serde_json::json!({"memory_mib": memory_mib, "cpus": cpus, "home": home})
         );
     }
     ExitCode::SUCCESS

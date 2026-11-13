@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         Some("machine") => machine::main(args),
         Some("ca") => ca::main(args),
         Some("runner") => runner::main(args),
+        Some("on") => runner::on(args),
         Some("forward") => remote::forward(args),
         Some("exec") => {
             let args: Vec<String> = args.collect();
