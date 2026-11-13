@@ -2,7 +2,7 @@
 
 Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built (`cargo
 xtask dist`) or $BOTTLE_CLI naming one. Checks it through bottle's own krun
-module, with a stand-in for bottled's decider, on one alpine machine made for
+module, with a stand-in for bottled's services socket, on one alpine machine made for
 the module and deleted after, its BOTTLE_HOME a temporary directory. Run it
 after changing bottle-cli, the agent or libkrun.
 """
@@ -11,7 +11,6 @@ import fcntl
 import hashlib
 import os
 import pty
-import secrets
 import select
 import shutil
 import signal
@@ -27,28 +26,26 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from bottle import daemon, decider, host, images, krun
+from bottle import host, images, krun, services
 from bottle.errors import BottleError
 from tests.support import krun_present
 
 STANDIN = "the-egress-proxy-holds-the-real-one"
-# An address the stand-in decider denies, to see what a denied flow does in the guest.
+# An address the machine's policy refuses (private, no name allowed there), to see what a refused flow does.
 DENIED = "192.0.2.99"
 
 
-class StandInDecider:
-    """bottled's decider, as little as bottle-cli needs.
+class StandInService:
+    """bottled's services socket, as little as bottle-cli needs: what the machine's policy routes here (bottle.host
+    on port 80) is answered as bottled answers git. Records each connection: what its PROXY header said, and its
+    first bytes."""
 
-    Every flow goes direct, except bottle.host on port 80, which is redirected
-    and answered here as bottled answers git, and DENIED, which is denied.
-    Records each flow it's asked about.
-    """
-
-    def __init__(self, token: bytes) -> None:
-        self.token = token
-        self.flows: list[tuple[str, int, bytes, str]] = []  # address, port, first bytes, answer
-        self.server = socket.create_server(("127.0.0.1", 0))
-        self.address = f"127.0.0.1:{self.server.getsockname()[1]}"
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.flows: list[tuple[str, int, str | None, str | None, bytes]] = []  # address, port, name, machine, first
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(str(path))
+        self.server.listen()
         threading.Thread(target=self._serve, daemon=True).start()
 
     def _serve(self) -> None:
@@ -61,25 +58,22 @@ class StandInDecider:
 
     def _answer(self, connection: socket.socket) -> None:
         with connection, connection.makefile("rb") as stream:
-            head = stream.read(75)
-            if head[:8] != decider.MAGIC or head[8:40] != self.token:
+            fixed = stream.read(16)
+            if fixed[:12] != services.SIGNATURE:
                 return
-            family, port = head[72], int.from_bytes(head[73:75], "big")
-            packed = stream.read(4 if family == 4 else 16)
-            address = socket.inet_ntop(socket.AF_INET if family == 4 else socket.AF_INET6, packed)
-            first = stream.read(int.from_bytes(stream.read(2), "big"))
-            if (address, port) == (host.ADDRESS, 80):
-                self.flows.append((address, port, first, "redirect"))
-                body = b"answered by the decider\n"
-                connection.sendall(
-                    decider.REDIRECT
-                    + b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
-            elif address == DENIED:
-                self.flows.append((address, port, first, "deny"))
-                connection.sendall(decider.DENY)
-            else:
-                self.flows.append((address, port, first, "direct"))
-                connection.sendall(decider.ALLOW_DIRECT)
+            body = stream.read(int.from_bytes(fixed[14:16], "big"))
+            address, port = socket.inet_ntoa(body[4:8]), int.from_bytes(body[10:12], "big")
+            fields, at = {}, 12
+            while at < len(body):
+                length = int.from_bytes(body[at + 1:at + 3], "big")
+                fields[body[at]] = body[at + 3:at + 3 + length].decode(errors="replace")
+                at += 3 + length
+            first = stream.readline()
+            self.flows.append((address, port, fields.get(services.PP2_TYPE_AUTHORITY),
+                               fields.get(services.PP2_TYPE_MACHINE), first))
+            body_out = b"answered by the service\n"
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body_out)
+                               + body_out)
 
     def close(self) -> None:
         self.server.close()
@@ -87,13 +81,12 @@ class StandInDecider:
 
 # Made by setUpModule, for every test here.
 machine = ""
-stand_in: StandInDecider = None  # type: ignore[assignment]
-token = ""
+stand_in: StandInService = None  # type: ignore[assignment]
 work = Path()
 
 
 def setUpModule() -> None:
-    global machine, stand_in, token, work
+    global machine, stand_in, work
     if not krun_present():
         raise unittest.SkipTest("needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
     work = Path(tempfile.mkdtemp(prefix="krun-contract-"))
@@ -105,16 +98,15 @@ def setUpModule() -> None:
     (work / "ro").mkdir()
     (work / "ro" / "file").write_text("from the host\n")
     machine = f"contract-{uuid.uuid4().hex[:8]}"
-    secret = secrets.token_bytes(32)
-    token = secret.hex()
-    stand_in = StandInDecider(secret)
+    stand_in = StandInService(work / "services.sock")
     unittest.addModuleCleanup(stand_in.close)
     alpine = subprocess.run([krun.binary(), "pull", "alpine", str(images.store())], capture_output=True, text=True,
                             check=True).stdout.split()[-1]
     krun.create(machine, alpine, mounts=[krun.Mount(work / "ro", "/mnt/ro")],
-                env={"STANDIN": STANDIN}, memory_mib=None, cpus=2)
+                env={"STANDIN": STANDIN}, memory_mib=None, cpus=2,
+                network=services.network([], [], socket=str(stand_in.path)))
     unittest.addModuleCleanup(krun.delete, machine)
-    krun.start(machine, stand_in.address, token)
+    krun.start(machine)
     krun.exec_(machine, ["sh", "-c", f"echo '{host.ADDRESS} {host.HOST}' >> /etc/hosts"], user="root")
 
 
@@ -124,27 +116,23 @@ def run(argv: list[str], input: bytes | None = None, **kwargs) -> subprocess.Com
 
 
 class DecidedEgressTest(unittest.TestCase):
-    def test_bottle_host_is_redirected_and_answered(self) -> None:
+    def test_bottle_host_is_routed_to_bottleds_socket_and_answered(self) -> None:
         answer = krun.exec_(machine, ["wget", "-qO-", "-T", "5", "http://bottle.host/git/x"])
-        self.assertEqual(answer, "answered by the decider\n")
-        [(_, _, first, _)] = [f for f in stand_in.flows if f[3] == "redirect" and b"/git/x" in f[2]]
-        # The decider gets the request's first bytes, Host included: how it names the flow.
+        self.assertEqual(answer, "answered by the service\n")
+        [(address, port, name, said_machine, first)] = [f for f in stand_in.flows if b"/git/x" in f[4]]
+        # Where the bottle connected, the name it asked for, and the machine: what bottle-cli says first.
+        self.assertEqual((address, port, name, said_machine), (host.ADDRESS, 80, host.HOST, machine))
         self.assertTrue(first.startswith(b"GET /git/x "), first)
-        self.assertIn(b"Host: bottle.host", first)
 
-    def test_other_flows_reach_the_decider_and_go_direct(self) -> None:
+    def test_public_flows_go_direct(self) -> None:
         krun.exec_(machine, ["wget", "-q", "-T", "10", "-O", "/dev/null", "https://example.com"])
-        tls = [f for f in stand_in.flows if f[1] == 443 and f[3] == "direct"]
-        self.assertTrue(tls)
-        # A ClientHello, which is where bottled reads a credential's host from.
-        self.assertTrue(any(first[:1] == b"\x16" for _, _, first, _ in tls))
+        self.assertFalse([f for f in stand_in.flows if f[1] == 443])  # nothing of bottled's
 
     def test_a_denied_flow_fails_at_once(self) -> None:
         started = time.monotonic()
         result = run(["wget", "-q", "-T", "10", "-O", "/dev/null", f"http://{DENIED}/"])
         self.assertNotEqual(result.returncode, 0)
         self.assertLess(time.monotonic() - started, 5)  # reset, not left to time out
-        self.assertIn((DENIED, 80), [(a, p) for a, p, _, answer in stand_in.flows if answer == "deny"])
 
 
 class ExecTest(unittest.TestCase):
@@ -260,7 +248,7 @@ class RestartTest(unittest.TestCase):
         krun.exec_(machine, ["sh", "-c", "echo still here > /root/marker"])
         krun.stop(machine)
         self.assertNotEqual(krun.state(machine), "running")
-        krun.start(machine, stand_in.address, token)
+        krun.start(machine)
         self.assertEqual(krun.state(machine), "running")
         self.assertEqual(krun.exec_(machine, ["cat", "/root/marker"]), "still here\n")
 
@@ -278,15 +266,13 @@ class BuildTest(unittest.TestCase):
         (context / "message").write_text("built by bottle-cli\n")
         recipe = {"pull": "alpine", "steps": [{"env": {"PROBE": "set by the recipe"}},
                                               {"run": images.interpreter(context / "install.sh"), "cwd": images.MOUNT}]}
-        # The build bound to the stand-in rather than to bottled.
-        with mock.patch.object(daemon, "bind_decider", return_value=(stand_in.address, token)), \
-                mock.patch.object(daemon, "release_egress"):
-            disk = images.build_recipe(context, "localhost/bottle/probe:latest", "probe", recipe)
+        disk = images.build_recipe(context, "localhost/bottle/probe:latest", "probe", recipe)
         self.assertEqual(images.archive_of("localhost/bottle/probe:latest"), disk)
         built = f"{machine}-built"
-        krun.create(built, str(disk), mounts=[], env={}, memory_mib=None, cpus=1)
+        krun.create(built, str(disk), mounts=[], env={}, memory_mib=None, cpus=1,
+                    network=services.network([], [], socket=str(stand_in.path)))
         self.addCleanup(krun.delete, built)
-        krun.start(built, stand_in.address, token)
+        krun.start(built)
         self.assertEqual(krun.exec_(built, ["cat", "/hello"]), "built by bottle-cli\n")
         self.assertEqual(krun.exec_(built, ["sh", "-c", 'echo "$PROBE"']), "set by the recipe\n")
 

@@ -1,7 +1,7 @@
 """bottle.host's services: what a bottle can ask of bottle, at http://bottle.host/.
 
-Requests to http://bottle.host/ never leave bottle: the decider hands them
-to bottled, which answers them itself, serving the bottle's repo over git's
+Requests to http://bottle.host/ never leave bottle: the bottle's machine routes
+them to bottled, which answers them itself, serving the bottle's repo over git's
 smart HTTP protocol with `git http-backend`. A bottle is served the remotes it
 was created with, each a Remote at http://bottle.host/git/<name>. What a fetch
 sees is one of three views:
@@ -86,7 +86,7 @@ log = logging.getLogger("bottle.egress")
 HOST = "bottle.host"
 # Where a bottle whose driver carries its sockets reaches bottle.host: its
 # /etc/hosts says so. A documentation address (TEST-NET-1) that nothing real
-# uses, which smolvm hands to the decider like any other.
+# uses, which the bottle's machine routes to bottled (services.network).
 ADDRESS = "192.0.2.1"
 # Where a bottle reaches the bottles it may ssh to (`bottle new --ssh`): the rest
 # of TEST-NET-1, an address for each, under the name its creator gave it.

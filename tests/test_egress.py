@@ -604,9 +604,6 @@ class InjectionMatchTest(unittest.TestCase):
             with self.subTest(target):
                 self.assertIsNone(self.injection_for(target))
 
-    def test_nothing_without_certificates(self) -> None:
-        self.assertIsNone(self.injection_for("ci.test:443", certificates=None))
-
 
 class ReplacingTest(unittest.TestCase):
     """Which header values present the stand-in, and what goes in their place."""

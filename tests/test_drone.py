@@ -2,10 +2,9 @@
 
 The runner is this machine, in a home of its own, reached through a fake ssh
 that runs each command there and makes a forward (-R) a symlink to the
-socket here. Each bottled's decider listens on a port of its own choosing
-(BOTTLE_DECIDER_PORT=0), so neither meets a real one. bottle-cli there records
-how a machine was started; the test is then its guest, opening a connection
-through the runner's decider as bottle-cli would.
+socket here. bottle-cli there records how a machine was started; the test is
+then bottle-cli, giving the runner's bottled a connection its guest opened, as
+the machine's policy routes it.
 """
 
 import json
@@ -20,10 +19,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import bottles, daemon, decider, features, host, images, mirrors, prereqs, repos, runners
+from bottle import bottles, daemon, features, host, images, mirrors, prereqs, repos, runners
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
+from tests.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
 forward=
@@ -34,10 +34,10 @@ if [ -n "$forward" ]; then ln -sfn "${forward#*:}" "${forward%%:*}"; exec sleep 
 exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
 """
 
-# bottle-cli there: a machine started is recorded, with the decider and token it was given.
+# bottle-cli there: a machine started is recorded, with what it was given.
 FAKE_CLI = r"""#!/usr/bin/env bash
 if [ "$1 $2" = "machine start" ]; then
-  printf '{"args": "%s", "token": "%s"}' "$*" "$BOTTLE_DECIDER_TOKEN" > "$HOME/started.json"
+  printf '{"args": "%s"}' "$*" > "$HOME/started.json"
 fi
 echo '{"state": "running"}'
 """
@@ -54,7 +54,7 @@ case "$op" in
   "machine create") echo created > "$machines/$name" ;;
   "machine start")
     echo running > "$machines/$name"
-    printf '{"args": "%s", "token": "%s"}' "$*" "$BOTTLE_DECIDER_TOKEN" > "$HOME/started.json" ;;
+    printf '{"args": "%s"}' "$*" > "$HOME/started.json" ;;
   "machine stop") echo stopped > "$machines/$name" ;;
   "machine delete") rm -f "$machines/$name" ;;
   "machine status")
@@ -96,7 +96,6 @@ class DroneCase(GitTestCase):
         fake.chmod(0o755)
         env = mock.patch.dict(os.environ, {
             "BOTTLE_HOME": str(short / "controller"), "BOTTLE_SSH": str(fake), "FAKE_REMOTES": str(short / "r"),
-            "BOTTLE_DECIDER_PORT": "0",
         })
         env.start()
         self.addCleanup(env.stop)
@@ -112,13 +111,12 @@ class DroneCase(GitTestCase):
                 s.sendall(b'{"op": "shutdown"}\n')
                 s.recv(100)
 
-    def guest_connects(self, started: dict, address: str, port: int, first: bytes) -> bytes:
-        """A connection from the machine's guest, as bottle-cli hands it to the decider it was given."""
-        decider_address = started["args"].split("--decider ")[1].split()[0]
-        ip, _, decider_port = decider_address.rpartition(":")
-        with socket.create_connection((ip, int(decider_port)), timeout=10) as s:
-            s.sendall(decider.MAGIC + bytes.fromhex(started["token"]) + b"m" * 16 + bytes(16) + bytes([4])
-                      + port.to_bytes(2, "big") + socket.inet_aton(address) + len(first).to_bytes(2, "big") + first)
+    def guest_connects(self, machine: str, address: str, port: int, first: bytes) -> bytes:
+        """A connection from `machine`'s guest, as bottle-cli there gives it to the runner's bottled."""
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(10)
+            s.connect(str(self.remote / ".bottle" / "services.sock"))
+            s.sendall(header(address, port, machine=machine) + first)
             answer = b""
             while chunk := s.recv(65536):
                 answer += chunk
@@ -142,10 +140,9 @@ class DroneTest(DroneCase):
         box.start("bottle-b", "b", (Served(repo / ".git", remotes, "workspace"),), ())
 
         started = json.loads((self.remote / "started.json").read_text())
-        self.assertIn("--decider", started["args"])
+        self.assertEqual(started["args"], "machine start --name bottle-b")   # nothing else: its policy is its own
         request = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
-        answer = self.guest_connects(started, host.ADDRESS, 80, request)
-        self.assertEqual(answer[:1], decider.REDIRECT)
+        answer = self.guest_connects("bottle-b", host.ADDRESS, 80, request)
         self.assertIn(b"HTTP/1.1 200", answer)
         # The controller fetched origin into the hub, the mirror the hub, and the runner served it.
         self.assertIn(f"{new} refs/heads/main".encode(), answer)
@@ -195,18 +192,17 @@ class DroneTest(DroneCase):
         box = runners.get("box")
         box.objects(repos.Repo("repo", repo))
         box.start("bottle-b", "b", bottles.served(bottles.get("b")), ())
-        started = json.loads((self.remote / "started.json").read_text())
         fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
-        self.assertIn(b"HTTP/1.1 200", self.guest_connects(started, host.ADDRESS, 80, fetch))
+        self.assertIn(b"HTTP/1.1 200", self.guest_connects("bottle-b", host.ADDRESS, 80, fetch))
 
         daemon.stop()
-        down = self.guest_connects(started, host.ADDRESS, 80, fetch)
+        down = self.guest_connects("bottle-b", host.ADDRESS, 80, fetch)
         self.assertIn(b"HTTP/1.1 503", down)
         self.assertIn(b"the controller can't be reached", down)
 
         daemon.start()
         for _ in range(100):   # the link comes back in the background
-            answer = self.guest_connects(started, host.ADDRESS, 80, fetch)
+            answer = self.guest_connects("bottle-b", host.ADDRESS, 80, fetch)
             if b"HTTP/1.1 200" in answer:
                 break
             time.sleep(0.2)
@@ -214,13 +210,12 @@ class DroneTest(DroneCase):
         # And what needs the bottle's side on the controller, a push, finds it, though the controller's bottled
         # is new and the bottle was bound through the one before.
         push = b"GET /git/workspace/work/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
-        self.assertIn(b"HTTP/1.1 200", self.guest_connects(started, host.ADDRESS, 80, push))
+        self.assertIn(b"HTTP/1.1 200", self.guest_connects("bottle-b", host.ADDRESS, 80, push))
 
-    def test_a_drones_flows_elsewhere_are_decided_there(self) -> None:
+    def test_what_a_machine_no_bottle_is_routes_gets_nothing_there(self) -> None:
         runners.get("box").start("bottle-b", "b", (), ())
-        started = json.loads((self.remote / "started.json").read_text())
-        answer = self.guest_connects(started, "127.0.0.1", 22, b"SSH-2.0-x\r\n")
-        self.assertEqual(answer[:1], decider.DENY)   # the runner's own loopback, never reachable
+        fetch = b"GET /git/workspace/origin/info/refs HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
+        self.assertEqual(self.guest_connects("stranger", host.ADDRESS, 80, fetch), b"")
 
 
 class DetachTest(DroneCase):

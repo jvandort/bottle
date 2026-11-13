@@ -21,8 +21,10 @@ exception: after its line, the connection is the flow, both ways.
                output, as body.
   deliver      {bottle, to, text}: a message, as host.HostServices takes it.
   peers        {bottle}: the running bottles it may see.
-  flow         {bottle, address, port, first}: a flow redirected for a
-               credential, its first bytes base64; then the flow itself.
+  flow         {bottle, address, port, first, name, unwrapped}: a flow
+               routed for a credential, its first bytes base64, its name and
+               whether bottle-cli took its TLS off (see egress.Flow); then
+               the flow itself.
   upload-pack  {repo, pull_through}: a mirror's fetch of the hub `repo` (a
                mirrors.key), origin fetched into it first if asked; then
                git's protocol, both ways (mirrors.py, remote.relay).
@@ -110,9 +112,9 @@ class LinkController:
             raise BottleError(f"the controller: {answer.get('error', 'failed')}")
         return answer, data
 
-    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], build: bool = False):
+    async def egress(self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...]):
         answer, _ = await self._ask({"op": "bind", "bottle": bottle, "repos": served_to_json(repos),
-                                     "features": list(features), "build": build})
+                                     "features": list(features)})
         from bottle import mirrors
 
         injections = tuple(egress.Injection(i["host"], i["header"], "", i["port"], feature=i.get("feature", ""))
@@ -190,7 +192,8 @@ class _LinkedGateway:
             writer.close()
             return
         await _send(up_writer, {"op": "flow", "bottle": self.bottle, "address": flow.address, "port": flow.port,
-                                "first": base64.b64encode(flow.first).decode()})
+                                "first": base64.b64encode(flow.first).decode(), "name": flow.name,
+                                "unwrapped": flow.unwrapped})
         await _pipe(reader, writer, up_reader, up_writer)
 
 
@@ -274,7 +277,8 @@ class LinkServer:
         try:
             if op == "flow":
                 side = self._side(bottle)
-                flow = egress.Flow(message["address"], message["port"], base64.b64decode(message["first"]))
+                flow = egress.Flow(message["address"], message["port"], base64.b64decode(message["first"]),
+                                   message.get("name"), message.get("unwrapped", False))
                 await side[1].serve_handed_off(flow, reader, writer)
                 return
             if op == "upload-pack":
@@ -297,8 +301,7 @@ class LinkServer:
         match op:
             case "bind":
                 where, caches, services, gateway = await self.controller.egress(
-                    bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())),
-                    message.get("build", False))
+                    bottle, served_from_json(message.get("repos", [])), tuple(message.get("features", ())))
                 self.bottles[bottle] = (services, gateway)
                 log.info("%s: bound from runner %s", bottle, self.runner)
                 return {"ok": True, "injections": [{"host": i.host, "header": i.header, "port": i.port,

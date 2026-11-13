@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import daemon, features, images
+from bottle import cache, features, images
 from bottle.errors import BottleError
 from tests.support import GitTestCase
 
@@ -80,14 +80,7 @@ class StoreTest(GitTestCase):
         self.context.mkdir()
         (self.context / "install.sh").write_text("#!/bin/sh\n")
 
-        def bind(bottle, *args, **kwargs):
-            self.calls.append(("bind", bottle))
-            self.bound = kwargs
-            return "127.0.0.1:47329", "token"
-
         for target, name, fake in (
-            (daemon, "bind_decider", bind),
-            (daemon, "release_egress", lambda bottle: self.calls.append(("release", bottle))),
             (images.subprocess, "run", self.cli),
             (images.prereqs, "ensure_cli", lambda: None),
             (features, "apt_https_hosts", lambda: ["apt.example"]),
@@ -121,8 +114,8 @@ class StoreTest(GitTestCase):
                 if disk.name not in keep:
                     disk.unlink()
             return done()
-        # image build RECIPE STORE --tag TAG --decider ADDRESS
-        self.calls.append(("build", args[4:], env.get("BOTTLE_DECIDER_TOKEN")))
+        # image build RECIPE STORE --tag TAG --network FILE
+        self.calls.append(("build", args[4:-1], json.loads(Path(args[-1]).read_text())))
         recipe = json.loads(Path(args[2]).read_text())
         self.recipes.append(recipe)
         if self.build_status:
@@ -138,13 +131,12 @@ class StoreTest(GitTestCase):
         with mock.patch("sys.stderr"):
             return images.build_recipe(self.context, tag, inputs, recipe, no_cache)
 
-    def test_a_build_runs_bound_like_a_bottle_and_released_after(self) -> None:
+    def test_a_build_reaches_the_public_network_its_apt_repositories_kept_and_nothing_routed(self) -> None:
         self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        [bind, build, release] = self.calls
-        self.assertEqual(bind[0], "bind")
-        self.assertEqual(build, ("build", ["--tag", "localhost/bottle/base:latest", "--decider", "127.0.0.1:47329"],
-                                 "token"))
-        self.assertEqual(release, ("release", bind[1]))
+        [(_, args, network)] = self.calls
+        self.assertEqual(args, ["--tag", "localhost/bottle/base:latest", "--network"])
+        self.assertEqual(set(network), {"cache"})
+        self.assertIn("deb.debian.org", [c["host"] for c in network["cache"]])
 
     def test_the_recipe_mounts_the_context_and_is_on_what_it_says(self) -> None:
         self.build("localhost/bottle/base:latest", "aaaa" * 16,
@@ -164,8 +156,9 @@ class StoreTest(GitTestCase):
             {"run": ["sh", "-c", "apt-get ..."], "env": {"HOME": "/root", images.BUILD_CA: ""}},
             {"run": ["./install.sh"], "env": {"HOME": "/root"}},
         ]}
-        self.build("localhost/bottle/base:with-claude", "aaaa" * 16, recipe)
-        self.assertEqual(self.bound, {"features": ["claude"], "build": True})
+        with mock.patch.object(cache, "cached_for", wraps=cache.cached_for) as cached_for:
+            self.build("localhost/bottle/base:with-claude", "aaaa" * 16, recipe)
+        cached_for.assert_called_once_with(["claude"], build=True)
         apt_step, install = self.recipes[-1]["steps"]
         self.assertEqual(apt_step["env"][images.BUILD_CA], "PEM for bottle-builds of apt.example")
         self.assertNotIn(images.BUILD_CA, install["env"])
@@ -218,12 +211,11 @@ class StoreTest(GitTestCase):
         self.assertEqual(self.tags, {"localhost/bottle/base:latest": "old"})
         self.assertFalse((images.bottle_home() / "images.json").exists())
 
-    def test_a_failed_build_is_an_error_keeps_nothing_and_releases_its_token(self) -> None:
+    def test_a_failed_build_is_an_error_and_keeps_nothing(self) -> None:
         self.build_status = 1
         with self.assertRaisesRegex(BottleError, "bottle-cli image build"):
             self.build("localhost/bottle/base:latest", "aaaa" * 16)
         self.assertIsNone(images.archive_of("localhost/bottle/base:latest"))
-        self.assertEqual(self.calls[-1][0], "release")
 
 
 if __name__ == "__main__":

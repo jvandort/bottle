@@ -195,8 +195,19 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         decider = await asyncio.start_server(self.decider, "127.0.0.1", 0)
         self.addAsyncCleanup(Upstream.close, decider)
         self.decider_port = decider.sockets[0].getsockname()[1]
+        routed = await asyncio.start_server(self.routed, "127.0.0.1", 0)
+        self.addAsyncCleanup(Upstream.close, routed)
+        self.routed_port = routed.sockets[0].getsockname()[1]
 
     upstream = Upstream.upstream
+
+    async def routed(self, reader, writer) -> None:
+        """As services.py serves what a machine routes to bottled: its TLS taken off by bottle-cli, its name said."""
+        address, port = self.connected_to
+        flow = Flow(address, port, name="upstream.test", unwrapped=True)
+        decision = await self.proxy.decide(flow, opening_read=True)
+        self.decisions.append(decision)
+        await self.proxy.serve(flow, decision, reader, writer)
 
     async def decider(self, reader, writer) -> None:
         """What the decider will do: read the first bytes, decide, and serve the redirect."""
@@ -251,6 +262,21 @@ class ServeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.endswith(b"hello"))
         self.assertIn("Authorization: Bearer real-token", head)
         self.assertEqual(self.decisions[0].service, CREDENTIAL)
+
+    async def test_a_credentials_flow_bottle_cli_unwrapped_gets_the_credential_in_plain_http(self) -> None:
+        for handed in (False, True):
+            if handed:
+                self.handing_off()
+            with self.subTest(handed=handed):
+                self.connected_to = ("203.0.113.5", self.upstream_port)
+                reader, writer = await asyncio.open_connection("127.0.0.1", self.routed_port)
+                writer.write(b"GET /api HTTP/1.1\r\nHost: upstream.test\r\nAuthorization: Bearer stand-in\r\n\r\n")
+                response = await asyncio.wait_for(reader.read(), 5)
+                head = (await asyncio.wait_for(self.received.get(), 5)).decode()
+                self.assertTrue(response.endswith(b"hello"))
+                self.assertIn("Authorization: Bearer real-token", head)
+                self.assertNotIn("stand-in", head)
+                self.assertEqual(self.decisions[-1].service, CREDENTIAL)
 
     async def test_a_credentials_flow_whose_opening_came_late_is_handed_off_once_read(self) -> None:
         self.handing_off()

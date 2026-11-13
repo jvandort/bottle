@@ -59,7 +59,9 @@ def _run(op: str, args: dict):
             local.create(args["machine"], Path(args["archive"]),
                          [runners.Mount(Path(m["source"]), m["target"]) for m in args["mounts"]],
                          args["env"], args["memory_mib"], args.get("disk_gib"), args.get("user"),
-                         args.get("workdir"), args.get("labels"))
+                         args.get("workdir"), args.get("labels"), args.get("network"))
+        case "configure":
+            local.configure(args["machine"], args["network"])
         case "start":
             local.start(args["machine"], args["bottle"], served_from_json(args["served"]), args["features"])
         case "release":

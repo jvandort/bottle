@@ -17,17 +17,16 @@ from tests.test_host import serve_bottle_host
 class FakeSmolvm:
     """Stands in for smolvm and bottled, recording what exists and what was done."""
 
-    DECIDER = "127.0.0.1:47329"
-
     def __init__(self, fail: str | None = None, fail_cleanup: str | None = None) -> None:
         self.fail = fail
         self.fail_cleanup = fail_cleanup
         self.machines: dict[str, str] = {}
         self.bound: set[str] = set()
-        self.started: dict[str, tuple[str, str]] = {}  # machine: the decider and token it was started with
+        self.started: dict[str, int] = {}  # machine: how often it's been started
+        self.bound_machines: dict[str, str] = {}  # bottle: the machine bottled answers for it
+        self.configured: dict[str, dict] = {}  # machine: the network policy it was given after it was made
         self.calls: list[str] = []
         self.statuses_seen: list[str] = []
-        self.tokens = 0
         self.ssh_setup: list[tuple] = []
 
     def _step(self, name: str) -> None:
@@ -38,17 +37,21 @@ class FakeSmolvm:
     def archive(self, tag):
         return Path("/images") / f"{tag.rsplit('/', 1)[-1].replace(':', '-')}.tar"
 
-    def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None):
+    def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None,
+               network=None):
         if bottles.load():
             self.statuses_seen.append(bottles.load()[next(iter(bottles.load()))].status)
         self._step("create")
         self.create_args = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib, cpus=cpus,
-                                disk_gib=disk_gib, user=user, workdir=workdir, labels=labels)
+                                disk_gib=disk_gib, user=user, workdir=workdir, labels=labels, network=network)
         self.machines[name] = "created"
 
-    def start(self, name, decider, token):
+    def configure(self, name, network):
+        self.configured[name] = network
+
+    def start(self, name):
         self._step("start")
-        self.started[name] = (decider, token)
+        self.started[name] = self.started.get(name, 0) + 1
         self.machines[name] = "running"
 
     def rename(self, name, new):
@@ -103,15 +106,14 @@ class FakeSmolvm:
         self.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
         return ["smolvm-exec", name, *argv]
 
-    def bind_decider(self, bottle, repos=(), features=()):
+    def bind(self, bottle, machine, repos=(), features=()):
         self._step("bind")
         self.egress_repos = tuple(repos)
         self.egress_git_dir = repos[0].git_dir if repos else None
         self.egress_features = tuple(features)
         self.egress_remotes = repos[0].remotes if repos else ()
         self.bound.add(bottle)
-        self.tokens += 1
-        return self.DECIDER, f"token-{self.tokens}"
+        self.bound_machines[bottle] = machine
 
     def release_egress(self, bottle):
         self.bound.discard(bottle)
@@ -121,7 +123,7 @@ class FakeSmolvm:
         return False
 
     def ca_certificate(self, name, hosts):
-        return "the machine's caching CA's certificate" if hosts else None
+        return "the machine's CA's certificate"  # for its policy's hosts, which bottle-cli reads
 
     def daemon_stop(self):
         self.calls.append("daemon_stop")
@@ -129,9 +131,9 @@ class FakeSmolvm:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runners.krun, ("create", "start", "stop", "rename", "delete", "state", "exec_", "exec_command",
-                                    "ca_certificate")),
-            (bottles.daemon, ("bind_decider", "release_egress")),
+            (bottles.runners.krun, ("create", "configure", "start", "stop", "rename", "delete", "state", "exec_",
+                                    "exec_command", "ca_certificate")),
+            (bottles.daemon, ("bind", "release_egress")),
         ):
             for name in names:
                 patcher = mock.patch.object(module, name, getattr(self, name))
@@ -144,8 +146,10 @@ class FakeSmolvm:
             mock.patch.object(bottles.runners.prereqs, "ensure_cli"),
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
             mock.patch.object(bottles.ca, "certificate", return_value="the egress CA's certificate"),
-            mock.patch.object(bottles.auth, "intercepted_hosts", side_effect=lambda specs: list(self.intercepted)),
-            mock.patch.object(bottles.auth, "credential_hosts", side_effect=lambda specs: list(self.intercepted)),
+            mock.patch.object(bottles.cache, "cached_for",
+                              side_effect=lambda specs: [bottles.cache.Cached("deb.debian.org", ports=(80,))]),
+            mock.patch.object(bottles.auth, "credential_destinations",
+                              side_effect=lambda specs: [(h, 443) for h in self.intercepted]),
             mock.patch.object(bottles.images, "is_current", return_value=True),
             mock.patch.object(bottles.features_, "remove_stale", return_value=[]),
             mock.patch.object(bottles.auth, "standins_for", side_effect=lambda specs: dict(self.standins)),
@@ -255,10 +259,18 @@ class CreateTest(BottleTestCase):
         self.assertEqual(fake.machines, {bottle.machine: "running"})
         self.assertEqual(bottles.get("old").machine_name, bottle.machine)
 
-    def test_started_with_its_token_at_the_decider(self) -> None:
+    def test_made_with_its_network_policy_and_bottled_answering_its_machine(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        self.assertEqual(fake.started[bottle.machine], (FakeSmolvm.DECIDER, "token-1"))
+        network = fake.create_args["network"]
+        socket = str(bottles.daemon.services_socket())
+        self.assertIn({"address": bottles.host.ADDRESS, "port": 80, "socket": socket}, network["routes"])
+        self.assertIn({"network": bottles.host.SSH_NETWORK, "port": bottles.host.SSH_PORT, "socket": socket},
+                      network["routes"])
+        self.assertIn("deb.debian.org", [c["host"] for c in network["cache"]])
+        self.assertTrue(bottles.get("example").networked)
+        self.assertEqual(fake.bound_machines, {"example": bottle.machine})
+        self.assertEqual(fake.started[bottle.machine], 1)
 
     def test_bottle_host_is_given_as_root(self) -> None:
         fake = self.fake()
@@ -454,7 +466,19 @@ class EnsureRunningTest(BottleTestCase):
 
         self.assertEqual(fake.machines[bottle.machine], "running")
         self.assertEqual(fake.bound, {"example"})
-        self.assertEqual(fake.started[bottle.machine], (FakeSmolvm.DECIDER, "token-2"))  # a new token each run
+        self.assertEqual(fake.started[bottle.machine], 2)
+        self.assertEqual(fake.configured, {})  # made with its policy
+
+    def test_a_bottle_made_before_machines_had_policies_is_given_one_as_it_starts(self) -> None:
+        fake = self.fake()
+        bottle = self.create()
+        bottles.stop("example")
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
+
+        bottles.ensure_running("example")
+
+        self.assertEqual(fake.configured[bottle.machine]["routes"], fake.create_args["network"]["routes"])
+        self.assertTrue(bottles.get("example").networked)
 
     def test_starting_verifies_the_contract_and_gives_bottle_host(self) -> None:
         fake = self.fake()
@@ -478,7 +502,8 @@ class EnsureRunningTest(BottleTestCase):
         fake.machines[bottle.machine] = "stopped"
         fake.trusted = None
         bottles.ensure_running("example")
-        self.assertEqual(fake.trusted, ("root", "the egress CA's certificate"))
+        self.assertEqual(fake.cache_trusted, ("root", "the machine's CA's certificate"))
+        self.assertEqual(fake.trusted, ("root", None))  # bottled's own, from before, taken out
 
     def test_missing_machine(self) -> None:
         fake = self.fake()
@@ -728,8 +753,7 @@ class UnreachableRunnerTest(BottleTestCase):
 
 
 class DroneCertificatesTest(BottleTestCase):
-    """A bottle on a runner elsewhere trusts two CAs: the controller's, for its credentials' hosts, and its
-    runner's, for the hosts whose downloads that runner keeps."""
+    """A bottle on a runner elsewhere trusts its machine's CA, which bottle-cli there takes TLS off with."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -747,22 +771,15 @@ class DroneCertificatesTest(BottleTestCase):
         patcher = mock.patch.object(bottles.runners, "get", side_effect=lambda name="local": self.box if name == "box" else real(name))
         patcher.start()
         self.addCleanup(patcher.stop)
-        for name, hosts in (("credential_hosts", ["api.example"]), ("intercepted_hosts", ["api.example", "repo.example"])):
-            patcher = mock.patch.object(bottles.auth, name, return_value=hosts)
-            patcher.start()
-            self.addCleanup(patcher.stop)
 
-    def test_the_controllers_is_for_its_credentials_and_its_runners_for_the_rest(self) -> None:
+    def test_its_runners_and_no_other(self) -> None:
         bottle = bottles.get("there")
-        self.assertEqual((bottles._terminated_here(bottle), bottles._cached_hosts(bottle)), (["api.example"], ["repo.example"]))
-        with mock.patch.object(bottles.ca, "certificate", return_value="the controller's CA's certificate") as certificate:
-            bottles.trust_egress_ca(bottle)
-        certificate.assert_called_once_with("there", ["api.example"])
-        self.box.cache_certificate.assert_called_once_with(bottle.machine, ["repo.example"])
+        bottles.trust_egress_ca(bottle)
+        self.box.cache_certificate.assert_called_once_with(bottle.machine, [])  # its policy's hosts, as it has them
         [(script, ours), (cache_script, theirs)] = self.installed
         self.assertIn(bottles.CA_CERTIFICATE, script)
         self.assertIn(bottles.CACHE_CERTIFICATE, cache_script)
-        self.assertEqual((ours, theirs), ("the controller's CA's certificate", "the runner's CA's certificate"))
+        self.assertEqual((ours, theirs), (None, "the runner's CA's certificate"))
 
     def test_delete_forgets_its_runners_ca_too(self) -> None:
         self.box.state.return_value = None

@@ -1,12 +1,12 @@
 """Egress: a bottle's only way out.
 
-A bottle's driver (smolvm, see smolvm.py) carries the guest's sockets and asks
-bottled about each TCP connection before it connects anywhere (see decider.py).
-Every connection is a flow (Flow): the address the bottle connected to, and the
-first bytes it sent. Gateway.decide says whether it may go there directly
-(the driver makes the connection from the runner, with its routes and VPN), whether
-bottled takes it, or neither; Gateway.serve is the far end of one bottled
-takes. The policy (Policy) is enforced where root in the bottle can't reach it.
+A bottle's driver (bottle-cli) carries the guest's sockets and decides each TCP
+connection itself, by its machine's policy, which routes some to bottled
+(see services.py). Every connection is a flow (Flow): the address the bottle
+connected to, the name it asked for, and whether its TLS was taken off.
+Gateway.decide says which of bottled's services takes it, or refuses it;
+Gateway.serve is the far end of one bottled takes. The policy (Policy) is
+enforced where root in the bottle can't reach it.
 
 bottled takes two kinds of flow. Those to bottle.host (host.ADDRESS) it
 answers itself, as the git service (see host.py); those to port 22 of the
@@ -313,12 +313,20 @@ class Flow:
     """One connection a bottle opened, as the driver presents it before connecting anywhere.
 
     The address the guest connected to, and the first bytes it sent, where a name
-    may be: a TLS ClientHello's SNI, an HTTP request's Host.
+    may be: a TLS ClientHello's SNI, an HTTP request's Host. One bottle-cli
+    routes here (see services.py) comes with its name, read already, and
+    `unwrapped` if the bottle spoke TLS, which bottle-cli has taken off.
     """
 
     address: str
     port: int
     first: bytes = b""  # the first bytes it sent, already read
+    name: str | None = None
+    unwrapped: bool = False
+
+    def named(self) -> str | None:
+        """The name it's for: as bottle-cli read it, else from its first bytes."""
+        return self.name if self.name is not None else name_in(self.first)
 
 
 # What a redirected flow is for.
@@ -368,9 +376,9 @@ class Gateway:
         self.resolve = resolve or _resolve
         # bottle.host's git service: flows to host.ADDRESS are answered here, never forwarded.
         self.services = services
-        # Credentials bottled attaches for the bottle, by destination, and
-        # the certificates that let it: without them, nothing is attached.
-        # Where bottled here doesn't hold them, `hand_off` takes the flows a
+        # Credentials bottled attaches for the bottle, by destination, on what
+        # bottle-cli gives it unwrapped (or, `certificates` given, what it
+        # takes the TLS off itself). Where bottled here doesn't hold them, `hand_off` takes the flows a
         # credential's host and port are redirected for: the controller's own
         # gateway for the bottle (serve_handed_off), and `injections` are only
         # where they're for, their secrets left out. It takes ssh's
@@ -379,7 +387,7 @@ class Gateway:
         # The command line that runs sshd -i in the bottle granted at an
         # address, which a flow to it is joined to; raises Refused if none is.
         self.ssh = ssh
-        self.injections = tuple(injections) if certificates or hand_off else ()
+        self.injections = tuple(injections)
         self.certificates = certificates
         # Hosts whose downloads the driver carrying the bottle's flows keeps (see driver_policy).
         self.caches = tuple(caches)
@@ -401,7 +409,7 @@ class Gateway:
         so it's checked before it opens anything. `opening_read`: bottled has
         already read all of the flow's opening it's going to.
         """
-        name = name_in(flow.first)
+        name = flow.named()
         address = ipaddress.ip_address(flow.address)
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
             address = address.ipv4_mapped  # judged as the IPv4 address it is
@@ -424,7 +432,8 @@ class Gateway:
                 raise Refused(403, "Forbidden: destination not allowed", "denied")  # the host itself: no name helps
             return Redirect(OPENING)
         # A credential goes only on TLS, so only a ClientHello's name claims one.
-        injection = self._injection_at(name, flow.port) if name and flow.first[:1] == b"\x16" else None
+        tls = flow.unwrapped or flow.first[:1] == b"\x16"
+        injection = self._injection_at(name, flow.port) if name and tls else None
         if injection is not None:
             # Sent to the name, never to the address the bottle chose: the
             # credential goes only where its host's name leads.
@@ -439,7 +448,7 @@ class Gateway:
     async def serve(self, flow: "Flow", decision: "Redirect", reader, writer) -> None:
         """Be the far end of a redirected flow, whose first bytes have already been read from `reader`."""
         started = time.monotonic()
-        name = name_in(flow.first)
+        name = flow.named()
         target = f"{flow.address}:{flow.port}" + (f" ({name})" if name else "")
         ip, up, down, response = None, [0], [0], bytearray()
         outcome, status = "ok", None
@@ -470,9 +479,12 @@ class Gateway:
                 ip, outcome = "controller", "handed-off"
                 await self.hand_off(flow, reader, writer)
                 return
-            context = await self._certificate(name)
-            reader, tls = await self._accept_tls(context, flow.first, reader, writer)
-            writer = tls
+            if flow.unwrapped:
+                reader = _Reader(reader.read, flow.first)
+            else:
+                context = await self._certificate(name)
+                reader, tls = await self._accept_tls(context, flow.first, reader, writer)
+                writer = tls
             request = await self._inside(Request("CONNECT", name, flow.port, None), decision.injection, reader, writer)
             if request.injected:
                 target += " +credential"
@@ -488,7 +500,7 @@ class Gateway:
         except Refused as e:
             outcome = e.outcome
             # A bottle speaking TLS can only be answered inside it; plain http, as it is.
-            if e.status is not None and (tls is not None or decision.service == GIT):
+            if e.status is not None and (tls is not None or flow.unwrapped or decision.service == GIT):
                 await _respond(writer, e.status, e.reason, e.body, e.content_type)
         except Exception:
             outcome = "error"
@@ -551,25 +563,6 @@ class Gateway:
         except (ValueError, asyncio.IncompleteReadError):
             raise Refused(400, "Bad Request", "bad-request") from None
         return await self.services.handle(host.HttpRequest(method, url.path or "/", url.query, headers, body), writer)
-
-    def driver_policy(self) -> dict:
-        """What the driver carrying the bottle's flows may decide itself, as decide would, and which flows it
-        must still hand here: those bottled is the far end of or must read (bottle.host's services, ssh to
-        bottles, a credential's), by address or by the name a flow's first bytes give (a ClientHello's server
-        name, an HTTP request's Host); the private addresses it may reach by name; and the hosts whose downloads
-        it keeps, as cache.Cached has them."""
-        hand: list[dict] = []
-        if self.services is not None:
-            hand.append({"address": host.ADDRESS, "port": 80})
-        if self.ssh or self.hand_off:
-            hand.append({"network": host.SSH_NETWORK, "port": host.SSH_PORT})
-        hand += [{"name": i.host.lower(), "port": i.port} for i in self.injections]
-        caches = [
-            {"host": c.host, "include": list(c.include), "exclude": list(c.exclude), "ports": list(c.ports),
-             "immutable": c.immutable}
-            for c in self.caches
-        ]
-        return {"version": 1, "allow_private": list(self.policy.allow_private), "hand": hand, "cache": caches}
 
     def _injection_at(self, host: str, port: int) -> Injection | None:
         """The credential for this host and port, if one claims it."""

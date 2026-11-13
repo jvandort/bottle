@@ -311,6 +311,13 @@ def credential_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
     return sorted({destination(host)[0].lower() for c in credentials_for(specs) for host in c.inject.hosts})
 
 
+def credential_destinations(specs: tuple[str, ...] | list[str]) -> list[tuple[str, int]]:
+    """The host patterns and ports a bottle with these features has credentials attached at, logged in or not:
+    what its machine routes to bottled (see services.network)."""
+    return sorted({(pattern.lower(), port) for c in credentials_for(specs) for pattern, port in
+                   (destination(h) for h in c.inject.hosts)})
+
+
 def intercepted_hosts(specs: tuple[str, ...] | list[str]) -> list[str]:
     """The host patterns a bottle with these features has its tunnels terminated for, without their ports.
 

@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest import mock
 
 from bottle import daemon, egress, host, link, runners
-from bottle.decider import Decider
 from bottle.errors import BottleError
 from tests.support import GitTestCase, run
 from tests.test_host import serve_bottle_host
@@ -33,8 +32,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        for patcher in (mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]),
-                        mock.patch.object(daemon.cache, "cached_for", return_value=[])):
+        for patcher in (mock.patch.object(daemon.cache, "cached_for", return_value=[]),):
             patcher.start()
             self.addCleanup(patcher.stop)
         short = Path(tempfile.mkdtemp(dir="/tmp"))   # macOS caps Unix socket paths at 104 bytes
@@ -53,8 +51,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         await server.wait_closed()
 
     def runner(self) -> daemon.Daemon:
-        return daemon.Daemon(decider=Decider(self.tmp / "tokens.json"), decider_port=0,
-                             controller=link.LinkController(self.socket))
+        return daemon.Daemon(controller=link.LinkController(self.socket))
 
     def controller(self) -> daemon.Controller:
         return daemon.Controller(egress.Policy(), running=lambda bottle: False)
@@ -66,9 +63,9 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(daemon.cache, "cached_for", return_value=cached):
             server = await self.link_up(self.controller())
             runner = self.runner()
-            await runner.bind("b", (), ("teamcity",))
+            await runner.bind("b", "b-m", (), ("teamcity",))
         self.assertTrue(server.bound("b"))
-        [binding] = runner.decider.bindings.values()
+        [binding] = runner.services.bindings.values()
         self.assertEqual([(i.host, i.header, i.value, i.feature) for i in binding.gateway.injections],
                          [("ci.test", "Authorization", "", "teamcity")])
         # What the features say is cached, from the controller, which has them: for bottle-cli here to keep.
@@ -156,7 +153,7 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         echoing = Echoing()
         controller = mock.Mock()
 
-        async def egress_for(bottle, repos, features, build=False):
+        async def egress_for(bottle, repos, features):
             return (), (), host.HostServices(), echoing
 
         controller.egress = egress_for
@@ -165,7 +162,8 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         answered = asyncio.Queue()
 
         async def bottle_side(reader, writer):
-            await gateway.serve_handed_off(egress.Flow("203.0.113.5", 443, b"\x16hello"), reader, writer)
+            await gateway.serve_handed_off(egress.Flow("203.0.113.5", 443, b"\x16hello", "api.example", True),
+                                           reader, writer)
 
         guest = await asyncio.start_server(bottle_side, "127.0.0.1", 0)
         self.addAsyncCleanup(self._close, guest)
@@ -173,7 +171,8 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         writer.write(b"and more")
         await writer.drain()
         self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"hello \x16helloand more")
-        self.assertEqual(echoing.flows, [egress.Flow("203.0.113.5", 443, b"\x16hello")])
+        # As bottle-cli gave it: its name, and its TLS taken off.
+        self.assertEqual(echoing.flows, [egress.Flow("203.0.113.5", 443, b"\x16hello", "api.example", True)])
 
     async def test_a_bottle_bound_from_no_runner_is_served_nothing(self):
         await self.link_up(self.controller())
@@ -181,33 +180,19 @@ class LinkTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
             await link.LinkController(self.socket)._ask({"op": "push", "bottle": "b", "method": "POST", "path": "/"})
 
     async def test_with_the_link_down_a_bottle_cant_be_bound_until_it_comes_up(self):
-        Decider(self.tmp / "tokens.json").bind("b", None)   # its machine holds the token from before
         runner = self.runner()
         runner.remembered = self.tmp / "bindings.json"
         with self.assertRaisesRegex(BottleError, "the controller can't be reached"):
-            await runner.bind("x", (), ())
-        runner._remember("b", ("b", [], ["tools"]))
-        self.assertEqual(runner.remembered_bindings(), [("b", (), ("tools",))])
-        self.assertEqual(await runner.restore(runner.remembered_bindings()), [("b", (), ("tools",))])
+            await runner.bind("x", "x-m", (), ())
+        runner._remember("b", ("b", "b-m", [], ["tools"]))
+        self.assertEqual(runner.remembered_bindings(), [("b", "b-m", (), ("tools",))])
+        self.assertEqual(await runner.restore(runner.remembered_bindings()), [("b", "b-m", (), ("tools",))])
         with mock.patch.object(daemon.auth, "injections_for", return_value=[]):
             await self.link_up(self.controller())
             self.assertEqual(await runner.restore(runner.remembered_bindings()), [])
-        self.assertTrue(runner.decider.bound("b"))
+        self.assertTrue(runner.services.bound("b"))
         await runner.release("b")
         self.assertEqual(runner.remembered_bindings(), [])
-
-
-    async def test_a_builds_binding_has_no_credentials_and_is_remembered_so(self):
-        runner = self.runner()
-        runner.remembered = self.tmp / "bindings.json"
-        injections = [egress.Injection("ci.test", "Authorization", "Bearer x")]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
-                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
-            await self.link_up(self.controller())
-            await runner.bind("builder", (), ("f",), build=True)
-            [binding] = runner.decider.bindings.values()
-            self.assertEqual(binding.gateway.injections, ())
-            self.assertEqual(runner.remembered_bindings(), [("builder", (), ("f",), True)])
 
 
 class LinksTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
@@ -308,7 +293,6 @@ exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" bash -c "$1"
         controller = daemon.Controller(egress.Policy(), running=lambda b: False)
         self.addAsyncCleanup(controller.links.close)
         with mock.patch.object(daemon.auth, "injections_for", return_value=[]), \
-                mock.patch.object(daemon.ca, "hosts", return_value=[]), \
                 mock.patch.object(daemon.cache, "cached_for", return_value=[]):
             await controller.links.ensure("box")
         self.assertEqual(list(controller.links.servers["box"].bottles), ["b"])

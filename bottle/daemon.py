@@ -1,17 +1,19 @@
-"""bottled: the daemon that decides every bottle's connections.
+"""bottled: the daemon that serves what bottles' machines route to it.
 
 It's two halves in one process. The runner's (Daemon) is what has to sit
-next to the machines: the decider and each bottle's gateway.
+next to the machines: the services socket and each bottle's gateway.
 The controller's (Controller) is what stays with the user: credentials,
 pushes into hubs, and messages between bottles. A runner elsewhere runs the
 first half alone, and reaches the controller's over its link; here the two
 call each other in-process.
 
-It runs the decider (see decider.py) on the runner's loopback, which smolvm asks
-about each of a bottle's connections before making it. Commands don't manage
-it directly: bind_decider() gives a bottle its token there, starting bottled
-if it isn't running, and release_egress() takes it back. It listens on a Unix
-socket in $BOTTLE_HOME and speaks one JSON line per request.
+bottle-cli decides a bottle's connections itself, by the policy its machine
+was made with (services.network), and gives bottled the ones that policy
+routes to it, on a unix socket in $BOTTLE_HOME (services.py): bottle.host's
+services, ssh to bottles, and credentials' hosts. Commands don't manage it
+directly: bind() has it answer a bottle's machine, starting bottled if it isn't
+running, and release_egress() stops it. It listens on another Unix socket in
+$BOTTLE_HOME and speaks one JSON line per request.
 """
 
 import asyncio
@@ -28,7 +30,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from bottle import auth, ca, cache, decider as decider_, egress, link, messages, specs, ssh
+from bottle import auth, cache, egress, link, messages, services as services_, specs, ssh
 from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
 from bottle.store import bottle_home, log_path, open_log, read_json, write_json
@@ -77,23 +79,23 @@ def socket_path(name: str = "bottled.sock") -> Path:
 # --- client -------------------------------------------------------------------
 
 
-def bind_decider(
-    bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = (), build: bool = False,
-) -> tuple[str, str]:
-    """Have the decider answer `bottle`'s flows; return its address and the bottle's new token, in hex.
+def services_socket() -> Path:
+    """Where bottled answers what this runner's machines route to it: what their policies name."""
+    return socket_path("services.sock")
 
-    The token goes to the driver that starts the bottle's machine, and nowhere
-    else: whoever holds it can speak for the bottle. For a `build` of an
-    image with these features, only their apt repositories' downloads are
-    kept (see cache.cached_for), and none of their credentials attached.
+
+def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] | list[str] = ()) -> None:
+    """Have bottled answer what `machine` routes to it as `bottle`'s, starting bottled if it isn't running.
+
+    Its credentials are read as it's bound: a login reaches a bottle when it's
+    next started, or when bottled is.
     """
     message = {
-        "op": "bind", "bottle": bottle, "features": list(features), "build": build,
+        "op": "bind", "bottle": bottle, "machine": machine, "features": list(features),
         "repos": [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at,
                    "remotes": [remote.spec for remote in r.remotes]} for r in repos],
     }
-    reply = _request(message, start=True)
-    return reply["decider"], reply["token"]
+    _request(message, start=True)
 
 
 def ensure_link(runner: str) -> None:
@@ -102,7 +104,7 @@ def ensure_link(runner: str) -> None:
 
 
 def release_egress(bottle: str) -> None:
-    """Stop answering `bottle`'s flows at the decider, and forget its token, if bottled is running at all."""
+    """Stop answering `bottle`'s machine, if bottled is running at all."""
     _request({"op": "release", "bottle": bottle}, start=False)
 
 
@@ -265,28 +267,23 @@ class Controller:
         """A bottle here has stopped: nothing to do, since its side here is made again each time it's bound."""
 
     async def egress(
-        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...], build: bool = False,
+        self, bottle: str, repos: tuple[Served, ...], features: tuple[str, ...],
     ) -> tuple[tuple[egress.Injection, ...], tuple[cache.Cached, ...], HostServices, egress.Gateway]:
         """What a runner needs to bind `bottle`: where its credentials are for, the hosts whose downloads are
         kept for it (the features say, and the runner doesn't have them), its bottle.host, and its gateway
         here, which serves its credentials' flows.
 
         Credentials are read here, each time a bottle is bound, so logging
-        in or out reaches a bottle when it next starts. Only for the hosts the
-        bottle's CA covers, which it was made for when the bottle started:
-        those its features name since then can't be terminated, and go
-        direct until it starts again. For a `build`, none, and only its features' apt repositories cached.
+        in or out reaches a bottle when it's next bound: when it starts, or
+        bottled does. Only for the hosts its machine routes here, which it was
+        made with: those its features name since then go direct until it's made again.
         """
-        intercepted = tuple(await asyncio.to_thread(ca.hosts, bottle))
-        injections = tuple(i for i in await asyncio.to_thread(auth.injections_for, features)
-                           if not build and i.host.lower() in intercepted)
-        certificates = functools.partial(ca.server_context, bottle, intercepted)
-        gateway = egress.Gateway(bottle, self.policy, injections=injections, certificates=certificates,
-                                 ssh=functools.partial(self.ssh, bottle))
+        injections = tuple(await asyncio.to_thread(auth.injections_for, features))
+        gateway = egress.Gateway(bottle, self.policy, injections=injections, ssh=functools.partial(self.ssh, bottle))
         services = HostServices(repos, bottle=bottle, deliver=self.deliver, peers=self.peers, git=HubGit())
         # Where each credential is for, and nothing of the credential itself.
         where = tuple(egress.Injection(i.host, i.header, "", i.port, feature=i.feature) for i in injections)
-        caches = tuple(await asyncio.to_thread(cache.cached_for, features, build))
+        caches = tuple(await asyncio.to_thread(cache.cached_for, features))
         return where, caches, services, gateway
 
     async def ssh(self, bottle: str, address: str) -> list[str]:
@@ -504,24 +501,23 @@ class _Retry(Exception):
 
 
 class Daemon:
-    """bottled's runner half: the decider, and each bottle's gateway, which hands the controller what's its."""
+    """bottled's runner half: the services socket, and each bottle's gateway, which hands the controller what's
+    its."""
 
     def __init__(
-        self, policy: egress.Policy | None = None, decider: decider_.Decider | None = None,
-        decider_port: int | None = None, controller: Controller | None = None,
+        self, policy: egress.Policy | None = None, services: services_.Services | None = None,
+        services_path: Path | None = None, controller: Controller | None = None,
     ) -> None:
         self.policy = policy or egress.Policy()
-        self.decider = decider or decider_.Decider()
-        self.decider_port = decider_.port() if decider_port is None else decider_port
-        # Where the decider listens once it does: host:port.
-        self.decider_address: str | None = None
+        self.services = services or services_.Services()
+        self.services_path = services_path
         self.stopping = asyncio.Event()
         # Serializes work per bottle: startup restore and requests may overlap.
         self.locks: dict[str, asyncio.Lock] = {}
         # The code it runs, by its hash, as it was when it started: what a command checks it against.
         self.code = ssh.code_hash()
         # The controller's half: here, in this process, unless the controller is elsewhere.
-        self.controller = controller or Controller(self.policy, self.decider.bound)
+        self.controller = controller or Controller(self.policy, self.services.bound)
         # With the controller elsewhere, this runner has no registry of bottles to restore them from: what each
         # was bound with is kept here instead (remembered).
         self.remembered: Path | None = None
@@ -540,9 +536,8 @@ class Daemon:
                     repos = tuple(Served(Path(r["git_dir"]) if r.get("git_dir") else None,
                                          tuple(Remote.parse(spec) for spec in r.get("remotes", ())), r.get("at", ""))
                                   for r in message.get("repos", ()))
-                    token = await self.bind(message["bottle"], repos, tuple(message.get("features", ())),
-                                            build=message.get("build", False))
-                    reply = {"ok": True, "decider": self.decider_address, "token": token.hex()}
+                    await self.bind(message["bottle"], message["machine"], repos, tuple(message.get("features", ())))
+                    reply = {"ok": True}
                 case "release":
                     await self.release(message["bottle"])
                     reply = {"ok": True}
@@ -566,24 +561,17 @@ class Daemon:
         await writer.drain()
         writer.close()
 
-    async def bind(
-        self, bottle: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = (),
-        token: bytes | None = None, build: bool = False,
-    ) -> bytes:
-        """Answer `bottle`'s flows at the decider; returns its token, a new one unless `token` is given; for a
-        `build`, as bind_decider says."""
+    async def bind(self, bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tuple[str, ...] = ()) -> None:
+        """Answer what `machine` routes here as `bottle`'s."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            injections, cached, services, controller_gateway = await self.controller.egress(
-                bottle, repos, features, build)
-            # Its cached hosts are the driver's, bottle-cli's, which answers them behind the machine's caching CA
-            # (see bottle-cli ca): bottled only tells it which (Gateway.driver_policy).
+            injections, cached, services, controller_gateway = await self.controller.egress(bottle, repos, features)
             gateway = egress.Gateway(
                 bottle, self.policy, services=services, injections=injections, caches=cached,
                 hand_off=controller_gateway.serve_handed_off,
             )
             if self.remembered is not None:
-                self._remember(bottle, (bottle, link.served_to_json(repos), list(features), build))
-            return self.decider.bind(bottle, gateway, token)
+                self._remember(bottle, (bottle, machine, link.served_to_json(repos), list(features)))
+            self.services.bind(bottle, machine, gateway)
 
     def _remember(self, bottle: str, binding: tuple | None) -> None:
         bindings = read_json(self.remembered) or {}
@@ -595,33 +583,31 @@ class Daemon:
 
     def remembered_bindings(self) -> list[tuple]:
         """What each bottle was last bound with here, as restore() takes them."""
-        return [(b, link.served_from_json(repos), tuple(features), *rest)
-                for b, repos, features, *rest in (read_json(self.remembered) or {}).values()]
+        return [(b, machine, link.served_from_json(repos), tuple(features))
+                for b, machine, repos, features in (read_json(self.remembered) or {}).values()]
 
     async def release(self, bottle: str) -> None:
-        """Stop answering `bottle`'s flows, and forget its token: its machine has stopped."""
+        """Stop answering `bottle`'s machine: it's stopped, or gone."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
-            self.decider.release(bottle)
+            self.services.release(bottle)
             if self.remembered is not None:
                 self._remember(bottle, None)
         await self.controller.release(bottle)
 
     async def restore(self, bound: list[tuple]) -> list[tuple]:
-        """Answer the flows of bottles the decider gave tokens to before bottled last stopped.
+        """Answer the machines of bottles there were before bottled started.
 
-        Each is (name, the repos it's served, features), as bound_bottles()
-        gives them, and whether it's a build, as remembered_bindings() has it
-        (a bottle if it doesn't say). Their machines still hold
-        those tokens, so the same ones are bound. Returns those it couldn't bind.
+        Each is (name, machine, the repos it's served, features), as
+        bound_bottles() and remembered_bindings() give them. Returns those it
+        couldn't bind.
         """
         unrestored = []
         for binding in bound:
-            bottle, repos, features, *rest = binding
-            token = self.decider.tokens.get(bottle)
-            if token is None or self.decider.bound(bottle):
+            bottle, machine, repos, features = binding
+            if self.services.bound(bottle):
                 continue
             try:
-                await self.bind(bottle, repos, features, token, build=rest[0] if rest else False)
+                await self.bind(bottle, machine, repos, features)
             except Exception as e:  # one bad bottle mustn't stop the rest
                 log.warning("%s: couldn't restore its decisions: %s", bottle, e)
                 unrestored.append(binding)
@@ -633,13 +619,12 @@ def _permissions(bottle) -> list[str]:
     return bottle.spec.get("permissions", []) if bottle is not None else []
 
 
-def bound_bottles() -> list[tuple[str, tuple[Served, ...], tuple[str, ...]]]:
-    """(name, the repos it's served, features) of every ready bottle that has a token at the decider."""
-    from bottle import bottles  # bottles imports this module
+def bound_bottles() -> list[tuple[str, str, tuple[Served, ...], tuple[str, ...]]]:
+    """(name, machine, the repos it's served, features) of every ready bottle on this machine."""
+    from bottle import bottles, runners  # bottles imports this module
 
-    tokens = decider_.Decider().tokens
-    return [(b.name, bottles.served(b), tuple(b.features)) for b in bottles.load().values()
-            if b.status == "ready" and b.name in tokens]
+    return [(b.name, b.machine, bottles.served(b), tuple(b.features)) for b in bottles.load().values()
+            if b.status == "ready" and b.runner == runners.LOCAL]
 
 
 async def _keep_restoring(daemon: Daemon, unrestored: list[tuple]) -> None:
@@ -676,7 +661,7 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
         daemon = Daemon(controller=link.LinkController(Path(there))) if there else Daemon()
         if there:
             daemon.remembered = bottle_home() / "bindings.json"
-    # Owner-only: anyone who can reach the socket can bind bottles and read their tokens.
+    # Owner-only: anyone who can reach the socket can bind bottles.
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.stat().st_uid != os.getuid():
         raise BottleError(f"{path.parent} is owned by another user")
@@ -688,14 +673,11 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
             return
         except (ConnectionRefusedError, FileNotFoundError):
             path.unlink()  # left over from a daemon that died
-    try:
-        decider = await daemon.decider.start(daemon.decider_port)
-    except OSError as e:
-        raise BottleError(f"bottled's decider can't listen on 127.0.0.1:{daemon.decider_port}: {e.strerror or e}") from None
-    daemon.decider_address = "127.0.0.1:%d" % decider.sockets[0].getsockname()[1]
-    log.info("decider listening on %s", daemon.decider_address)
+    services_path = daemon.services_path or services_socket()
+    routed = await daemon.services.start(services_path)
+    log.info("services listening on %s", services_path)
     # Before answering anyone: whoever started bottled may be about to use a bottle whose machine
-    # still holds its token, and its flows must find it bound.
+    # is running, and what it routes here must find it bound.
     if daemon.remembered is None:
         await daemon.restore(await asyncio.to_thread(bound_bottles))
         # In the background: a runner that's off mustn't keep bottled from answering.
@@ -714,7 +696,7 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
             retrying.cancel()
         if isinstance(daemon.controller, Controller):
             await daemon.controller.links.close()
-        # Closed, not released: the decider's tokens outlive bottled, as their machines do.
-        decider.close()
+        routed.close()
+        services_path.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
         log.info("bottled %d stopped", os.getpid())

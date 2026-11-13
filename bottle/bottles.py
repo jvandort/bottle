@@ -6,11 +6,11 @@ Creation rolls back on failure; delete() removes whatever parts exist, so it
 also cleans up a bottle that was left half-made.
 
 Each bottle has:
-  - a machine, bottle-<name> (see krun.py), with each of its mounts'
-    repos' objects mounted read-only
-  - a token at bottled's decider, which the machine asks about each of the
-    machine's connections before making them, and which serves each mount's git
-    remotes at bottle.host (see decider.py, egress.py, host.py)
+  - a machine, <name> (see krun.py), with each of its mounts' repos'
+    objects mounted read-only, and the network policy it decides its
+    connections by (network), which routes some to bottled: bottle.host,
+    which serves each mount's git remotes, ssh to bottles, and its credentials'
+    hosts (see services.py, egress.py, host.py)
   - for each mount, a checkout at its path that borrows those objects via
     alternates. Which paths is the bottle's creator's to say; none is special,
     but the first is where a shell or a command starts (genie's home without one).
@@ -49,7 +49,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NoReturn
 
-from bottle import auth, ca, daemon, features as features_, host, images, repos, runners, specs
+from bottle import auth, ca, cache, daemon, features as features_, host, images, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, namespace, read_json, write_json
@@ -80,10 +80,10 @@ CONTRACT = (
     ("sshd is installed", "test -x /usr/sbin/sshd"),
     ("update-ca-certificates is installed", "test -x /usr/sbin/update-ca-certificates"),
 )
-# Where the egress CA's certificate goes in a bottle's trust store, whose bundle
-# the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
+# Where bottled's egress CA was in a bottle's trust store, before its machine's own took its place.
 CA_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress.crt"
-# Where a bottle has its machine's caching CA, for its cached hosts, which bottle-cli where it runs answers.
+# Where a bottle has its machine's CA, which bottle-cli where it runs takes TLS off with (bottle-cli ca), in the
+# trust store whose bundle the base image points NODE_EXTRA_CA_CERTS at, for Node tools.
 CACHE_CERTIFICATE = "/usr/local/share/ca-certificates/bottle-egress-cache.crt"
 
 
@@ -169,6 +169,9 @@ class Bottle:
     ssh: tuple[SshGrant, ...] = ()
     # Its machine's name, as bottle-cli has it; "" for a bottle made before it was recorded (see machine).
     machine_name: str = ""
+    # Whether its machine has its network policy (see network); one made before machines had their own is given
+    # it as it's next started.
+    networked: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", tuple(self.features))  # a list, when read from JSON
@@ -419,15 +422,18 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     # Recorded first, so the archive is kept from the moment a machine could have been made from it.
     bottle = replace(bottle, archive=archive.name)
     _save(bottle)
-    # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open.
+    # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open,
+    # by the policy its machine is made with.
     runner.create(
         bottle.machine, archive,
         mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),
         # What bottle-cli's exec and shell use unless told, and what its ls shows.
-        user=USER, workdir=bottle.workdir, labels=specs.labels(bottle.spec),
+        user=USER, workdir=bottle.workdir, labels=specs.labels(bottle.spec), network=network(bottle),
     )
+    bottle = replace(bottle, networked=True)
+    _save(bottle)
     _start_machine(bottle)
     verify_contract(bottle)
     trust_egress_ca(bottle)
@@ -459,29 +465,16 @@ def _let_in(bottle: Bottle, grant: SshGrant) -> None:
 
 
 def _start_machine(bottle: Bottle) -> None:
-    """Start the bottle's machine, its flows decided by bottled under a token new for this run.
-
-    Its CAs are made first, for the hosts its features name now: bottled
-    terminates TLS for the hosts its egress CA covers (see daemon.py), and
-    bottle-cli for those its machine's caching CA covers; trust_egress_ca
-    installs them once the machine is up.
-    """
-    runner = runner_of(bottle)
-    ca.certificate(bottle.name, _terminated_here(bottle))
-    runner.cache_certificate(bottle.machine, _cached_hosts(bottle))
-    runner.start(bottle.machine, bottle.name, served(bottle), bottle.features)
+    """Start the bottle's machine, bottled answering what it routes there as this bottle's, its credentials read
+    now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, which trust_egress_ca
+    installs once it's up."""
+    runner_of(bottle).start(bottle.machine, bottle.name, served(bottle), bottle.features)
 
 
-def _terminated_here(bottle: Bottle) -> list[str]:
-    """The hosts whose TLS bottled terminates for the bottle: its credentials'."""
-    return auth.credential_hosts(bottle.features)
-
-
-def _cached_hosts(bottle: Bottle) -> list[str]:
-    """The hosts bottle-cli terminates the bottle's TLS for, where it runs, to answer from its cache: none for the
-    credential hosts, which bottled does."""
-    credentials = set(auth.credential_hosts(bottle.features))
-    return sorted(h for h in auth.intercepted_hosts(bottle.features) if h not in credentials)
+def network(bottle: Bottle) -> dict:
+    """The policy the bottle's machine decides its connections by (services.network): what its features cache,
+    and what it routes to bottled: bottle.host, ssh to bottles, and its credentials' hosts, logged in or not."""
+    return services.network(auth.credential_destinations(bottle.features), cache.cached_for(bottle.features))
 
 
 def _memory_mib(memory: str | None) -> int:
@@ -493,7 +486,7 @@ def _memory_mib(memory: str | None) -> int:
 
 
 def point_at_host(bottle: Bottle) -> None:
-    """Give the bottle bottle.host, at the address whose flows the decider hands to bottled's git service, and the
+    """Give the bottle bottle.host, at the address whose flows its machine routes to bottled's git service, and the
     name of each bottle it may ssh to, at its address."""
     entries = [f"{host.ADDRESS} {host.HOST}", *(f"{g.address} {g.name}" for g in bottle.ssh)]
     script = "; ".join(f"grep -qsx {shlex.quote(e)} /etc/hosts || echo {shlex.quote(e)} >> /etc/hosts" for e in entries)
@@ -681,7 +674,7 @@ def start(name: str) -> Bottle:
 
 
 def stop(name: str) -> None:
-    """Stop the bottle's machine, and its token at the decider. Its checkout and changes are kept."""
+    """Stop the bottle's machine, and bottled's answering it. Its checkout and changes are kept."""
     bottle = get(name)
     runner = runner_of(bottle)
     if runner.state(bottle.machine) == "running":
@@ -724,7 +717,7 @@ def stop_all(runner: str | None = None) -> tuple[list[str], dict[str, str]]:
 
 
 def ensure_running(name: str) -> Bottle:
-    """Start the bottle's machine if it isn't running, bound to the decider."""
+    """Start the bottle's machine if it isn't running, bottled answering it."""
     bottle = get(name)
     if bottle.status != "ready":
         raise BottleError(f"{name} is {bottle.status}; remove it with `bottle delete {name}`")
@@ -735,13 +728,18 @@ def ensure_running(name: str) -> Bottle:
     if state != "running":
         runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
+        if not bottle.networked:
+            # Made before machines had their own policy: given it now.
+            runner.configure(bottle.machine, network(bottle))
+            bottle = replace(bottle, networked=True)
+            _save(bottle)
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
         verify_contract(bottle)
         trust_egress_ca(bottle)
         point_at_host(bottle)
     else:
-        # Running, so its token is kept: the decider, if it had stopped, binds it again as it starts.
+        # Running: bottled, if it had stopped, binds it again as it starts.
         runner.ensure_deciding()
     return bottle
 
@@ -762,17 +760,17 @@ def _named_machine(bottle: Bottle, runner: runners.Runner) -> Bottle:
 
 
 def trust_egress_ca(bottle: Bottle) -> None:
-    """Make the bottle's trust store hold its egress CA's certificate and its machine's caching CA's, and no other.
+    """Make the bottle's trust store hold its machine's CA's certificate, and no other of bottle's.
 
-    Every time a bottle starts, so a bottle made before its CAs, or whose
-    hosts have changed since, trusts the current ones, and a bottle with no
-    credential or cached hosts trusts none. The egress CA is what lets bottled
-    attach a credential to the bottle's HTTPS (see ca.py), its key on the Mac;
-    the caching CA what lets bottle-cli, where the bottle runs, answer its
-    cached hosts (bottle-cli ca).
+    The CA bottle-cli takes TLS off with, where the bottle runs, for the hosts
+    its policy caches over https and routes by name (bottle-cli ca): what lets
+    it answer cached hosts and give bottled credentials' requests. Each time
+    a bottle starts, so one made before, or given its policy since, trusts the
+    current one; one with no such hosts trusts none. bottled's own egress CA,
+    from before, is taken out.
     """
-    _trust(bottle, CA_CERTIFICATE, ca.certificate(bottle.name, _terminated_here(bottle)))
-    _trust(bottle, CACHE_CERTIFICATE, runner_of(bottle).cache_certificate(bottle.machine, _cached_hosts(bottle)))
+    _trust(bottle, CA_CERTIFICATE, None)
+    _trust(bottle, CACHE_CERTIFICATE, runner_of(bottle).cache_certificate(bottle.machine, []))
 
 
 def _trust(bottle: Bottle, path: str, certificate: str | None) -> None:

@@ -143,25 +143,27 @@ fine-grained GitHub token without Workflows or Administration (or read-only),
 a Develocity user without administrative permissions.
 
 Tools in the bottle talk to those hosts over HTTPS as usual. TLS is opaque, so
-for those hosts only, bottled takes the connection itself: it completes the
-bottle's TLS handshake with a certificate from the bottle's **egress CA**,
-reads the request, attaches the credential, and makes its own verified HTTPS
-connection to the server. Every other connection goes straight to where it
-was headed, untouched. The
-host is also reachable when it's a private address, since configuring it is
-what naming it means; nothing else about that host opens up.
+for those hosts only, the bottle's machine routes the connection to bottled:
+bottle-cli, which carries the machine's connections, completes the bottle's TLS
+handshake with a certificate from the machine's **CA**, and gives bottled the
+plain request, after a PROXY protocol header saying where it was going and
+from which machine. bottled attaches the credential and makes its own verified
+HTTPS connection to the server. Every other connection goes straight to where
+it was headed, untouched. The host is also reachable when it's a private
+address, since configuring it is what naming it means; nothing else about that
+host opens up.
 
-Each bottle has an egress CA of its own, made with `openssl` in
-`~/.bottle/ca/<bottle>` when the bottle starts, and installed in that bottle's
+Each machine has a CA of its own, made by `bottle-cli ca` in
+`~/.bottle/krun/ca/<machine>` as it starts, and installed in that bottle's
 trust store (whose bundle `NODE_EXTRA_CA_CERTS` names, for Node tools); a bottle whose
 features name no credential or cached hosts has none. The CA carries a name constraint
-permitting only the hosts the bottle's credentials and cache name, which the bottle's own
-TLS clients enforce: a certificate for any other site is refused, whoever signs
-it, so nothing but those hosts' traffic can be read by bottled. A constraint
+permitting only the hosts the machine's policy routes by name and caches over https, which
+the bottle's own TLS clients enforce: a certificate for any other site is refused, whoever
+signs it, so nothing but those hosts' traffic can be read. A constraint
 on a host also covers the names below it (`github.com` covers
 `gist.github.com`); that is how X.509 name constraints work. The keys never
-leave your machine, your machine never trusts any of them, and `bottle delete`
-removes them.
+leave the machine the bottle runs on, that machine never trusts any of them, and
+deleting the machine removes them.
 
 A CLI doesn't know its token is being attached for it, and usually won't make a
 request until it thinks it's logged in, so a bottle gets a **stand-in**: a fake
@@ -565,21 +567,24 @@ reached are left as they are, and it says so.
 
 ### `bottle daemon start` / `bottle daemon stop`
 
-Starts or stops `bottled`, the background process that decides bottles'
-connections. A bottle's VM asks it about each TCP connection the bottle opens, before
-making it: public destinations, IPv4 and IPv6, go straight there; private
-addresses are refused, but for a credential's own host; `bottle.host` is
-answered by bottled itself, with the bottle's git remotes. A refused
-connection is reset. A bottle's names are looked up by the machine it runs
-on, with its resolver, as they're asked; a bottle has no UDP. Logs one line per connection, in `~/.bottle/logs` (a
-drone's, in the runner's).
+Starts or stops `bottled`, the background process that serves what bottles'
+machines route to it. A machine decides each TCP connection the bottle opens
+itself, by the network policy it was made with (`network.json` in its
+directory): public destinations go straight there; private addresses are
+refused, but for a name allowed private; `bottle.host`, ssh to other bottles
+and credentials' hosts are routed to bottled's socket (`~/.bottle/services.sock`),
+which answers `bottle.host` with the bottle's git remotes. A refused
+connection is reset, and logged in the machine's `boot.log`. A bottle's names
+are looked up by the machine it runs on, with its resolver, as they're asked;
+a bottle has no UDP or IPv6. A machine starts with nothing but its name
+(`bottle-cli start NAME` works without bottled); what it routes to bottled is
+refused while bottled isn't running. bottled logs one line per connection it
+serves, in `~/.bottle/logs` (a drone's, in the runner's).
 
 **The HTTP cache.** Every bottle starts from its image, so a build in a new
 one downloads every dependency again. A feature can name hosts whose
 downloads are kept: bottle-cli, which carries the bottle's connections,
-terminates the bottle's TLS to them with the machine's caching CA (made by
-`bottle-cli ca`, constrained to those hosts, and trusted by the bottle beside
-bottled's egress CA), and answers a GET or HEAD from
+terminates the bottle's TLS to them with the machine's CA (above), and answers a GET or HEAD from
 `~/.bottle/cache/http/<host>/<path>` when it has the file, for every bottle.
 Only whole 200s are kept, without headers (a hit has no `Content-Type`), unless
 the server marks them `no-store`, `no-cache` or `private`, from GETs with no query, range,
@@ -604,11 +609,12 @@ index. Debian's are asked over plain http, which bottle-cli answers without
 terminating anything and fetches over https. An https repository at build
 time is answered behind a caching CA builds share (`bottle-builds`), which the
 build's apt step trusts for those hosts alone; a bottle trusts its machine's
-caching CA for them, as for any cached host.
+CA for them, as for any cached host.
 
 bottled starts automatically when a command needs it, and when it starts it
-picks up the bottles that were running. While it's stopped, running bottles
-can't open connections. A command that finds it running other code (another
+picks up the bottles there are. While it's stopped, a running bottle's
+connections go on as its policy says, but for what it routes to bottled
+(`bottle.host`, ssh, credentials' hosts), which is refused. A command that finds it running other code (another
 checkout's, or this one's before it changed) restarts it first, and says so.
 
 </details>

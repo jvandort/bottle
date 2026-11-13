@@ -9,8 +9,6 @@ from unittest import mock
 
 from bottle import daemon, messages
 from bottle.daemon import Daemon
-from bottle.decider import Decider
-from bottle.errors import BottleError
 
 
 class SocketPathTest(unittest.TestCase):
@@ -60,7 +58,7 @@ class OpenFilesTest(unittest.TestCase):
 
 
 class DaemonTest(unittest.IsolatedAsyncioTestCase):
-    """bottled itself; what the decider does with a bottle's flows is test_decider's."""
+    """bottled itself; what it does with what a machine routes to it is test_services' and test_egress'."""
 
     async def asyncSetUp(self) -> None:
         # Keep the socket path short: macOS caps Unix socket paths at 104 bytes.
@@ -68,11 +66,10 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         self.tmp = Path(tmp)
         self.path = self.tmp / "d.sock"
-        self.daemon = Daemon(decider=Decider(self.tmp / "tokens.json"), decider_port=0)
+        self.services = self.tmp / "s.sock"
+        self.daemon = Daemon(services_path=self.services)
         for patcher in (
             # The features these tests name aren't resolved: what a credential claims is mocked where it matters.
-            # The hosts the bottle's CA was made for when it started.
-            mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
             mock.patch.object(daemon.cache, "cached_for", return_value=[]),
             mock.patch.object(daemon, "bound_bottles", return_value=[]),
@@ -98,66 +95,37 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
     async def test_ping(self) -> None:
         self.assertEqual(await self.request({"op": "ping"}), {"ok": True, "code": daemon.ssh.code_hash()})
 
-    async def test_socket_is_owner_only(self) -> None:
+    async def test_sockets_are_owner_only(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.services.stat().st_mode & 0o777, 0o600)
 
     async def test_a_bottles_credentials_reach_the_controllers_gateway_and_go_no_further(self) -> None:
         injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
         with mock.patch.object(daemon.auth, "injections_for", return_value=injections) as looked_up:
-            reply = await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
+            reply = await self.request({"op": "bind", "bottle": "b", "machine": "b-m",
+                                        "features": ["teamcity:server=ci.test"]})
         looked_up.assert_called_once_with(("teamcity:server=ci.test",))
         self.assertNotIn("the-real-credential", json.dumps(reply))
-        [binding] = self.daemon.decider.bindings.values()
+        self.assertEqual(list(self.daemon.services.bindings), ["b-m"])  # by its machine
+        [binding] = self.daemon.services.bindings.values()
         # The runner's gateway knows where the credential is for, and hands those flows to the controller's.
         self.assertEqual([(i.host, i.port, i.value) for i in binding.gateway.injections], [("ci.test", 443, "")])
         self.assertEqual(binding.gateway.hand_off.__self__.injections, tuple(injections))
-
-    async def test_a_bottles_gateway_mints_from_that_bottles_ca(self) -> None:
-        with mock.patch.object(daemon.ca, "server_context") as server_context:
-            await self.request({"op": "bind", "bottle": "b", "features": ["teamcity:server=ci.test"]})
-            [binding] = self.daemon.decider.bindings.values()
-            # The controller's gateway, which the runner's hands credentials' flows to.
-            binding.gateway.hand_off.__self__.certificates("ci.test")
-        server_context.assert_called_once_with("b", ("ci.test",), "ci.test")
-
-    async def test_only_what_the_bottles_ca_covers_is_terminated(self) -> None:
-        # Named by its features since the bottle started, whose CA doesn't cover them: reached directly.
-        injections = [daemon.egress.Injection(h, "Authorization", "Bearer x") for h in ("ci.test", "new-ci.test")]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
-            await self.request({"op": "bind", "bottle": "b", "features": ["f"]})
-        [binding] = self.daemon.decider.bindings.values()
-        self.assertEqual([i.host for i in binding.gateway.injections], ["ci.test"])
-
-    async def test_a_build_keeps_its_apt_downloads_and_gets_none_of_its_features_credentials(self) -> None:
-        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer the-real-credential")]
-        caches = [daemon.cache.Cached("ci.test"), daemon.cache.Cached("deb.test", ports=(daemon.cache.HTTP_PORT,))]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
-                mock.patch.object(daemon.cache, "cached_for", return_value=caches) as cached_for, \
-                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]) as hosts:
-            await self.request({"op": "bind", "bottle": "builder", "features": ["f"], "build": True})
-        cached_for.assert_called_once_with(("f",), True)  # its apt repositories alone (see cache.cached_for)
-        [binding] = self.daemon.decider.bindings.values()
-        self.assertEqual(binding.gateway.injections, ())
-        self.assertEqual(binding.gateway.hand_off.__self__.injections, ())
-        # Answered by bottle-cli, behind the caching CA builds have, which their apt steps trust: bottled reads
-        # none of a build's TLS.
-        self.assertNotIn(mock.call(daemon.ca.BUILDS), hosts.call_args_list)
-        self.assertEqual([c.host for c in binding.gateway.caches], ["ci.test", "deb.test"])
 
     async def test_binding_again_reads_the_credentials_again(self) -> None:
         for value in ("Bearer old", "Bearer new"):
             injections = [daemon.egress.Injection("ci.test", "Authorization", value)]
             with mock.patch.object(daemon.auth, "injections_for", return_value=injections):
-                await self.request({"op": "bind", "bottle": "b", "features": ["teamcity"]})
-        [binding] = self.daemon.decider.bindings.values()
+                await self.request({"op": "bind", "bottle": "b", "machine": "b-m", "features": ["teamcity"]})
+        [binding] = self.daemon.services.bindings.values()
         self.assertEqual(binding.gateway.hand_off.__self__.injections[0].value, "Bearer new")
 
-    async def test_shutdown_removes_the_socket_and_keeps_the_tokens(self) -> None:
-        await self.request({"op": "bind", "bottle": "b"})
+    async def test_shutdown_removes_the_sockets(self) -> None:
+        await self.request({"op": "bind", "bottle": "b", "machine": "b-m"})
         self.assertEqual(await self.request({"op": "shutdown"}), {"ok": True})
         await asyncio.wait_for(self.task, 2)
         self.assertFalse(self.path.exists())
-        self.assertIn("b", json.loads((self.tmp / "tokens.json").read_text()))
+        self.assertFalse(self.services.exists())
 
     async def test_client_shutdown_when_not_running(self) -> None:
         with mock.patch.object(daemon, "socket_path", return_value=self.path.with_name("absent.sock")):
@@ -167,19 +135,7 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.request({"op": "nope"}), {"ok": False, "error": "unknown op 'nope'"})
 
     async def test_second_daemon_exits(self) -> None:
-        await asyncio.wait_for(daemon.serve(self.path, Daemon(decider_port=0)), 2)
-
-    async def test_a_taken_decider_port_stops_bottled_saying_so(self) -> None:
-        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-        self.addAsyncCleanup(self._close, blocker)
-        taken = blocker.sockets[0].getsockname()[1]
-        with self.assertRaisesRegex(BottleError, f"decider can't listen on 127.0.0.1:{taken}"):
-            await daemon.serve(self.tmp / "e.sock", Daemon(decider=Decider(self.tmp / "t2.json"), decider_port=taken))
-
-    @staticmethod
-    async def _close(server: asyncio.Server) -> None:
-        server.close()
-        await server.wait_closed()
+        await asyncio.wait_for(daemon.serve(self.path, Daemon(services_path=self.tmp / "s2.sock")), 2)
 
 
 class DeliverTest(unittest.IsolatedAsyncioTestCase):
@@ -199,13 +155,12 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         for patcher in (
-            mock.patch.object(daemon.ca, "hosts", return_value=[]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
             mock.patch.object(daemon.cache, "cached_for", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.daemon = Daemon(decider=Decider(self.tmp / "tokens.json"))
+        self.daemon = Daemon()
 
         def bottle(name: str, repo: str | None = None, **spec) -> mock.Mock:
             return SimpleNamespace(machine=f"bottle-{name}", mounts=[SimpleNamespace(repo=repo)] if repo else [], spec=spec,
@@ -221,7 +176,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
         loaded.start()
         self.addCleanup(loaded.stop)
         for name in ("broker", "app-1a2b3c4d-foo", "app-1a2b3c4d-bar"):
-            await self.daemon.bind(name)
+            await self.daemon.bind(name, f"bottle-{name}")
 
     def ran(self) -> tuple[list[str], str]:
         """What the fake bottle-cli ran last, after `--`, and in which machine; and its stdin."""
@@ -301,42 +256,23 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
 
 class RestoreTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
         for patcher in (
-            mock.patch.object(daemon.ca, "hosts", return_value=[]),
             mock.patch.object(daemon.auth, "injections_for", return_value=[]),
             mock.patch.object(daemon.cache, "cached_for", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    async def test_binds_the_tokens_it_gave_and_no_others(self) -> None:
-        saved = Decider(self.tmp / "tokens.json")
-        token = saved.bind("b", gateway=None)
-        d = Daemon(decider=Decider(self.tmp / "tokens.json"))
-        await d.restore([("b", (), ()), ("other", (), ())])
-        self.assertEqual([binding.bottle for binding in d.decider.bindings.values()], ["b"])
-        self.assertEqual(d.decider.tokens["b"], token)
-
-    async def test_a_build_is_restored_without_credentials(self) -> None:
-        saved = Decider(self.tmp / "tokens.json")
-        for bottle in ("builder", "b"):
-            saved.bind(bottle, gateway=None)
-        d = Daemon(decider=Decider(self.tmp / "tokens.json"))
-        injections = [daemon.egress.Injection("ci.test", "Authorization", "Bearer x")]
-        with mock.patch.object(daemon.auth, "injections_for", return_value=injections), \
-                mock.patch.object(daemon.ca, "hosts", return_value=["ci.test"]):
-            await d.restore([("builder", (), ("f",), True), ("b", (), ("f",))])
-        hosts = {b.bottle: [i.host for i in b.gateway.injections] for b in d.decider.bindings.values()}
-        self.assertEqual(hosts, {"builder": [], "b": ["ci.test"]})
+    async def test_binds_each_by_its_machine_unless_its_bound_already(self) -> None:
+        d = Daemon()
+        await d.bind("b", "b-m")
+        bound = d.services.bindings["b-m"]
+        await d.restore([("b", "b-m", (), ()), ("other", "other-m", (), ())])
+        self.assertEqual({m: b.bottle for m, b in d.services.bindings.items()}, {"b-m": "b", "other-m": "other"})
+        self.assertIs(d.services.bindings["b-m"], bound)
 
     async def test_one_failure_doesnt_stop_the_rest(self) -> None:
-        saved = Decider(self.tmp / "tokens.json")
-        saved.bind("bad", gateway=None)
-        saved.bind("good", gateway=None)
-        d = Daemon(decider=Decider(self.tmp / "tokens.json"))
+        d = Daemon()
         real = d.controller.egress
 
         async def egress(bottle, *args):
@@ -345,8 +281,9 @@ class RestoreTest(unittest.IsolatedAsyncioTestCase):
             return await real(bottle, *args)
 
         with mock.patch.object(d.controller, "egress", side_effect=egress), self.assertLogs("bottle.daemon", "WARNING"):
-            await d.restore([("bad", (), ()), ("good", (), ())])
-        self.assertEqual([binding.bottle for binding in d.decider.bindings.values()], ["good"])
+            unrestored = await d.restore([("bad", "bad-m", (), ()), ("good", "good-m", (), ())])
+        self.assertEqual([binding.bottle for binding in d.services.bindings.values()], ["good"])
+        self.assertEqual([b[0] for b in unrestored], ["bad"])
 
 
 class CurrentCodeTest(unittest.TestCase):
@@ -371,7 +308,7 @@ class CurrentCodeTest(unittest.TestCase):
             if message["op"] == "shutdown":
                 self.running = None
                 return {"ok": True}
-            return {"ok": True, **self.running, **({"decider": "d", "token": "t"} if message["op"] == "bind" else {})}
+            return {"ok": True, **self.running}
 
         def start_daemon():
             self.calls.append("start")
@@ -384,7 +321,7 @@ class CurrentCodeTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_one_on_other_code_is_restarted_before_its_asked_anything(self) -> None:
-        daemon.bind_decider("b")
+        daemon.bind("b", "b-m")
         self.assertEqual(self.calls, ["ping", "shutdown", "ping", "start", "bind"])
         daemon.release_egress("b")
         self.assertEqual(self.calls[-1:], ["release"])   # asked once a command, not once a request
@@ -392,7 +329,7 @@ class CurrentCodeTest(unittest.TestCase):
     def test_one_that_closes_connections_as_it_stops_is_waited_out(self) -> None:
         self.closing = 2
         with mock.patch("time.sleep"):
-            daemon.bind_decider("b")
+            daemon.bind("b", "b-m")
         self.assertEqual(self.calls, ["ping", "shutdown", "ping", "ping", "ping", "start", "bind"])
 
     def test_one_from_before_it_said_its_code_is_restarted(self) -> None:
@@ -402,10 +339,10 @@ class CurrentCodeTest(unittest.TestCase):
 
     def test_one_on_this_code_is_left_alone(self) -> None:
         self.running = {"code": daemon.ssh.code_hash()}
-        daemon.bind_decider("b")
+        daemon.bind("b", "b-m")
         self.assertEqual(self.calls, ["ping", "bind"])
 
     def test_none_running_is_started_by_what_needs_it(self) -> None:
         self.running = None
-        daemon.bind_decider("b")
+        daemon.bind("b", "b-m")
         self.assertEqual(self.calls, ["ping", "bind", "start", "bind"])

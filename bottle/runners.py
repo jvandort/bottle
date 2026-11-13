@@ -1,16 +1,16 @@
 """Runners: the machines bottles run on, behind one interface (see the README's `bottle runner`).
 
-A runner holds bottles' machines, the images they boot, and the decider their
-connections are asked about. Everything else -- the registry, credentials,
+A runner holds bottles' machines, the images they boot, and the bottled their
+machines route connections to. Everything else -- the registry, credentials,
 the repos bottles are served -- is the driver's, the machine bottle's commands
 run on. The code on the driver's side reaches machines only through a
 Runner, so it can't tell which runner it has.
 
 The local runner is the driver itself: krun.py (bottle-cli's machines),
-images.py and bottled, called in-process. Its decider is bottled's.
+images.py and bottled, called in-process.
 
-Code on the runner's side (krun.py, images.py's store and builds, the
-decider) uses its neighbours directly: a builder machine is the runner's own
+Code on the runner's side (krun.py, images.py's store and builds, bottled's
+services) uses its neighbours directly: a builder machine is the runner's own
 business. What to build (an image's tag, its inputs and their hash) is the
 controller's to work out, in images.py and features.py; the runner keeps the
 images it's built and builds those it's sent.
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from bottle import daemon, images, krun, prereqs, repos
+from bottle import daemon, images, krun, prereqs, repos, services
 from bottle.errors import BottleError
 from bottle.host import Served
 from bottle.store import bottle_home, read_json, write_json
@@ -76,18 +76,19 @@ class Runner(Protocol):
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
-               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
+               workdir: str | None = None, labels: dict[str, str] | None = None,
+               network: dict | None = None) -> None:
         """Create a stopped machine from `archive` (a top stage's disk), its mounts read-only, with all the runner's
         cores; `memory_mib` and `disk_gib` None: bottle-cli's defaults; `user`, `workdir` and `labels` as
-        krun.create has them."""
+        krun.create has them; `network` its policy (services.network), its routes to bottled's socket there."""
+
+    def configure(self, machine: str, network: dict) -> None:
+        """Give a stopped machine its policy, as create does."""
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
-        """Start a machine, its flows decided as `bottle`'s: served `served`'s remotes, with `features`' credentials.
-
-        A machine never runs undecided: binding the bottle at the decider is
-        part of starting it, under a token new for this run.
-        """
+        """Start a machine, bottled there answering what it routes as `bottle`'s: served `served`'s remotes, with
+        `features`' credentials, read now."""
 
     def release(self, bottle: str) -> None:
         """Stop deciding `bottle`'s flows, and forget its token; a no-op if it isn't bound."""
@@ -101,7 +102,7 @@ class Runner(Protocol):
         if it has one."""
 
     def ensure_deciding(self) -> None:
-        """The decider up for bottles still running, which it binds again with the tokens they started with."""
+        """bottled up there, for what bottles still running route to it: it binds them again as it starts."""
 
     def stop(self, machine: str) -> None: ...
 
@@ -127,7 +128,7 @@ class Runner(Protocol):
 
 
 class LocalRunner:
-    """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, the decider is bottled's."""
+    """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, services are bottled's."""
 
     name = LOCAL
 
@@ -163,14 +164,19 @@ class LocalRunner:
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
-               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
+               workdir: str | None = None, labels: dict[str, str] | None = None,
+               network: dict | None = None) -> None:
         krun.create(machine, str(archive), [krun.Mount(m.source, m.target) for m in mounts], env, memory_mib,
-                    os.cpu_count() or 1, disk_gib, user, workdir, labels)
+                    os.cpu_count() or 1, disk_gib, user, workdir, labels,
+                    services.with_socket(network, str(daemon.services_socket())) if network else None)
+
+    def configure(self, machine: str, network: dict) -> None:
+        krun.configure(machine, services.with_socket(network, str(daemon.services_socket())))
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
-        decider, token = daemon.bind_decider(bottle, served, features)
-        krun.start(machine, decider, token)
+        daemon.bind(bottle, machine, served, features)
+        krun.start(machine)
 
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
@@ -291,10 +297,15 @@ class RemoteRunner:
 
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
-               workdir: str | None = None, labels: dict[str, str] | None = None) -> None:
+               workdir: str | None = None, labels: dict[str, str] | None = None,
+               network: dict | None = None) -> None:
         self._call("create", machine=machine, archive=str(archive),
                    mounts=[{"source": str(m.source), "target": m.target} for m in mounts],
-                   env=env, memory_mib=memory_mib, disk_gib=disk_gib, user=user, workdir=workdir, labels=labels)
+                   env=env, memory_mib=memory_mib, disk_gib=disk_gib, user=user, workdir=workdir, labels=labels,
+                   network=network)
+
+    def configure(self, machine: str, network: dict) -> None:
+        self._call("configure", machine=machine, network=network)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:

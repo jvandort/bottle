@@ -5,9 +5,9 @@ as a libkrun VM of its own, booting the image's stage disks stacked by
 overlayfs, with bottle's agent as its init. Bottle relies on, and
 tests/test_krun_contract.py checks:
 
-  - decided egress: started with --decider, a machine asks bottled's decider
-    about each TCP connection before connecting it (see decider.py), as the
-    bottle whose token is in $BOTTLE_DECIDER_TOKEN; it has no UDP.
+  - decided egress: a machine decides each TCP connection by the policy it
+    was made with (services.network), caching what it says, and gives what it
+    routes to bottled's services socket (see services.py); it has no UDP.
   - DNS, answered in the guest from the runner's resolver at the time of each
     lookup.
   - exec, its stdin, stdout and stderr streamed, and exit status kept.
@@ -18,9 +18,11 @@ Machines, and running commands in them, are all this module does: building
 the images machines boot is images.py's, on top of bottle-cli's builds.
 """
 
+import contextlib
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,10 +57,11 @@ class Mount:
 
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
            disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
-           labels: dict[str, str] | None = None) -> None:
+           labels: dict[str, str] | None = None, network: dict | None = None) -> None:
     """Create a stopped machine from `image` (a stage's disk), its mounts read-only; `memory_mib` and `disk_gib`
     None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
-    `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it."""
+    `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
+    `network`, the policy every connection it makes is decided by (services.network), kept with it."""
     args = ["machine", "create", "--name", name, "--image", image, "--cpus", str(min(cpus, MAX_CPUS)),
             *(["--mem", str(memory_mib)] if memory_mib else []), *(["--storage", str(disk_gib)] if disk_gib else []),
             *(["--user", user] if user else []), *(["--workdir", workdir] if workdir else [])]
@@ -68,15 +71,31 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
         args += ["-v", f"{m.source}:{m.target}:ro"]
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]
-    _run(*args)
+    with _policy(network) as path:
+        _run(*args, *(["--network", path] if path else []))
 
 
-def start(name: str, decider: str, token: str) -> None:
-    """Start a machine, asking `decider` about each flow and presenting `token`.
+def configure(name: str, network: dict) -> None:
+    """Give a stopped machine the policy its connections are decided by (one made before it had one, say)."""
+    with _policy(network) as path:
+        _run("machine", "configure", "--name", name, "--network", path)
 
-    bottle-cli keeps both for this run of the machine only, so every start passes them.
-    """
-    _run("machine", "start", "--name", name, "--decider", decider, env={"BOTTLE_DECIDER_TOKEN": token})
+
+@contextlib.contextmanager
+def _policy(network: dict | None):
+    """A network policy as a file, for bottle-cli to take, while it's needed; None for none."""
+    if network is None:
+        yield None
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="network-") as file:
+        json.dump(network, file)
+        file.flush()
+        yield file.name
+
+
+def start(name: str) -> None:
+    """Start a machine: by the policy it was made with, nothing else needed."""
+    _run("machine", "start", "--name", name)
 
 
 def ca_certificate(name: str, hosts: list[str]) -> str | None:

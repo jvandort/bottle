@@ -20,7 +20,6 @@ its state.
 
 import hashlib
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -103,12 +102,12 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
 
     `recipe` is on a registry's image (pull: its reference) or on one of bottle's built here (from: its tag);
     its steps, entrypoint, cmd and labels are bottle-cli's (see bottle_disk::build::Recipe); its features, the
-    specs of those it installs, are bottle's: the build's connections are decided as those of a build of them
-    (see daemon.bind_decider), their apt repositories kept, and a step asking for BUILD_CA gets the CA it's
-    answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
+    specs of those it installs, are bottle's: the build reaches the public network, with none of their
+    credentials, their apt repositories kept (cache.cached_for, a build's), and a step asking for BUILD_CA gets
+    the CA they're answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
     With `no_cache`, the stage is made again even if one was made from the same.
     """
-    from bottle import ca, daemon, features  # daemon's auth imports features, which imports this module
+    from bottle import ca, cache, features, services  # features imports this module
 
     prereqs.ensure_cli()
     _migrate()
@@ -126,26 +125,21 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
              for step in recipe.get("steps", [])]
     made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},
             "mount": {"source": str(context.resolve()), "target": MOUNT}, "steps": steps, "labels": image_labels}
-    builder = f"bottle-builder-{uuid.uuid4().hex[:12]}"
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file:
-            json.dump(made, file)
-            file.flush()
-            # The public network, with none of its features' credentials; their apt repositories kept.
-            decider, token = daemon.bind_decider(builder, features=recipe.get("features", []), build=True)
-            return _cli("image", "build", file.name, str(store()), "--tag", image, "--decider", decider,
-                        env={"BOTTLE_DECIDER_TOKEN": token})
-    finally:
-        try:
-            daemon.release_egress(builder)
-        except BottleError as e:
-            print(f"bottle: cleaning up {builder}: {e}", file=sys.stderr)
+    # The public network, with none of its features' credentials, nothing routed to bottled; their apt
+    # repositories kept.
+    network = {"cache": services.cache_rules(cache.cached_for(recipe.get("features", []), build=True))}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file, \
+            tempfile.NamedTemporaryFile("w", suffix=".json", prefix="network-") as policy:
+        json.dump(made, file)
+        file.flush()
+        json.dump(network, policy)
+        policy.flush()
+        return _cli("image", "build", file.name, str(store()), "--tag", image, "--network", policy.name)
 
 
-def _cli(*args: str, env: dict[str, str] | None = None) -> Path:
+def _cli(*args: str) -> Path:
     """Run a bottle-cli image build, its progress on stderr; the disk of the stage it made (its last line)."""
-    result = subprocess.run([krun.binary(), *args], stdout=subprocess.PIPE, text=True,
-                            env={**os.environ, **env} if env else None)
+    result = subprocess.run([krun.binary(), *args], stdout=subprocess.PIPE, text=True)
     lines = result.stdout.split()
     if result.returncode != 0 or not lines:
         raise BottleError(f"bottle-cli {' '.join(args[:2])} failed")
