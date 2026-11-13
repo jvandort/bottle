@@ -112,8 +112,8 @@ struct Args {
     hostname: Option<String>,
     console: Option<PathBuf>,
     env: Vec<(String, String)>,
-    /// Host directories, read-only in the bottle at their targets.
-    mounts: Vec<(PathBuf, String)>,
+    /// Host directories, in the bottle at their targets: read-only, unless writable.
+    mounts: Vec<(PathBuf, String, bool)>,
     net: Net,
     /// Whose caching CA a cached or routed host's TLS is answered with, and who a service is told
     /// its connections are from.
@@ -203,11 +203,15 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
                 run = Some(argv);
             }
             "--mount" => {
-                let pair = value("--mount")?;
+                let given = value("--mount")?;
+                let (pair, writable) = match given.strip_suffix(":rw") {
+                    Some(pair) => (pair, true),
+                    None => (given.as_str(), false),
+                };
                 let (source, target) = pair
                     .rsplit_once(':')
-                    .ok_or(format!("--mount {pair}: not SOURCE:TARGET"))?;
-                mounts.push((source.into(), target.into()));
+                    .ok_or(format!("--mount {given}: not SOURCE:TARGET[:rw]"))?;
+                mounts.push((source.into(), target.into(), writable));
             }
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             _ => positional.push(PathBuf::from(arg)),
@@ -316,7 +320,9 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     let mut config = serde_json::json!({
         "env": args.env,
         "mounts": args.mounts.iter().enumerate()
-            .map(|(i, (_, target))| serde_json::json!({"source": format!("m{i}"), "target": target}))
+            .map(|(i, (_, target, writable))| {
+                serde_json::json!({"source": format!("m{i}"), "target": target, "writable": writable})
+            })
             .collect::<Vec<_>>(),
     });
     if net_socket.is_some() {
@@ -339,7 +345,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         .mounts
         .iter()
         .enumerate()
-        .map(|(i, (source, _))| Ok((c(&format!("m{i}"))?, path(source)?)))
+        .map(|(i, (source, _, writable))| Ok((c(&format!("m{i}"))?, path(source)?, *writable)))
         .collect::<io::Result<Vec<_>>>()?;
     let init: Vec<CString> = init.iter().map(|a| c(a)).collect::<io::Result<_>>()?;
     let argv = nul_terminated(&init);
@@ -432,10 +438,10 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
                 false,
             ),
         )?;
-        for (tag, source) in &mounts {
+        for (tag, source, writable) in &mounts {
             check(
                 "adding a mount",
-                krun::krun_add_virtiofs3(ctx, tag.as_ptr(), source.as_ptr(), 0, true),
+                krun::krun_add_virtiofs3(ctx, tag.as_ptr(), source.as_ptr(), 0, !writable),
             )?;
         }
         for (id, disk) in ids.iter().zip(&disks) {
@@ -565,7 +571,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a.env, [("A".to_string(), "b=c".to_string())]);
-        assert_eq!(a.mounts, [(PathBuf::from("/h/x"), "/x".to_string())]);
+        assert_eq!(a.mounts, [(PathBuf::from("/h/x"), "/x".to_string(), false)]);
         assert_eq!(a.socket, PathBuf::from("/s"));
         assert_eq!(a.upper, PathBuf::from("/rw"));
         assert_eq!(a.disks, [PathBuf::from("/d0"), PathBuf::from("/d1")]);

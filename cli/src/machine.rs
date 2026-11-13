@@ -2,7 +2,7 @@
 //! their disks kept between. By name, each command's first argument:
 //!
 //!     bottle-cli create NAME --image IMAGE [--cpus N] [--mem MIB] [--storage GIB]
-//!                       [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
+//!                       [-v SOURCE:TARGET[:ro|:rw]]... [-e NAME=VALUE]... [--user USER]
 //!                       [--workdir DIR] [--label NAME=VALUE]... [--network FILE|-]
 //!     bottle-cli start NAME [--net-direct]
 //!     bottle-cli stop NAME
@@ -18,7 +18,7 @@
 //! IMAGE is a tag in the store ($BOTTLE_HOME/stages, see build.rs), or a stage's disk
 //! (as `image build` prints them, the last): the image is it and the stages below it; its
 //! environment is everything's in the machine, under -e's; and what it runs, its entrypoint and
-//! command, is started at each start. Mounts are read-only, whatever they say. A machine is a
+//! command, is started at each start. Mounts are read-only, unless one says :rw. A machine is a
 //! directory, $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at
 //! most), and, while it runs, its pid, its agent's socket and its console's log. Started, it runs
 //! in the background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's
@@ -66,7 +66,11 @@ struct Config {
     mem_mib: u32,
     storage_gib: u64,
     env: Vec<(String, String)>,
+    /// Host directories, read-only in it at their targets...
     mounts: Vec<(PathBuf, String)>,
+    /// ...but for these targets', writable (-v SOURCE:TARGET:rw).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    writable: Vec<String>,
     /// What its image runs, its entrypoint and command, from its top stage.
     #[serde(default)]
     run: Option<Vec<String>>,
@@ -334,8 +338,13 @@ impl Machine {
             boot.arg("--env").arg(format!("{name}={value}"));
         }
         for (source, target) in &config.mounts {
+            let rw = if config.writable.contains(target) {
+                ":rw"
+            } else {
+                ""
+            };
             boot.arg("--mount")
-                .arg(format!("{}:{target}", source.display()));
+                .arg(format!("{}:{target}{rw}", source.display()));
         }
         if let Some(run) = &config.run {
             boot.arg("--run").arg(serde_json::to_string(run).unwrap());
@@ -424,6 +433,7 @@ fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
         storage_gib: 64,
         env: Vec::new(),
         mounts: Vec::new(),
+        writable: Vec::new(),
         run: None,
         user: None,
         workdir: None,
@@ -465,15 +475,22 @@ fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
                     .ok_or_else(|| other(format!("--label {pair}: not NAME=VALUE")))?;
                 config.labels.insert(k.into(), v.into());
             }
+            // Read-only, unless it says :rw.
             "-v" => {
-                let spec = value()?;
-                let spec = spec.strip_suffix(":ro").unwrap_or(&spec);
+                let given = value()?;
+                let (spec, writable) = match given.strip_suffix(":rw") {
+                    Some(spec) => (spec, true),
+                    None => (given.strip_suffix(":ro").unwrap_or(&given), false),
+                };
                 let (source, target) = spec
                     .rsplit_once(':')
-                    .ok_or_else(|| other(format!("-v {spec}: not SOURCE:TARGET")))?;
+                    .ok_or_else(|| other(format!("-v {given}: not SOURCE:TARGET[:ro|:rw]")))?;
                 config
                     .mounts
                     .push((fs::canonicalize(source)?, target.into()));
+                if writable {
+                    config.writable.push(target.into());
+                }
             }
             other_arg => return Err(other(format!("unknown option {other_arg}"))),
         }

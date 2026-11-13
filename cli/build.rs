@@ -37,7 +37,10 @@ fn main() {
     println!("cargo::rerun-if-changed={}", agent.display());
     let out = Path::new(&env::var_os("OUT_DIR").unwrap()).join("agent");
     if let Err(e) = fs::copy(agent, &out) {
-        panic!("{per_target} or BOTTLE_EMBED_AGENT={}: {e}", agent.display());
+        panic!(
+            "{per_target} or BOTTLE_EMBED_AGENT={}: {e}",
+            agent.display()
+        );
     }
     println!("cargo::rustc-cfg=embedded_agent");
 }

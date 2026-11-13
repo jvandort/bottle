@@ -8,7 +8,7 @@
 //!
 //! A disk is named by its virtio serial (the block id libkrun was given for it), or by a path to
 //! its device; a lower may also be a directory, used as it is (out of a VM, to try this on). With
-//! `--config FILE`, the bottle's environment, read-only mounts, network and what its image runs come
+//! `--config FILE`, the bottle's environment, mounts (read-only, unless writable), network and what its image runs come
 //! too (see Config). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
 //! is a stage.
 
@@ -67,13 +67,15 @@ pub struct File {
     pub content: String,
 }
 
-/// A directory of the host's, read-only in the bottle at `target`.
+/// A directory of the host's, in the bottle at `target`: read-only, unless it's `writable`.
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
     /// Its virtio-fs tag; or, out of a VM, a directory, bound.
     pub source: String,
     pub target: String,
+    #[serde(default)]
+    pub writable: bool,
 }
 
 /// Init's options, taken from `args`; what's left there is how to serve.
@@ -253,15 +255,20 @@ fn run(argv: &[String]) {
     }
 }
 
-/// Mounts `m` at `target`, read-only: a virtio-fs tag, or a directory (out of a VM), bound.
+/// Mounts `m` at `target`, read-only unless it's writable: a virtio-fs tag, or a directory (out of
+/// a VM), bound.
 fn mount_share(m: &Mount, target: &str) -> io::Result<()> {
     fs::create_dir_all(target)?;
+    let rdonly = if m.writable { 0 } else { libc::MS_RDONLY };
     if m.source.starts_with('/') {
         mount_raw(Some(&m.source), target, None, libc::MS_BIND, None)?;
+        if m.writable {
+            return Ok(());
+        }
         let ro = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
         mount_raw(None, target, None, ro, None)
     } else {
-        mount(&m.source, target, "virtiofs", libc::MS_RDONLY, "")
+        mount(&m.source, target, "virtiofs", rdonly, "")
     }
 }
 

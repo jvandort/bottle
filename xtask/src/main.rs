@@ -214,9 +214,12 @@ fn agents(arches: &[&str]) -> Result<Vec<PathBuf>> {
 /// The Mac's distribution, built on a Mac. mke2fs and the kernel, while cargo builds.
 fn mac_dist(out: &Path) -> Result<()> {
     std::thread::scope(|scope| {
-        let beside = scope.spawn(|| beside_cli("aarch64-apple-darwin", env::consts::ARCH, None, out));
+        let beside =
+            scope.spawn(|| beside_cli("aarch64-apple-darwin", env::consts::ARCH, None, out));
         let built = mac_cli(out);
-        let beside = beside.join().map_err(|_| "building mke2fs or the kernel panicked")?;
+        let beside = beside
+            .join()
+            .map_err(|_| "building mke2fs or the kernel panicked")?;
         built.and(beside)
     })
 }
@@ -278,7 +281,10 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
         let built = linux_clis(dists, &arches, &cs);
         let beside = beside
             .into_iter()
-            .map(|b| b.join().map_err(|_| "building mke2fs or the kernel panicked".to_string())?)
+            .map(|b| {
+                b.join()
+                    .map_err(|_| "building mke2fs or the kernel panicked".to_string())?
+            })
             .collect::<Result<Vec<()>>>();
         built.and(beside.map(drop))
     })

@@ -105,7 +105,9 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
         ]);
         if mount {
             fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-            create.arg("-v").arg(format!("{}:{WORK}", work.display()));
+            create
+                .arg("-v")
+                .arg(format!("{}:{WORK}:rw", work.display()));
         }
         run(&mut create)?;
     }
@@ -142,13 +144,11 @@ fn build_in(
     };
     let targets: String = triples.iter().map(|t| format!(" --target {t}")).collect();
     // Its progress on stderr: stdout is the tars, after.
-    run(exec(&[
-        "sh",
-        "-c",
-        &format!("cargo xtask dist{targets} 1>&2"),
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null()))?;
+    run(
+        exec(&["sh", "-c", &format!("cargo xtask dist{targets} 1>&2")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )?;
     // Where that put each: as this Mac's xtask would, the VM's architecture being this Mac's.
     let vm = format!("{}-unknown-linux-musl", env::consts::ARCH);
     for (triple, out) in dists {
