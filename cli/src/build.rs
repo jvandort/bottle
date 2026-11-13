@@ -37,6 +37,9 @@ use bottle_disk::registry::{Reference, Registry};
 use crate::FAILED;
 use crate::boot::Net;
 
+/// The caching CA builds' cached hosts are answered with: bottle/ca.py's BUILDS.
+const BUILDS_CA: &str = "bottle-builds";
+
 pub const BUILD_USAGE: &str = "build RECIPE STORE [--decider ADDRESS:PORT | --net-direct]";
 pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--decider ADDRESS:PORT | --net-direct]";
 pub const PULL_USAGE: &str = "pull REFERENCE STORE [--decider ADDRESS:PORT | --net-direct]";
@@ -368,6 +371,11 @@ impl Launch for Boot {
             .arg(upper)
             .args(lowers)
             .args(self.net.args())
+            .args(match self.net {
+                // An image's apt repositories' https answered with the builds' caching CA.
+                Net::Decider(_) => vec!["--ca", BUILDS_CA],
+                _ => vec![],
+            })
             .args(mount.into_iter().flat_map(|m| {
                 [
                     "--mount".to_string(),

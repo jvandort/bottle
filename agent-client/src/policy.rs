@@ -160,6 +160,28 @@ impl Policy {
     }
 }
 
+impl Policy {
+    /// The addresses of `name` a connection may be made to from here, for a cached host's
+    /// fetches: public ones, and private ones too if the name's allowed private.
+    pub fn reachable(&self, name: &str, resolve: impl Fn(&str) -> Vec<IpAddr>) -> Vec<IpAddr> {
+        let private = self.allow_private.iter().any(|p| glob(p, name));
+        resolve(name)
+            .into_iter()
+            .filter(|ip| match ip {
+                IpAddr::V4(v4) => {
+                    is_global(*v4)
+                        || (private
+                            && !(v4.is_loopback()
+                                || v4.is_link_local()
+                                || v4.is_multicast()
+                                || v4.is_unspecified()))
+                }
+                IpAddr::V6(_) => false,
+            })
+            .collect()
+    }
+}
+
 /// Whether `ip` is in `network`, written ADDRESS/PREFIX (IPv4).
 fn in_network(ip: IpAddr, network: &str) -> bool {
     let (IpAddr::V4(ip), Some((base, prefix))) = (ip, network.split_once('/')) else {

@@ -4,13 +4,15 @@
 //!     bottle-cli boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB]
 //!                     [--hostname NAME] [--console FILE] [--env NAME=VALUE]...
 //!                     [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct]
+//!                     [--ca NAME]
 //!
 //! DISKs are the bottle's stage disks, bottom first, as `bottle-cli disk` prints them; UPPER is its
 //! own, read-write, made (--size GIB, sparse) if it isn't there. SOCKET is where the agent is
 //! reached, for `bottle-cli exec`. Everything run in it gets --env's variables; each --mount is a
 //! host directory, read-only at TARGET (virtio-fs). With --decider, the bottle has a network,
 //! every connection it makes asked of bottled's decider there, as the bottle whose token is
-//! $BOTTLE_DECIDER_TOKEN; with --net-direct, every connection allowed; without either, none.
+//! $BOTTLE_DECIDER_TOKEN, and the hosts it says to cache answered here, their https with NAME's
+//! caching CA (see `bottle-cli ca`); with --net-direct, every connection allowed; without either, none.
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
 //! it's up. While it runs, its clock is set from this machine's and its freed memory given back
 //! (see upkeep).
@@ -35,7 +37,7 @@ use crate::FAILED;
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
                          [--mount SOURCE:TARGET]... [--decider ADDRESS:PORT | --net-direct] \
-                         [--run JSON]";
+                         [--ca NAME] [--run JSON]";
 
 /// The vsock port the agent listens on.
 const AGENT_PORT: u32 = 1024;
@@ -102,6 +104,8 @@ struct Args {
     /// Host directories, read-only in the bottle at their targets.
     mounts: Vec<(PathBuf, String)>,
     net: Net,
+    /// Whose caching CA a cached host's https is answered with.
+    ca: Option<String>,
     /// What the image runs, started once the bottle's up.
     run: Option<Vec<String>>,
 }
@@ -161,6 +165,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut hostname, mut console) = (None, None);
     let (mut env, mut mounts) = (Vec::new(), Vec::new());
     let mut net = Net::None;
+    let mut ca = None;
     let mut run = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -175,6 +180,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--size" => size_gib = number("--size", value("--size")?)?,
             "--hostname" => hostname = Some(value("--hostname")?),
             "--console" => console = Some(value("--console")?.into()),
+            "--ca" => ca = Some(value("--ca")?),
             "--env" => {
                 let pair = value("--env")?;
                 let (name, val) = pair
@@ -214,6 +220,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         env,
         mounts,
         net,
+        ca,
         run,
     })
 }
@@ -268,7 +275,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         Net::None => None,
         net => {
             let decider = match net {
-                Net::Decider(address) => Some(decider(*address)?),
+                Net::Decider(address) => Some(decider(*address)?.caching(args.ca.clone())),
                 _ => None,
             };
             let path = net_socket_beside(&args.socket);
@@ -546,6 +553,9 @@ mod tests {
         let a = args("/s --decider 127.0.0.1:47329 /rw").unwrap();
         assert_eq!(a.net, Net::Decider("127.0.0.1:47329".parse().unwrap()));
         assert_eq!(a.net.args(), ["--decider", "127.0.0.1:47329"]);
+        assert_eq!(a.ca, None);
+        let a = args("/s --decider 127.0.0.1:47329 --ca m1 /rw").unwrap();
+        assert_eq!(a.ca.as_deref(), Some("m1"));
         assert_eq!(
             args("/s /rw --decider nope").unwrap_err(),
             "--decider nope: not ADDRESS:PORT"

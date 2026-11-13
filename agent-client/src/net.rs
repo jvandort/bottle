@@ -3,15 +3,17 @@
 //! here directly, handed to bottled, which is then its far end, or refused. Decided here, by the
 //! policy bottled gives once (see policy.rs), unless it's one bottled must see; asked of bottled's
 //! decider (see bottle/decider.py), as smolvm asked it, when it is, or when bottled hasn't given a
-//! policy. Names the bottle looks up are resolved here, by this machine's own resolver, at the time.
+//! policy. A connection to a host the policy says to cache is answered here (see cache.rs). Names
+//! the bottle looks up are resolved here, by this machine's own resolver, at the time.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::cache;
 use crate::policy::{Local, Policy};
 
 pub use bottle_agent_proto::net::PORT;
@@ -34,6 +36,9 @@ pub struct Decider {
     pub token: [u8; 32],
     pub machine: [u8; 16],
     policy: PolicyState,
+    /// Whose caching CA a cached host's https is terminated with (see ca.rs).
+    pub ca: Option<String>,
+    cache: Arc<OnceLock<cache::Context>>,
 }
 
 /// The policy bottled gave, once it has; when it was last asked for.
@@ -60,7 +65,21 @@ impl Decider {
             token,
             machine,
             policy: Default::default(),
+            ca: None,
+            cache: Default::default(),
         }
+    }
+
+    /// Terminating a cached host's https with `ca`'s caching CA: a machine's name, or
+    /// `bottle-builds`. Without one, only plain http is cached here.
+    pub fn caching(self, ca: Option<String>) -> Decider {
+        Decider { ca, ..self }
+    }
+
+    /// What serving a cached host needs, made the first time it's needed.
+    fn cache(&self) -> &cache::Context {
+        self.cache
+            .get_or_init(|| cache::Context::new(self.ca.clone()))
     }
 
     /// The policy bottled gives, asked for the first time it's needed, and again after
@@ -250,27 +269,45 @@ fn resolve(name: &str) -> Resolved {
 
 fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> io::Result<()> {
     let first = first_bytes(&mut conn)?;
+    let ips = |name: &str| match resolve(name) {
+        Resolved::Addresses(ips) => ips,
+        _ => Vec::new(),
+    };
     let decision = match decider {
         None => Decision::Direct,
-        Some(decider) => match decider.policy().map(|policy| {
-            policy.decide(to, &first, |name| match resolve(name) {
-                Resolved::Addresses(ips) => ips,
-                _ => Vec::new(),
-            })
-        }) {
-            Some(Local::Direct) => Decision::Direct,
-            Some(Local::Deny) => {
-                let name = crate::policy::name_in(&first);
-                eprintln!(
-                    "bottle-cli: refused {to}{}: not allowed",
-                    name.map_or(String::new(), |n| format!(" ({n})"))
-                );
-                Decision::Deny
+        Some(decider) => {
+            let policy = decider.policy();
+            match policy.as_ref().map(|policy| policy.decide(to, &first, ips)) {
+                Some(Local::Direct) => Decision::Direct,
+                Some(Local::Deny) => {
+                    let name = crate::policy::name_in(&first);
+                    eprintln!(
+                        "bottle-cli: refused {to}{}: not allowed",
+                        name.map_or(String::new(), |n| format!(" ({n})"))
+                    );
+                    Decision::Deny
+                }
+                Some(Local::Cache(i)) => {
+                    let policy = policy.as_ref().unwrap();
+                    let name = crate::policy::name_in(&first).unwrap_or_default();
+                    let plain = first.first() != Some(&0x16);
+                    let ctx = decider.cache();
+                    if plain || ctx.terminates(&name) {
+                        conn.write_all(&[CONNECTED])?;
+                        let reachable = |host: &str| policy.reachable(host, ips);
+                        let rule = &policy.cache[i];
+                        return cache::serve(conn, first, &name, rule, plain, ctx, &reachable);
+                    }
+                    // bottled's cache, for now: its CA is the one the bottle trusts.
+                    eprintln!(
+                        "bottle-cli: {name} is cached, but {} has no caching CA for it",
+                        decider.ca.as_deref().unwrap_or("this machine")
+                    );
+                    decider.decide(to, &first).unwrap_or(Decision::Deny)
+                }
+                Some(Local::Hand) | None => decider.decide(to, &first).unwrap_or(Decision::Deny),
             }
-            Some(Local::Hand | Local::Cache(_)) | None => {
-                decider.decide(to, &first).unwrap_or(Decision::Deny)
-            }
-        },
+        }
     };
     let far = match decision {
         Decision::Direct => match TcpStream::connect_timeout(&to, CONNECT_TIMEOUT) {
@@ -455,6 +492,38 @@ mod tests {
         );
         assert_eq!(&asked.join().unwrap(), MAGIC);
         drop(far);
+    }
+
+    #[test]
+    fn a_cached_hosts_connection_is_answered_here() {
+        crate::ca::in_home(|home| {
+            let kept = home.join("cache/http/deb.example/dists/InRelease");
+            std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+            std::fs::write(&kept, "release").unwrap();
+            let decider = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = decider.local_addr().unwrap();
+            let gave = thread::spawn(move || {
+                let (mut s, _) = decider.accept().unwrap();
+                s.read_exact(&mut [0; 8 + 32 + 16]).unwrap();
+                let policy = br#"{"cache": [{"host": "deb.example", "ports": [80]}]}"#;
+                s.write_all(&(policy.len() as u32).to_be_bytes()).unwrap();
+                s.write_all(policy).unwrap();
+            });
+            let d = Decider::new(address, [7; 32], [9; 16]).caching(Some("m1".into()));
+            let (mut agent, host) = pair();
+            thread::spawn(move || handle(host, Some(&d)));
+            Request::Connect("93.184.216.34:80".parse().unwrap())
+                .write(&mut agent)
+                .unwrap();
+            agent
+                .write_all(b"GET /dists/InRelease HTTP/1.1\r\nHost: deb.example\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut answer = String::new();
+            agent.read_to_string(&mut answer).unwrap();
+            assert!(answer.starts_with("\0HTTP/1.1 200 OK\r\n"), "{answer:?}");
+            assert!(answer.ends_with("\r\n\r\nrelease"), "{answer:?}");
+            gave.join().unwrap();
+        });
     }
 
     #[test]

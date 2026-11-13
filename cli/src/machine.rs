@@ -254,6 +254,11 @@ impl Machine {
             }
         };
         boot.args(net.args())
+            .args(match net {
+                // A cached host's https answered with the machine's own caching CA.
+                crate::boot::Net::Decider(_) => vec!["--ca", &self.name],
+                _ => vec![],
+            })
             .arg(&socket)
             .arg(self.disk())
             .args(&config.image)
