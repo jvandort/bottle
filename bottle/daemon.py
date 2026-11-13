@@ -218,10 +218,11 @@ def _start_daemon() -> None:
     command = [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "bottle")]
     # Its own records go to the log through logging, stamped; this catches anything else it prints.
     with os.fdopen(open_log("bottled"), "a") as out:
-        # A new session detaches it from this terminal, so it outlives the command.
+        # A new session detaches it from this terminal, so it outlives the command. It runs in /, not the
+        # command's directory: that may be deleted while it runs (a machine's), and then every git it runs fails.
         subprocess.Popen(
             [*command, "daemon", "start", "--foreground"],
-            stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, cwd="/",
         )
     deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:

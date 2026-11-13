@@ -264,8 +264,10 @@ fn begin_forward(runner: &str, name: &str) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
-        // Its own session: it outlives this command, and this terminal.
+        // Its own session: it outlives this command, and this terminal. In /, not this command's directory,
+        // which may be deleted while it runs.
         .process_group(0)
+        .current_dir("/")
         .spawn()?;
     fs::write(dir.join("forward.pid"), child.id().to_string())
 }

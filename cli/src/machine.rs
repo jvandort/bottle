@@ -327,9 +327,11 @@ impl Machine {
         if let Some(run) = &config.run {
             boot.arg("--run").arg(serde_json::to_string(run).unwrap());
         }
+        // In /, not this command's directory, which may be deleted while the machine runs.
         boot.stdin(Stdio::null())
             .stdout(log.try_clone()?)
-            .stderr(log);
+            .stderr(log)
+            .current_dir("/");
         // SAFETY: setsid between fork and exec: a session of its own, out of reach of this
         // terminal's signals, and outliving this process.
         unsafe {
