@@ -282,8 +282,10 @@ as root but built as you:
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 ```
 
-`bin/bottle` builds bottle-cli from the checkout (`cargo xtask dist`, into
-`target/dist`) when its sources have changed since it was, then runs it:
-`bottle/prereqs.py`, tested by `python3 -m unittest` here. folio's tests,
+`bin/bottle`, a shell script, builds bottle-cli from the checkout (`cargo xtask
+dist --if-changed`, into `target/dist`) when its sources have changed since it
+was, then runs it. folio builds it the same way, for now through
+`bottle/prereqs.py` (tested by `python3 -m unittest` here), which hashes the
+sources as xtask does. folio's tests,
 the suites that drive bottle-cli from folio's side among them, are in
 [folio](folio/README.md#development).

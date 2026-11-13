@@ -1,14 +1,7 @@
-#!/usr/bin/env python3
-# bottle-cli's dev hook for a runner's distribution ($BOTTLE_DIST_BUILD, which bin/bottle and folio set): the one
-# for TARGET (a Rust target triple), built from this checkout's sources if they've changed since it was.
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from bottle import prereqs
-
-try:
-    prereqs.ensure_dist(sys.argv[1])
-except prereqs.PrereqError as e:
-    sys.exit(f"bottle: error: {e}")
+#!/bin/sh
+# bottle-cli's dev hook for a runner's distribution ($BOTTLE_DIST_BUILD): the one for TARGET (a Rust
+# target triple), built from this checkout's sources if they've changed since it was.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
+cd "$root" && exec "$cargo" xtask dist --target "$1" --if-changed

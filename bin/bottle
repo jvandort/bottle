@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-# The dev shim: bottle-cli, built first from this checkout's sources if they've changed since it was (see
-# bottle/prereqs.py), then run with these arguments. Keep this file Python 3.9-compatible so macOS's
-# /usr/bin/python3 gets a clear error.
-import os
-import sys
-
-if sys.version_info < (3, 11):
-    sys.exit(f"bottle requires Python 3.11+ (found {sys.version.split()[0]} at {sys.executable})")
-
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from bottle import prereqs
-
-try:
-    prereqs.ensure_cli()
-except prereqs.PrereqError as e:
-    sys.exit(f"bottle: error: {e}")
-os.execv(prereqs.binary(), [prereqs.binary(), *sys.argv[1:]])
+#!/bin/sh
+# The dev shim: bottle-cli from this checkout, built first if its sources have changed since it was
+# (`cargo xtask dist --if-changed`, its progress on stderr), then run with these arguments; or the
+# one $BOTTLE_CLI names, as it is.
+set -eu
+if [ -n "${BOTTLE_CLI:-}" ]; then
+  exec "$BOTTLE_CLI" "$@"
+fi
+root=$(cd "$(dirname "$0")/.." && pwd)
+# rustup's cargo, if it isn't on PATH.
+cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
+# From the checkout: cargo finds its xtask alias there (.cargo/config.toml).
+(cd "$root" && "$cargo" xtask dist --if-changed) >&2
+# And a runner's, as bottle-cli's about to copy it there.
+export BOTTLE_DIST_BUILD="${BOTTLE_DIST_BUILD:-$root/bin/bottle-dist}"
+exec "$root/target/dist/bottle-cli" "$@"

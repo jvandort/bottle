@@ -1,6 +1,6 @@
 //! `cargo xtask`: bottle's build steps past cargo's own, in one place.
 //!
-//!     cargo xtask dist [--target TRIPLE] [--out DIR]
+//!     cargo xtask dist [--target TRIPLE] [--out DIR] [--if-changed]
 //!
 //! Builds a distribution into DIR (target/dist for this machine's own, target/dist-TRIPLE for
 //! another): bottle-cli, with the agent its VMs run built into it (a static Linux build of
@@ -20,6 +20,10 @@
 //! linux-libc-dev-amd64-cross), the kernel's headers, and for x86_64's kernel bsdtar, or rpm2cpio
 //! and cpio, to open Fedora's package. Cargo's builds, and this step's, are in $CARGO_TARGET_DIR
 //! if it's set.
+//!
+//! A distribution has its sources' hash beside it (`.sources`, see source_hash): with
+//! --if-changed, one whose sources are as they are now isn't built again, and nothing's said. One
+//! build of a distribution at a time: another waits for it, then finds it current.
 
 mod builder;
 
@@ -32,8 +36,9 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("dist") => parse_dist(&args[1..]).and_then(|(target, out)| dist(target, out)),
-        _ => Err("usage: cargo xtask dist [--target TRIPLE] [--out DIR]".into()),
+        Some("dist") => parse_dist(&args[1..])
+            .and_then(|(target, out, if_changed)| dist(target, out, if_changed)),
+        _ => Err("usage: cargo xtask dist [--target TRIPLE] [--out DIR] [--if-changed]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -46,17 +51,80 @@ fn main() -> ExitCode {
 
 type Result<T> = std::result::Result<T, String>;
 
-fn parse_dist(args: &[String]) -> Result<(Option<String>, Option<PathBuf>)> {
-    let (mut target, mut out) = (None, None);
+fn parse_dist(args: &[String]) -> Result<(Option<String>, Option<PathBuf>, bool)> {
+    let (mut target, mut out, mut if_changed) = (None, None, false);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--target" => target = Some(args.next().ok_or("--target needs a value")?.clone()),
             "--out" => out = Some(args.next().ok_or("--out needs a value")?.into()),
+            "--if-changed" => if_changed = true,
             _ => return Err(format!("unknown option {arg}")),
         }
     }
-    Ok((target, out))
+    Ok((target, out, if_changed))
+}
+
+/// What bottle-cli is built from, in the workspace: when it's changed since a distribution was
+/// built, it's built again.
+const SOURCES: [&str; 9] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "agent",
+    "agent-client",
+    "agent-proto",
+    "cli",
+    "disk",
+    "xtask",
+];
+/// Beside a distribution's bottle-cli: the hash of the sources it was built from.
+const STAMP: &str = ".sources";
+
+/// A hash of bottle-cli's sources (SOURCES, less what cargo builds in a target directory): each
+/// file's path in the workspace and a sha256 of its contents, in order of their paths, by
+/// component. bottle/prereqs.py hashes them the same, for the same stamp.
+fn source_hash() -> Result<String> {
+    use sha2::Digest;
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
+        let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            // A symlink to a directory isn't followed, as Python's rglob doesn't.
+            let kind = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            if kind.is_dir() {
+                walk(&path, found)?;
+            } else {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+    let root = root();
+    let mut found = Vec::new();
+    for name in SOURCES {
+        let path = root.join(name);
+        if path.is_dir() {
+            walk(&path, &mut found)?;
+        } else {
+            found.push(path);
+        }
+    }
+    let mut files: Vec<PathBuf> = found
+        .into_iter()
+        .filter(|p| p.is_file())
+        .map(|p| p.strip_prefix(&root).unwrap().to_path_buf())
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "target"))
+        .collect();
+    files.sort();
+    let mut hash = sha2::Sha256::new();
+    for file in files {
+        hash.update(file.to_string_lossy().as_bytes());
+        hash.update([0]);
+        let data = fs::read(root.join(&file)).map_err(|e| format!("{}: {e}", file.display()))?;
+        hash.update(sha2::Sha256::digest(&data));
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// What a distribution is built for.
@@ -90,7 +158,7 @@ fn target() -> PathBuf {
     env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), |dir| root().join(dir))
 }
 
-fn dist(target: Option<String>, out: Option<PathBuf>) -> Result<()> {
+fn dist(target: Option<String>, out: Option<PathBuf>, if_changed: bool) -> Result<()> {
     let host = host();
     let target = target.unwrap_or_else(|| host.clone());
     if !TARGETS.contains(&target.as_str()) {
@@ -104,6 +172,27 @@ fn dist(target: Option<String>, out: Option<PathBuf>) -> Result<()> {
         false => root().join(format!("target/dist-{target}")),
     });
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let sources = source_hash()?;
+    let current = || {
+        out.join("bottle-cli").is_file()
+            && fs::read_to_string(out.join(STAMP)).is_ok_and(|stamp| stamp == sources)
+    };
+    if if_changed && current() {
+        return Ok(());
+    }
+    // One build of it at a time: another waits, and then may find it current.
+    let name = out
+        .file_name()
+        .map_or("dist".into(), |n| n.to_string_lossy());
+    let lock = out.with_file_name(format!(".{name}.lock"));
+    let lock = fs::File::create(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
+    lock.lock()
+        .map_err(|e| format!("locking {}: {e}", out.display()))?;
+    if if_changed && current() {
+        return Ok(());
+    }
+    eprintln!("xtask: building bottle-cli for {target}...");
+    let _ = fs::remove_file(out.join(STAMP));
     let arch = target.split('-').next().unwrap();
     if target.ends_with("-apple-darwin") {
         if !cfg!(target_os = "macos") {
@@ -115,6 +204,7 @@ fn dist(target: Option<String>, out: Option<PathBuf>) -> Result<()> {
     } else {
         linux_dist(arch, &target, &out)?;
     }
+    fs::write(out.join(STAMP), &sources).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!("xtask: {}", out.display());
     Ok(())
 }

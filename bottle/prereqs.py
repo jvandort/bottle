@@ -1,5 +1,6 @@
-"""bottle-cli, built from this checkout: the dev shim's (bin/bottle, bin/bottle-dist), and what folio's krun.py
-asks before it runs bottle-cli.
+"""bottle-cli, built from this checkout: what folio's krun.py asks before it runs bottle-cli (bin/bottle and
+bin/bottle-dist have `cargo xtask dist --if-changed` do it). Its sources hashed as xtask hashes them, for the same
+stamp.
 
 ensure_cli and ensure_dist are silent when everything is in place. On its own, beside the Rust it builds,
 importing nothing of folio's.
