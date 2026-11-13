@@ -190,6 +190,8 @@ pub fn serve(
     reachable: &dyn Fn(&str) -> Vec<IpAddr>,
 ) -> io::Result<()> {
     guest.set_read_timeout(Some(IDLE))?;
+    // And a bottle that stops reading isn't waited on for ever.
+    guest.set_write_timeout(Some(IDLE))?;
     let stream = Prefixed {
         prefix: first,
         at: 0,
@@ -326,6 +328,11 @@ fn read_head(r: &mut impl BufRead) -> Result<Option<Head>, Refused> {
         let text: String = line.iter().map(|&b| b as char).collect();
         let text = text.trim_end_matches(['\r', '\n']).to_string();
         if text.is_empty() {
+            // Empty lines before a head are ignored, as HTTP has a server do: some clients end a
+            // body with an extra CRLF.
+            if lines.is_empty() {
+                continue;
+            }
             break;
         }
         lines.push(text);
@@ -847,6 +854,7 @@ impl Server<'_> {
                 continue;
             };
             let _ = tcp.set_read_timeout(Some(IDLE));
+            let _ = tcp.set_write_timeout(Some(IDLE));
             let tls = ClientConnection::new(Arc::clone(&self.ctx.client), server.clone())
                 .map_err(|e| bad_gateway(e.to_string()))?;
             return Ok(BufReader::new(StreamOwned::new(tls, tcp)));
@@ -1155,6 +1163,19 @@ mod tests {
             assert_eq!(data, b"jar");
             assert_eq!(asked.lock().unwrap().len(), 1);
         });
+    }
+
+    #[test]
+    fn empty_lines_before_a_head_are_ignored() {
+        let mut r = BufReader::new(&b"\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\n"[..]);
+        let head = read_head(&mut r).ok().unwrap().unwrap();
+        assert_eq!((head.method.as_str(), head.lines.len()), ("GET", 1));
+        assert!(
+            read_head(&mut BufReader::new(&b"\r\n"[..]))
+                .ok()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
