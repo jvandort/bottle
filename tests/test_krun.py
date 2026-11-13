@@ -24,10 +24,10 @@ class CommandTest(unittest.TestCase):
     def test_create_makes_a_machine_with_read_only_mounts(self) -> None:
         run = self.run_with()
         krun.create("bottle-b", "/stages/b.ext4", [krun.Mount(Path("/repo/.git/objects"), "/mnt/repo/objects")],
-                    {"TOKEN": "stand-in"}, memory_mib=8192, cpus=1000, disk_gib=50)
+                    {"TOKEN": "stand-in"}, memory_mib=8192, cpus=32, disk_gib=50)
         self.assertEqual(run.call_args.args[0], [
             krun.binary(), "machine", "create", "--name", "bottle-b", "--image", "/stages/b.ext4",
-            "--cpus", "16", "--mem", "8192", "--storage", "50",
+            "--cpus", "32", "--mem", "8192", "--storage", "50",
             "-v", "/repo/.git/objects:/mnt/repo/objects:ro", "-e", "TOKEN=stand-in",
         ])
 
