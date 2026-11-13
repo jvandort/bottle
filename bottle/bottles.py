@@ -705,16 +705,6 @@ def start(name: str) -> Bottle:
     return ensure_running(name)
 
 
-def stop(name: str) -> None:
-    """Stop the bottle's machine, and bottled's answering it. Its checkout and changes are kept."""
-    bottle = get(name)
-    runner = runner_of(bottle)
-    if runner.state(bottle.machine) == "running":
-        runner.stop(bottle.machine)
-        log.info("%s: stopped", name)
-    daemon.release_egress(bottle.name)
-
-
 def ensure_running(name: str) -> Bottle:
     """Start the bottle's machine if it isn't running, bottled answering it."""
     bottle = get(name)

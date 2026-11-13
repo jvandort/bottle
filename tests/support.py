@@ -108,3 +108,15 @@ def register_runner(name: str, destination: str) -> None:
 def thread_dir() -> "Path":
     """A thread's directory in folio's home, for the bottles a test makes: where their records are kept."""
     return Path(os.environ["FOLIO_HOME"]) / "repo-0" / "thread"
+
+
+def stop_bottle(name: str) -> None:
+    """Stop a bottle's machine, as bottle-cli's stop does, and folio serve's answering it: what a test stops one
+    with, to start it again."""
+    from bottle import bottles, daemon
+
+    bottle = bottles.get(name)
+    runner = bottles.runner_of(bottle)
+    if runner.state(bottle.machine) == "running":
+        runner.stop(bottle.machine)
+    daemon.release_egress(bottle.name)

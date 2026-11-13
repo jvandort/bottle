@@ -22,7 +22,7 @@ from unittest import mock
 from bottle import bottles, daemon, features, host, images, prereqs, repos, runners, services
 from bottle.host import Remote, Served
 from bottle.errors import BottleError
-from tests.support import GitTestCase, built_cli, register_runner, run, thread_dir, write_bottles
+from tests.support import GitTestCase, built_cli, register_runner, run, stop_bottle, thread_dir, write_bottles
 from tests.test_services import header
 
 FAKE_SSH = r"""#!/usr/bin/env bash
@@ -214,7 +214,7 @@ class DroneTest(DroneCase):
         self.assertIn("/mnt/objects/workspace", execs)   # its checkout borrows the mirror's objects, mounted there
         self.assertEqual(bottles.status(["drone"])[0]["state"], "running")
 
-        bottles.stop("drone")
+        stop_bottle("drone")
         self.assertEqual(machine.read_text().strip(), "stopped")
         bottles.delete("drone")
         self.assertFalse(machine.exists())

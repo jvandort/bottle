@@ -6,7 +6,7 @@ from unittest import mock
 
 from bottle import bottles, daemon, host, krun
 from bottle.errors import BottleError
-from tests.support import GitTestCase, thread_dir
+from tests.support import GitTestCase, stop_bottle, thread_dir
 
 
 def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -202,7 +202,7 @@ class KrunBottleTest(GitTestCase):
 
     def test_a_stopped_bottle_starts_bound_again(self) -> None:
         bottle = self.create()
-        bottles.stop("b")
+        stop_bottle("b")
         self.assertEqual(self.calls[-2:], ["stop", "release b"])
         self.calls.clear()
         bottles.ensure_running("b")

@@ -9,7 +9,7 @@ from unittest import mock
 from bottle.store import write_json
 from bottle import bottles, daemon, features as features_, host, repos
 from bottle.errors import BottleError
-from tests.support import GitTestCase, run, thread_dir, write_bottles
+from tests.support import GitTestCase, run, stop_bottle, thread_dir, write_bottles
 from tests.test_host import serve_bottle_host
 
 
@@ -458,7 +458,7 @@ class EnsureRunningTest(BottleTestCase):
     def test_starts_a_stopped_bottle_bound_again(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        bottles.stop("example")
+        stop_bottle("example")
 
         bottles.ensure_running("example")
 
@@ -470,7 +470,7 @@ class EnsureRunningTest(BottleTestCase):
     def test_a_bottle_made_before_machines_had_policies_is_given_one_as_it_starts(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        bottles.stop("example")
+        stop_bottle("example")
         bottles._save(dataclasses.replace(bottles.get("example"), networked=False, network_version=0))
 
         bottles.ensure_running("example")
@@ -658,7 +658,7 @@ class StartStopTest(BottleTestCase):
     def test_stop_stops_the_machine_and_releases_its_token(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        bottles.stop("example")
+        stop_bottle("example")
         self.assertEqual(fake.machines[bottle.machine], "stopped")
         self.assertEqual(fake.bound, set())
         self.assertEqual(bottles.get("example").status, "ready")  # kept, just stopped
@@ -666,15 +666,15 @@ class StartStopTest(BottleTestCase):
     def test_stop_a_stopped_bottle(self) -> None:
         fake = self.fake()
         self.create()
-        bottles.stop("example")
+        stop_bottle("example")
         fake.calls.clear()
-        bottles.stop("example")
+        stop_bottle("example")
         self.assertEqual(fake.calls, [])
 
     def test_start_after_stop(self) -> None:
         fake = self.fake()
         bottle = self.create()
-        bottles.stop("example")
+        stop_bottle("example")
         bottles.start("example")
         self.assertEqual(fake.machines[bottle.machine], "running")
         self.assertEqual(fake.bound, {"example"})
@@ -761,7 +761,7 @@ class ExecTest(BottleTestCase):
         self.assertEqual(command, ["smolvm-exec", self.attached["name"], "git", "push", "host"])
 
     def test_starts_a_stopped_bottle(self) -> None:
-        bottles.stop("example")
+        stop_bottle("example")
         bottles.exec_command("example", ["true"])
         self.assertIn("start", self.fake_smolvm.calls)
 
@@ -1101,7 +1101,7 @@ class SshTest(BottleTestCase):
             bottles.sshd_command("main", "192.0.2.3")
         with self.assertRaisesRegex(BottleError, "big may ssh to nothing"):
             bottles.sshd_command("big", "192.0.2.2")
-        bottles.stop("big")
+        stop_bottle("big")
         with self.assertRaisesRegex(BottleError, "isn't running"):
             bottles.sshd_command("main", "192.0.2.2")
 
