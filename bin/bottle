@@ -6,7 +6,13 @@ set -eu
 if [ -n "${BOTTLE_CLI:-}" ]; then
   exec "$BOTTLE_CLI" "$@"
 fi
-root=$(cd "$(dirname "$0")/.." && pwd)
+# The checkout this script is in, through any symlinks to it (one on PATH, say).
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
 # rustup's cargo, if it isn't on PATH.
 cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
 # From the checkout: cargo finds its xtask alias there (.cargo/config.toml).

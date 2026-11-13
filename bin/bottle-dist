@@ -2,6 +2,12 @@
 # bottle-cli's dev hook for a runner's distribution ($BOTTLE_DIST_BUILD): the one for TARGET (a Rust
 # target triple), built from this checkout's sources if they've changed since it was.
 set -eu
-root=$(cd "$(dirname "$0")/.." && pwd)
+# The checkout this script is in, through any symlinks to it (one on PATH, say).
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
 cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
 cd "$root" && exec "$cargo" xtask dist --target "$1" --if-changed
