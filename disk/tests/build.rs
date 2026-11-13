@@ -41,10 +41,14 @@ fn run(command: &mut Command) -> String {
 fn agent() -> &'static PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
-        // target/<profile>/deps/<this test>
-        let profile = std::env::current_exe().unwrap();
-        let profile = profile.parent().unwrap().parent().unwrap();
-        let target = profile.parent().unwrap();
+        // The target directory (CARGO_TARGET_TMPDIR is its tmp/, whatever the build directory's
+        // layout), and the profile's directory in it.
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let profile = target.join(if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        });
         let triple = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
         let mut args = vec!["build", "-q", "-p", "bottle-agent", "--target", &triple];
         if profile.ends_with("release") {

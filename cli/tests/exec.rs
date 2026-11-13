@@ -18,11 +18,8 @@ use std::time::{Duration, Instant};
 fn agent_binary() -> &'static PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
-        // target/<profile>/deps/<this test>
-        let profile = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
+        // Where cargo put bottle-cli: target/<profile>, whatever its build directory's layout.
+        let profile = std::path::Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
             .parent()
             .unwrap()
             .to_path_buf();

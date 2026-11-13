@@ -64,8 +64,11 @@ fn root() -> bool {
 
 /// bottle-agent, built here: another package's binary, which cargo doesn't hand this test.
 fn agent() -> PathBuf {
-    let profile = std::env::current_exe().unwrap();
-    let profile = profile.parent().unwrap().parent().unwrap().to_path_buf();
+    // Where cargo put bottle-cli: target/<profile>, whatever its build directory's layout.
+    let profile = Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let cargo = env!("CARGO");
     let mut command = match std::env::var("SUDO_USER") {
         Ok(user) => {
