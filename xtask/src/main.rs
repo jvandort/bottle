@@ -23,7 +23,8 @@
 //!
 //! Incremental: cargo builds what's changed, and a file of the distribution is copied (and on a Mac
 //! signed) only when what it's copied from has. One build of a distribution at a time: another
-//! waits for it. Whether one is needed at all, without starting cargo, is bin/bottle-build's.
+//! waits for it. Whether one is needed at all, without starting cargo, is bin/bottle-build's, which
+//! builds every distribution this machine builds.
 //! Every distribution has a manifest of its files (MANIFEST): each one's sha256 and name, as
 //! sha256sum writes them, which is what a runner's copy is compared with (bottle-cli's runner.rs).
 

@@ -120,8 +120,8 @@ bottle-cli has (`folio configure --runner RUNNER`).
   the runner, what differs of it is copied again, file by file: each file's
   sha256, from the manifest the build wrote beside it, against what the
   runner's `sha256sum` says of its copy, and only the files that differ are
-  sent; in a checkout, it's built first if its sources have changed
-  (`bin/bottle-build TARGET`).
+  sent. Nothing is built then: every distribution is there already, built
+  with bottle-cli (in a checkout, `bin/bottle-build` builds them all).
 - **`bottle runner ls`** lists them; **`bottle runner check RUNNER`** says
   what one is and lacks.
 - **`bottle runner detach RUNNER [--offline]`** is for turning a runner off:
@@ -289,7 +289,9 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 checkout first when its sources have changed since it was (`bin/bottle-build`:
 a hash of their contents, `sha256sum`'s, against the one the last build left,
 then `cargo xtask dist` if they differ, which builds and copies only what's
-changed), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
+changed; for each distribution, this machine's and the ones runners take:
+on a Mac, Linux's two, built in a Linux VM; on Linux, the other
+architecture's, with Debian's cross gcc), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
 else builds it: folio runs `$BOTTLE_CLI`, else `bottle-cli` on `PATH`. folio's tests,
 the suites that drive bottle-cli from folio's side among them, are in
 [folio](folio/README.md#development).

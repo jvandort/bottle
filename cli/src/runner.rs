@@ -14,10 +14,10 @@
 //! never asking for a password or a host key: a runner it can't reach without asking is unreachable.
 //! Each runner gets one shared connection (ssh's ControlMaster), kept for a while after its last
 //! use. A runner has this program and nothing else of bottle's: in ~/.bottle/dist there, copied
-//! from the distribution for its architecture beside this one's (`dist-TARGET`, as `cargo xtask
-//! dist --target TARGET` makes it; in $BOTTLE_RUNNER_DISTS instead, if it's set) whenever that's
-//! another build ($BOTTLE_DIST_BUILD, if it's set, is run with TARGET first: a checkout's dev shim,
-//! which brings it up to date with the checkout's sources). Its machines are named
+//! from the distribution for its architecture whenever that's another build: this one's own, if
+//! it's built for the same, else the one beside it (`dist-TARGET`; in $BOTTLE_RUNNER_DISTS instead,
+//! if it's set). Every distribution bottle-cli is built for is there, built with it, whether any
+//! runner needs it or not: nothing is built for a runner when it's used. Its machines are named
 //! `NAME/MACHINE` here (see machine.rs). `runner ssh` is its shared connection, for a command
 //! there: what git's GIT_SSH_COMMAND can be, with a URL `NAME:PATH` and GIT_SSH_VARIANT=simple.
 //! `runner check` says what a machine (a runner's, or one to add) is and what it lacks, and adds
@@ -145,6 +145,26 @@ fn sums<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
         .filter_map(|line| line.split_once("  "))
         .map(|(sum, name)| (name.to_string(), sum.to_string()))
         .collect()
+}
+
+/// Where the distribution for `target` is: $BOTTLE_RUNNER_DISTS/dist-TARGET, if that's set; else
+/// this program's own, if it's built for `target`; else dist-TARGET beside it.
+fn dist_for(target: &str) -> io::Result<PathBuf> {
+    if let Some(dists) = env::var_os("BOTTLE_RUNNER_DISTS") {
+        return Ok(PathBuf::from(dists).join(format!("dist-{target}")));
+    }
+    let exe = env::current_exe()?;
+    let own = exe
+        .parent()
+        .ok_or_else(|| other("no directory beside this program"))?;
+    let ours = format!("{}-unknown-linux-musl", env::consts::ARCH);
+    if cfg!(target_os = "linux") && target == ours {
+        return Ok(own.to_path_buf());
+    }
+    Ok(own
+        .parent()
+        .ok_or_else(|| other("no directory beside this program"))?
+        .join(format!("dist-{target}")))
 }
 
 /// `s` quoted for a POSIX shell.
@@ -323,33 +343,14 @@ impl Runner {
                 )));
             }
         };
-        // $BOTTLE_RUNNER_DISTS/dist-TARGET, else beside this program's own distribution.
-        let dists = match env::var_os("BOTTLE_RUNNER_DISTS") {
-            Some(dir) => PathBuf::from(dir),
-            None => env::current_exe()?
-                .parent()
-                .and_then(|d| d.parent())
-                .ok_or_else(|| other("no directory beside this program"))?
-                .to_path_buf(),
-        };
-        let dist = dists.join(format!("dist-{target}"));
-        // A checkout's: its dev shim brings the distribution up to date with its sources first.
-        if let Some(build) = env::var_os("BOTTLE_DIST_BUILD").filter(|b| !b.is_empty()) {
-            let built = Command::new(&build)
-                .arg(target)
-                .stdout(Stdio::from(io::stderr()))
-                .status()
-                .map_err(|e| other(format!("{}: {e}", PathBuf::from(&build).display())))?;
-            if !built.success() {
-                return Err(other(format!("building bottle-cli for {target} failed")));
-            }
-        }
+        let dist = dist_for(target)?;
         let ours = fs::read_to_string(dist.join(MANIFEST))
             .map(|listed| sums(listed.lines()))
             .map_err(|_| {
                 other(format!(
-                    "no bottle-cli for {target} at {} (cargo xtask dist --target {target})",
-                    dist.display()
+                    "this bottle-cli has no distribution for {target} (in {}) to copy to runner {}",
+                    dist.display(),
+                    self.name
                 ))
             })?;
         let changed: Vec<&String> = ours

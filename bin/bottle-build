@@ -1,11 +1,13 @@
 #!/bin/sh
-# bottle-cli from this checkout, built if its sources have changed since it was: this machine's
-# (target/dist), or, given a Rust target triple, a runner's (target/dist-TARGET; bottle-cli runs this
-# as its $BOTTLE_DIST_BUILD). Whether they have is a hash of their contents and names, without
-# starting cargo, against the one the last build left beside it (.sources); a build is `cargo xtask
-# dist`, its progress on stderr, and leaves the hash once it's done.
+# Every distribution of bottle-cli this machine builds, each built if its sources have changed since
+# it was: this machine's own (target/dist), and beside it each other one bottle-cli is built for
+# (target/dist-TARGET), whether any runner needs it or not, which is where bottle-cli takes a
+# runner's from. On a Mac, Linux's two; on Linux, the other architecture's. Whether they have is a
+# hash of their contents and names, without starting cargo, against the one each distribution's last
+# build left beside it (.sources); a build is `cargo xtask dist`, its progress on stderr, and leaves
+# the hash once it's done.
 #
-#   bottle-build [TARGET]
+#   bottle-build
 set -eu
 # The checkout this script is in, through any symlinks to it (one on PATH, say).
 self=$0
@@ -15,8 +17,6 @@ while [ -L "$self" ]; do
 done
 root=$(cd "$(dirname "$self")/.." && pwd)
 cd "$root"
-target=${1:-}
-dist=target/dist${target:+-$target}
 
 # What bottle-cli is built from. A compiled sha256sum where there's one (Linux; recent macOS), else
 # shasum. In a fixed order, whatever the locale.
@@ -24,10 +24,21 @@ if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; else sum="shasum -a
 sources=$(find Cargo.toml Cargo.lock .cargo agent agent-client agent-proto cli disk xtask \
             -path '*/target' -prune -o -type f -print \
           | LC_ALL=C sort | tr '\n' '\0' | xargs -0 $sum | $sum | cut -d' ' -f1)
-if [ -f "$dist/bottle-cli" ] && [ "$(cat "$dist/.sources" 2>/dev/null)" = "$sources" ]; then
-  exit 0
-fi
 # rustup's cargo, if it isn't on PATH.
 cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
-"$cargo" xtask dist ${target:+--target "$target"} --out "$dist" >&2
-printf '%s' "$sources" > "$dist/.sources"
+
+# This machine's own first: a Mac builds Linux's with it.
+case $(uname -s)/$(uname -m) in
+  Darwin/*) others="aarch64-unknown-linux-musl x86_64-unknown-linux-musl" ;;
+  Linux/x86_64) others=aarch64-unknown-linux-musl ;;
+  Linux/aarch64) others=x86_64-unknown-linux-musl ;;
+  *) echo "bottle-build: bottle-cli isn't built for $(uname -s) on $(uname -m)" >&2; exit 1 ;;
+esac
+for target in "" $others; do
+  dist=target/dist${target:+-$target}
+  if [ -f "$dist/bottle-cli" ] && [ "$(cat "$dist/.sources" 2>/dev/null)" = "$sources" ]; then
+    continue
+  fi
+  "$cargo" xtask dist ${target:+--target "$target"} --out "$dist" >&2
+  printf '%s' "$sources" > "$dist/.sources"
+done
