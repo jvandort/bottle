@@ -20,6 +20,12 @@ class GetTest(unittest.TestCase):
 class LocalRunnerTest(GitTestCase):
     """The local runner is bottle-cli, images and bottled here, as bottle used them before runners."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(runners.prereqs, "ensure_cli")   # its bottle-cli as it is
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_starting_binds_its_machine_at_bottled_then_starts_it(self) -> None:
         calls = []
         with mock.patch.object(runners.daemon, "bind", side_effect=lambda *a: calls.append(("bind", *a))), \
@@ -54,6 +60,7 @@ class RemoteRunnerTest(unittest.TestCase):
 
     def test_its_machines_are_named_runner_slash_name_its_images_asked_there(self) -> None:
         box = runners.RemoteRunner("box")
+        box._is_ready = True   # its bottle-cli, here and there, as these sources are
         with mock.patch.object(runners.krun, "start") as start, \
                 mock.patch.object(runners.daemon, "bind") as bind, \
                 mock.patch.object(runners.krun, "state", return_value="running") as state:
@@ -65,4 +72,13 @@ class RemoteRunnerTest(unittest.TestCase):
         self.assertEqual(box.cli.command(["images", "/s", "--json"])[1:], ["on", "box", "images", "/s", "--json"])
         command = box.exec_command("m", ["bash", "-l"], user="genie", tty=True)
         self.assertEqual(command[1:6], ["machine", "exec", "--name", "box/m", "-t"])
+
+    def test_it_readies_itself_once_before_it_first_asks_bottle_cli_anything(self) -> None:
+        box = runners.RemoteRunner("box")
+        with mock.patch.object(runners.RemoteRunner, "ensure_ready") as ready, \
+                mock.patch.object(runners.krun, "state", return_value=None), \
+                mock.patch.object(runners.krun, "delete"):
+            box.state("m")
+            box.delete("m")
+        ready.assert_called_once_with()
 

@@ -14,6 +14,7 @@ controller's to work out, in images.py and features.py; the runner keeps the
 images it's built and builds those it's sent.
 """
 
+import functools
 import hashlib
 import json
 import os
@@ -124,6 +125,18 @@ class Runner(Protocol):
         """The command line that runs `argv` in a machine with stdin attached (and a TTY), for this process to run."""
 
 
+def _readied(method):
+    """`method`, its runner made ready first (ensure_ready: its bottle-cli as this repo's sources are now), the
+    first time any such method is called on it."""
+    @functools.wraps(method)
+    def readied(self, *args, **kwargs):
+        if not getattr(self, "_is_ready", False):
+            self.ensure_ready()
+            self._is_ready = True
+        return method(self, *args, **kwargs)
+    return readied
+
+
 class LocalRunner:
     """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, services are bottled's."""
 
@@ -134,6 +147,7 @@ class LocalRunner:
     def ensure_ready(self) -> None:
         prereqs.ensure_cli()
 
+    @_readied
     def memory_mib(self) -> int:
         from bottle import specs
 
@@ -146,21 +160,27 @@ class LocalRunner:
         """`machine`, as this machine's bottle-cli names it."""
         return machine
 
+    @_readied
     def archive(self, tag: str) -> Path | None:
         return images.archive_of(tag, self.cli)
 
+    @_readied
     def image_labels(self, tag: str) -> dict[str, str] | None:
         return images.built_labels(tag, self.cli)
 
+    @_readied
     def built(self) -> dict[str, dict[str, str]]:
         return images.built(self.cli)
 
+    @_readied
     def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
         images.build_recipe(context, tag, inputs, recipe, no_cache, cli=self.cli)
 
+    @_readied
     def forget(self, tag: str) -> None:
         images.forget(tag, self.cli)
 
+    @_readied
     def remove_unused(self, in_use: set[str]) -> None:
         images.remove_unused(in_use, self.cli)
 
@@ -168,6 +188,7 @@ class LocalRunner:
         # The repo's own: it's on this machine's disk, so nothing is copied.
         return repos.objects_dir(repo)
 
+    @_readied
     def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
                workdir: str | None = None, labels: dict[str, str] | None = None,
@@ -177,9 +198,11 @@ class LocalRunner:
                     memory_mib, self.cpus(), disk_gib, user, workdir, labels,
                     services.with_socket(network, str(daemon.services_socket())) if network else None)
 
+    @_readied
     def configure(self, machine: str, network: dict) -> None:
         krun.configure(self.qualified(machine), services.with_socket(network, str(daemon.services_socket())))
 
+    @_readied
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
         daemon.bind(bottle, machine, served, features)
@@ -188,32 +211,40 @@ class LocalRunner:
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
 
+    @_readied
     def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
         return krun.ca_certificate(machine, hosts, cli=self.cli)
 
     def ensure_deciding(self) -> None:
         daemon.start()
 
+    @_readied
     def stop(self, machine: str) -> None:
         krun.stop(self.qualified(machine))
 
+    @_readied
     def rename(self, machine: str, new: str) -> None:
         krun.rename(self.qualified(machine), self.qualified(new))
 
+    @_readied
     def running(self) -> list[str]:
         # Its own, not those of runners it reaches.
         return [m for m in krun.running(cli=self.cli) if "/" not in m]
 
+    @_readied
     def delete(self, machine: str) -> None:
         krun.delete(self.qualified(machine))
 
+    @_readied
     def state(self, machine: str) -> str | None:
         return krun.state(self.qualified(machine))
 
+    @_readied
     def exec_(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
               input: str | None = None, env: dict[str, str] | None = None) -> str:
         return krun.exec_(self.qualified(machine), argv, user=user, workdir=workdir, input=input, env=env)
 
+    @_readied
     def exec_command(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
                      tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
         return krun.exec_command(self.qualified(machine), argv, user=user, workdir=workdir, tty=tty, env=env)
@@ -244,15 +275,18 @@ class RemoteRunner(LocalRunner):
             self._info = krun.info(cli=self.cli)
         return self._info
 
+    @_readied
     def memory_mib(self) -> int:
         return int(self._host()["memory_mib"])
 
+    @_readied
     def cpus(self) -> int:
         return int(self._host()["cpus"])
 
     def qualified(self, machine: str) -> str:
         return f"{self.name}/{machine}"
 
+    @_readied
     def objects(self, repo: repos.Repo) -> Path:
         # A bare mirror of the repo there, brought up to date by a push from here: what its machines borrow
         # objects from. Fetches aren't served from it: they come here, as everything routed does.
