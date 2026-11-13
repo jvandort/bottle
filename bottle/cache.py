@@ -39,12 +39,11 @@ class Cached:
     immutable: bool = False
 
 
-def cached_for(specs: tuple[str, ...] | list[str], build: bool = False) -> list[Cached]:
+def cached_for(specs: tuple[str, ...] | list[str]) -> list[Cached]:
     """The hosts a bottle with these features has its downloads kept for: those its features name, and the apt
-    repositories its image has (see apt.py). For a `build` of its image, the apt repositories alone: what a
-    build's apt trusts the builds' caching CA for, where nothing else in it does."""
+    repositories its image has (see apt.py)."""
     from bottle import apt, features  # which import this module
 
     resolved = features.resolve(list(specs))
-    named = [] if build else [Cached(host.lower(), f.cache.exclude) for f in resolved if f.cache for host in f.cache.hosts]
+    named = [Cached(host.lower(), f.cache.exclude) for f in resolved if f.cache for host in f.cache.hosts]
     return named + apt.cached((*apt.DEBIAN, *(r for f in resolved for r in f.apt.repositories)))

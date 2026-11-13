@@ -136,10 +136,10 @@ bottle-cli has (`folio configure --runner RUNNER`).
   on the machine is touched.
 
 On a runner, everything bottle keeps is in `~/.bottle`: bottle-cli's
-distribution (`~/.bottle/dist`), the images built there, the machines, the
-HTTP cache, and a bare mirror of each repo its bottles use (`~/.bottle/git`),
-which your Mac pushes into as a drone is made, so its checkout borrows objects
-from the runner's disk. Runners are bottle-cli's (`bottle-cli runner`): it
+distribution (`~/.bottle/dist`), the images built there, the machines and the
+HTTP cache. (folio keeps a bare mirror there of each repo its bottles use, in
+`~/.folio/git`, which your Mac pushes into as a drone is made, so its checkout
+borrows objects from the runner's disk.) Runners are bottle-cli's (`bottle-cli runner`): it
 runs itself there over ssh, and a runner's machines are your Mac's by
 `RUNNER/NAME` (`bottle shell desktop/foo`; `bottle ls` lists every
 machine, here and on each runner); nothing else of bottle's runs there.

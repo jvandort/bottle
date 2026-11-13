@@ -11,6 +11,7 @@ ssh as the machine is made.
 """
 
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -18,9 +19,10 @@ from pathlib import Path
 
 from bottle import daemon, krun, repos, services
 from bottle.errors import BottleError
-from bottle.store import bottle_home, read_json
 
 LOCAL = "local"
+# Where on a runner, under its user's home, folio keeps bare mirrors of the repos its machines mount objects from.
+MIRRORS = ".folio/git"
 
 
 class Runner:
@@ -34,6 +36,13 @@ class Runner:
     def qualified(self, machine: str) -> str:
         """`machine`, as bottle-cli here names it."""
         return machine if self.name == LOCAL else f"{self.name}/{machine}"
+
+    def _home(self, ssh: list[str]) -> str:
+        """The home directory there of the user bottle-cli reaches it as."""
+        found = subprocess.run([*ssh, 'printf %s "$HOME"'], capture_output=True, text=True)
+        if found.returncode != 0 or not found.stdout:
+            raise BottleError(f"runner {self.name}: {krun._error(found.stderr) or 'no home'}")
+        return found.stdout
 
     def _host(self) -> dict:
         if self._info is None:
@@ -58,8 +67,8 @@ class Runner:
         if self.name == LOCAL:
             return repos.objects_dir(repo)
         git_dir = repos.objects_dir(repo).parent
-        there = f"{self.cli.home()}/git/{mirror_key(git_dir)}.git"
         ssh = [krun.binary(), "runner", "ssh", self.name]
+        there = f"{self._home(ssh)}/{MIRRORS}/{mirror_key(git_dir)}.git"
         made = subprocess.run([*ssh, f"[ -d {shlex.quote(there)} ] || git init -q --bare {shlex.quote(there)}"],
                               capture_output=True, text=True)
         if made.returncode != 0:
@@ -75,13 +84,14 @@ class Runner:
 
     # Its machines, as krun.py has them, by their names there.
 
-    def create(self, machine: str, archive: Path, mounts: list[krun.Mount], env: dict[str, str],
+    def create(self, machine: str, image: str, mounts: list[krun.Mount], env: dict[str, str],
                memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
                workdir: str | None = None, labels: dict[str, str] | None = None,
                network: dict | None = None) -> None:
-        """A stopped machine from `archive`, with all its cores, as krun.create makes it; `network` its policy
-        (services.network), its routes to folio serve's sockets here, which bottle-cli forwards to a runner's."""
-        krun.create(self.qualified(machine), str(archive), mounts, env, memory_mib, self.cpus(), disk_gib, user,
+        """A stopped machine from `image` (a tag there), with all its cores, as krun.create makes it; `network`
+        its policy (services.network), its routes to folio serve's sockets here, which bottle-cli forwards to a
+        runner's."""
+        krun.create(self.qualified(machine), image, mounts, env, memory_mib, self.cpus(), disk_gib, user,
                     workdir, labels, services.with_sockets(network, daemon.services_sockets()) if network else None)
 
     def configure(self, machine: str, network: dict) -> None:
@@ -126,20 +136,17 @@ def mirror_key(git_dir: Path) -> str:
     return f"{name}-{hashlib.sha256(str(git_dir).encode()).hexdigest()[:8]}"
 
 
-def registry_path() -> Path:
-    return bottle_home() / "runners.json"
-
-
 def registered() -> dict[str, dict]:
-    """Every remote runner added (`bottle runner add`), by name: each one's {"ssh": destination}, and "detached"
-    if it is."""
-    return (read_json(registry_path()) or {}).get("runners", {})
+    """Every remote runner added (`bottle runner add`), by name, as `bottle runner ls` has them: each one's ssh
+    destination, and whether it's detached."""
+    listed = json.loads(krun.LOCAL.run(["runner", "ls", "--json"]).stdout or "[]")
+    return {runner["name"]: runner for runner in listed}
 
 
 def is_detached(name: str) -> bool:
     """Whether `name` was detached (`bottle runner detach`), to be turned off: nothing asks it anything until it's
     used again, which attaches it."""
-    return "detached" in registered().get(name, {})
+    return name != LOCAL and bool(registered().get(name, {}).get("detached"))
 
 
 _LOCAL = Runner()

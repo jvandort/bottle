@@ -99,10 +99,11 @@ def write_bottles(bottles_: dict) -> None:
 
 def register_runner(name: str, destination: str) -> None:
     """Runner `name` added, at ssh `destination`, as `bottle runner add` records it (unchecked)."""
-    from bottle import runners
-    from bottle.store import write_json
+    from bottle.store import bottle_home, read_json, write_json
 
-    write_json(runners.registry_path(), {"version": 1, "runners": {**runners.registered(), name: {"ssh": destination}}})
+    path = bottle_home() / "runners.json"
+    known = (read_json(path) or {}).get("runners", {})
+    write_json(path, {"version": 1, "runners": {**known, name: {"ssh": destination}}})
 
 
 def thread_dir() -> "Path":

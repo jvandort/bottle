@@ -84,9 +84,8 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
 
     def test_its_bottle_cli_runs_there_and_nothing_else_of_bottles(self) -> None:
         self.assertEqual(self.box.state("bottle-b"), "running")
-        self.assertIn('"$HOME/.bottle/dist/bottle-cli" machine status --name bottle-b --json', self.logged()[-1])
+        self.assertIn('"$HOME/.bottle/dist/bottle-cli" status bottle-b --json', self.logged()[-1])
         self.assertEqual((self.box.memory_mib(), self.box.cpus()), (4096, 32))
-        self.assertEqual(self.box.cli.home(), str(self.remotes / "box" / ".bottle"))
 
     def test_a_build_sends_its_context_with_the_recipe_and_builds_there(self) -> None:
         context = self.tmp / "context"
@@ -99,12 +98,12 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
 
     def test_a_shell_there_is_its_bottle_cli_exec_by_runner_slash_name(self) -> None:
         command = self.box.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)
-        self.assertEqual(command[1:6], ["machine", "exec", "--name", "box/bottle-b", "-t"])
+        self.assertEqual(command[1:4], ["exec", "box/bottle-b", "-t"])
 
     def test_a_repos_objects_are_pushed_into_a_mirror_there(self) -> None:
         repo = self.make_repo("app")
         objects = self.box.objects(runners.repos.Repo("app", repo))
-        mirror = self.remotes / "box" / ".bottle" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
+        mirror = self.remotes / "box" / ".folio" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(objects, mirror / "objects")
         main = subprocess.run(["git", "--git-dir", mirror, "rev-parse", "refs/heads/main"], capture_output=True,
                               text=True).stdout.strip()

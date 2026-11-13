@@ -27,7 +27,7 @@ import os
 import secrets
 from pathlib import Path
 
-from bottle.store import bottle_home
+from bottle.store import folio_home
 
 MARK = "~"
 KEY_BYTES = 32
@@ -36,7 +36,7 @@ SIGNATURE_CHARS = 26
 
 
 def key_path() -> Path:
-    return bottle_home() / "messages.key"
+    return folio_home() / "messages.key"
 
 
 def _key() -> bytes:

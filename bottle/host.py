@@ -438,9 +438,9 @@ def _config_env(config: dict[str, str]) -> dict[str, str]:
 
 
 def default_view_dir(git_dir: Path) -> Path:
-    from bottle.store import bottle_home
+    from bottle.store import folio_home
 
-    return bottle_home() / "views" / f"{hashlib.sha256(str(git_dir).encode()).hexdigest()[:16]}.git"
+    return folio_home() / "views" / f"{hashlib.sha256(str(git_dir).encode()).hexdigest()[:16]}.git"
 
 
 def write_view(git_dir: Path, view: Path) -> Path:

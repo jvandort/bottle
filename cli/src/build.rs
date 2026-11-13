@@ -2,15 +2,15 @@
 //! build); each command that makes one prints the disks of the image it made, bottom first, as
 //! `boot` takes them.
 //!
-//!     bottle-cli image build RECIPE [--tag TAG] [--store PATH] [--network FILE | --net-direct]
-//!     bottle-cli image import ARCHIVE [--store PATH] [--network FILE | --net-direct]
-//!     bottle-cli image pull REFERENCE [--store PATH] [--network FILE | --net-direct]
-//!     bottle-cli image tag IMAGE TAG [--store PATH]
-//!     bottle-cli image rm TAG [--store PATH]
-//!     bottle-cli images [--store PATH] [--json]
-//!     bottle-cli gc [--store PATH] [IMAGE]...
+//!     bottle-cli image build RECIPE [--tag TAG] [--network FILE | --net-direct]
+//!     bottle-cli image import ARCHIVE [--network FILE | --net-direct]
+//!     bottle-cli image pull REFERENCE [--network FILE | --net-direct]
+//!     bottle-cli image tag IMAGE TAG
+//!     bottle-cli image rm TAG
+//!     bottle-cli images [--json]
+//!     bottle-cli gc [IMAGE]...
 //!
-//! The store is $BOTTLE_HOME/stages, unless --store names another. RECIPE is a JSON file, steps
+//! Its store is $BOTTLE_HOME/stages. RECIPE is a JSON file, steps
 //! run on the stage it's `from` (see bottle_disk::build::Recipe); ARCHIVE an OCI layout archive of
 //! one image; REFERENCE an image in a registry (`debian:trixie-slim`, `name@sha256:...`), fetched
 //! by curl, streamed into the import (see bottle_disk::registry). Images are a store's stages by
@@ -44,36 +44,22 @@ const BUILDS_CA: &str = "bottle-builds";
 /// What a step asks for the builds' CA's certificate by, in its environment.
 const BUILD_CA: &str = "BOTTLE_BUILD_CA";
 
-pub const USAGE: &str = "image build RECIPE [--tag TAG] [--store PATH] [--network FILE | --net-direct] \
-    | image import ARCHIVE [...] | image pull REFERENCE [...] | image tag IMAGE TAG [--store PATH] \
-    | image rm TAG [--store PATH] | images [--store PATH] [--json] | gc [--store PATH] [IMAGE]...";
+pub const USAGE: &str = "image build RECIPE [--tag TAG] [--network FILE | --net-direct] \
+    | image import ARCHIVE [...] | image pull REFERENCE [...] | image tag IMAGE TAG | image rm TAG \
+    | images [--json] | gc [IMAGE]...";
 
-/// The store, unless a command's --store names another: $BOTTLE_HOME/stages.
-pub fn default_store() -> PathBuf {
+/// The store: $BOTTLE_HOME/stages.
+pub fn store() -> PathBuf {
     crate::runner::home().join("stages")
-}
-
-/// `--store PATH`, taken out of `args`; else the default store.
-fn take_store(args: &mut Vec<String>) -> Result<PathBuf, ExitCode> {
-    let Some(at) = args.iter().position(|a| a == "--store") else {
-        return Ok(default_store());
-    };
-    if at + 1 >= args.len() {
-        return Err(crate::usage_error("--store needs a PATH"));
-    }
-    let path = args.remove(at + 1);
-    args.remove(at);
-    Ok(PathBuf::from(path))
 }
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";
 const MEM_MIB: &str = "4096";
 
-/// One argument, the store (take_store) and the network options (see boot's Net), in any order.
+/// One argument, and the network options (see boot's Net), in any order; and the store.
 fn one_and_net(args: Vec<String>, what: &str) -> Result<(String, PathBuf, Net), ExitCode> {
-    let mut args = args;
-    let store = take_store(&mut args)?;
+    let store = store();
     let mut positional = Vec::new();
     let mut net = Net::None;
     let mut args = args.into_iter();
@@ -124,11 +110,7 @@ pub fn image(mut args: impl Iterator<Item = String>) -> ExitCode {
     let command = args.next();
     let mut args: Vec<String> = args.collect();
     if matches!(command.as_deref(), Some("tag" | "rm")) {
-        let store = match take_store(&mut args) {
-            Ok(store) => store,
-            Err(code) => return code,
-        };
-        args.push(store.to_string_lossy().into_owned());
+        args.push(store().to_string_lossy().into_owned());
     }
     match command.as_deref() {
         Some("build") => image_build(args),
@@ -256,11 +238,8 @@ fn give_builds_ca(recipe: &mut serde_json::Value, net: &Net) -> io::Result<()> {
 
 /// `images [--json]`: the store's tags, each with its stage, disks and labels.
 pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
-    let mut args: Vec<String> = args.collect();
-    let store = match take_store(&mut args) {
-        Ok(store) => store,
-        Err(code) => return code,
-    };
+    let args: Vec<String> = args.collect();
+    let store = store();
     let json = match args.as_slice() {
         [] => false,
         [flag] if flag == "--json" => true,
@@ -307,11 +286,8 @@ pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
 /// stages' names, or disks) or of its tagged images is made of. What a machine uses is safe
 /// whether it runs or not.
 pub fn gc(args: impl Iterator<Item = String>) -> ExitCode {
-    let mut keep: Vec<String> = args.collect();
-    let store = match take_store(&mut keep) {
-        Ok(store) => store,
-        Err(code) => return code,
-    };
+    let keep: Vec<String> = args.collect();
+    let store = store();
     let result = (|| -> io::Result<Vec<String>> {
         let store = store_for_reading(&store)?;
         let mut kept = std::collections::BTreeSet::new();

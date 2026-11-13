@@ -39,9 +39,12 @@ cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$*"
 
 # bottle-cli there: a machine started is recorded, with what it was given; every machine is running.
 FAKE_CLI = r"""#!/usr/bin/env bash
+case "$1" in
+  start) printf '{"args": "%s"}' "$*" > "$HOME/started.json" ;;
+  create|configure) cat > "$HOME/network.json" ;;
+esac
 case "$1 $2" in
-  "machine start") printf '{"args": "%s"}' "$*" > "$HOME/started.json" ;;
-  "machine create"|"machine configure") cat > "$HOME/network.json" ;;
+  "start "*|"create "*|"configure "*) ;;
   "info --json") printf '{"memory_mib": 4096, "cpus": 32, "home": "%s/.bottle"}' "$HOME" ;;
   *) echo '{"state": "running"}' ;;
 esac
@@ -54,21 +57,20 @@ STATEFUL_CLI = r"""#!/usr/bin/env bash
 [ "$1" = images ] && exec cat "$HOME/images.listed"
 [ "$1" = info ] && { printf '{"memory_mib": 4096, "cpus": 32, "home": "%s/.bottle"}' "$HOME"; exit 0; }
 [ "$1 $2" = "ca certificate" ] && { echo "a CA of $3's"; exit 0; }
-op="$1 $2"; shift 2
-while [ $# -gt 0 ]; do [ "$1" = --name ] && name=$2; [ "$1" = -- ] && break; shift; done
+op="$1"; name="$2"; all="$*"
 machines="$HOME/machines"; mkdir -p "$machines"
 case "$op" in
-  "machine create") echo created > "$machines/$name"; cat > "$machines/$name.network" ;;
-  "machine start")
+  create) echo created > "$machines/$name"; cat > "$machines/$name.network" ;;
+  start)
     echo running > "$machines/$name"
-    printf '{"args": "%s"}' "$*" > "$HOME/started.json" ;;
-  "machine stop") echo stopped > "$machines/$name" ;;
-  "machine delete") rm -f "$machines/$name" ;;
-  "machine status")
+    printf '{"args": "%s"}' "$all" > "$HOME/started.json" ;;
+  stop) echo stopped > "$machines/$name" ;;
+  delete) rm -f "$machines/$name" ;;
+  status)
     if [ -f "$machines/$name" ]; then printf '{"state": "%s"}' "$(cat "$machines/$name")"
     else echo "bottle-cli: no machine $name" >&2; exit 1; fi ;;
-  "machine exec") cat > /dev/null; echo "$*" >> "$HOME/execs" ;;
-  "machine ls")
+  exec) cat > /dev/null; echo "$all" >> "$HOME/execs" ;;
+  ls)
     printf '['; sep=
     for m in "$machines"/*; do
       case "$m" in *.network) continue ;; esac
@@ -166,7 +168,7 @@ class DroneTest(DroneCase):
 
         # What its machine mounts: a bare mirror there, pushed into from here.
         objects = box.objects(repos.Repo("repo", repo))
-        mirror = self.remote / ".bottle" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
+        mirror = self.remote / ".folio" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(objects, mirror / "objects")
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))
@@ -177,7 +179,7 @@ class DroneTest(DroneCase):
         box.start(machine)
 
         started = json.loads((self.remote / "started.json").read_text())
-        self.assertEqual(started["args"], f"machine start --name {machine}")   # nothing else: its policy is its own
+        self.assertEqual(started["args"], f"start {machine}")   # nothing else: its policy is its own
         request = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         answer = self.guest_connects(machine, host.ADDRESS, 80, request)
         self.assertIn(b"HTTP/1.1 200", answer)
@@ -198,7 +200,7 @@ class DroneTest(DroneCase):
         bottle = bottles.create(thread_dir(), {"features": [], "memory": "512M"}, "drone", [bottles.MountRequest("/workspace", repo)],
                                 runner="box")
 
-        self.assertEqual((bottle.runner, bottle.status, bottle.archive), ("box", "ready", "base.ext4"))
+        self.assertEqual((bottle.runner, bottle.status), ("box", "ready"))
         machine = self.remote / "machines" / bottle.machine
         self.assertEqual(machine.read_text().strip(), "running")
         # Its routes, to a socket of its own there, forwarded here.
@@ -206,7 +208,7 @@ class DroneTest(DroneCase):
         theres = {r["socket"] for r in network["routes"]}
         self.assertEqual(len(theres), 2)   # bottle.host's, ssh's: a socket there for each socket here
         self.assertTrue(all(t.startswith(str(self.remote / ".bottle" / "routes")) for t in theres), theres)
-        mirror = self.remote / ".bottle" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
+        mirror = self.remote / ".folio" / "git" / f"{runners.mirror_key(repo / '.git')}.git"
         self.assertEqual(run("git", "--git-dir", mirror, "rev-parse", "refs/heads/main"),
                          run("git", "-C", repo, "rev-parse", "main"))
         execs = (self.remote / "execs").read_text()

@@ -1,7 +1,7 @@
 //! bottle-cli's machines: bottles' VMs, kept: made once, started and stopped any number of times,
 //! their disks kept between. By name, each command's first argument:
 //!
-//!     bottle-cli create NAME --image IMAGE [--store PATH] [--cpus N] [--mem MIB] [--storage GIB]
+//!     bottle-cli create NAME --image IMAGE [--cpus N] [--mem MIB] [--storage GIB]
 //!                       [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
 //!                       [--workdir DIR] [--label NAME=VALUE]... [--network FILE|-]
 //!     bottle-cli start NAME [--net-direct]
@@ -15,7 +15,7 @@
 //!     bottle-cli ls [--json]
 //!     bottle-cli info [--json]
 //!
-//! IMAGE is a tag in a store (its default, $BOTTLE_HOME/stages, or --store's), or a stage's disk
+//! IMAGE is a tag in the store ($BOTTLE_HOME/stages, see build.rs), or a stage's disk
 //! (as `image build` prints them, the last): the image is it and the stages below it; its
 //! environment is everything's in the machine, under -e's; and what it runs, its entrypoint and
 //! command, is started at each start. Mounts are read-only, whatever they say. A machine is a
@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::FAILED;
 
-pub const USAGE: &str = "create NAME --image IMAGE [--store PATH] [OPTION]... | start NAME [--net-direct] \
+pub const USAGE: &str = "create NAME --image IMAGE [OPTION]... | start NAME [--net-direct] \
     | stop NAME | status NAME [--json] | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]... \
     | shell NAME | configure NAME --network FILE|- | rename NAME NEW | delete NAME [-f] | ls [--json] \
     | info [--json] | cp SRC DST (either NAME:PATH)";
@@ -417,7 +417,6 @@ impl Machine {
 
 fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
     let mut image = None;
-    let mut store = None;
     let mut config = Config {
         image: Vec::new(),
         cpus: 2,
@@ -444,7 +443,6 @@ fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
         };
         match arg.as_str() {
             "--image" => image = Some(value()?),
-            "--store" => store = Some(PathBuf::from(value()?)),
             // As many as the hypervisor has for it, at most: boot sees to that.
             "--cpus" => config.cpus = number(value()?).map(|n: u64| n.min(255) as u8)?,
             "--mem" => config.mem_mib = number(value()?)? as u32,
@@ -484,7 +482,7 @@ fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
     if machine.exists() {
         return Err(other(format!("there's a machine {} already", machine.name)));
     }
-    let (disks, image_env, run) = image_of(&disk_of(&image, store.as_deref())?)?;
+    let (disks, image_env, run) = image_of(&disk_of(&image)?)?;
     // The image's environment first: a machine's own -e overrides it.
     config.env.splice(0..0, image_env);
     (config.image, config.run) = (disks, run);
@@ -506,13 +504,12 @@ fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
     made
 }
 
-/// The top stage's disk of `image`: a stage's disk as given, else a tag in `store` (its default, if
-/// None).
-fn disk_of(image: &str, store: Option<&Path>) -> io::Result<PathBuf> {
+/// The top stage's disk of `image`: a stage's disk as given, else a tag in the store.
+fn disk_of(image: &str) -> io::Result<PathBuf> {
     if Path::new(image).is_file() {
         return Ok(image.into());
     }
-    let dir = store.map_or_else(crate::build::default_store, Path::to_path_buf);
+    let dir = crate::build::store();
     let store = Store {
         dir: dir.clone(),
         mke2fs: PathBuf::new(),

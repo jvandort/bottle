@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from bottle import host, images, krun, services
+from bottle import daemon, host, images, krun, services
 from bottle.errors import BottleError
 from tests.support import krun_present
 
@@ -100,11 +100,11 @@ def setUpModule() -> None:
     machine = f"contract-{uuid.uuid4().hex[:8]}"
     stand_in = StandInService(work / "services.sock")
     unittest.addModuleCleanup(stand_in.close)
-    alpine = subprocess.run([krun.binary(), "pull", "alpine", str(images.store())], capture_output=True, text=True,
+    alpine = subprocess.run([krun.binary(), "image", "pull", "alpine"], capture_output=True, text=True,
                             check=True).stdout.split()[-1]
     krun.create(machine, alpine, mounts=[krun.Mount(work / "ro", "/mnt/ro")],
                 env={"STANDIN": STANDIN}, memory_mib=None, cpus=2,
-                network=services.network([], [], socket=str(stand_in.path)))
+                network=services.network([], [], sockets=dict.fromkeys(daemon.SERVICES, str(stand_in.path))))
     unittest.addModuleCleanup(krun.delete, machine)
     krun.start(machine)
     krun.exec_(machine, ["sh", "-c", f"echo '{host.ADDRESS} {host.HOST}' >> /etc/hosts"], user="root")
@@ -267,10 +267,10 @@ class BuildTest(unittest.TestCase):
         recipe = {"pull": "alpine", "steps": [{"env": {"PROBE": "set by the recipe"}},
                                               {"run": images.interpreter(context / "install.sh"), "cwd": images.MOUNT}]}
         disk = images.build_recipe(context, "localhost/bottle/probe:latest", "probe", recipe)
-        self.assertEqual(images.archive_of("localhost/bottle/probe:latest"), disk)
+        self.assertIsNotNone(images.built_labels("localhost/bottle/probe:latest"))
         built = f"{machine}-built"
         krun.create(built, str(disk), mounts=[], env={}, memory_mib=None, cpus=1,
-                    network=services.network([], [], socket=str(stand_in.path)))
+                    network=services.network([], [], sockets=dict.fromkeys(daemon.SERVICES, str(stand_in.path))))
         self.addCleanup(krun.delete, built)
         krun.start(built)
         self.assertEqual(krun.exec_(built, ["cat", "/hello"]), "built by bottle-cli\n")

@@ -31,8 +31,6 @@ class FakeSmolvm:
         if self.fail == name:
             raise BottleError(f"{name} failed")
 
-    def archive(self, tag, cli=None):
-        return Path("/images") / f"{tag.rsplit('/', 1)[-1].replace(':', '-')}.tar"
 
     def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None,
                network=None, cli=None):
@@ -134,7 +132,7 @@ class FakeSmolvm:
                 patcher.start()
                 test.addCleanup(patcher.stop)
         for patcher in (
-            mock.patch.object(bottles.images, "archive_of", self.archive),
+            mock.patch.object(bottles.runners, "registered", return_value={}),
             mock.patch.object(daemon, "start", self.daemon_start),
             mock.patch.object(daemon, "stop", self.daemon_stop),
             mock.patch.object(bottles.krun.prereqs, "ensure_cli"),
@@ -208,8 +206,7 @@ class CreateTest(BottleTestCase):
     def test_machine_gets_its_archive_memory_and_read_only_objects(self) -> None:
         fake = self.fake()
         bottle = self.create(memory="3G")
-        self.assertEqual(fake.create_args["image"], "/images/base-latest.tar")
-        self.assertEqual(bottle.archive, "base-latest.tar")  # kept while the bottle exists
+        self.assertEqual(fake.create_args["image"], "localhost/bottle/base:latest")
         self.assertEqual((fake.create_args["memory_mib"], fake.create_args["disk_gib"]), (3072, None))
         self.create(memory="2G", name="big", disk="50G")
         self.assertEqual(fake.create_args["disk_gib"], 50)
@@ -221,8 +218,8 @@ class CreateTest(BottleTestCase):
     def test_its_machine_is_its_name_with_its_users_defaults(self) -> None:
         fake = self.fake()
         bottle = self.create(name="fix-it")
-        # As bottle-cli lists it: the bottle's own name, in this home's namespace.
-        self.assertEqual(bottle.machine, f"{bottles.namespace()}fix-it")
+        # As bottle-cli lists it: the bottle's own name.
+        self.assertEqual(bottle.machine, "fix-it")
         self.assertEqual(fake.create_args["name"], bottle.machine)
         self.assertEqual((fake.create_args["user"], fake.create_args["workdir"], fake.create_args["labels"]),
                          (bottles.USER, "/workspace", {}))
@@ -311,14 +308,6 @@ class CreateTest(BottleTestCase):
         with self.assertRaisesRegex(BottleError, "already exists"):
             self.create(name="mine")
 
-    def test_an_image_that_isnt_built_rolls_back(self) -> None:
-        fake = self.fake()
-        fake.archive = lambda tag, cli=None: None
-        with mock.patch.object(bottles.images, "archive_of", fake.archive), \
-                self.assertRaisesRegex(BottleError, "localhost/bottle/base:latest isn't built"):
-            self.create()
-        self.assertEqual(bottles.load(), {})
-
     def test_builds_the_image_first(self) -> None:
         fake = self.fake()
 
@@ -329,7 +318,7 @@ class CreateTest(BottleTestCase):
         with mock.patch.object(bottles.features_, "ensure_built", side_effect=ensure_built):
             bottle = self.create(features=["tools"])
         self.assertEqual(fake.calls[0], "ensure_built ['tools']")
-        self.assertEqual(fake.create_args["image"], "/images/base-with-tools.tar")
+        self.assertEqual(fake.create_args["image"], "localhost/bottle/base:with-tools")
         self.assertEqual((bottle.features, bottle.environment), (("tools",), "base+tools"))
         self.assertEqual(bottles.get("example").features, ("tools",))  # survives the JSON round trip
 
@@ -514,7 +503,7 @@ class ContractTest(BottleTestCase):
     def test_image_defaults_to_base(self) -> None:
         fake = self.fake()
         self.assertEqual(self.create().image, "base")
-        self.assertEqual(fake.create_args["image"], "/images/base-latest.tar")
+        self.assertEqual(fake.create_args["image"], "localhost/bottle/base:latest")
 
     def run_contract_script(self):
         """Run the script verify_contract would have run in a bottle, on this machine instead."""
@@ -591,19 +580,12 @@ class OwnershipTest(BottleTestCase):
 
     def test_new_refuses_a_taken_name_and_leaves_it_alone(self) -> None:
         fake = self.fake()
-        fake.machines[bottles.namespace() + "example"] = "running"
+        fake.machines["example"] = "running"
         with self.assertRaisesRegex(BottleError, "a machine named .* already exists"):
             self.create()
-        self.assertEqual(fake.machines, {bottles.namespace() + "example": "running"})
+        self.assertEqual(fake.machines, {"example": "running"})
         self.assertEqual(bottles.load(), {})
         self.assertEqual(fake.calls, ["warn_unset"])  # nothing was created, so nothing rolled back
-
-    def test_other_homes_get_their_own_machine_names(self) -> None:
-        # The tests run in a scratch BOTTLE_HOME, so names are prefixed.
-        self.assertRegex(bottles.namespace(), r"^[0-9a-f]{6}-$")
-        with mock.patch.dict(__import__("os").environ, {"BOTTLE_HOME": ""}):
-            self.assertEqual(bottles.namespace(), "")  # empty means the default home
-
 
 class DeleteImageTest(BottleTestCase):
     def test_delete_removes_stale_images(self) -> None:

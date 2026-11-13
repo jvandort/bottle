@@ -110,10 +110,10 @@ impl Fixture {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = PathBuf::from(format!("/tmp/bcm{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("store")).unwrap();
-        fs::write(dir.join("store/host.ext4"), "").unwrap();
+        fs::create_dir_all(dir.join("home/stages")).unwrap();
+        fs::write(dir.join("home/stages/host.ext4"), "").unwrap();
         fs::write(
-            dir.join("store/host.json"),
+            dir.join("home/stages/host.json"),
             r#"{"lowers":[],"env":{"GREETING":"the image's","IMAGE_ONLY":"from the image"},"entrypoint":["sh","-c"],"cmd":["echo $GREETING > /run/ran; exec sleep 1000"],"labels":{}}"#,
         )
         .unwrap();
@@ -175,7 +175,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         return;
     }
     let f = Fixture::new();
-    let image = f.dir.join("store/host.ext4").display().to_string();
+    let image = f.dir.join("home/stages/host.ext4").display().to_string();
     let share = format!("{}:/mnt/share:ro", f.dir.join("share").display());
     f.ok(&[
         "create",
@@ -271,7 +271,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     f.ok(&["stop", "m1"]);
 
     // gc: what a machine uses stays, stopped or not, as does what's named; the rest goes.
-    let store = f.dir.join("store");
+    let store = f.dir.join("home/stages");
     for name in ["named", "unused"] {
         fs::write(store.join(format!("{name}.ext4")), "").unwrap();
         fs::write(
@@ -280,11 +280,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         )
         .unwrap();
     }
-    let store_arg = store.display().to_string();
-    assert_eq!(
-        f.ok(&["gc", "--store", &store_arg, "named"]),
-        "deleted unused\n"
-    );
+    assert_eq!(f.ok(&["gc", "named"]), "deleted unused\n");
     assert!(store.join("host.ext4").exists() && store.join("named.ext4").exists());
     assert!(!store.join("unused.ext4").exists() && !store.join("unused.json").exists());
 
@@ -301,7 +297,7 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
         return;
     }
     let f = Fixture::new();
-    let image = f.dir.join("store/host.ext4").display().to_string();
+    let image = f.dir.join("home/stages/host.ext4").display().to_string();
     let bad = f.dir.join("bad.json");
     fs::write(&bad, r#"{"routes": [{"host": "x.example"}]}"#).unwrap();
     let refused = f.cli(&["create", "m2", "--image", &image, "--network"]);

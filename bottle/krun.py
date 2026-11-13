@@ -30,7 +30,6 @@ from pathlib import Path
 
 from bottle import prereqs
 from bottle.errors import BottleError
-from bottle.store import bottle_home
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -57,11 +56,11 @@ class Mount:
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
            disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
            labels: dict[str, str] | None = None, network: dict | None = None) -> None:
-    """Create a stopped machine from `image` (a stage's disk), its mounts read-only; `memory_mib` and `disk_gib`
-    None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
+    """Create a stopped machine from `image` (a tag in bottle-cli's store where the machine is), its mounts
+    read-only; `memory_mib` and `disk_gib` None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
     `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
     `network`, the policy every connection it makes is decided by (services.network), kept with it."""
-    args = ["machine", "create", "--name", name, "--image", image, "--cpus", str(cpus),
+    args = ["create", name, "--image", image, "--cpus", str(cpus),
             *(["--mem", str(memory_mib)] if memory_mib else []), *(["--storage", str(disk_gib)] if disk_gib else []),
             *(["--user", user] if user else []), *(["--workdir", workdir] if workdir else [])]
     for key, value in (labels or {}).items():
@@ -77,12 +76,12 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
 
 def configure(name: str, network: dict) -> None:
     """Give a stopped machine the policy its connections are decided by (one made before it had one, say)."""
-    _run("machine", "configure", "--name", name, "--network", "-", input=json.dumps(network))
+    _run("configure", name, "--network", "-", input=json.dumps(network))
 
 
 def start(name: str) -> None:
     """Start a machine: by the policy it was made with, nothing else needed."""
-    _run("machine", "start", "--name", name)
+    _run("start", name)
 
 
 def ca_certificate(name: str, hosts: list[str], cli: "Cli | None" = None) -> str | None:
@@ -92,30 +91,30 @@ def ca_certificate(name: str, hosts: list[str], cli: "Cli | None" = None) -> str
 
 
 def stop(name: str) -> None:
-    _run("machine", "stop", "--name", name)
+    _run("stop", name)
 
 
 def rename(name: str, new: str) -> None:
     """Rename a stopped machine."""
-    _run("machine", "rename", "--name", name, "--to", new)
+    _run("rename", name, new)
 
 
 def delete(name: str) -> None:
     """Delete a machine; a no-op if there's none."""
     if state(name) is not None:
-        _run("machine", "delete", "--name", name, "-f")
+        _run("delete", name, "-f")
 
 
 def running(cli: "Cli | None" = None) -> list[str]:
     """The machines running there, whoever made them: any that isn't stopped (or never started)."""
-    machines = json.loads(_run("machine", "ls", "--json", cli=cli) or "[]")
+    machines = json.loads(_run("ls", "--json", cli=cli) or "[]")
     return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
 
 
 def state(name: str) -> str | None:
     """"running", "stopped", "created", or None if there's no such machine."""
     try:
-        return json.loads(_run("machine", "status", "--name", name, "--json"))["state"]
+        return json.loads(_run("status", name, "--json"))["state"]
     except Missing:
         return None
 
@@ -139,7 +138,7 @@ def info(cli: "Cli | None" = None) -> dict:
 
 def exec_args(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
               env: dict[str, str] | None = None, tty: bool = False) -> list[str]:
-    args = ["machine", "exec", "--name", name, *(["-t"] if tty else [])]
+    args = ["exec", name, *(["-t"] if tty else [])]
     if user:
         args += ["-u", user]
     if workdir:
@@ -164,21 +163,17 @@ class Cli:
         prereqs.ensure_cli()
         return [binary(), *args]
 
-    def home(self) -> str:
-        """$BOTTLE_HOME there, absolute."""
-        return str(bottle_home())
-
     def run(self, args: list[str], input: str | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
 
-    def build(self, recipe: dict, network: dict, context: Path, store: str, tag: str) -> subprocess.CompletedProcess:
-        """`bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged `tag` in `store`:
-        its progress on this process's stderr, the disks it made on stdout."""
+    def build(self, recipe: dict, network: dict, context: Path, tag: str) -> subprocess.CompletedProcess:
+        """`bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged `tag`: its
+        progress on this process's stderr, the disks it made on stdout."""
         with tempfile.TemporaryDirectory(prefix="build-") as here:
             made = {**recipe, "mount": {**recipe["mount"], "source": str(context.resolve())}}
             (Path(here) / "recipe.json").write_text(json.dumps(made))
             (Path(here) / "network.json").write_text(json.dumps(network))
-            return subprocess.run(self.command(["image", "build", f"{here}/recipe.json", store, "--tag", tag,
+            return subprocess.run(self.command(["image", "build", f"{here}/recipe.json", "--tag", tag,
                                                 "--network", f"{here}/network.json"]),
                                   stdout=subprocess.PIPE, text=True)
 
@@ -192,15 +187,9 @@ class RunnerCli(Cli):
 
     def __init__(self, runner: str) -> None:
         self.runner = runner
-        self._home: str | None = None
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
         return super().command(["on", self.runner, *args], tty)
-
-    def home(self) -> str:
-        if self._home is None:
-            self._home = info(cli=self)["home"]
-        return self._home
 
 
 def _run(*args: str, input: str | None = None, cli: Cli | None = None) -> str:

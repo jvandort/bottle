@@ -1,6 +1,6 @@
 import unittest
 
-from bottle import apt, cache
+from bottle import apt, cache, features
 
 
 class CachedTest(unittest.TestCase):
@@ -23,11 +23,11 @@ class CachedTest(unittest.TestCase):
     def test_every_bottle_keeps_debians(self) -> None:
         self.assertIn(apt.cached(apt.DEBIAN)[0], cache.cached_for([]))
 
-    def test_a_build_keeps_its_apt_repositories_alone(self) -> None:
-        # Maven's hosts are the jvm feature's to cache in a bottle; in a build only apt trusts bottled's CA.
+    def test_a_build_keeps_apt_repositories_alone(self) -> None:
+        # Maven's hosts are the jvm feature's to cache in a bottle; in a build only apt trusts the builds' CA.
         hosts = {c.host for c in cache.cached_for(["jvm"])}
         self.assertIn("repo.maven.apache.org", hosts)
-        built = {c.host for c in cache.cached_for(["jvm"], build=True)}
+        built = {c.host for c in features.build_cached()}
         self.assertNotIn("repo.maven.apache.org", built)
         self.assertIn("deb.debian.org", built)
 

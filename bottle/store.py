@@ -1,6 +1,5 @@
 """bottle's on-disk state under $BOTTLE_HOME (default ~/.bottle)."""
 
-import hashlib
 import json
 import logging
 import logging.handlers
@@ -22,16 +21,16 @@ def folio_home() -> Path:
 
 
 def log_path(name: str = "bottle", home: Path | None = None) -> Path:
-    """A log in `home`/logs ($BOTTLE_HOME's, else): "bottle" for commands; folio serve's is "serve", in folio's."""
-    return (home or bottle_home()) / "logs" / f"{name}.log"
+    """A log in `home`/logs (folio's home's, else): folio serve's is "serve"."""
+    return (home or folio_home()) / "logs" / f"{name}.log"
 
 
 def open_log(name: str = "bottle", home: Path | None = None) -> int:
-    """The log, opened for appending; only its owner can read it, or list $BOTTLE_HOME.
+    """The log, opened for appending; only its owner can read it, or list the home it's in.
 
-    The logs name every host the bottles reached, and $BOTTLE_HOME their repos.
+    The logs name every host the bottles reached, and the home their repos.
     """
-    for directory in (home or bottle_home(), log_path(name, home).parent):
+    for directory in (home or folio_home(), log_path(name, home).parent):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
     fd = os.open(log_path(name, home), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -71,18 +70,6 @@ class _Log(logging.handlers.WatchedFileHandler):
 
     def _open(self):
         return os.fdopen(open_log(self.log_name, self.log_home), "a", encoding=self.encoding, errors=self.errors)
-
-
-def namespace() -> str:
-    """A prefix for names that are global on a runner (machines), per BOTTLE_HOME.
-
-    Empty for the default home; otherwise a short hash, so bottles in another
-    home (e.g. tests) can never collide with the default home's.
-    """
-    home = bottle_home().expanduser().resolve()
-    if home == (Path.home() / ".bottle").resolve():
-        return ""
-    return hashlib.sha256(str(home).encode()).hexdigest()[:6] + "-"
 
 
 def read_json(path: Path) -> dict | None:

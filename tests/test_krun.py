@@ -26,7 +26,7 @@ class CommandTest(unittest.TestCase):
         krun.create("bottle-b", "/stages/b.ext4", [krun.Mount(Path("/repo/.git/objects"), "/mnt/repo/objects")],
                     {"TOKEN": "stand-in"}, memory_mib=8192, cpus=32, disk_gib=50)
         self.assertEqual(run.call_args.args[0], [
-            krun.binary(), "machine", "create", "--name", "bottle-b", "--image", "/stages/b.ext4",
+            krun.binary(), "create", "bottle-b", "--image", "/stages/b.ext4",
             "--cpus", "32", "--mem", "8192", "--storage", "50",
             "-v", "/repo/.git/objects:/mnt/repo/objects:ro", "-e", "TOKEN=stand-in",
         ])
@@ -34,8 +34,7 @@ class CommandTest(unittest.TestCase):
     def test_create_with_bottle_clis_defaults(self) -> None:
         run = self.run_with()
         krun.create("m", "/stages/b.ext4", [], {}, memory_mib=None, cpus=2)
-        self.assertEqual(run.call_args.args[0][1:], ["machine", "create", "--name", "m", "--image", "/stages/b.ext4",
-                                                     "--cpus", "2"])
+        self.assertEqual(run.call_args.args[0][1:], ["create", "m", "--image", "/stages/b.ext4", "--cpus", "2"])
 
     def test_create_gives_its_users_defaults_and_labels(self) -> None:
         run = self.run_with()
@@ -47,7 +46,7 @@ class CommandTest(unittest.TestCase):
     def test_start_needs_only_the_machine(self) -> None:
         run = self.run_with()
         krun.start("b")
-        self.assertEqual(run.call_args.args[0][1:], ["machine", "start", "--name", "b"])
+        self.assertEqual(run.call_args.args[0][1:], ["start", "b"])
 
     def test_a_network_policy_is_given_on_stdin_at_create_and_configure(self) -> None:
         given = []
@@ -58,13 +57,13 @@ class CommandTest(unittest.TestCase):
         krun.create("b", "/stages/b.ext4", [], {}, memory_mib=None, cpus=2, network=policy)
         krun.configure("b", policy)
         self.assertEqual(given, [("-", policy), ("-", policy)])
-        self.assertEqual(run.call_args.args[0][1:4], ["machine", "configure", "--name"])
+        self.assertEqual(run.call_args.args[0][1:4], ["configure", "b", "--network"])
 
     def test_exec_args(self) -> None:
-        self.assertEqual(krun.exec_args("m", ["cat", "f"]), ["machine", "exec", "--name", "m", "--", "cat", "f"])
+        self.assertEqual(krun.exec_args("m", ["cat", "f"]), ["exec", "m", "--", "cat", "f"])
         self.assertEqual(
             krun.exec_args("m", ["sh"], user="genie", workdir="/workspace", env={"A": "1"}, tty=True),
-            ["machine", "exec", "--name", "m", "-t", "-u", "genie", "-w", "/workspace", "-e", "A=1", "--", "sh"],
+            ["exec", "m", "-t", "-u", "genie", "-w", "/workspace", "-e", "A=1", "--", "sh"],
         )
 
     def test_exec_gives_the_command_stdin_and_returns_its_output(self) -> None:
@@ -74,7 +73,7 @@ class CommandTest(unittest.TestCase):
 
     def test_the_command_line_for_a_terminal(self) -> None:
         self.assertEqual(krun.exec_command("m", ["claude"], user="genie", tty=True)[:3],
-                         [krun.binary(), "machine", "exec"])
+                         [krun.binary(), "exec", "m"])
 
     def test_the_binary_is_the_repos_dist_unless_named(self) -> None:
         with mock.patch.dict(krun.os.environ, {"BOTTLE_CLI": ""}):
@@ -120,8 +119,6 @@ class KrunBottleTest(GitTestCase):
         self.calls: list[str] = []
         self.machines: dict[str, str] = {}
         self.created: dict = {}
-        archive = self.tmp / "base.ext4"
-        archive.write_bytes(b"archive")
 
         def exec_(name, argv, user=None, workdir=None, input=None, env=None, cli=None):
             script = argv[-1]
@@ -153,7 +150,7 @@ class KrunBottleTest(GitTestCase):
             (bottles.runners.krun, "create", create), (bottles.runners.krun, "start", start), (bottles.runners.krun, "stop", stop),
             (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),
             (bottles.runners.krun, "state", lambda name, cli=None: self.machines.get(name)),
-            (bottles.images, "archive_of", lambda tag, cli=None: archive),
+            (bottles.images, "built_labels", lambda tag, cli=None: {}),
             (daemon, "bind", bind),
             (daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
             (bottles.krun.prereqs, "ensure_cli", lambda: None),
@@ -175,8 +172,6 @@ class KrunBottleTest(GitTestCase):
 
     def test_a_new_bottle_is_a_machine_bound_to_the_decider(self) -> None:
         bottle = self.create()
-        self.assertEqual(bottle.archive, "base.ext4")
-        self.assertEqual(bottles.get("b").archive, "base.ext4")
         self.assertEqual(self.calls, [
             "create", "bind b", "start", "contract as genie", "trust CA as root",
             "bottle.host as root", "workspace as root", "workspace as genie",

@@ -732,12 +732,11 @@ class AptTest(FeatureTestCase):
 
     def test_its_repositories_are_kept_for_its_bottles_and_builds(self) -> None:
         self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code"]})
-        for build in (False, True):
-            kept = {c.host: c for c in features.cache_module.cached_for(["claude"], build)}
+        self.feature("base")
+        for kept in (features.cache_module.cached_for(["claude"]), features.build_cached()):
+            kept = {c.host: c for c in kept}
             self.assertEqual(kept["apt.example"].include, ("/stable/*.deb",))
             self.assertIn("deb.debian.org", kept)
-        self.feature("base")
-        self.assertEqual(features.apt_https_hosts(), ["apt.example"])
 
     def test_the_recipe_says_its_features_for_the_build(self) -> None:
         self.feature("tools")
@@ -824,27 +823,23 @@ class RemoveStaleTest(FeatureTestCase):
         self.current = features.inputs_hash([tools])
         self.deleted: list[str] = []
 
-    def run_with(self, images: dict[str, dict], bottles: dict) -> list[str]:
-        self.kept: set[str] = set()
-        from bottle import bottles as bottles_
+    def run_with(self, images: dict[str, dict]) -> list[str]:
         with mock.patch.object(features.images, "built", return_value=images), \
                 mock.patch.object(features.images, "forget", side_effect=lambda tag, cli=None: self.deleted.append(tag)), \
-                mock.patch.object(features.images, "remove_unused", side_effect=lambda in_use, cli=None: self.kept.update(in_use)), \
-                mock.patch.object(bottles_, "load", return_value=bottles):
+                mock.patch.object(features.images, "remove_unused") as self.remove_unused:
             return features.remove_stale(runners.Runner())
 
-    def test_forgets_stale_images_and_keeps_every_archive_a_bottle_was_made_from(self) -> None:
+    def test_forgets_stale_images_and_has_bottle_cli_delete_what_nothing_uses(self) -> None:
         removed = self.run_with({
             "localhost/bottle/base:with-tools": {"bottle.features": "tools", "bottle.inputs": self.current},
             "localhost/bottle/base:with-old": {"bottle.features": "tools", "bottle.inputs": "outdated"},
             "localhost/bottle/base:with-gone": {"bottle.features": "no-such-feature", "bottle.inputs": "x"},
             "localhost/bottle/base:with-unlabeled": {"bottle.features": "tools"},
-        }, bottles={"a": mock.Mock(archive="old.tar", runner="local"), "b": mock.Mock(archive=None, runner="local"),
-                    "elsewhere": mock.Mock(archive="theirs.tar", runner="box")})
+        })
         self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
                                    "localhost/bottle/base:with-unlabeled"])
         self.assertEqual(self.deleted, removed)
-        self.assertEqual(self.kept, {"old.tar"})
+        self.remove_unused.assert_called_once()
 
 
 if __name__ == "__main__":

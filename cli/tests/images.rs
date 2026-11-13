@@ -16,9 +16,9 @@ impl Store {
         let root =
             std::env::temp_dir().join(format!("bottle-images-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let (dir, home) = (root.join("stages"), root.join("home"));
+        // Its home's: the store is $BOTTLE_HOME/stages.
+        let (dir, home) = (root.join("stages"), root.clone());
         fs::create_dir_all(&dir).unwrap();
-        fs::create_dir_all(&home).unwrap();
         for (stage, lowers) in [("base", vec![]), ("tools", vec!["base"]), ("old", vec![])] {
             fs::write(dir.join(format!("{stage}.ext4")), "").unwrap();
             let json = serde_json::json!({"lowers": lowers, "env": {}, "entrypoint": null, "cmd": null,
@@ -45,10 +45,6 @@ impl Store {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn at(&self) -> &str {
-        self.dir.to_str().unwrap()
     }
 
     fn stages(&self) -> Vec<String> {
@@ -79,20 +75,12 @@ fn disk(store: &Store, stage: &str) -> String {
 #[test]
 fn a_tag_names_an_image_its_listed_by_and_gc_keeps() {
     let store = Store::new("tags");
-    let printed = store.ok(&[
-        "image",
-        "tag",
-        "tools",
-        "localhost/bottle/base:with-tools",
-        "--store",
-        store.at(),
-    ]);
+    let printed = store.ok(&["image", "tag", "tools", "localhost/bottle/base:with-tools"]);
     assert_eq!(
         printed.lines().collect::<Vec<_>>(),
         [disk(&store, "base"), disk(&store, "tools")]
     );
-    let listed: serde_json::Value =
-        serde_json::from_str(&store.ok(&["images", "--store", store.at(), "--json"])).unwrap();
+    let listed: serde_json::Value = serde_json::from_str(&store.ok(&["images", "--json"])).unwrap();
     assert_eq!(
         listed,
         serde_json::json!([{"tag": "localhost/bottle/base:with-tools", "name": "tools",
@@ -100,48 +88,26 @@ fn a_tag_names_an_image_its_listed_by_and_gc_keeps() {
                             "labels": {"made": "tools"}}])
     );
     // A tag names an image as a stage's name does.
-    store.ok(&[
-        "image",
-        "tag",
-        "localhost/bottle/base:with-tools",
-        "again",
-        "--store",
-        store.at(),
-    ]);
-    assert_eq!(
-        store.ok(&["images", "--store", store.at()]).lines().count(),
-        2
-    );
+    store.ok(&["image", "tag", "localhost/bottle/base:with-tools", "again"]);
+    assert_eq!(store.ok(&["images"]).lines().count(), 2);
 
-    let deleted = store.ok(&["gc", "--store", store.at()]);
+    let deleted = store.ok(&["gc"]);
     assert_eq!(deleted.trim(), "deleted old"); // untagged, unused; tools' lower stays with it
     assert_eq!(store.stages(), ["base", "tools"]);
 
-    store.ok(&["image", "rm", "again", "--store", store.at()]);
-    store.ok(&[
-        "image",
-        "rm",
-        "localhost/bottle/base:with-tools",
-        "--store",
-        store.at(),
-    ]);
-    let out = store.cli(&[
-        "image",
-        "rm",
-        "localhost/bottle/base:with-tools",
-        "--store",
-        store.at(),
-    ]);
+    store.ok(&["image", "rm", "again"]);
+    store.ok(&["image", "rm", "localhost/bottle/base:with-tools"]);
+    let out = store.cli(&["image", "rm", "localhost/bottle/base:with-tools"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no image tagged"));
-    store.ok(&["gc", "--store", store.at()]);
+    store.ok(&["gc"]);
     assert!(store.stages().is_empty());
 }
 
 #[test]
 fn what_isnt_there_cant_be_tagged() {
     let store = Store::new("missing");
-    let out = store.cli(&["image", "tag", "nope", "t", "--store", store.at()]);
+    let out = store.cli(&["image", "tag", "nope", "t"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no image nope"));
     assert!(!Path::new(&store.dir.join("tags.json")).exists());

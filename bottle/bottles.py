@@ -47,7 +47,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from bottle import auth, cache, daemon, features as features_, host, images, krun, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
-from bottle.store import folio_home, namespace, read_json, write_json
+from bottle.store import folio_home, read_json, write_json
 
 log = logging.getLogger("bottle.bottles")
 
@@ -151,8 +151,6 @@ class Bottle:
     mounts: tuple[Mount, ...] = ()
     # Its creator's addition to ~/BOTTLE.md.
     context: str = ""
-    # The image archive its machine was made from, which is kept while it exists.
-    archive: str | None = None
     # The runner its machine is on (see runners.py); records from before runners were the local one's.
     runner: str = runners.LOCAL
     # The bottles it may ssh to.
@@ -181,7 +179,7 @@ class Bottle:
 
     @property
     def machine(self) -> str:
-        """Its machine's name, as bottle-cli lists it: its own, in this home's namespace."""
+        """Its machine's name, as bottle-cli there lists it: the bottle's own."""
         return self.machine_name
 
     @property
@@ -296,7 +294,7 @@ def create(
         name, uuid.uuid4().hex, images.BASE, time.time(),
         features=tuple(installed), memory=specs.memory_limit(spec), spec=spec,
         mounts=tuple(m for m, _ in planned), context=context, runner=runner, ssh=grants,
-        machine_name=f"{namespace()}{name}",
+        machine_name=name,
     )
     bottle = _bring_up(bottle, [repo for _, repo in planned], tag, owner)
     log.info("%s: created, %s, features %s", name,
@@ -410,18 +408,12 @@ def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], 
 
 
 def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
-    """Create and start a fresh machine for the bottle from `tag`'s archive, and set it up from scratch."""
+    """Create and start a fresh machine for the bottle from image `tag`, and set it up from scratch."""
     runner = runner_of(bottle)
-    archive = images.archive_of(tag, runner.cli)
-    if archive is None:
-        raise BottleError(f"{tag} isn't built")
-    # Recorded first, so the archive is kept from the moment a machine could have been made from it.
-    bottle = replace(bottle, archive=archive.name)
-    _save(bottle)
     # The bottle gets stand-ins, never credentials (see auth.py), and no proxy: its flows are decided as they open,
     # by the policy its machine is made with.
     runner.create(
-        bottle.machine, archive,
+        bottle.machine, tag,
         mounts=[krun.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),

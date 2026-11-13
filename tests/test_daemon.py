@@ -179,7 +179,7 @@ class DeliverTest(unittest.IsolatedAsyncioTestCase):
     def ran(self) -> tuple[list[str], str]:
         """What the fake bottle-cli ran last, after `--`, and in which machine; and its stdin."""
         argv = (self.tmp / "argv").read_text().splitlines()
-        return argv[argv.index("--name") + 1], argv[argv.index("--") + 1:], (self.tmp / "stdin").read_text()
+        return argv[argv.index("exec") + 1], argv[argv.index("--") + 1:], (self.tmp / "stdin").read_text()
 
     async def refused(self, sender: str, to: str) -> daemon.ServiceError:
         with self.assertRaises(daemon.ServiceError) as raised:

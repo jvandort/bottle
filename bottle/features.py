@@ -732,9 +732,12 @@ def image_tag(features: list[Feature]) -> str:
     return f"{images.REPOSITORY}/{images.BASE}:with-{'.'.join(parts)}"
 
 
-def apt_https_hosts() -> list[str]:
-    """Every host an https apt repository a feature declares is on: what the CA builds have covers (images.BUILDS_CA)."""
-    return sorted({r.host for f in [base(), *(load(i) for i in available())] for r in f.apt.repositories if r.https})
+def build_cached() -> list[cache_module.Cached]:
+    """What a build keeps of what it downloads: every apt repository, Debian's and every feature's, whichever the
+    build installs, so every build's policy is the same and so is the caching CA bottle-cli answers its https ones
+    with (images.BUILD_CA)."""
+    repositories = (r for f in [base(), *(load(i) for i in available())] for r in f.apt.repositories)
+    return apt_module.cached((*apt_module.DEBIAN, *repositories))
 
 
 def base() -> Feature:
@@ -838,15 +841,12 @@ def remove_stale(runner) -> list[str]:
     A stage goes once no tag's image is made of it and no machine there was made
     from it: a machine boots its image's stages on every start. Returns the images forgotten.
     """
-    from bottle import bottles  # bottles imports this module
-
     removed = []
     for tag, labels in images.built(runner.cli).items():
         if labels.get(images.INPUTS_LABEL) != _expected_inputs(tag, labels):
             images.forget(tag, runner.cli)
             removed.append(tag)
-    images.remove_unused({b.archive for b in bottles.load().values() if b.archive and b.runner == runner.name},
-                         runner.cli)
+    images.remove_unused(runner.cli)
     return removed
 
 
