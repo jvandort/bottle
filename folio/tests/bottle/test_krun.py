@@ -76,9 +76,9 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(krun.exec_command("m", ["claude"], user="genie", tty=True)[:3],
                          [krun.binary(), "exec", "m"])
 
-    def test_the_binary_is_the_checkouts_dist_unless_named(self) -> None:
+    def test_the_binary_is_bottle_clis_unless_named(self) -> None:
         with mock.patch.dict(os.environ, {"BOTTLE_CLI": ""}):
-            self.assertEqual(krun.binary(), str(krun.prereqs.REPO / "target" / "dist" / "bottle-cli"))
+            self.assertTrue(krun.binary().endswith("bottle-cli"))   # the one on PATH
         with mock.patch.dict(os.environ, {"BOTTLE_CLI": "/opt/bottle-cli"}):
             self.assertEqual(krun.binary(), "/opt/bottle-cli")
 
@@ -154,7 +154,6 @@ class KrunBottleTest(GitTestCase):
             (bottles.images, "built_labels", lambda tag, cli=None: {}),
             (daemon, "bind", bind),
             (daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
-            (bottles.krun.prereqs, "ensure_cli", lambda: None),
             (bottles.features_, "ensure_built", lambda specs, runner=None: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda runner=None: []),
             (bottles.auth, "warn_unset", lambda specs: None),

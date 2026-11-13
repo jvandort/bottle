@@ -228,14 +228,17 @@ def _send(message: dict, timeout: float = 30) -> dict:
 
 def _start_daemon() -> None:
     log.info("starting folio serve")
-    command = [sys.executable, str(Path(__file__).resolve().parents[3] / "bin" / "folio")]
+    # This folio, on this Python: its package found where this one was.
+    command = [sys.executable, "-m", "folio"]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [
+        str(Path(__file__).resolve().parents[2]), os.environ.get("PYTHONPATH")]))}
     # Its own records go to the log through logging, stamped; this catches anything else it prints.
     with os.fdopen(open_log(LOG, home()), "a") as out:
         # A new session detaches it from this terminal, so it outlives the command. It runs in /, not the
         # command's directory: that may be deleted while it runs (a machine's), and then every git it runs fails.
         subprocess.Popen(
             [*command, "serve", "start", "--foreground"],
-            stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, cwd="/",
+            stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, cwd="/", env=env,
         )
     deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:

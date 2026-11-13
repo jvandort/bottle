@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 
 from folio import repos, threads
 from tests.support import FOLIO, FolioTestCase
@@ -96,7 +95,7 @@ class SidecarTest(FolioTestCase):
 
     def resume_failing(self, name: str) -> None:
         env = {**self.env, "FAKE_BOTTLE_FAIL_NEW": name}
-        result = subprocess.run([sys.executable, str(FOLIO), "claude", "fix-it"], cwd=self.repo, env=env,
+        result = subprocess.run([str(FOLIO), "claude", "fix-it"], cwd=self.repo, env=env,
                                 capture_output=True, text=True, input="")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(threads.states(self.repo_, [threads.load(self.repo_, "fix-it")])["fix-it"]["state"], "paused")
@@ -122,7 +121,7 @@ class SidecarTest(FolioTestCase):
         self.assertEqual(sorted(self.bottles()), [self.bottle, self.sidecar])
 
     def folio_with(self, env: dict, *args: str) -> subprocess.CompletedProcess:
-        result = subprocess.run([sys.executable, str(FOLIO), *args], cwd=self.repo, env={**self.env, **env},
+        result = subprocess.run([str(FOLIO), *args], cwd=self.repo, env={**self.env, **env},
                                 capture_output=True, text=True, input="")
         self.assertEqual(result.returncode, 0, result.stderr)
         return result

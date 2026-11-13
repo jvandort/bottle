@@ -26,6 +26,9 @@ class FolioTestCase(unittest.TestCase):
             **os.environ,
             "FOLIO_HOME": str(self.home),
             "FOLIO_ENGINE": str(CLI_ENGINE),
+            # bin/folio runs this Python, and builds no bottle-cli: the stand-in engine runs none.
+            "FOLIO_PYTHON": sys.executable,
+            "BOTTLE_CLI": "/no/bottle-cli",
             "FOLIO_BOTTLE": str(FAKE_BOTTLE),
             "FAKE_BOTTLE_STATE": str(self.state),
             "GIT_CONFIG_GLOBAL": os.devnull,
@@ -57,7 +60,7 @@ class FolioTestCase(unittest.TestCase):
 
     def folio(self, *args: str, cwd: Path | None = None, input: str | None = None) -> subprocess.CompletedProcess:
         # Never this terminal for stdin, even with no input: folio would think it had one to ask on, and wait.
-        return subprocess.run([sys.executable, str(FOLIO), *args], cwd=cwd or self.repo, env=self.env,
+        return subprocess.run([str(FOLIO), *args], cwd=cwd or self.repo, env=self.env,
                               capture_output=True, text=True, input=input or "")
 
     def ok(self, *args: str, cwd: Path | None = None) -> str:

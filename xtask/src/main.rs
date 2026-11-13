@@ -1,6 +1,6 @@
 //! `cargo xtask`: bottle's build steps past cargo's own, in one place.
 //!
-//!     cargo xtask dist [--target TRIPLE] [--out DIR] [--if-changed]
+//!     cargo xtask dist [--target TRIPLE] [--out DIR]
 //!
 //! Builds a distribution into DIR (target/dist for this machine's own, target/dist-TRIPLE for
 //! another): bottle-cli, with the agent its VMs run built into it (a static Linux build of
@@ -21,9 +21,9 @@
 //! and cpio, to open Fedora's package. Cargo's builds, and this step's, are in $CARGO_TARGET_DIR
 //! if it's set.
 //!
-//! A distribution has its sources' hash beside it (`.sources`, see source_hash): with
-//! --if-changed, one whose sources are as they are now isn't built again, and nothing's said. One
-//! build of a distribution at a time: another waits for it, then finds it current.
+//! Incremental: cargo builds what's changed, and a file of the distribution is copied (and on a Mac
+//! signed) only when what it's copied from has. One build of a distribution at a time: another
+//! waits for it. Whether one is needed at all, without starting cargo, is bin/bottle-build's.
 
 mod builder;
 
@@ -36,9 +36,8 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("dist") => parse_dist(&args[1..])
-            .and_then(|(target, out, if_changed)| dist(target, out, if_changed)),
-        _ => Err("usage: cargo xtask dist [--target TRIPLE] [--out DIR] [--if-changed]".into()),
+        Some("dist") => parse_dist(&args[1..]).and_then(|(target, out)| dist(target, out)),
+        _ => Err("usage: cargo xtask dist [--target TRIPLE] [--out DIR]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -51,80 +50,17 @@ fn main() -> ExitCode {
 
 type Result<T> = std::result::Result<T, String>;
 
-fn parse_dist(args: &[String]) -> Result<(Option<String>, Option<PathBuf>, bool)> {
-    let (mut target, mut out, mut if_changed) = (None, None, false);
+fn parse_dist(args: &[String]) -> Result<(Option<String>, Option<PathBuf>)> {
+    let (mut target, mut out) = (None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--target" => target = Some(args.next().ok_or("--target needs a value")?.clone()),
             "--out" => out = Some(args.next().ok_or("--out needs a value")?.into()),
-            "--if-changed" => if_changed = true,
             _ => return Err(format!("unknown option {arg}")),
         }
     }
-    Ok((target, out, if_changed))
-}
-
-/// What bottle-cli is built from, in the workspace: when it's changed since a distribution was
-/// built, it's built again.
-const SOURCES: [&str; 9] = [
-    "Cargo.toml",
-    "Cargo.lock",
-    ".cargo",
-    "agent",
-    "agent-client",
-    "agent-proto",
-    "cli",
-    "disk",
-    "xtask",
-];
-/// Beside a distribution's bottle-cli: the hash of the sources it was built from.
-const STAMP: &str = ".sources";
-
-/// A hash of bottle-cli's sources (SOURCES, less what cargo builds in a target directory): each
-/// file's path in the workspace and a sha256 of its contents, in order of their paths, by
-/// component. bottle/prereqs.py hashes them the same, for the same stamp.
-fn source_hash() -> Result<String> {
-    use sha2::Digest;
-    fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        for entry in entries {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            // A symlink to a directory isn't followed, as Python's rglob doesn't.
-            let kind = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if kind.is_dir() {
-                walk(&path, found)?;
-            } else {
-                found.push(path);
-            }
-        }
-        Ok(())
-    }
-    let root = root();
-    let mut found = Vec::new();
-    for name in SOURCES {
-        let path = root.join(name);
-        if path.is_dir() {
-            walk(&path, &mut found)?;
-        } else {
-            found.push(path);
-        }
-    }
-    let mut files: Vec<PathBuf> = found
-        .into_iter()
-        .filter(|p| p.is_file())
-        .map(|p| p.strip_prefix(&root).unwrap().to_path_buf())
-        .filter(|p| !p.components().any(|c| c.as_os_str() == "target"))
-        .collect();
-    files.sort();
-    let mut hash = sha2::Sha256::new();
-    for file in files {
-        hash.update(file.to_string_lossy().as_bytes());
-        hash.update([0]);
-        let data = fs::read(root.join(&file)).map_err(|e| format!("{}: {e}", file.display()))?;
-        hash.update(sha2::Sha256::digest(&data));
-    }
-    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok((target, out))
 }
 
 /// What a distribution is built for.
@@ -158,7 +94,7 @@ fn target() -> PathBuf {
     env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), |dir| root().join(dir))
 }
 
-fn dist(target: Option<String>, out: Option<PathBuf>, if_changed: bool) -> Result<()> {
+fn dist(target: Option<String>, out: Option<PathBuf>) -> Result<()> {
     let host = host();
     let target = target.unwrap_or_else(|| host.clone());
     if !TARGETS.contains(&target.as_str()) {
@@ -172,15 +108,7 @@ fn dist(target: Option<String>, out: Option<PathBuf>, if_changed: bool) -> Resul
         false => root().join(format!("target/dist-{target}")),
     });
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let sources = source_hash()?;
-    let current = || {
-        out.join("bottle-cli").is_file()
-            && fs::read_to_string(out.join(STAMP)).is_ok_and(|stamp| stamp == sources)
-    };
-    if if_changed && current() {
-        return Ok(());
-    }
-    // One build of it at a time: another waits, and then may find it current.
+    // One build of it at a time: another waits.
     let name = out
         .file_name()
         .map_or("dist".into(), |n| n.to_string_lossy());
@@ -188,11 +116,7 @@ fn dist(target: Option<String>, out: Option<PathBuf>, if_changed: bool) -> Resul
     let lock = fs::File::create(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
     lock.lock()
         .map_err(|e| format!("locking {}: {e}", out.display()))?;
-    if if_changed && current() {
-        return Ok(());
-    }
     eprintln!("xtask: building bottle-cli for {target}...");
-    let _ = fs::remove_file(out.join(STAMP));
     let arch = target.split('-').next().unwrap();
     if target.ends_with("-apple-darwin") {
         if !cfg!(target_os = "macos") {
@@ -204,7 +128,6 @@ fn dist(target: Option<String>, out: Option<PathBuf>, if_changed: bool) -> Resul
     } else {
         linux_dist(arch, &target, &out)?;
     }
-    fs::write(out.join(STAMP), &sources).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!("xtask: {}", out.display());
     Ok(())
 }
@@ -236,14 +159,18 @@ fn mac_dist(out: &Path) -> Result<()> {
         &["build", "--release", "-p", "bottle-cli"],
         &[("BOTTLE_EMBED_AGENT".into(), agent.into())],
     )?;
+    let built = target().join("release/bottle-cli");
     let cli = out.join("bottle-cli");
-    copy(&target().join("release/bottle-cli"), &cli)?;
-    step("signing bottle-cli");
-    let entitlements = root().join("xtask/hypervisor.entitlements");
-    run(Command::new("codesign")
-        .args(["--force", "-s", "-", "--entitlements"])
-        .arg(&entitlements)
-        .arg(&cli))?;
+    if copy(&built, &cli)? {
+        step("signing bottle-cli");
+        let entitlements = root().join("xtask/hypervisor.entitlements");
+        run(Command::new("codesign")
+            .args(["--force", "-s", "-", "--entitlements"])
+            .arg(&entitlements)
+            .arg(&cli))?;
+        // Signing changed it: its time says again what it's a copy of (see copy).
+        same_time(&built, &cli)?;
+    }
     let mke2fs = mke2fs(&target().join("mke2fs"), "aarch64-apple-darwin", None)?;
     copy(&mke2fs, &out.join("mke2fs"))?;
     kernel(env::consts::ARCH, &target().join("kernel"), out)
@@ -490,7 +417,7 @@ fn kernel(arch: &str, cache: &Path, out: &Path) -> Result<()> {
                 fs::rename(&partial, &image).map_err(|e| e.to_string())?;
                 let _ = fs::remove_dir_all(cache.join("libkrunfw"));
             }
-            copy(&image, &out.join("kernel"))
+            copy(&image, &out.join("kernel")).map(drop)
         }
         "x86_64" => {
             let library = cache.join("libkrunfw.so.5.6.2");
@@ -529,7 +456,7 @@ fn kernel(arch: &str, cache: &Path, out: &Path) -> Result<()> {
                 fs::write(&partial, elf).map_err(|e| e.to_string())?;
                 fs::rename(&partial, &image).map_err(|e| e.to_string())?;
             }
-            copy(&image, &out.join("kernel"))
+            copy(&image, &out.join("kernel")).map(drop)
         }
         arch => Err(format!("no kernel for {arch}")),
     }
@@ -715,12 +642,31 @@ fn run(command: &mut Command) -> Result<()> {
     }
 }
 
-fn copy(from: &Path, to: &Path) -> Result<()> {
+/// `from` copied to `to`, unless `to` is a copy of it already: one with its modification time,
+/// which a copy is given. Whether it was copied.
+fn copy(from: &Path, to: &Path) -> Result<bool> {
+    let time = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    if time(to).is_some() && time(to) == time(from) {
+        return Ok(false);
+    }
     // Removed first: a running bottle-cli's file is replaced, not written over.
     let _ = fs::remove_file(to);
     fs::copy(from, to)
-        .map(drop)
-        .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))
+        .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))?;
+    same_time(from, to)?;
+    Ok(true)
+}
+
+/// `to` given `from`'s modification time.
+fn same_time(from: &Path, to: &Path) -> Result<()> {
+    let time = fs::metadata(from)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("{}: {e}", from.display()))?;
+    fs::File::options()
+        .write(true)
+        .open(to)
+        .and_then(|f| f.set_modified(time))
+        .map_err(|e| format!("{}: {e}", to.display()))
 }
 
 #[cfg(test)]

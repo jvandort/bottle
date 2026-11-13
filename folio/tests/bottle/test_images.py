@@ -82,7 +82,6 @@ class StoreTest(GitTestCase):
 
         for target, name, fake in (
             (images.krun.subprocess, "run", self.cli),
-            (images.krun.prereqs, "ensure_cli", lambda: None),
             (features, "build_cached", lambda: [cache.Cached("deb.debian.org", ports=(80,))]),
         ):
             patcher = mock.patch.object(target, name, fake)

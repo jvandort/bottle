@@ -117,7 +117,7 @@ bottle-cli has (`folio configure --runner RUNNER`).
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
   can't set up itself, and copies bottle-cli's distribution for the
   machine's architecture over, built here (see above): in a checkout,
-  whenever bottle-cli's sources change, it's built (`bin/bottle-dist`) and
+  whenever bottle-cli's sources change, it's built (`bin/bottle-build TARGET`) and
   copied again before the runner's next use.
 - **`bottle runner ls`** lists them; **`bottle runner check RUNNER`** says
   what one is and lacks.
@@ -282,10 +282,11 @@ as root but built as you:
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 ```
 
-`bin/bottle`, a shell script, builds bottle-cli from the checkout (`cargo xtask
-dist --if-changed`, into `target/dist`) when its sources have changed since it
-was, then runs it. folio builds it the same way, for now through
-`bottle/prereqs.py` (tested by `python3 -m unittest` here), which hashes the
-sources as xtask does. folio's tests,
+`bin/bottle` and `bin/folio`, shell scripts, build bottle-cli from the
+checkout first when its sources have changed since it was (`bin/bottle-build`:
+a hash of their contents, `sha256sum`'s, against the one the last build left,
+then `cargo xtask dist` if they differ, which builds and copies only what's
+changed), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
+else builds it: folio runs `$BOTTLE_CLI`, else `bottle-cli` on `PATH`. folio's tests,
 the suites that drive bottle-cli from folio's side among them, are in
 [folio](folio/README.md#development).

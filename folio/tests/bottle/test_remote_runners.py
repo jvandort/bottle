@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest import mock
 
 from folio.bottle import images, runners
-from folio.bottle.krun import prereqs
 from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, built_cli, register_runner
 
@@ -56,16 +55,13 @@ class RemoteRunnerTestCase(GitTestCase):
         self.dist.mkdir(parents=True)
         (self.dist / "bottle-cli").write_text(FAKE_CLI)
         (self.dist / "bottle-cli").chmod(0o755)
-        (self.dist / prereqs.STAMP).write_text("these sources")
+        (self.dist / ".sources").write_text("these sources")
         env = mock.patch.dict(os.environ, {
             "BOTTLE_CLI": str(cli), "BOTTLE_SSH": str(short / "ssh"), "BOTTLE_RUNNER_DISTS": str(short / "dists"),
             "FAKE_SSH_LOG": str(self.log), "FAKE_REMOTES": str(self.remotes), "FAKE_KVM": str(self.kvm),
         })
         env.start()
         self.addCleanup(env.stop)
-        patcher = mock.patch.object(prereqs, "ensure_cli")
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def has_kvm(self) -> None:
         self.kvm.write_text("")

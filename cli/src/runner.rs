@@ -64,7 +64,7 @@ const CONNECT_TIMEOUT: u32 = 10;
 const MAX_CONTROL_PATH: usize = 80;
 /// Where a runner has this program, under its home.
 pub const DIST: &str = ".bottle/dist";
-/// What a distribution was built from, as the dev shim stamps it (bottle/prereqs.py).
+/// What a distribution was built from, as the dev shim stamps it (bin/bottle-build).
 const STAMP: &str = ".sources";
 
 /// $BOTTLE_HOME, else ~/.bottle.

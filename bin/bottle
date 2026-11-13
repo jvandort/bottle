@@ -1,7 +1,6 @@
 #!/bin/sh
 # The dev shim: bottle-cli from this checkout, built first if its sources have changed since it was
-# (`cargo xtask dist --if-changed`, its progress on stderr), then run with these arguments; or the
-# one $BOTTLE_CLI names, as it is.
+# (bin/bottle-build), then run with these arguments; or the one $BOTTLE_CLI names, as it is.
 set -eu
 if [ -n "${BOTTLE_CLI:-}" ]; then
   exec "$BOTTLE_CLI" "$@"
@@ -13,10 +12,7 @@ while [ -L "$self" ]; do
   case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
 done
 root=$(cd "$(dirname "$self")/.." && pwd)
-# rustup's cargo, if it isn't on PATH.
-cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
-# From the checkout: cargo finds its xtask alias there (.cargo/config.toml).
-(cd "$root" && "$cargo" xtask dist --if-changed) >&2
-# And a runner's, as bottle-cli's about to copy it there.
-export BOTTLE_DIST_BUILD="${BOTTLE_DIST_BUILD:-$root/bin/bottle-dist}"
+"$root/bin/bottle-build"
+# A runner's, built the same way, as bottle-cli's about to copy it there.
+export BOTTLE_DIST_BUILD="${BOTTLE_DIST_BUILD:-$root/bin/bottle-build}"
 exec "$root/target/dist/bottle-cli" "$@"

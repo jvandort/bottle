@@ -236,7 +236,7 @@ class WarnUnsetTest(unittest.TestCase):
 class ExecEnvTest(unittest.TestCase):
     def test_nothing_from_the_host_reaches_a_session(self) -> None:
         """A bottle's environment is its image's: no credential is ever handed in here."""
-        with mock.patch.dict(os.environ, {"TOKEN": "tok-secret"}), mock.patch.object(krun.prereqs, "ensure_cli"):
+        with mock.patch.dict(os.environ, {"TOKEN": "tok-secret"}):
             argv = krun.exec_command("m", ["bash"], user="genie", tty=True)
         self.assertNotIn("-e", argv)
         self.assertFalse(any("tok-secret" in arg for arg in argv))

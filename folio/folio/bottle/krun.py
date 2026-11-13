@@ -17,29 +17,23 @@ tests/test_krun_contract.py checks:
 Machines, and running commands in them, are all this module does: building
 the images machines boot is images.py's, on top of bottle-cli's builds. A
 machine is named as bottle-cli here names it: RUNNER/NAME for a runner's (see
-runners.py). bottle-cli is built from this checkout first, if it's changed
-(prereqs.ensure_cli).
+runners.py). The bottle-cli is $BOTTLE_CLI's (bin/folio sets it, from a
+checkout), else `bottle-cli` on PATH: folio builds nothing.
 """
 
 import json
+import os
+import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from folio.bottle.errors import BottleError
 
-# What builds bottle-cli from this checkout, bottle's dev shim's (bottle/prereqs.py, at its root): beside the Rust it
-# builds, not folio's, for now.
-_ROOT = str(Path(__file__).resolve().parents[3])
-if _ROOT not in sys.path:
-    sys.path.append(_ROOT)
-from bottle import prereqs  # noqa: E402
-
 def binary() -> str:
-    """The bottle-cli folio runs: this checkout's (prereqs.binary)."""
-    return prereqs.binary()
+    """The bottle-cli folio runs: $BOTTLE_CLI's, else the one on PATH."""
+    return os.environ.get("BOTTLE_CLI") or shutil.which("bottle-cli") or "bottle-cli"
 
 
 # --- machines -------------------------------------------------------------------
@@ -152,14 +146,14 @@ class Cli:
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
         """The command line that runs bottle-cli with `args` there."""
-        try:
-            prereqs.ensure_cli()
-        except prereqs.PrereqError as e:
-            raise BottleError(str(e)) from None
         return [binary(), *args]
 
     def run(self, args: list[str], input: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
+        try:
+            return subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
+        except FileNotFoundError:
+            raise BottleError(f"no bottle-cli at {binary()}: install it, or set BOTTLE_CLI (bin/folio does, from "
+                              "a checkout)") from None
 
     def build(self, recipe: dict, network: dict, context: Path, tag: str) -> subprocess.CompletedProcess:
         """`bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged `tag`: its

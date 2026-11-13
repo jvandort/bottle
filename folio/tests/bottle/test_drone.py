@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest import mock
 
 from folio.bottle import bottles, daemon, features, host, images, repos, runners, services
-from folio.bottle.krun import prereqs
 from folio.bottle.host import Remote, Served
 from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, built_cli, register_runner, run, stop_bottle, thread_dir, write_bottles
@@ -101,11 +100,11 @@ class DroneCase(GitTestCase):
         cli.write_text(FAKE_CLI)
         cli.chmod(0o755)
         # The same build as what bottle-cli here would copy there: not copied.
-        (cli.parent / prereqs.STAMP).write_text("these sources")
+        (cli.parent / ".sources").write_text("these sources")
         arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
         dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
         dist.mkdir(parents=True)
-        (dist / prereqs.STAMP).write_text("these sources")
+        (dist / ".sources").write_text("these sources")
         fake = short / "ssh"
         fake.write_text(FAKE_SSH)
         fake.chmod(0o755)
@@ -117,10 +116,6 @@ class DroneCase(GitTestCase):
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(self.stop_both)
-        for name in ("ensure_dist", "ensure_cli"):
-            patcher = mock.patch.object(prereqs, name)
-            patcher.start()
-            self.addCleanup(patcher.stop)
         register_runner("box", "box")
 
     def stop_both(self) -> None:

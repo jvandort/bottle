@@ -23,9 +23,6 @@ class LocalRunnerTest(GitTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        patcher = mock.patch.object(runners.krun.prereqs, "ensure_cli")   # its bottle-cli as it is
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def test_a_machines_routes_are_to_folio_serves_sockets_here(self) -> None:
         policy = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80, "service": "host"}]}
@@ -55,8 +52,7 @@ class RemoteRunnerTest(unittest.TestCase):
     def test_its_machines_are_named_runner_slash_name_its_images_asked_there(self) -> None:
         box = runners.Runner("box")
         with mock.patch.object(runners.krun, "start") as start, \
-                mock.patch.object(runners.krun, "state", return_value="running") as state, \
-                mock.patch.object(runners.krun.prereqs, "ensure_cli"):
+                mock.patch.object(runners.krun, "state", return_value="running") as state:
             box.start("m")
             self.assertEqual(box.state("m"), "running")
             self.assertEqual(box.cli.command(["images", "/s", "--json"])[1:], ["on", "box", "images", "/s", "--json"])

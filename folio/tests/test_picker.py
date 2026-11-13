@@ -135,13 +135,12 @@ class TerminalTest(FolioTestCase):
         import os
         import pty
         import select
-        import sys
         import time
 
         pid, fd = pty.fork()
         if pid == 0:  # the child: folio, on the terminal
             os.chdir(self.repo)
-            os.execve(sys.executable, [sys.executable, str(FOLIO), *argv],
+            os.execve(str(FOLIO), [str(FOLIO), *argv],
                       {**self.env, "TERM": "xterm-256color", "LINES": "24", "COLUMNS": "80"})
         out, deadline, sent = b"", time.monotonic() + 20, False
         try:
