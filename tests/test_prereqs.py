@@ -95,12 +95,6 @@ class EnsureCliTest(unittest.TestCase):
         self.ensure()
         self.assertEqual(self.commands, [])
 
-    def test_where_dist_says(self) -> None:
-        os.environ["BOTTLE_DIST"] = str(self.repo / "elsewhere")
-        self.ensure()
-        self.assertEqual(self.commands[0][-1], str(self.repo / "elsewhere"))
-        self.assertEqual(krun.binary(), str(self.repo / "elsewhere" / "bottle-cli"))
-
     def test_rustups_cargo_when_its_not_on_path(self) -> None:
         # As in a non-interactive ssh session, whose shell never read rustup's addition to PATH.
         prereqs.RUSTUP_CARGO.parent.mkdir()

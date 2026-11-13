@@ -27,8 +27,12 @@ mkdir -p "$FAKE_REMOTES/$destination"
 exec env -u BOTTLE_HOME HOME="$FAKE_REMOTES/$destination" PATH="$FAKE_PATH:$PATH" bash -c "$script"
 """
 
-# bottle-cli there: every machine is running.
+# bottle-cli there: every machine is running; an image build fails, saying what it was given.
 FAKE_CLI = """#!/bin/sh
+if [ "$1 $2" = "image build" ]; then
+  echo "bottle-cli: can't build $3 ($(cat "$(dirname "$3")/context/install.sh" | head -c 9))" >&2
+  exit 1
+fi
 echo '{"state": "running"}'
 """
 
@@ -82,24 +86,22 @@ class SshTestCase(GitTestCase):
 
 
 class TransportTest(SshTestCase):
-    def test_its_code_is_sent_the_first_time_and_run_there_after(self) -> None:
+    def test_its_bottle_cli_is_what_runs_there_and_nothing_else_of_bottles(self) -> None:
         self.has_cli()
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
         self.assertEqual(runner.state("bottle-b"), "running")
-        code = self.remotes / "box" / ".bottle" / "runner" / ssh.code_hash()
-        self.assertTrue((code / ".complete").exists() and (code / "bottle" / "remote.py").exists())
-        self.assertEqual(len(self.logged()), 3)  # asked, sent, asked again
-        runner.state("bottle-b")
-        self.assertEqual(len(self.logged()), 4)  # just asked
+        self.assertEqual(len(self.logged()), 1)
+        self.assertIn('"$HOME/.bottle/dist/bottle-cli" machine status --name bottle-b --json', self.logged()[0])
+        self.assertFalse((self.remotes / "box" / ".bottle" / "runner").exists())
 
-    def test_a_build_streams_its_context_there_and_its_answer_back(self) -> None:
+    def test_a_build_sends_its_context_with_the_recipe_and_builds_there(self) -> None:
+        self.has_cli()
         context = self.tmp / "context"
         context.mkdir()
         (context / "install.sh").write_text("#!/bin/sh\n")
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
-        # No bottle-cli there: the build fails there, before any VM, and says why, here.
-        with mock.patch.object(ssh.SshTransport, "link"), mock.patch.dict(os.environ, {"BOTTLE_CLI": "/no/bottle-cli"}), \
-                self.assertRaisesRegex(BottleError, r"runner box: .*/no/bottle-cli"):
+        with mock.patch.object(runners.images.krun, "ca_certificate", return_value=None), \
+                mock.patch("sys.stderr"), self.assertRaisesRegex(BottleError, "image build failed"):
             runner.build(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []})
 
     def test_a_runner_it_cant_reach_is_unreachable(self) -> None:
@@ -115,11 +117,11 @@ class TransportTest(SshTestCase):
         self.assertEqual(command[-4:], ["-t", "--", "user@box.example", "bottle-cli machine exec"])
 
     def test_a_shell_there_is_its_bottle_cli_exec_over_ssh(self) -> None:
-        cli = self.has_cli()
+        self.has_cli()
         runner = runners.RemoteRunner("box", ssh.SshTransport("box", "box"))
         command = runner.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)
         self.assertEqual(command[-3:-1], ["--", "box"])
-        self.assertTrue(command[-1].startswith(f"{cli} machine exec --name bottle-b -t"))
+        self.assertTrue(command[-1].startswith('"$HOME/.bottle/dist/bottle-cli" machine exec --name bottle-b -t'))
         result = subprocess.run(command, capture_output=True, text=True)   # runs there
         self.assertEqual(json.loads(result.stdout), {"state": "running"})
 
@@ -140,21 +142,19 @@ class TransportTest(SshTestCase):
             self.assertEqual(ssh.explained(why), why)
 
     def test_what_it_lacks_is_said_as_its_fixed(self) -> None:
-        check = ssh.Check("Darwin", "arm64", False, "3.9", False)
+        check = ssh.Check("Darwin", "arm64", False, False)
         self.assertEqual(check.missing(), [
-            "Linux (it runs Darwin)", "access to /dev/kvm (add the user to the kvm group)",
-            "Python 3.11 or later as python3 (it has 3.9)", "git",
+            "Linux (it runs Darwin)", "access to /dev/kvm (add the user to the kvm group)", "git",
         ])
-        self.assertEqual(ssh.Check("Linux", "riscv64", True, "3.13", True).missing(), ["x86_64 or arm64 (it's riscv64)"])
+        self.assertEqual(ssh.Check("Linux", "riscv64", True, True).missing(), ["x86_64 or arm64 (it's riscv64)"])
 
 
 class RunnerCommandsTest(SshTestCase):
-    def test_add_checks_and_records_it_and_sends_its_code(self) -> None:
+    def test_add_checks_and_records_it(self) -> None:
         self.has_kvm()
         check = runners.add("box", "box")
         self.assertEqual(check.arch, "x86_64")
         self.assertEqual(runners.registered(), {"box": {"ssh": "box"}})
-        self.assertTrue((self.remotes / "box" / ".bottle" / "runner" / ssh.code_hash() / ".complete").exists())
         self.assertIsInstance(runners.get("box"), runners.RemoteRunner)
 
     def test_add_refuses_what_bottle_cant_set_up(self) -> None:

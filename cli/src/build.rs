@@ -284,8 +284,9 @@ pub fn gc(mut args: impl Iterator<Item = String>) -> ExitCode {
                 .map_or(k.clone(), |s| s.to_string_lossy().into_owned());
             store.disks(&name)
         });
-        for disks in named {
-            kept.extend(disks?);
+        // One that isn't there has nothing to keep.
+        for disks in named.flatten() {
+            kept.extend(disks);
         }
         kept.extend(in_use);
         let kept: std::collections::BTreeSet<PathBuf> = kept

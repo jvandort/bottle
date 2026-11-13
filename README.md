@@ -78,14 +78,14 @@ A runner, for bottles on another machine, needs:
 
 - Linux, with `/dev/kvm` usable by the user bottle logs in as (the `kvm` group)
 - x86_64 or arm64
-- Python 3.11+ and git
+- git
 - ssh from your Mac without a prompt: a key whose passphrase is in your
   Keychain (`ssh-add --apple-use-keychain`, `UseKeychain yes`), since bottle
   runs ssh in batch mode
 
-Nothing else, and no root: bottle copies its code there, and bottle-cli,
-built on your Mac for the runner's architecture: static, so it runs on any
-distribution. Your Mac builds it in a Linux VM of its own bottle-cli
+Nothing else, and no root: bottle copies bottle-cli there, built on your Mac
+for the runner's architecture: static, so it runs on any distribution. It's
+all a runner has of bottle. Your Mac builds it in a Linux VM of its own bottle-cli
 (`cargo xtask dist --target x86_64-unknown-linux-musl`, which bottle runs when
 it's needed; the first time takes a while). (Untested on a real runner yet.)
 
@@ -431,8 +431,8 @@ here, and what a drone needs of them comes here.
 - **`bottle runner add RUNNER --ssh DESTINATION`** checks a machine and adds
   it under that name. `DESTINATION` is what you'd give ssh: a `Host` from
   `~/.ssh/config`, or `user@host`. It says what the machine lacks that bottle
-  can't set up itself, and copies bottle's own code over, and bottle-cli's
-  distribution for the machine's architecture, built here (see above).
+  can't set up itself, and copies bottle-cli's distribution for the
+  machine's architecture over, built here (see above).
   Whenever bottle-cli's sources change, it's built and copied again before
   the runner's next bottle is made.
 - **`bottle runner status [RUNNER]...`** (also `list`, `ls`) shows each runner, whether it can be
@@ -446,7 +446,7 @@ here, and what a drone needs of them comes here.
   say; if something does, it says what, and leaves the runner attached), and
   lets it go, then says it's safe to turn off. Until it's attached again,
   nothing asks it anything: its bottles show as `detached`, at once, and
-  bottled doesn't keep trying its link. Using one of its bottles again
+  bottled doesn't keep trying its forward. Using one of its bottles again
   (`start`, `attach`, `exec`, `cp`, folio's `attach`) attaches it again if
   it answers, and says it's still off if it doesn't. `--offline` marks one
   that's off already, unasked.
@@ -455,31 +455,29 @@ here, and what a drone needs of them comes here.
 - **`bottle runner remove RUNNER`** forgets a runner with no bottles. Nothing
   on the machine is touched.
 
-On a runner, everything bottle keeps is in `~/.bottle`: bottle's code
-(copied again whenever it changes), bottle-cli's distribution
-(`~/.bottle/dist`), the images built there, the machines,
-the HTTP cache, and a mirror of each repo its bottles use (`~/.bottle/git`),
-so a drone's checkout borrows objects from the runner's disk, not over the
-network.
+On a runner, everything bottle keeps is in `~/.bottle`: bottle-cli's
+distribution (`~/.bottle/dist`), the images built there, the machines, the
+HTTP cache, and a bare mirror of each repo its bottles use (`~/.bottle/git`),
+which your Mac pushes into as a drone is made, so its checkout borrows objects
+from the runner's disk. bottle runs bottle-cli there over ssh; nothing else of
+bottle's runs there.
 
 A drone works as a local bottle does, with these differences:
 
-- **Its connections are decided on the runner**, by bottled there, so public
-  destinations go straight from the runner, and "private" means the runner's
-  network: a drone doesn't get your Mac's VPN routes. DNS is the runner's.
-- **Its git goes through your Mac.** A fetch is served from the runner's
-  mirror, brought up to date from your repo first (and your repo's `origin`
-  fetched first, for `upstream`), so the drone is sent little but refs. A push
-  goes into your repo, under the same rules as a local bottle's.
-- **Its credentials stay on your Mac.** The runner knows which hosts they're
-  for and nothing else, and sends those connections to your Mac, where bottled
-  attaches the credential and makes the connection. The cached hosts are
-  answered on the runner, behind a CA of the runner's own for the bottle.
-- **Everything that comes to your Mac goes over one ssh connection per
-  runner**, the *link*, which bottled keeps up while a bottle there needs it.
-  If it drops, a drone keeps its public network, while its fetches, pushes,
-  credentialed requests and messages fail and say why, until the link is back:
-  bottled tries again, waiting up to a minute between tries.
+- **Its connections are decided on the runner**, by bottle-cli there and its
+  machine's policy, so public destinations go straight from the runner, and
+  "private" means the runner's network: a drone doesn't get your Mac's VPN
+  routes. DNS is the runner's. The cached hosts are answered on the runner.
+- **What its policy routes comes to your Mac**: its git (fetches served from
+  your repo, its `origin` fetched first for `upstream`; pushes into it, under
+  the same rules as a local bottle's), its credentialed requests, ssh and
+  messages, to bottled here, through a socket on the runner
+  (`~/.bottle/services.sock`) that ssh forwards back. The runner never holds a
+  credential.
+- **That forward is one ssh connection per runner**, which bottled keeps up
+  while a bottle there is bound. If it drops, a drone keeps its public
+  network, while what's routed is refused until it's back: bottled tries
+  again, waiting up to a minute between tries.
 
 A runner that's off is unreachable, not broken: `bottle status` shows its
 bottles as `unreachable`, a command for one fails at once, saying so, and

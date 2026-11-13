@@ -7,30 +7,31 @@ run on. The code on the driver's side reaches machines only through a
 Runner, so it can't tell which runner it has.
 
 The local runner is the driver itself: krun.py (bottle-cli's machines),
-images.py and bottled, called in-process.
-
-Code on the runner's side (krun.py, images.py's store and builds, bottled's
-services) uses its neighbours directly: a builder machine is the runner's own
-business. What to build (an image's tag, its inputs and their hash) is the
+images.py and bottled, called in-process. A remote runner is the same, its
+bottle-cli run over ssh (ssh.RemoteCli): it has bottle-cli and nothing else of
+bottle's. What to build (an image's tag, its inputs and their hash) is the
 controller's to work out, in images.py and features.py; the runner keeps the
 images it's built and builds those it's sent.
 """
 
-import json
+import hashlib
 import os
 import re
+import shlex
+import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from bottle import daemon, images, krun, prereqs, repos, services
 from bottle.errors import BottleError
 from bottle.host import Served
 from bottle.store import bottle_home, read_json, write_json
+
+if TYPE_CHECKING:
+    from bottle import ssh
 
 LOCAL = "local"
 
@@ -127,6 +128,8 @@ class LocalRunner:
     """The driver itself: machines are bottle-cli's here, images are in $BOTTLE_HOME, services are bottled's."""
 
     name = LOCAL
+    # Where bottle-cli runs for it: here.
+    cli: krun.Cli = krun.LOCAL
 
     def ensure_ready(self) -> None:
         prereqs.ensure_cli()
@@ -136,23 +139,30 @@ class LocalRunner:
 
         return specs.host_memory_mib()
 
+    def cpus(self) -> int:
+        return os.cpu_count() or 1
+
+    def services_socket(self) -> str:
+        """Where its machines reach bottled: what their routes say."""
+        return str(daemon.services_socket())
+
     def archive(self, tag: str) -> Path | None:
-        return images.archive_of(tag)
+        return images.archive_of(tag, self.cli)
 
     def image_labels(self, tag: str) -> dict[str, str] | None:
-        return images.built_labels(tag)
+        return images.built_labels(tag, self.cli)
 
     def built(self) -> dict[str, dict[str, str]]:
-        return images.built()
+        return images.built(self.cli)
 
     def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
-        images.build_recipe(context, tag, inputs, recipe, no_cache)
+        images.build_recipe(context, tag, inputs, recipe, no_cache, cli=self.cli)
 
     def forget(self, tag: str) -> None:
-        images.forget(tag)
+        images.forget(tag, self.cli)
 
     def remove_unused(self, in_use: set[str]) -> None:
-        images.remove_unused(in_use)
+        images.remove_unused(in_use, self.cli)
 
     def objects(self, repo: repos.Repo) -> Path:
         # The repo's own: it's on this machine's disk, so nothing is copied.
@@ -163,182 +173,115 @@ class LocalRunner:
                workdir: str | None = None, labels: dict[str, str] | None = None,
                network: dict | None = None) -> None:
         krun.create(machine, str(archive), [krun.Mount(m.source, m.target) for m in mounts], env, memory_mib,
-                    os.cpu_count() or 1, disk_gib, user, workdir, labels,
-                    services.with_socket(network, str(daemon.services_socket())) if network else None)
+                    self.cpus(), disk_gib, user, workdir, labels,
+                    services.with_socket(network, self.services_socket()) if network else None, cli=self.cli)
 
     def configure(self, machine: str, network: dict) -> None:
-        krun.configure(machine, services.with_socket(network, str(daemon.services_socket())))
+        krun.configure(machine, services.with_socket(network, self.services_socket()), cli=self.cli)
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
         daemon.bind(bottle, machine, served, features)
-        krun.start(machine)
+        krun.start(machine, cli=self.cli)
 
     def release(self, bottle: str) -> None:
         daemon.release_egress(bottle)
 
     def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
-        return krun.ca_certificate(machine, hosts)
+        return krun.ca_certificate(machine, hosts, cli=self.cli)
 
     def ensure_deciding(self) -> None:
         daemon.start()
 
     def stop(self, machine: str) -> None:
-        krun.stop(machine)
+        krun.stop(machine, cli=self.cli)
 
     def rename(self, machine: str, new: str) -> None:
-        krun.rename(machine, new)
+        krun.rename(machine, new, cli=self.cli)
 
     def running(self) -> list[str]:
-        return krun.running()
+        return krun.running(cli=self.cli)
 
     def delete(self, machine: str) -> None:
-        krun.delete(machine)
+        krun.delete(machine, cli=self.cli)
 
     def state(self, machine: str) -> str | None:
-        return krun.state(machine)
+        return krun.state(machine, cli=self.cli)
 
     def exec_(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
               input: str | None = None, env: dict[str, str] | None = None) -> str:
-        return krun.exec_(machine, argv, user=user, workdir=workdir, input=input, env=env)
+        return krun.exec_(machine, argv, user=user, workdir=workdir, input=input, env=env, cli=self.cli)
 
     def exec_command(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
                      tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
-        return krun.exec_command(machine, argv, user=user, workdir=workdir, tty=tty, env=env)
+        return krun.exec_command(machine, argv, user=user, workdir=workdir, tty=tty, env=env, cli=self.cli)
 
 
-class Transport(Protocol):
-    """How a controller reaches a remote runner: an operation's request and answer, and commands run there."""
+class RemoteRunner(LocalRunner):
+    """A runner elsewhere, reached over ssh: its bottle-cli run there (ssh.RemoteCli), as the local runner runs
+    this machine's; its machines' routes to a socket there that ssh forwards to bottled here (see daemon.Links);
+    a repo's objects, for its machines to mount, pushed into a bare mirror there."""
 
-    def call(self, op: str, request: str) -> str:
-        """Run `op` there (bottle.remote) with `request` on its stdin; its answer, from its stdout."""
+    def __init__(self, name: str, transport: "ssh.SshTransport") -> None:
+        from bottle import ssh
 
-    def command(self, argv: list[str], tty: bool) -> list[str]:
-        """The command line that runs `argv` there, attached to this process's stdin (and a TTY)."""
-
-    def link(self) -> None:
-        """The runner's link to the controller up, so its bottled can reach the controller's."""
-
-    def stream(self, op: str, request: str, data: BinaryIO) -> str:
-        """Run `op` there with `request` as its argument and `data` on its stdin, its stderr on this process's:
-        for what's long and worth watching, a build."""
-
-    def ensure_dist(self) -> None:
-        """bottle-cli there, as this repo's sources are now."""
-
-
-class RemoteRunner:
-    """A runner elsewhere: its own local runner, operated through `transport` (see bottle/remote.py)."""
-
-    def __init__(self, name: str, transport: Transport) -> None:
         self.name = name
         self.transport = transport
-
-    def _call(self, op: str, **args):
-        from bottle import link
-
-        if "served" in args:
-            args["served"] = link.served_to_json(args["served"])
-        answer = json.loads(self.transport.call(op, json.dumps(args)))
-        if not answer.get("ok"):
-            raise BottleError(f"runner {self.name}: {answer.get('error', 'failed')}")
-        return answer.get("result")
+        self.cli = ssh.RemoteCli(transport)
+        self._info: dict | None = None
 
     def ensure_ready(self) -> None:
         # Its bottle-cli as this repo's sources are now, built here; what else it's missing is the controller's to ask
         # about when the runner's added.
         self.transport.ensure_dist()
 
+    def _host(self) -> dict:
+        if self._info is None:
+            self._info = krun.info(cli=self.cli)
+        return self._info
+
     def memory_mib(self) -> int:
-        return self._call("memory_mib")
+        return int(self._host()["memory_mib"])
 
-    def archive(self, tag: str) -> Path | None:
-        found = self._call("archive", tag=tag)
-        return Path(found) if found is not None else None
+    def cpus(self) -> int:
+        return int(self._host()["cpus"])
 
-    def image_labels(self, tag: str) -> dict[str, str] | None:
-        return self._call("image_labels", tag=tag)
-
-    def built(self) -> dict[str, dict[str, str]]:
-        return self._call("built")
-
-    def build(self, context: Path, tag: str, inputs: str, recipe: dict, no_cache: bool = False) -> None:
-        # The context sent as a tar, the recipe with the request. Built on images there, by a VM there, whose
-        # connections are decided there and so through the controller.
-        with tempfile.TemporaryFile() as sent:
-            with tarfile.open(fileobj=sent, mode="w") as tar:
-                tar.add(context, "context")
-            sent.seek(0)
-            self.transport.link()
-            request = {"tag": tag, "inputs": inputs, "no_cache": no_cache, "recipe": recipe}
-            answer = json.loads(self.transport.stream("build", json.dumps(request), sent))
-        if not answer.get("ok"):
-            raise BottleError(f"runner {self.name}: {answer.get('error', 'build failed')}")
-
-    def forget(self, tag: str) -> None:
-        self._call("forget", tag=tag)
-
-    def remove_unused(self, in_use: set[str]) -> None:
-        self._call("remove_unused", in_use=sorted(in_use))
+    def services_socket(self) -> str:
+        return self.transport.services_socket()
 
     def objects(self, repo: repos.Repo) -> Path:
-        from bottle import mirrors
-
-        # Its mirror there, made if it's the first bottle of that hub there, and fetched through the link.
-        self.transport.link()
-        return Path(self._call("mirror", key=mirrors.key(repos.objects_dir(repo).parent)))
-
-    def create(self, machine: str, archive: Path, mounts: list[Mount], env: dict[str, str],
-               memory_mib: int | None, disk_gib: int | None = None, user: str | None = None,
-               workdir: str | None = None, labels: dict[str, str] | None = None,
-               network: dict | None = None) -> None:
-        self._call("create", machine=machine, archive=str(archive),
-                   mounts=[{"source": str(m.source), "target": m.target} for m in mounts],
-                   env=env, memory_mib=memory_mib, disk_gib=disk_gib, user=user, workdir=workdir, labels=labels,
-                   network=network)
-
-    def configure(self, machine: str, network: dict) -> None:
-        self._call("configure", machine=machine, network=network)
+        # A bare mirror of the repo there, brought up to date by a push from here: what its machines borrow
+        # objects from. Fetches aren't served from it: they come here, as everything routed does.
+        git_dir = repos.objects_dir(repo).parent
+        there = f"{self.cli.home()}/git/{mirror_key(git_dir)}.git"
+        made = self.transport.run(f"[ -d {shlex.quote(there)} ] || git init -q --bare {shlex.quote(there)}")
+        if made.returncode != 0:
+            raise BottleError(f"runner {self.name}: {made.stderr.decode(errors='replace').strip()}")
+        # Its ssh as bottle runs it, up to "--": git adds the destination and its command, and nothing else (a
+        # "simple" ssh, to git, takes no options of git's).
+        ssh_command = shlex.join(self.transport._ssh(tty=False)[:-1])
+        pushed = subprocess.run(["git", "-C", str(git_dir), "push", "--quiet", "--mirror",
+                                 f"{self.transport.destination}:{there}"], capture_output=True, text=True,
+                                env={**os.environ, "GIT_SSH_COMMAND": ssh_command, "GIT_SSH_VARIANT": "simple"})
+        if pushed.returncode != 0:
+            raise BottleError(f"runner {self.name}: copying {repo.name} there failed: {pushed.stderr.strip()}")
+        return Path(there) / "objects"
 
     def start(self, machine: str, bottle: str, served: tuple[Served, ...] = (),
               features: tuple[str, ...] | list[str] = ()) -> None:
-        # Binding it there asks the controller, over the link.
-        self.transport.link()
-        self._call("start", machine=machine, bottle=bottle, served=tuple(served), features=list(features))
-
-    def release(self, bottle: str) -> None:
-        self._call("release", bottle=bottle)
-
-    def cache_certificate(self, machine: str, hosts: list[str]) -> str | None:
-        return self._call("cache_ca", machine=machine, hosts=hosts)
+        # The forward its routes reach bottled through, up first.
+        self.ensure_deciding()
+        super().start(machine, bottle, served, features)
 
     def ensure_deciding(self) -> None:
-        self.transport.link()
-        self._call("ensure_deciding")
+        # bottled here, and the forward its machines reach it through.
+        daemon.ensure_link(self.name)
 
-    def stop(self, machine: str) -> None:
-        self._call("stop", machine=machine)
 
-    def rename(self, machine: str, new: str) -> None:
-        self._call("rename", machine=machine, new=new)
-
-    def running(self) -> list[str]:
-        return self._call("running")
-
-    def delete(self, machine: str) -> None:
-        self._call("delete", machine=machine)
-
-    def state(self, machine: str) -> str | None:
-        return self._call("state", machine=machine)
-
-    def exec_(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-              input: str | None = None, env: dict[str, str] | None = None) -> str:
-        return self._call("exec", machine=machine, argv=argv, user=user, workdir=workdir, input=input, env=env)
-
-    def exec_command(self, machine: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-                     tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
-        there = self._call("exec_command", machine=machine, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
-        return self.transport.command(there, tty)
+def mirror_key(git_dir: Path) -> str:
+    """A repo's name among a runner's mirrors: its name, and a hash of where it is here."""
+    name = git_dir.parent.name if git_dir.name == ".git" else git_dir.name.removesuffix(".git")
+    return f"{name}-{hashlib.sha256(str(git_dir).encode()).hexdigest()[:8]}"
 
 
 _LOCAL = LocalRunner()
@@ -405,9 +348,9 @@ def get(name: str = LOCAL) -> Runner:
 def add(name: str, destination: str) -> "ssh.Check":
     """Add a remote runner: check it over ssh, set up bottle there, and record it.
 
-    What bottle can't set up itself refuses it, saying what's missing. bottle's
-    code is copied there, and bottle-cli, built here for its architecture (on a
-    Mac, in a Linux VM: see xtask), before it's recorded.
+    What bottle can't set up itself refuses it, saying what's missing.
+    bottle-cli, built here for its architecture (on a Mac, in a Linux VM: see
+    xtask), is copied there before it's recorded: all a runner has of bottle.
     """
     from bottle import ssh
 
@@ -421,7 +364,6 @@ def add(name: str, destination: str) -> "ssh.Check":
     missing = check.missing()
     if missing:
         raise BottleError(f"{destination} can't be a runner yet; it needs: {'; '.join(missing)}")
-    transport.ship()
     transport.ensure_dist()
     register(name, destination)
     return check

@@ -23,7 +23,6 @@ import json
 import shlex
 import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -100,7 +99,7 @@ def interpreter(script: Path) -> list[str]:
 
 
 def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache: bool = False,
-                 labels: dict[str, str] | None = None) -> Path:
+                 labels: dict[str, str] | None = None, cli: krun.Cli = krun.LOCAL) -> Path:
     """Build `recipe` into `image`, `context` mounted at its working directory (MOUNT): a stage, in a VM of
     bottle-cli's; return its disk.
 
@@ -109,104 +108,96 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     specs of those it installs, are bottle's: the build reaches the public network, with none of their
     credentials, their apt repositories kept (cache.cached_for, a build's), and a step asking for BUILD_CA gets
     the CA they're answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
-    With `no_cache`, the stage is made again even if one was made from the same.
+    With `no_cache`, the stage is made again even if one was made from the same. Built where `cli` runs
+    bottle-cli: here, or on a runner, the context sent there with the recipe.
     """
     from bottle import cache, features, services  # features imports this module
 
-    prereqs.ensure_cli()
-    _migrate()
+    if cli is krun.LOCAL:
+        prereqs.ensure_cli()
+        _migrate()
     if "pull" in recipe:
         print(f"Pulling {recipe['pull']}...", file=sys.stderr)
-    elif archive_of(recipe["from"]) is None:
+    elif archive_of(recipe["from"], cli) is None:
         raise BottleError(f"{recipe['from']} isn't built")
     image_labels = {**recipe.get("labels", {}), INPUTS_LABEL: inputs, **(labels or {})}
     if no_cache:
         # A stage is named for what it's made from: something new in it makes it anew.
         image_labels["bottle.build"] = uuid.uuid4().hex
     # The caching CA of bottle-cli's builds, which answers their apt repositories.
-    certificate = krun.ca_certificate(BUILDS_CA, features.apt_https_hosts()) or ""
+    certificate = krun.ca_certificate(BUILDS_CA, features.apt_https_hosts(), cli=cli) or ""
     steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step
              for step in recipe.get("steps", [])]
     made = {**{k: recipe[k] for k in ("pull", "from", "entrypoint", "cmd") if k in recipe},
-            "mount": {"source": str(context.resolve()), "target": MOUNT}, "steps": steps, "labels": image_labels}
+            "mount": {"target": MOUNT}, "steps": steps, "labels": image_labels}
     # The public network, with none of its features' credentials, nothing routed to bottled; their apt
     # repositories kept.
     network = {"cache": services.cache_rules(cache.cached_for(recipe.get("features", []), build=True))}
-    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="recipe-") as file, \
-            tempfile.NamedTemporaryFile("w", suffix=".json", prefix="network-") as policy:
-        json.dump(made, file)
-        file.flush()
-        json.dump(network, policy)
-        policy.flush()
-        return _cli("image", "build", file.name, str(store()), "--tag", image, "--network", policy.name)
-
-
-def _cli(*args: str) -> Path:
-    """Run a bottle-cli image build, its progress on stderr; the disk of the stage it made (its last line)."""
-    result = subprocess.run([krun.binary(), *args], stdout=subprocess.PIPE, text=True)
+    # Its progress on stderr; the disk of the stage it made, the last line of its stdout.
+    result = cli.build(made, network, context, str(store(cli)), image)
     lines = result.stdout.split()
     if result.returncode != 0 or not lines:
-        raise BottleError(f"bottle-cli {' '.join(args[:2])} failed")
+        raise BottleError("bottle-cli image build failed")
     return Path(lines[-1])
 
 
 # --- the store -----------------------------------------------------------------
 
 
-def store() -> Path:
-    """bottle-cli's store of stages, which keeps its images' tags too."""
-    return bottle_home() / "stages"
+def store(cli: krun.Cli = krun.LOCAL) -> Path:
+    """bottle-cli's store of stages where `cli` runs it, which keeps its images' tags too."""
+    return Path(cli.home()) / "stages"
 
 
-def _images() -> list[dict]:
+def _images(cli: krun.Cli = krun.LOCAL) -> list[dict]:
     """bottle-cli's images: each tag, its stage, disks and labels."""
-    if not store().is_dir():
-        return []
-    _migrate()
-    result = subprocess.run([krun.binary(), "images", str(store()), "--json"], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise BottleError(f"bottle-cli images: {result.stderr.strip()}")
-    return json.loads(result.stdout)
+    if cli is krun.LOCAL:
+        if not store().is_dir():
+            return []
+        _migrate()
+    return json.loads(_cli(cli, "images", str(store(cli)), "--json"))
 
 
-def _image(tag: str) -> dict | None:
-    return next((i for i in _images() if i["tag"] == tag and i["disks"]), None)
+def _image(tag: str, cli: krun.Cli = krun.LOCAL) -> dict | None:
+    return next((i for i in _images(cli) if i["tag"] == tag and i["disks"]), None)
 
 
-def archive_of(image: str) -> Path | None:
+def archive_of(image: str, cli: krun.Cli = krun.LOCAL) -> Path | None:
     """The disk of the top stage `image` (a tag) was last built into, or None."""
-    found = _image(image)
+    found = _image(image, cli)
     return Path(found["disks"][-1]) if found else None
 
 
-def built_labels(image: str) -> dict[str, str] | None:
+def built_labels(image: str, cli: krun.Cli = krun.LOCAL) -> dict[str, str] | None:
     """The labels `image` was last built with, or None if it's not built."""
-    found = _image(image)
+    found = _image(image, cli)
     return dict(found["labels"]) if found else None
 
 
-def built() -> dict[str, dict[str, str]]:
+def built(cli: krun.Cli = krun.LOCAL) -> dict[str, dict[str, str]]:
     """Every built tag, with its labels."""
-    return {i["tag"]: dict(i["labels"]) for i in _images()}
+    return {i["tag"]: dict(i["labels"]) for i in _images(cli)}
 
 
-def forget(image: str) -> None:
+def forget(image: str, cli: krun.Cli = krun.LOCAL) -> None:
     """Untag `image`; its stages go once nothing uses them (remove_unused)."""
-    if any(i["tag"] == image for i in _images()):
-        result = subprocess.run([krun.binary(), "image", "rm", image, str(store())], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise BottleError(f"bottle-cli image rm: {result.stderr.strip()}")
+    if any(i["tag"] == image for i in _images(cli)):
+        _cli(cli, "image", "rm", image, str(store(cli)))
 
 
-def remove_unused(in_use: set[str]) -> None:
+def remove_unused(in_use: set[str], cli: krun.Cli = krun.LOCAL) -> None:
     """Delete the stages no image is made of and no machine uses (bottle-cli knows its images and machines;
     `in_use`, the disks bottles were made from by name, are kept too)."""
-    if not store().is_dir():
+    if cli is krun.LOCAL and not store().is_dir():
         return
-    kept = [str(store() / name) for name in sorted(in_use) if (store() / name).exists()]
-    result = subprocess.run([krun.binary(), "gc", str(store()), *kept], capture_output=True, text=True)
+    _cli(cli, "gc", str(store(cli)), *(str(store(cli) / name) for name in sorted(in_use)))
+
+
+def _cli(cli: krun.Cli, *args: str) -> str:
+    result = cli.run(list(args))
     if result.returncode != 0:
-        raise BottleError(f"bottle-cli gc: {result.stderr.strip()}")
+        raise BottleError(f"bottle-cli {' '.join(args[:2])}: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _migrate() -> None:

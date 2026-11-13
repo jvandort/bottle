@@ -34,11 +34,11 @@ class FakeSmolvm:
         if self.fail == name:
             raise BottleError(f"{name} failed")
 
-    def archive(self, tag):
+    def archive(self, tag, cli=None):
         return Path("/images") / f"{tag.rsplit('/', 1)[-1].replace(':', '-')}.tar"
 
     def create(self, name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None,
-               network=None):
+               network=None, cli=None):
         if bottles.load():
             self.statuses_seen.append(bottles.load()[next(iter(bottles.load()))].status)
         self._step("create")
@@ -46,37 +46,37 @@ class FakeSmolvm:
                                 disk_gib=disk_gib, user=user, workdir=workdir, labels=labels, network=network)
         self.machines[name] = "created"
 
-    def configure(self, name, network):
+    def configure(self, name, network, cli=None):
         self.configured[name] = network
 
-    def start(self, name):
+    def start(self, name, cli=None):
         self._step("start")
         self.started[name] = self.started.get(name, 0) + 1
         self.machines[name] = "running"
 
-    def rename(self, name, new):
+    def rename(self, name, new, cli=None):
         self.calls.append("rename")
         if self.machines.get(name) == "running":
             raise BottleError(f"{name} is running: stop it first")
         self.machines[new] = self.machines.pop(name)
 
-    def stop(self, name):
+    def stop(self, name, cli=None):
         self.calls.append("stop")
         self.machines[name] = "stopped"
 
-    def delete(self, name):
+    def delete(self, name, cli=None):
         if self.fail_cleanup == "machine":
             raise BottleError("machine busy")
         self.machines.pop(name, None)
 
-    def state(self, name):
+    def state(self, name, cli=None):
         return self.machines.get(name)
 
     contract_output = ""
     standins: dict = {}
     intercepted: list = ["ci.test"]
 
-    def exec_(self, name, argv, user=None, workdir=None, input=None, env=None):
+    def exec_(self, name, argv, user=None, workdir=None, input=None, env=None, cli=None):
         assert self.machines.get(name) == "running", f"{name} isn't running"
         if "# bottle contract" in argv[-1]:
             self._step("verify_contract")
@@ -102,7 +102,7 @@ class FakeSmolvm:
         self.workspace_script = argv[-1]
         return ""
 
-    def exec_command(self, name, argv, user=None, workdir=None, tty=False, env=None):
+    def exec_command(self, name, argv, user=None, workdir=None, tty=False, env=None, cli=None):
         self.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
         return ["smolvm-exec", name, *argv]
 
@@ -122,7 +122,7 @@ class FakeSmolvm:
         self.calls.append("daemon_start")
         return False
 
-    def ca_certificate(self, name, hosts):
+    def ca_certificate(self, name, hosts, cli=None):
         return "the machine's CA's certificate"  # for its policy's hosts, which bottle-cli reads
 
     def daemon_stop(self):
@@ -344,7 +344,7 @@ class CreateTest(BottleTestCase):
 
     def test_an_image_that_isnt_built_rolls_back(self) -> None:
         fake = self.fake()
-        fake.archive = lambda tag: None
+        fake.archive = lambda tag, cli=None: None
         with mock.patch.object(bottles.images, "archive_of", fake.archive), \
                 self.assertRaisesRegex(BottleError, "localhost/bottle/base:latest isn't built"):
             self.create()
@@ -552,7 +552,7 @@ class ContractTest(BottleTestCase):
         """Run the script verify_contract would have run in a bottle, on this machine instead."""
         script = None
 
-        def capture(name, argv, user=None, workdir=None, input=None, env=None):
+        def capture(name, argv, user=None, workdir=None, input=None, env=None, cli=None):
             nonlocal script
             script = argv
             return ""
@@ -854,7 +854,7 @@ class CopyTest(BottleTestCase):
         (reports / "near").symlink_to("index.html")
         self.users = []
 
-        def exec_command(name, argv, user=None, workdir=None, tty=False, env=None):
+        def exec_command(name, argv, user=None, workdir=None, tty=False, env=None, cli=None):
             self.users.append((user, workdir, tty))
             return ["sh", "-c", f"cd {self.inside[name]} && " + argv[2], *argv[3:]]
 

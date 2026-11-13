@@ -49,15 +49,15 @@ class CommandTest(unittest.TestCase):
         krun.start("b")
         self.assertEqual(run.call_args.args[0][1:], ["machine", "start", "--name", "b"])
 
-    def test_a_network_policy_is_given_as_a_file_at_create_and_configure(self) -> None:
+    def test_a_network_policy_is_given_on_stdin_at_create_and_configure(self) -> None:
         given = []
         run = self.run_with()
-        run.side_effect = lambda argv, **kw: (given.append(json.load(open(argv[argv.index("--network") + 1]))),
+        run.side_effect = lambda argv, **kw: (given.append((argv[argv.index("--network") + 1], json.loads(kw["input"]))),
                                               subprocess.CompletedProcess(argv, 0, "", ""))[1]
         policy = {"routes": [{"address": "192.0.2.1", "port": 80, "socket": "/s"}]}
         krun.create("b", "/stages/b.ext4", [], {}, memory_mib=None, cpus=2, network=policy)
         krun.configure("b", policy)
-        self.assertEqual(given, [policy, policy])
+        self.assertEqual(given, [("-", policy), ("-", policy)])
         self.assertEqual(run.call_args.args[0][1:4], ["machine", "configure", "--name"])
 
     def test_exec_args(self) -> None:
@@ -123,7 +123,7 @@ class KrunBottleTest(GitTestCase):
         archive = self.tmp / "base.ext4"
         archive.write_bytes(b"archive")
 
-        def exec_(name, argv, user=None, workdir=None, input=None, env=None):
+        def exec_(name, argv, user=None, workdir=None, input=None, env=None, cli=None):
             script = argv[-1]
             what = ("contract" if "# bottle contract" in script else "trust CA" if bottles.CA_CERTIFICATE in script
                     else "trust caching CA" if bottles.CACHE_CERTIFICATE in script
@@ -132,20 +132,20 @@ class KrunBottleTest(GitTestCase):
             return ""
 
         def create(name, image, mounts, env, memory_mib, cpus, disk_gib=None, user=None, workdir=None, labels=None,
-                   network=None):
+                   network=None, cli=None):
             self.calls.append("create")
             self.machines[name] = "created"
             self.created = dict(name=name, image=image, mounts=mounts, env=env, memory_mib=memory_mib)
 
-        def start(name):
+        def start(name, cli=None):
             self.calls.append("start")
             self.machines[name] = "running"
 
-        def stop(name):
+        def stop(name, cli=None):
             self.calls.append("stop")
             self.machines[name] = "stopped"
 
-        def delete(name):
+        def delete(name, cli=None):
             self.calls.append("delete")
             self.machines.pop(name, None)
 
@@ -153,8 +153,8 @@ class KrunBottleTest(GitTestCase):
         for target, name, value in (
             (bottles.runners.krun, "create", create), (bottles.runners.krun, "start", start), (bottles.runners.krun, "stop", stop),
             (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),
-            (bottles.runners.krun, "state", lambda name: self.machines.get(name)),
-            (bottles.images, "archive_of", lambda tag: archive),
+            (bottles.runners.krun, "state", lambda name, cli=None: self.machines.get(name)),
+            (bottles.images, "archive_of", lambda tag, cli=None: archive),
             (bottles.daemon, "bind", bind),
             (bottles.daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
             (bottles.runners.prereqs, "ensure_cli", lambda: None),
@@ -163,7 +163,7 @@ class KrunBottleTest(GitTestCase):
             (bottles.auth, "ensure_logged_in", lambda specs: None),
             (bottles.auth, "standins_for", lambda specs: {"CLAUDE_CODE_OAUTH_TOKEN": "stand-in"}),
             (bottles.auth, "credential_destinations", lambda specs: []),
-            (bottles.runners.krun, "ca_certificate", lambda name, hosts: None),
+            (bottles.runners.krun, "ca_certificate", lambda name, hosts, cli=None: None),
         ):
             patcher = mock.patch.object(target, name, value)
             patcher.start()

@@ -1,11 +1,10 @@
 """bottled: the daemon that serves what bottles' machines route to it.
 
-It's two halves in one process. The runner's (Daemon) is what has to sit
-next to the machines: the services socket and each bottle's gateway.
-The controller's (Controller) is what stays with the user: credentials,
-pushes into hubs, and messages between bottles. A runner elsewhere runs the
-first half alone, and reaches the controller's over its link; here the two
-call each other in-process.
+It runs on the controller alone, for every runner's bottles: the services
+socket and each bottle's gateway (Daemon), and what stays with the user
+(Controller): credentials, pushes into hubs, and messages between bottles.
+A remote runner's machines reach the socket through one on the runner that
+ssh forwards here (Links).
 
 bottle-cli decides a bottle's connections itself, by the policy its machine
 was made with (services.network), and gives bottled the ones that policy
@@ -30,10 +29,10 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from bottle import auth, cache, egress, link, messages, services as services_, specs, ssh
+from bottle import auth, cache, egress, messages, services as services_, specs, ssh
 from bottle.host import HostServices, HubGit, Remote, Served, ServiceError
 from bottle.errors import BottleError
-from bottle.store import bottle_home, log_path, open_log, read_json, write_json
+from bottle.store import bottle_home, log_path, open_log
 
 log = logging.getLogger("bottle.daemon")
 log.addHandler(logging.NullHandler())
@@ -63,8 +62,6 @@ LINK_IDLE = 120
 # and the cache's files, for every bottle's builds downloading at once. macOS gives what a shell starts 256.
 OPEN_FILES = 65536
 LINK_IDLE_CHECK = 15
-# How often a runner retries binding the bottles it couldn't when its link was down.
-RESTORE_INTERVAL = 5
 
 
 def socket_path(name: str = "bottled.sock") -> Path:
@@ -99,7 +96,8 @@ def bind(bottle: str, machine: str, repos: tuple[Served, ...] = (), features: tu
 
 
 def ensure_link(runner: str) -> None:
-    """The link to a remote runner up: its ssh connection forwarding the runner's link.sock to bottled here."""
+    """The forward to a remote runner up: its ssh connection forwarding the runner's services socket to bottled's
+    here, starting bottled if it isn't running."""
     _request({"op": "link", "runner": runner}, start=True, timeout=LINK_TIMEOUT + 5)
 
 
@@ -220,12 +218,7 @@ def _send(message: dict, timeout: float = 30) -> dict:
 
 def _start_daemon() -> None:
     log.info("starting bottled")
-    code = Path(__file__).resolve().parent.parent
-    launcher = code / "bin" / "bottle"
-    # A runner elsewhere has the package alone, run as bottle.remote runs it.
-    command = [sys.executable, str(launcher)] if launcher.exists() else [
-        sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv.pop(1)); from bottle.cli import main; "
-        "sys.exit(main())", str(code)]
+    command = [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "bottle")]
     # Its own records go to the log through logging, stamped; this catches anything else it prints.
     with os.fdopen(open_log("bottled"), "a") as out:
         # A new session detaches it from this terminal, so it outlives the command.
@@ -249,19 +242,16 @@ def _start_daemon() -> None:
 class Controller:
     """bottled's controller half: what a bottle's gateway hands to the controller, wherever the bottle runs.
 
-    Credentials and the certificates they're attached behind, pushes into
-    the hub (HubGit), and messages between bottles. `running` says whether a
+    Credentials, pushes into the hub (HubGit), and messages between bottles. `running` says whether a
     bottle's machine is running: its runner's to know.
     """
 
     def __init__(self, policy: egress.Policy, running: Callable[[str], bool]) -> None:
         self.policy = policy
         self._running = running
-        # Its links to remote runners, which bottles there are bound through.
-        self.links = Links(self)
 
     def running(self, bottle: str) -> bool:
-        return self._running(bottle) or any(server.bound(bottle) for server in self.links.servers.values())
+        return self._running(bottle)
 
     async def release(self, bottle: str) -> None:
         """A bottle here has stopped: nothing to do, since its side here is made again each time it's bound."""
@@ -354,38 +344,27 @@ class Controller:
 
 
 class Links:
-    """The controller's links to its remote runners (see link.py), each made when it's first needed.
-
-    For each runner: a socket here that the runner's bottled reaches through
-    the link, and an ssh connection forwarding the runner's link.sock to it,
-    started again whenever it ends, waiting longer each time it fails, up to
-    LINK_BACKOFF. A link that's down is only that: what the runner's bottles
-    ask of the controller fails meanwhile.
+    """The forwards to remote runners, each made when it's first needed: an ssh connection forwarding the runner's
+    services socket (ssh.SERVICES) to bottled's here, so what its machines route reaches bottled as a machine here
+    does. Started again whenever it ends, waiting longer each time it fails, up to LINK_BACKOFF; let go when no
+    bottle there has been bound for LINK_IDLE, or the runner's detached. One that's down is only that: what the
+    runner's machines route is refused meanwhile.
     """
 
-    def __init__(self, controller: "Controller") -> None:
-        self.controller = controller
-        self.servers: dict[str, link.LinkServer] = {}
-        self.sockets: dict[str, asyncio.Server] = {}
+    def __init__(self, here: Callable[[], Path], bound: Callable[[str], bool]) -> None:
+        self.here = here
+        self.bound = bound
         self.keeping: dict[str, asyncio.Task] = {}
         self.up: dict[str, asyncio.Event] = {}
         self.processes: dict[str, asyncio.subprocess.Process] = {}
 
     async def ensure(self, runner: str) -> None:
-        """The link to `runner` up, or BottleError saying why it isn't."""
+        """The forward to `runner` up, or BottleError saying why it isn't."""
         from bottle import runners
 
         destination = runners.registered().get(runner, {}).get("ssh")
         if destination is None:
             raise BottleError(f"no runner named {runner!r}")
-        if runner not in self.servers:
-            server = self.servers[runner] = link.LinkServer(runner, self.controller)
-            path = socket_path(f"links/{runner}.sock")
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            path.unlink(missing_ok=True)
-            self.sockets[runner] = await asyncio.start_unix_server(server.handle, str(path))
-            os.chmod(path, 0o600)
-            await self._restore(runner, server)
         up = self.up.setdefault(runner, asyncio.Event())
         failure: list[str] = []
         task = self.keeping.get(runner)
@@ -394,48 +373,30 @@ class Links:
         try:
             await asyncio.wait_for(up.wait(), LINK_TIMEOUT)
         except TimeoutError:
-            raise BottleError(f"runner {runner} is unreachable: its link didn't come up"
+            raise BottleError(f"runner {runner} is unreachable: its forward didn't come up"
                               f"{' (' + failure[-1] + ')' if failure else ''}") from None
 
-    async def _restore(self, runner: str, server: link.LinkServer) -> None:
-        """Make the controller's side again for the bottles on `runner`, from the registry.
+    async def _in_use(self, runner: str) -> bool:
+        """Whether a bottle on `runner` is bound here."""
+        from bottle import bottles
 
-        A runner's bottled binds a bottle through the link when its machine
-        starts, and keeps it bound however often bottled here restarts; this
-        one, restarted, would otherwise not know it until the bottle's next
-        start. Every bottle there that's ready is taken to be running: one
-        that isn't asks nothing of it.
-        """
-        from bottle import bottles, runners
-
-        if await asyncio.to_thread(runners.is_detached, runner):
-            return  # turned off: none of its bottles runs
-        for bottle in await asyncio.to_thread(lambda: list(bottles.load().values())):
-            if bottle.runner != runner or bottle.status != "ready":
-                continue
-            try:
-                _, _, services, gateway = await self.controller.egress(bottle.name, bottles.served(bottle), bottle.features)
-            except Exception as e:  # one bad bottle mustn't stop the rest
-                log.warning("%s: couldn't restore its side of runner %s's link: %s", bottle.name, runner, e)
-                continue
-            server.bottles[bottle.name] = (services, gateway)
+        there = await asyncio.to_thread(lambda: [b.name for b in bottles.load().values() if b.runner == runner])
+        return any(self.bound(b) for b in there)
 
     async def _keep(self, runner: str, destination: str, failure: list[str]) -> None:
-        """Keep the link to `runner` up while any bottle there is bound through it, and it isn't detached; then let
-        it go."""
+        """Keep the forward to `runner` up while any bottle there is bound, and it isn't detached; then let it go."""
         from bottle import runners
 
         transport = ssh.SshTransport(runner, destination)
-        here = socket_path(f"links/{runner}.sock")
         backoff, idle = 1, 0.0
         while idle < LINK_IDLE and not runners.is_detached(runner):
             try:
-                there = await asyncio.to_thread(transport.prepare_link)
+                there = await asyncio.to_thread(transport.prepare_forward)
                 process = self.processes[runner] = await asyncio.create_subprocess_exec(
-                    *transport.forward_command(there, here), stdin=asyncio.subprocess.DEVNULL,
+                    *transport.forward_command(there, self.here()), stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-                if await asyncio.to_thread(transport.wait_for_link, there, process, LINK_APPEAR):
-                    log.info("link to runner %s up", runner)
+                if await asyncio.to_thread(transport.wait_for_forward, there, process, LINK_APPEAR):
+                    log.info("forward to runner %s up", runner)
                     self.up[runner].set()
                     backoff = 1
                 elif process.returncode is None:
@@ -445,36 +406,35 @@ class Links:
                     said = (await process.stderr.read()).decode(errors="replace").strip().splitlines()
                     failure.append(f"its socket didn't appear on the runner within {LINK_APPEAR}s"
                                    + (f" ({ssh.explained(said[-1])})" if said else ""))
-                    log.warning("link to runner %s: %s", runner, failure[-1])
+                    log.warning("forward to runner %s: %s", runner, failure[-1])
                     raise _Retry
                 while process.returncode is None and idle < LINK_IDLE and not runners.is_detached(runner):
                     try:
                         await asyncio.wait_for(asyncio.shield(process.wait()), LINK_IDLE_CHECK)
                     except TimeoutError:
-                        idle = 0.0 if self.servers[runner].bottles else idle + LINK_IDLE_CHECK
+                        idle = 0.0 if await self._in_use(runner) else idle + LINK_IDLE_CHECK
                 if process.returncode is None:
-                    log.info("link to runner %s let go: no bottle there is bound through it, or it's detached", runner)
+                    log.info("forward to runner %s let go: no bottle there is bound, or it's detached", runner)
                     process.terminate()
                     await process.wait()
                     break
                 why = (await process.stderr.read()).decode(errors="replace").strip().splitlines()
                 failure.append(ssh.explained(why[-1]) if why else f"ssh exited {process.returncode}")
-                log.warning("link to runner %s down: %s", runner, failure[-1])
+                log.warning("forward to runner %s down: %s", runner, failure[-1])
             except BottleError as e:
                 failure.append(str(e))
-                log.warning("link to runner %s: %s", runner, e)
+                log.warning("forward to runner %s: %s", runner, e)
             except _Retry:
                 pass
             self.up[runner].clear()
             await asyncio.sleep(backoff)
-            # Not tried for ever for nothing: with no bottle bound through it, the waiting counts as idle.
-            idle = idle + backoff if not self.servers[runner].bottles else 0.0
+            # Not tried for ever for nothing: with no bottle bound there, the waiting counts as idle.
+            idle = 0.0 if await self._in_use(runner) else idle + backoff
             backoff = min(backoff * 2, LINK_BACKOFF)
         self.up[runner].clear()
 
     async def bring_up(self) -> None:
-        """The links to runners with bottles, but those detached: theirs may be running, and need the controller to be
-        decided."""
+        """The forwards to runners with bottles, but those detached: theirs may be running."""
         from bottle import bottles, runners
 
         wanted = {b.runner for b in await asyncio.to_thread(lambda: list(bottles.load().values()))
@@ -492,8 +452,6 @@ class Links:
         for process in self.processes.values():
             if process.returncode is None:
                 process.terminate()
-        for server in self.sockets.values():
-            server.close()
 
 
 class _Retry(Exception):
@@ -516,11 +474,10 @@ class Daemon:
         self.locks: dict[str, asyncio.Lock] = {}
         # The code it runs, by its hash, as it was when it started: what a command checks it against.
         self.code = ssh.code_hash()
-        # The controller's half: here, in this process, unless the controller is elsewhere.
+        # The controller's half, in this process.
         self.controller = controller or Controller(self.policy, self.services.bound)
-        # With the controller elsewhere, this runner has no registry of bottles to restore them from: what each
-        # was bound with is kept here instead (remembered).
-        self.remembered: Path | None = None
+        # The forwards to remote runners, whose machines' routes reach the services socket through them.
+        self.links = Links(lambda: self.services_path or services_socket(), self.services.bound)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = await reader.readline()
@@ -542,9 +499,7 @@ class Daemon:
                     await self.release(message["bottle"])
                     reply = {"ok": True}
                 case "link":
-                    if not isinstance(self.controller, Controller):
-                        raise BottleError("a runner has no links of its own: its controller does")
-                    await self.controller.links.ensure(message["runner"])
+                    await self.links.ensure(message["runner"])
                     reply = {"ok": True}
                 case "shutdown":
                     log.info("shutdown requested")
@@ -569,37 +524,19 @@ class Daemon:
                 bottle, self.policy, services=services, injections=injections, caches=cached,
                 hand_off=controller_gateway.serve_handed_off,
             )
-            if self.remembered is not None:
-                self._remember(bottle, (bottle, machine, link.served_to_json(repos), list(features)))
             self.services.bind(bottle, machine, gateway)
-
-    def _remember(self, bottle: str, binding: tuple | None) -> None:
-        bindings = read_json(self.remembered) or {}
-        if binding is None:
-            bindings.pop(bottle, None)
-        else:
-            bindings[bottle] = binding
-        write_json(self.remembered, bindings)
-
-    def remembered_bindings(self) -> list[tuple]:
-        """What each bottle was last bound with here, as restore() takes them."""
-        return [(b, machine, link.served_from_json(repos), tuple(features))
-                for b, machine, repos, features in (read_json(self.remembered) or {}).values()]
 
     async def release(self, bottle: str) -> None:
         """Stop answering `bottle`'s machine: it's stopped, or gone."""
         async with self.locks.setdefault(bottle, asyncio.Lock()):
             self.services.release(bottle)
-            if self.remembered is not None:
-                self._remember(bottle, None)
         await self.controller.release(bottle)
 
     async def restore(self, bound: list[tuple]) -> list[tuple]:
         """Answer the machines of bottles there were before bottled started.
 
         Each is (name, machine, the repos it's served, features), as
-        bound_bottles() and remembered_bindings() give them. Returns those it
-        couldn't bind.
+        bound_bottles() gives them. Returns those it couldn't bind.
         """
         unrestored = []
         for binding in bound:
@@ -620,17 +557,12 @@ def _permissions(bottle) -> list[str]:
 
 
 def bound_bottles() -> list[tuple[str, str, tuple[Served, ...], tuple[str, ...]]]:
-    """(name, machine, the repos it's served, features) of every ready bottle on this machine."""
+    """(name, machine, the repos it's served, features) of every ready bottle, wherever it runs, but on a runner
+    detached (turned off)."""
     from bottle import bottles, runners  # bottles imports this module
 
     return [(b.name, b.machine, bottles.served(b), tuple(b.features)) for b in bottles.load().values()
-            if b.status == "ready" and b.runner == runners.LOCAL]
-
-
-async def _keep_restoring(daemon: Daemon, unrestored: list[tuple]) -> None:
-    while unrestored:
-        await asyncio.sleep(RESTORE_INTERVAL)
-        unrestored = await daemon.restore(unrestored)
+            if b.status == "ready" and (b.runner == runners.LOCAL or not runners.is_detached(b.runner))]
 
 
 def raise_open_files(wanted: int = OPEN_FILES) -> int:
@@ -655,12 +587,7 @@ def raise_open_files(wanted: int = OPEN_FILES) -> int:
 async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     path = path or socket_path()
     log.info("open files: up to %d", raise_open_files())
-    if daemon is None:
-        # On a runner elsewhere, bottle.remote names its link: the controller's half is reached through it.
-        there = os.environ.get("BOTTLE_LINK")
-        daemon = Daemon(controller=link.LinkController(Path(there))) if there else Daemon()
-        if there:
-            daemon.remembered = bottle_home() / "bindings.json"
+    daemon = daemon or Daemon()
     # Owner-only: anyone who can reach the socket can bind bottles.
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.stat().st_uid != os.getuid():
@@ -678,13 +605,9 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     log.info("services listening on %s", services_path)
     # Before answering anyone: whoever started bottled may be about to use a bottle whose machine
     # is running, and what it routes here must find it bound.
-    if daemon.remembered is None:
-        await daemon.restore(await asyncio.to_thread(bound_bottles))
-        # In the background: a runner that's off mustn't keep bottled from answering.
-        retrying = asyncio.create_task(daemon.controller.links.bring_up())
-    else:
-        # The link may not be up yet: those that can't be bound now are tried again until they are.
-        retrying = asyncio.create_task(_keep_restoring(daemon, await daemon.restore(daemon.remembered_bindings())))
+    await daemon.restore(await asyncio.to_thread(bound_bottles))
+    # In the background: a runner that's off mustn't keep bottled from answering.
+    retrying = asyncio.create_task(daemon.links.bring_up())
     server = await asyncio.start_unix_server(daemon.handle, str(path))
     os.chmod(path, 0o600)
     log.info("bottled %d listening on %s", os.getpid(), path)
@@ -694,8 +617,7 @@ async def serve(path: Path | None = None, daemon: Daemon | None = None) -> None:
     finally:
         if retrying is not None:
             retrying.cancel()
-        if isinstance(daemon.controller, Controller):
-            await daemon.controller.links.close()
+        await daemon.links.close()
         routed.close()
         services_path.unlink(missing_ok=True)
         path.unlink(missing_ok=True)

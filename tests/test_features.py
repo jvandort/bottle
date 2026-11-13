@@ -846,8 +846,8 @@ class RemoveStaleTest(FeatureTestCase):
         self.kept: set[str] = set()
         from bottle import bottles as bottles_
         with mock.patch.object(features.images, "built", return_value=images), \
-                mock.patch.object(features.images, "forget", side_effect=self.deleted.append), \
-                mock.patch.object(features.images, "remove_unused", side_effect=self.kept.update), \
+                mock.patch.object(features.images, "forget", side_effect=lambda tag, cli=None: self.deleted.append(tag)), \
+                mock.patch.object(features.images, "remove_unused", side_effect=lambda in_use, cli=None: self.kept.update(in_use)), \
                 mock.patch.object(bottles_, "load", return_value=bottles):
             return features.remove_stale()
 

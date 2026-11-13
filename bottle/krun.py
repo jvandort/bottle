@@ -18,7 +18,6 @@ Machines, and running commands in them, are all this module does: building
 the images machines boot is images.py's, on top of bottle-cli's builds.
 """
 
-import contextlib
 import json
 import os
 import subprocess
@@ -27,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bottle.errors import BottleError
+from bottle.store import bottle_home
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -37,9 +37,8 @@ def binary() -> str:
 
 
 def dist() -> Path:
-    """Where `cargo xtask dist` builds bottle-cli, from this repo: $BOTTLE_DIST (a runner's, see remote.py), else
-    the repo's target/dist."""
-    return Path(os.environ.get("BOTTLE_DIST") or REPO / "target" / "dist")
+    """Where `cargo xtask dist` builds bottle-cli, from this repo: its target/dist."""
+    return REPO / "target" / "dist"
 
 
 # A machine's caps. vCPUs cost nothing idle; memory is committed as the guest touches it.
@@ -57,7 +56,7 @@ class Mount:
 
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
            disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
-           labels: dict[str, str] | None = None, network: dict | None = None) -> None:
+           labels: dict[str, str] | None = None, network: dict | None = None, cli: "Cli | None" = None) -> None:
     """Create a stopped machine from `image` (a stage's disk), its mounts read-only; `memory_mib` and `disk_gib`
     None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
     `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
@@ -71,78 +70,71 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
         args += ["-v", f"{m.source}:{m.target}:ro"]
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]
-    with _policy(network) as path:
-        _run(*args, *(["--network", path] if path else []))
+    if network is not None:
+        args += ["--network", "-"]
+    _run(*args, input=json.dumps(network) if network is not None else None, cli=cli)
 
 
-def configure(name: str, network: dict) -> None:
+def configure(name: str, network: dict, cli: "Cli | None" = None) -> None:
     """Give a stopped machine the policy its connections are decided by (one made before it had one, say)."""
-    with _policy(network) as path:
-        _run("machine", "configure", "--name", name, "--network", path)
+    _run("machine", "configure", "--name", name, "--network", "-", input=json.dumps(network), cli=cli)
 
 
-@contextlib.contextmanager
-def _policy(network: dict | None):
-    """A network policy as a file, for bottle-cli to take, while it's needed; None for none."""
-    if network is None:
-        yield None
-        return
-    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="network-") as file:
-        json.dump(network, file)
-        file.flush()
-        yield file.name
-
-
-def start(name: str) -> None:
+def start(name: str, cli: "Cli | None" = None) -> None:
     """Start a machine: by the policy it was made with, nothing else needed."""
-    _run("machine", "start", "--name", name)
+    _run("machine", "start", "--name", name, cli=cli)
 
 
-def ca_certificate(name: str, hosts: list[str]) -> str | None:
+def ca_certificate(name: str, hosts: list[str], cli: "Cli | None" = None) -> str | None:
     """The certificate of the caching CA bottle-cli answers `name`'s cached https `hosts` behind (a machine's, or
     images.BUILDS_CA for builds), made if missing; None for no hosts."""
-    return _run("ca", "certificate", name, *hosts) or None
+    return _run("ca", "certificate", name, *hosts, cli=cli) or None
 
 
-def stop(name: str) -> None:
-    _run("machine", "stop", "--name", name)
+def stop(name: str, cli: "Cli | None" = None) -> None:
+    _run("machine", "stop", "--name", name, cli=cli)
 
 
-def rename(name: str, new: str) -> None:
+def rename(name: str, new: str, cli: "Cli | None" = None) -> None:
     """Rename a stopped machine."""
-    _run("machine", "rename", "--name", name, "--to", new)
+    _run("machine", "rename", "--name", name, "--to", new, cli=cli)
 
 
-def delete(name: str) -> None:
+def delete(name: str, cli: "Cli | None" = None) -> None:
     """Delete a machine; a no-op if there's none."""
-    if state(name) is not None:
-        _run("machine", "delete", "--name", name, "-f")
+    if state(name, cli=cli) is not None:
+        _run("machine", "delete", "--name", name, "-f", cli=cli)
 
 
-def running() -> list[str]:
-    """The machines running here, whoever made them: any that isn't stopped (or never started)."""
-    machines = json.loads(_run("machine", "ls", "--json") or "[]")
+def running(cli: "Cli | None" = None) -> list[str]:
+    """The machines running there, whoever made them: any that isn't stopped (or never started)."""
+    machines = json.loads(_run("machine", "ls", "--json", cli=cli) or "[]")
     return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
 
 
-def state(name: str) -> str | None:
+def state(name: str, cli: "Cli | None" = None) -> str | None:
     """"running", "stopped", "created", or None if there's no such machine."""
     try:
-        return json.loads(_run("machine", "status", "--name", name, "--json"))["state"]
+        return json.loads(_run("machine", "status", "--name", name, "--json", cli=cli))["state"]
     except Missing:
         return None
 
 
 def exec_(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-          input: str | None = None, env: dict[str, str] | None = None) -> str:
+          input: str | None = None, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> str:
     """Run a command in a running machine and return its output; `input` is its stdin."""
-    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "")
+    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "", cli=cli)
 
 
 def exec_command(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-                 tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
+                 tty: bool = False, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> list[str]:
     """The command line that runs `argv` in a machine with stdin attached (and a TTY), for other tools to run."""
-    return [binary(), *exec_args(name, argv, user, workdir, env, tty)]
+    return (cli or LOCAL).command(exec_args(name, argv, user, workdir, env, tty), tty=tty)
+
+
+def info(cli: "Cli | None" = None) -> dict:
+    """The machine's memory (memory_mib) and cores (cpus), as bottle-cli there sees them."""
+    return json.loads(_run("info", "--json", cli=cli))
 
 
 def exec_args(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
@@ -164,11 +156,37 @@ class Missing(BottleError):
     """bottle-cli found no such machine."""
 
 
-def _run(*args: str, input: str | None = None, env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(
-        [binary(), *args], capture_output=True, text=True, input=input,
-        env={**os.environ, **env} if env else None,
-    )
+class Cli:
+    """Where bottle-cli runs: on this machine (LOCAL), or a runner's, over ssh (ssh.RemoteCli)."""
+
+    def command(self, args: list[str], tty: bool | None = None) -> list[str]:
+        """The command line that runs bottle-cli with `args` there."""
+        return [binary(), *args]
+
+    def home(self) -> str:
+        """$BOTTLE_HOME there, absolute."""
+        return str(bottle_home())
+
+    def run(self, args: list[str], input: str | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(self.command(args, tty=False), capture_output=True, text=True, input=input)
+
+    def build(self, recipe: dict, network: dict, context: Path, store: str, tag: str) -> subprocess.CompletedProcess:
+        """`bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged `tag` in `store`:
+        its progress on this process's stderr, the disks it made on stdout."""
+        with tempfile.TemporaryDirectory(prefix="build-") as here:
+            made = {**recipe, "mount": {**recipe["mount"], "source": str(context.resolve())}}
+            (Path(here) / "recipe.json").write_text(json.dumps(made))
+            (Path(here) / "network.json").write_text(json.dumps(network))
+            return subprocess.run(self.command(["image", "build", f"{here}/recipe.json", store, "--tag", tag,
+                                                "--network", f"{here}/network.json"]),
+                                  stdout=subprocess.PIPE, text=True)
+
+
+LOCAL = Cli()
+
+
+def _run(*args: str, input: str | None = None, cli: Cli | None = None) -> str:
+    result = (cli or LOCAL).run(list(args), input=input)
     if result.returncode != 0:
         message = _error(result.stderr)
         if message.startswith("no machine "):

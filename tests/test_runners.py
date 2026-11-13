@@ -23,7 +23,7 @@ class LocalRunnerTest(GitTestCase):
     def test_starting_binds_its_machine_at_bottled_then_starts_it(self) -> None:
         calls = []
         with mock.patch.object(runners.daemon, "bind", side_effect=lambda *a: calls.append(("bind", *a))), \
-                mock.patch.object(runners.krun, "start", side_effect=lambda *a: calls.append(("start", *a))):
+                mock.patch.object(runners.krun, "start", side_effect=lambda *a, cli: calls.append(("start", *a))):
             runners.get().start("b-machine", "b", (), ["tools"])
         self.assertEqual(calls, [("bind", "b", "b-machine", (), ["tools"]), ("start", "b-machine")])
 
@@ -35,7 +35,7 @@ class LocalRunnerTest(GitTestCase):
         routed = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80,
                                             "socket": str(runners.daemon.services_socket())}]}
         self.assertEqual(create.call_args.args[-1], routed)
-        configure.assert_called_once_with("m", routed)
+        configure.assert_called_once_with("m", routed, cli=runners.krun.LOCAL)
 
     def test_a_machine_mounts_the_repos_own_objects(self) -> None:
         path = self.make_repo("example")
@@ -46,4 +46,4 @@ class LocalRunnerTest(GitTestCase):
             runners.get().create("m", Path("/stages/a.ext4"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                  {"A": "1"}, 512, 50)
         create.assert_called_once_with("m", "/stages/a.ext4", [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
-                                       {"A": "1"}, 512, 12, 50, None, None, None, None)
+                                       {"A": "1"}, 512, 12, 50, None, None, None, None, cli=runners.krun.LOCAL)
