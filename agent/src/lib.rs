@@ -215,8 +215,15 @@ static STOPPING: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
 fn stop(upper: Option<&File>) -> io::Result<()> {
     *STOPPING.write().unwrap_or_else(|e| e.into_inner()) = true;
     for (signal, wait) in [(libc::SIGTERM, GRACE), (libc::SIGKILL, GRACE)] {
-        // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
-        unsafe { libc::kill(-1, signal) };
+        if everything_is_mine() {
+            // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
+            unsafe { libc::kill(-1, signal) };
+        } else {
+            for pid in mine() {
+                // SAFETY: kill with a pid, one of this process's descendants.
+                unsafe { libc::kill(pid as libc::pid_t, signal) };
+            }
+        }
         let deadline = std::time::Instant::now() + wait;
         while others_running() && std::time::Instant::now() < deadline {
             thread::sleep(std::time::Duration::from_millis(20));
@@ -279,15 +286,29 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
     }
 }
 
-/// Whether anything is still running but this process and pid 1: kernel threads (which kill(-1)
-/// counts, never ending) and zombies (dead, to be reaped) aside.
+/// Whether every process this one may signal is the machine's, to stop: as the VM's init, or the
+/// init of a pid namespace of its own. Out of either (a test running it as a stand-in), only its
+/// own descendants are: kill(-1) would end every process of its user.
+fn everything_is_mine() -> bool {
+    BOOTED.load(std::sync::atomic::Ordering::Relaxed) || std::process::id() == 1
+}
+
+/// Whether anything of the machine's is still running but this process and pid 1: kernel threads
+/// (which kill(-1) counts, never ending) and zombies (dead, to be reaped) aside.
 fn others_running() -> bool {
     !still_running().is_empty()
 }
 
-/// What's still running but this process and pid 1, kernel threads and zombies aside: "pid comm"s.
-fn still_running() -> Vec<String> {
-    let me = std::process::id();
+/// A process, as /proc has it.
+struct Process {
+    pid: u32,
+    ppid: u32,
+    comm: String,
+    /// Not a zombie, and not a kernel thread.
+    live: bool,
+}
+
+fn processes() -> Vec<Process> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -295,21 +316,54 @@ fn still_running() -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-            if pid == 1 || pid == me {
-                return None;
-            }
             let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
             // "pid (comm) state ppid pgrp session tty tpgid flags ...", comm perhaps with spaces.
             let (head, rest) = stat.rsplit_once(')')?;
-            let comm = head.split_once('(').map_or("", |(_, c)| c);
+            let comm = head.split_once('(').map_or("", |(_, c)| c).to_string();
             let fields: Vec<&str> = rest.split_whitespace().collect();
             let state = fields.first().copied().unwrap_or("Z");
+            let ppid = fields.get(1).and_then(|f| f.parse().ok()).unwrap_or(0);
             let flags: u64 = fields.get(6).and_then(|f| f.parse().ok()).unwrap_or(0);
             /// PF_KTHREAD, from linux/sched.h.
             const KERNEL_THREAD: u64 = 0x0020_0000;
-            (!matches!(state, "Z" | "X") && flags & KERNEL_THREAD == 0)
-                .then(|| format!("{pid} {comm}"))
+            let live = !matches!(state, "Z" | "X") && flags & KERNEL_THREAD == 0;
+            Some(Process {
+                pid,
+                ppid,
+                comm,
+                live,
+            })
         })
+        .collect()
+}
+
+/// This process's descendants, live: what's the machine's when not everything is.
+fn mine() -> Vec<u32> {
+    let all = processes();
+    let mut found = vec![std::process::id()];
+    let mut i = 0;
+    while i < found.len() {
+        let parent = found[i];
+        found.extend(all.iter().filter(|p| p.ppid == parent).map(|p| p.pid));
+        i += 1;
+    }
+    found.remove(0);
+    let live: std::collections::HashSet<u32> =
+        all.iter().filter(|p| p.live).map(|p| p.pid).collect();
+    found.into_iter().filter(|p| live.contains(p)).collect()
+}
+
+/// What's still running of the machine's but this process and pid 1, kernel threads and zombies
+/// aside: "pid comm"s.
+fn still_running() -> Vec<String> {
+    let me = std::process::id();
+    let scope: Option<std::collections::HashSet<u32>> =
+        (!everything_is_mine()).then(|| mine().into_iter().collect());
+    processes()
+        .into_iter()
+        .filter(|p| p.live && p.pid != 1 && p.pid != me)
+        .filter(|p| scope.as_ref().is_none_or(|s| s.contains(&p.pid)))
+        .map(|p| format!("{} {}", p.pid, p.comm))
         .collect()
 }
 
