@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["agent-proto", "agent", "agent-client", "cli", "disk", "xtask"]
+members = ["agent-proto", "agent", "agent-client", "cli", "disk", "xtask", "folio/cli"]
 
 [workspace.package]
 edition = "2024"
