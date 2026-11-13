@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from bottle import prereqs, runners
+from bottle import images, prereqs, runners
 from bottle.errors import BottleError
 from tests.support import GitTestCase, built_cli, register_runner
 
@@ -92,9 +92,10 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
         context = self.tmp / "context"
         context.mkdir()
         (context / "install.sh").write_text("the context's install.sh\n")
-        with mock.patch.object(runners.images.krun, "ca_certificate", return_value=None), \
+        with mock.patch.object(runners.krun, "ca_certificate", return_value=None), \
                 mock.patch("sys.stderr"), self.assertRaisesRegex(BottleError, "image build failed"):
-            self.box.build(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []})
+            images.build_recipe(context, "localhost/bottle/x:latest", "abc", {"pull": "debian", "steps": []},
+                                cli=self.box.cli)
 
     def test_a_shell_there_is_its_bottle_cli_exec_by_runner_slash_name(self) -> None:
         command = self.box.exec_command("bottle-b", ["bash", "-l"], user="genie", workdir="/workspace", tty=True)

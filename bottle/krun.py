@@ -7,7 +7,7 @@ tests/test_krun_contract.py checks:
 
   - decided egress: a machine decides each TCP connection by the policy it
     was made with (services.network), caching what it says, and gives what it
-    routes to bottled's services socket (see services.py); it has no UDP.
+    routes to folio serve's sockets (see services.py); it has no UDP.
   - DNS, answered in the guest from the runner's resolver at the time of each
     lookup.
   - exec, its stdin, stdout and stderr streamed, and exit status kept.
@@ -15,7 +15,10 @@ tests/test_krun_contract.py checks:
     disk kept across stops.
 
 Machines, and running commands in them, are all this module does: building
-the images machines boot is images.py's, on top of bottle-cli's builds.
+the images machines boot is images.py's, on top of bottle-cli's builds. A
+machine is named as bottle-cli here names it: RUNNER/NAME for a runner's (see
+runners.py). bottle-cli is built from this checkout first, if it's changed
+(prereqs.ensure_cli).
 """
 
 import json
@@ -25,6 +28,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from bottle import prereqs
 from bottle.errors import BottleError
 from bottle.store import bottle_home
 
@@ -52,7 +56,7 @@ class Mount:
 
 def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memory_mib: int | None, cpus: int,
            disk_gib: int | None = None, user: str | None = None, workdir: str | None = None,
-           labels: dict[str, str] | None = None, network: dict | None = None, cli: "Cli | None" = None) -> None:
+           labels: dict[str, str] | None = None, network: dict | None = None) -> None:
     """Create a stopped machine from `image` (a stage's disk), its mounts read-only; `memory_mib` and `disk_gib`
     None: bottle-cli's defaults. The disk is its own, sparse, where what the machine writes goes. `user` and
     `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls` shows of it;
@@ -68,17 +72,17 @@ def create(name: str, image: str, mounts: list[Mount], env: dict[str, str], memo
         args += ["-e", f"{key}={value}"]
     if network is not None:
         args += ["--network", "-"]
-    _run(*args, input=json.dumps(network) if network is not None else None, cli=cli)
+    _run(*args, input=json.dumps(network) if network is not None else None)
 
 
-def configure(name: str, network: dict, cli: "Cli | None" = None) -> None:
+def configure(name: str, network: dict) -> None:
     """Give a stopped machine the policy its connections are decided by (one made before it had one, say)."""
-    _run("machine", "configure", "--name", name, "--network", "-", input=json.dumps(network), cli=cli)
+    _run("machine", "configure", "--name", name, "--network", "-", input=json.dumps(network))
 
 
-def start(name: str, cli: "Cli | None" = None) -> None:
+def start(name: str) -> None:
     """Start a machine: by the policy it was made with, nothing else needed."""
-    _run("machine", "start", "--name", name, cli=cli)
+    _run("machine", "start", "--name", name)
 
 
 def ca_certificate(name: str, hosts: list[str], cli: "Cli | None" = None) -> str | None:
@@ -87,19 +91,19 @@ def ca_certificate(name: str, hosts: list[str], cli: "Cli | None" = None) -> str
     return _run("ca", "certificate", name, *hosts, cli=cli) or None
 
 
-def stop(name: str, cli: "Cli | None" = None) -> None:
-    _run("machine", "stop", "--name", name, cli=cli)
+def stop(name: str) -> None:
+    _run("machine", "stop", "--name", name)
 
 
-def rename(name: str, new: str, cli: "Cli | None" = None) -> None:
+def rename(name: str, new: str) -> None:
     """Rename a stopped machine."""
-    _run("machine", "rename", "--name", name, "--to", new, cli=cli)
+    _run("machine", "rename", "--name", name, "--to", new)
 
 
-def delete(name: str, cli: "Cli | None" = None) -> None:
+def delete(name: str) -> None:
     """Delete a machine; a no-op if there's none."""
-    if state(name, cli=cli) is not None:
-        _run("machine", "delete", "--name", name, "-f", cli=cli)
+    if state(name) is not None:
+        _run("machine", "delete", "--name", name, "-f")
 
 
 def running(cli: "Cli | None" = None) -> list[str]:
@@ -108,24 +112,24 @@ def running(cli: "Cli | None" = None) -> list[str]:
     return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
 
 
-def state(name: str, cli: "Cli | None" = None) -> str | None:
+def state(name: str) -> str | None:
     """"running", "stopped", "created", or None if there's no such machine."""
     try:
-        return json.loads(_run("machine", "status", "--name", name, "--json", cli=cli))["state"]
+        return json.loads(_run("machine", "status", "--name", name, "--json"))["state"]
     except Missing:
         return None
 
 
 def exec_(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-          input: str | None = None, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> str:
+          input: str | None = None, env: dict[str, str] | None = None) -> str:
     """Run a command in a running machine and return its output; `input` is its stdin."""
-    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "", cli=cli)
+    return _run(*exec_args(name, argv, user, workdir, env), input=input if input is not None else "")
 
 
 def exec_command(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
-                 tty: bool = False, env: dict[str, str] | None = None, cli: "Cli | None" = None) -> list[str]:
+                 tty: bool = False, env: dict[str, str] | None = None) -> list[str]:
     """The command line that runs `argv` in a machine with stdin attached (and a TTY), for other tools to run."""
-    return (cli or LOCAL).command(exec_args(name, argv, user, workdir, env, tty), tty=tty)
+    return LOCAL.command(exec_args(name, argv, user, workdir, env, tty), tty=tty)
 
 
 def info(cli: "Cli | None" = None) -> dict:
@@ -157,6 +161,7 @@ class Cli:
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
         """The command line that runs bottle-cli with `args` there."""
+        prereqs.ensure_cli()
         return [binary(), *args]
 
     def home(self) -> str:
@@ -190,7 +195,7 @@ class RunnerCli(Cli):
         self._home: str | None = None
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
-        return [binary(), "on", self.runner, *args]
+        return super().command(["on", self.runner, *args], tty)
 
     def home(self) -> str:
         if self._home is None:

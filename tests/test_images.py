@@ -82,7 +82,7 @@ class StoreTest(GitTestCase):
 
         for target, name, fake in (
             (images.subprocess, "run", self.cli),
-            (images.prereqs, "ensure_cli", lambda: None),
+            (images.krun.prereqs, "ensure_cli", lambda: None),
             (features, "apt_https_hosts", lambda: ["apt.example"]),
         ):
             patcher = mock.patch.object(target, name, fake)
@@ -126,10 +126,10 @@ class StoreTest(GitTestCase):
         self.labels[name] = recipe["labels"]
         return done(f"{store}/below.ext4\n{store}/{name}.ext4\n")
 
-    def build(self, tag: str, inputs: str, recipe: dict | None = None, no_cache: bool = False) -> Path:
+    def build(self, tag: str, inputs: str, recipe: dict | None = None) -> Path:
         recipe = recipe or {"pull": "debian:13", "steps": [{"run": ["true"]}]}
         with mock.patch("sys.stderr"):
-            return images.build_recipe(self.context, tag, inputs, recipe, no_cache)
+            return images.build_recipe(self.context, tag, inputs, recipe)
 
     def test_a_build_reaches_the_public_network_its_apt_repositories_kept_and_nothing_routed(self) -> None:
         self.build("localhost/bottle/base:latest", "aaaa" * 16)
@@ -172,11 +172,6 @@ class StoreTest(GitTestCase):
         self.assertEqual(disk.name, "aaaaaaaa.ext4")
         self.assertEqual(images.archive_of("localhost/bottle/base:latest"), disk)
         self.assertEqual(images.built_labels("localhost/bottle/base:latest"), {"bottle.inputs": "aaaa" * 16})
-
-    def test_no_cache_makes_the_stage_anew(self) -> None:
-        first = self.build("localhost/bottle/base:latest", "aaaa" * 16)
-        again = self.build("localhost/bottle/base:latest", "aaaa" * 16, no_cache=True)
-        self.assertNotEqual(first, again)
 
     def test_on_an_image_that_isnt_built_is_an_error(self) -> None:
         with self.assertRaisesRegex(BottleError, "isn't built"):

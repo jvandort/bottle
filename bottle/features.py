@@ -801,47 +801,52 @@ def inputs_hash(features: list[Feature]) -> str:
     return digest.hexdigest()
 
 
-def ensure_built(specs: list[str], runner=None) -> str:
-    """Build the base image with the features in `specs` on `runner` (default: this machine), and the base image
-    under it, if missing or stale there; return its tag."""
+def ensure_built(specs: list[str], runner) -> str:
+    """Build the base image with the features in `specs` on `runner`, and the base image under it, if missing or
+    stale there; return its tag."""
     features = resolve(specs)
     tag = image_tag(features)
     built = _ensure_base(runner)
-    if features and not images.is_current(tag, inputs_hash(features), runner):
-        print(f"Building {tag}{images._where(runner)}...", file=sys.stderr)
-        _build(features, tag, runner=runner)
+    if features and not images.is_current(tag, inputs_hash(features), runner.cli):
+        print(f"Building {tag}{_where(runner)}...", file=sys.stderr)
+        images.build_recipe(FEATURES, tag, inputs_hash(features), recipe(features), cli=runner.cli)
         built = True
     if built:
-        _report_removed(remove_stale(runner))
+        for name in remove_stale(runner):
+            print(f"Removed stale image {name}", file=sys.stderr)
     return tag
 
 
-def _ensure_base(runner=None, no_cache: bool = False) -> bool:
-    """The base image built on `runner` if it's missing or stale there (or always, with `no_cache`); whether it was."""
+def _where(runner) -> str:
+    return "" if runner.name == "local" else f" on runner {runner.name}"
+
+
+def _ensure_base(runner) -> bool:
+    """The base image built on `runner` if it's missing or stale there; whether it was."""
     tag = images.tag(images.BASE)
-    if not no_cache and images.is_current(tag, base_inputs(), runner):
+    if images.is_current(tag, base_inputs(), runner.cli):
         return False
-    print(f"Building {tag}{images._where(runner)}...", file=sys.stderr)
-    images._on(runner).build(FEATURES, tag, base_inputs(), base_recipe(), no_cache)
+    print(f"Building {tag}{_where(runner)}...", file=sys.stderr)
+    images.build_recipe(FEATURES, tag, base_inputs(), base_recipe(), cli=runner.cli)
     return True
 
 
-def remove_stale(runner=None) -> list[str]:
-    """Forget bottle's images on `runner` (default: this machine) whose inputs have changed since they were
-    built; delete stages nothing there uses.
+def remove_stale(runner) -> list[str]:
+    """Forget bottle's images on `runner` whose inputs have changed since they were built; delete stages nothing
+    there uses.
 
     A stage goes once no tag's image is made of it and no machine there was made
     from it: a machine boots its image's stages on every start. Returns the images forgotten.
     """
     from bottle import bottles  # bottles imports this module
 
-    on = images._on(runner)
     removed = []
-    for tag, labels in on.built().items():
+    for tag, labels in images.built(runner.cli).items():
         if labels.get(images.INPUTS_LABEL) != _expected_inputs(tag, labels):
-            on.forget(tag)
+            images.forget(tag, runner.cli)
             removed.append(tag)
-    on.remove_unused({b.archive for b in bottles.load().values() if b.archive and b.runner == on.name})
+    images.remove_unused({b.archive for b in bottles.load().values() if b.archive and b.runner == runner.name},
+                         runner.cli)
     return removed
 
 
@@ -855,28 +860,6 @@ def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
         return inputs_hash(resolve(labels[FEATURES_LABEL].split()))
     except BottleError:
         return None
-
-
-def build(specs: list[str], no_cache: bool = False, runner=None) -> str:
-    """Build the base image with the features in `specs` on `runner`, first building base if it's missing or stale;
-    without features, base, always."""
-    _ensure_base(runner, no_cache=not specs)
-    tag = images.tag(images.BASE)
-    if specs:
-        features = resolve(specs)
-        tag = image_tag(features)
-        _build(features, tag, no_cache, runner)
-    _report_removed(remove_stale(runner))
-    return tag
-
-
-def _report_removed(removed: list[str]) -> None:
-    for name in removed:
-        print(f"Removed stale image {name}", file=sys.stderr)
-
-
-def _build(features: list[Feature], tag: str, no_cache: bool = False, runner=None) -> None:
-    images._on(runner).build(FEATURES, tag, inputs_hash(features), recipe(features), no_cache)
 
 
 def _option_env_name(option: str) -> str:

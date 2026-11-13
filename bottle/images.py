@@ -23,10 +23,9 @@ import json
 import shlex
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
-from bottle import krun, prereqs
+from bottle import krun
 from bottle.errors import BottleError
 from bottle.store import bottle_home, read_json
 
@@ -73,23 +72,10 @@ def tree_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def is_current(image: str, expected: str, runner=None) -> bool:
-    """Whether `image` is built on `runner` (default: this machine) from what it's built from now."""
-    labels = _on(runner).image_labels(image)
+def is_current(image: str, expected: str, cli: krun.Cli = krun.LOCAL) -> bool:
+    """Whether `image` is built where `cli` runs bottle-cli from what it's built from now."""
+    labels = built_labels(image, cli)
     return labels is not None and labels.get(INPUTS_LABEL) == expected
-
-
-def _on(runner):
-    """`runner`, or the local one: where images are kept and built."""
-    if runner is not None:
-        return runner
-    from bottle import runners  # runners imports this module
-
-    return runners.get()
-
-
-def _where(runner) -> str:
-    return f" on runner {runner.name}" if runner is not None and runner.name != "local" else ""
 
 
 def interpreter(script: Path) -> list[str]:
@@ -98,8 +84,8 @@ def interpreter(script: Path) -> list[str]:
     return [*(shlex.split(first[2:]) if first.startswith("#!") else ["/bin/sh"]), f"./{script.name}"]
 
 
-def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache: bool = False,
-                 labels: dict[str, str] | None = None, cli: krun.Cli = krun.LOCAL) -> Path:
+def build_recipe(context: Path, image: str, inputs: str, recipe: dict, labels: dict[str, str] | None = None,
+                 cli: krun.Cli = krun.LOCAL) -> Path:
     """Build `recipe` into `image`, `context` mounted at its working directory (MOUNT): a stage, in a VM of
     bottle-cli's; return its disk.
 
@@ -107,23 +93,18 @@ def build_recipe(context: Path, image: str, inputs: str, recipe: dict, no_cache:
     its steps, entrypoint, cmd and labels are bottle-cli's (see bottle_disk::build::Recipe); its features, the
     specs of those it installs, are bottle's: the build reaches the public network, with none of their
     credentials, their apt repositories kept (cache.cached_for, a build's), and a step asking for BUILD_CA gets
-    the CA they're answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with `labels`.
-    With `no_cache`, the stage is made again even if one was made from the same. Built where `cli` runs
-    bottle-cli: here, or on a runner, the context sent there with the recipe.
+    the CA they're answered behind. `inputs` is the hash of what the image is built from, recorded as a label, with
+    `labels`. Built where `cli` runs bottle-cli: here, or on a runner, the context sent there with the recipe.
     """
     from bottle import cache, features, services  # features imports this module
 
     if cli is krun.LOCAL:
-        prereqs.ensure_cli()
         _migrate()
     if "pull" in recipe:
         print(f"Pulling {recipe['pull']}...", file=sys.stderr)
     elif archive_of(recipe["from"], cli) is None:
         raise BottleError(f"{recipe['from']} isn't built")
     image_labels = {**recipe.get("labels", {}), INPUTS_LABEL: inputs, **(labels or {})}
-    if no_cache:
-        # A stage is named for what it's made from: something new in it makes it anew.
-        image_labels["bottle.build"] = uuid.uuid4().hex
     # The caching CA of bottle-cli's builds, which answers their apt repositories.
     certificate = krun.ca_certificate(BUILDS_CA, features.apt_https_hosts(), cli=cli) or ""
     steps = [{**step, "env": {**step["env"], BUILD_CA: certificate}} if BUILD_CA in step.get("env", {}) else step

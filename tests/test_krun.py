@@ -157,7 +157,7 @@ class KrunBottleTest(GitTestCase):
             (bottles.images, "archive_of", lambda tag, cli=None: archive),
             (daemon, "bind", bind),
             (daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),
-            (bottles.runners.prereqs, "ensure_cli", lambda: None),
+            (bottles.krun.prereqs, "ensure_cli", lambda: None),
             (bottles.features_, "ensure_built", lambda specs, runner=None: "localhost/bottle/base:latest"),
             (bottles.features_, "remove_stale", lambda runner=None: []),
             (bottles.auth, "warn_unset", lambda specs: None),

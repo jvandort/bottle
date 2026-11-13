@@ -173,7 +173,8 @@ class DroneTest(DroneCase):
         new = self.commit(upstream, "since the controller last fetched")
         machine = bottles.get("b").machine
         self.made(machine)
-        box.start(machine, "b", (Served(repo / ".git", remotes, "workspace"),), ())
+        daemon.bind("b", machine, (Served(repo / ".git", remotes, "workspace"),), ())
+        box.start(machine)
 
         started = json.loads((self.remote / "started.json").read_text())
         self.assertEqual(started["args"], f"machine start --name {machine}")   # nothing else: its policy is its own
@@ -230,7 +231,8 @@ class DroneTest(DroneCase):
         box.objects(repos.Repo("repo", repo))
         machine = bottles.get("b").machine   # as bottled, restarted, binds it again
         self.made(machine)
-        box.start(machine, "b", bottles.served(bottles.get("b")), ())
+        daemon.bind("b", machine, bottles.served(bottles.get("b")), ())
+        box.start(machine)
         fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         self.assertIn(b"HTTP/1.1 200", self.guest_connects(machine, host.ADDRESS, 80, fetch))
 
@@ -256,7 +258,8 @@ class DroneTest(DroneCase):
 
     def test_what_a_machine_no_bottle_is_routes_gets_nothing_there(self) -> None:
         self.made("bottle-b")
-        runners.get("box").start("bottle-b", "b", (), ())
+        daemon.bind("b", "bottle-b")
+        runners.get("box").start("bottle-b")
         fetch = b"GET /git/workspace/origin/info/refs HTTP/1.1\r\nHost: bottle.host\r\n\r\n"
         self.assertEqual(self.guest_connects("bottle-b", host.ADDRESS, 80, fetch, said="stranger"), b"")
 

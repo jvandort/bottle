@@ -45,7 +45,7 @@ import uuid
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 
-from bottle import auth, cache, features as features_, host, images, repos, runners, services, specs
+from bottle import auth, cache, daemon, features as features_, host, images, krun, repos, runners, services, specs
 from bottle.errors import BottleError
 from bottle.git import git
 from bottle.store import bottle_home, folio_home, namespace, read_json, write_json
@@ -337,8 +337,6 @@ def create(
     in `owner`, its thread's directory.
     """
     on = runners.get(runner)
-    # Ready first: what it's asked next is its bottle-cli's to answer, as this repo's sources are now.
-    on.ensure_ready()
     spec = specs.canonical(spec, on.memory_mib(), "this machine" if runner == runners.LOCAL else f"runner {runner}")
     installed = [f.spec for f in features_.resolve(list(spec["features"]))]
     existing = load()
@@ -472,7 +470,7 @@ def _refuse_a_second_writer(repo: repos.Repo, remotes: tuple[host.Remote, ...], 
 def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     """Create and start a fresh machine for the bottle from `tag`'s archive, and set it up from scratch."""
     runner = runner_of(bottle)
-    archive = runner.archive(tag)
+    archive = images.archive_of(tag, runner.cli)
     if archive is None:
         raise BottleError(f"{tag} isn't built")
     # Recorded first, so the archive is kept from the moment a machine could have been made from it.
@@ -482,7 +480,7 @@ def _run_machine(bottle: Bottle, mounted: list[repos.Repo], tag: str) -> Bottle:
     # by the policy its machine is made with.
     runner.create(
         bottle.machine, archive,
-        mounts=[runners.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
+        mounts=[krun.Mount(runner.objects(repo), mount.objects) for repo, mount in zip(mounted, bottle.mounts)],
         env=_machine_env(bottle.features, bottle.spec.get("permissions", ()), bottle.workdir),
         memory_mib=_memory_mib(bottle.memory), disk_gib=specs.disk_gib(bottle.spec),
         # What bottle-cli's exec and shell use unless told, and what its ls shows.
@@ -521,10 +519,11 @@ def _let_in(bottle: Bottle, grant: SshGrant) -> None:
 
 
 def _start_machine(bottle: Bottle) -> None:
-    """Start the bottle's machine, bottled answering what it routes there as this bottle's, its credentials read
-    now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, which trust_egress_ca
+    """Start the bottle's machine, folio serve answering what it routes there as this bottle's, its credentials
+    read now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, which trust_egress_ca
     installs once it's up."""
-    runner_of(bottle).start(bottle.machine, bottle.name, served(bottle), bottle.features)
+    daemon.bind(bottle.name, bottle.machine, served(bottle), bottle.features)
+    runner_of(bottle).start(bottle.machine)
 
 
 # The version of the policy network() makes: 1, its routes to bottled's one socket; 2, folio serve's, by service.
@@ -713,7 +712,7 @@ def stop(name: str) -> None:
     if runner.state(bottle.machine) == "running":
         runner.stop(bottle.machine)
         log.info("%s: stopped", name)
-    runner.release(bottle.name)
+    daemon.release_egress(bottle.name)
 
 
 def ensure_running(name: str) -> Bottle:
@@ -726,7 +725,6 @@ def ensure_running(name: str) -> Bottle:
     if state is None:
         raise BottleError(f"{bottle.name}'s machine is gone; delete its thread (`folio delete`)")
     if state != "running":
-        runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
         given = _network_version(bottle) < NETWORK
         if given:
@@ -743,8 +741,8 @@ def ensure_running(name: str) -> Bottle:
             trust_egress_ca(bottle)
             point_at_host(bottle)
     else:
-        # Running: bottled, if it had stopped, binds it again as it starts.
-        runner.ensure_deciding()
+        # Running: folio serve, if it had stopped, binds it again as it starts.
+        daemon.start()
     return bottle
 
 
@@ -886,7 +884,7 @@ def delete(name: str) -> None:
     # The registry says the machine is the bottle's: a machine has no labels to ask.
     runner = runner_of(bottle)
     for step, action in (
-        ("egress", lambda: runner.release(bottle.name)),
+        ("egress", lambda: daemon.release_egress(bottle.name)),
         ("machine", lambda: runner.delete(bottle.machine)),
     ):
         try:

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bottle import egress, features
+from bottle import egress, features, runners
 from bottle.errors import BottleError
 
 
@@ -753,36 +753,36 @@ class BuildTest(FeatureTestCase):
         self.built: list[str] = []
         self.runner = mock.Mock()
         self.runner.name = "local"
-        self.runner.build.side_effect = lambda context, tag, inputs, recipe, no_cache=False: self.built.append(tag)
+        self.build = mock.Mock(side_effect=lambda context, tag, inputs, recipe, cli=None: self.built.append(tag))
         for patcher in (
-            mock.patch.object(features.images, "_on", return_value=self.runner),
-            mock.patch.object(features, "remove_stale", side_effect=lambda runner=None: self.built.append("remove stale") or []),
+            mock.patch.object(features.images, "build_recipe", self.build),
+            mock.patch.object(features, "remove_stale", side_effect=lambda runner: self.built.append("remove stale") or []),
             mock.patch("sys.stderr"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def current(self, *tags: str):
-        return mock.patch.object(features.images, "is_current", side_effect=lambda tag, inputs, runner=None: tag in tags)
+        return mock.patch.object(features.images, "is_current", side_effect=lambda tag, inputs, cli=None: tag in tags)
 
     def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
         with self.current():
-            self.assertEqual(features.ensure_built(["jvm"]), "localhost/bottle/base:with-jvm.tools")
+            self.assertEqual(features.ensure_built(["jvm"], self.runner), "localhost/bottle/base:with-jvm.tools")
         self.assertEqual(self.built, ["localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools",
                                       "remove stale"])
 
     def test_ensure_built_skips_whats_current(self) -> None:
         with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
-            features.ensure_built(["jvm"])
+            features.ensure_built(["jvm"], self.runner)
         self.assertEqual(self.built, [])
         with self.current("localhost/bottle/base:latest"):
-            features.ensure_built(["jvm"])
+            features.ensure_built(["jvm"], self.runner)
         self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
 
     def test_base_is_the_base_feature_on_debian_running_bottles_entrypoint(self) -> None:
         with self.current():
-            features.ensure_built([])
-        [(context, tag, inputs, recipe, no_cache)] = [c.args for c in self.runner.build.call_args_list]
+            features.ensure_built([], self.runner)
+        [(context, tag, inputs, recipe)] = [c.args for c in self.build.call_args_list]
         self.assertEqual((context, tag, inputs), (self.root, "localhost/bottle/base:latest", features.base_inputs()))
         self.assertEqual((recipe["pull"], recipe["entrypoint"], recipe["cmd"]),
                          (features.images.DEBIAN, features.images.ENTRYPOINT, features.images.CMD))
@@ -804,16 +804,8 @@ class BuildTest(FeatureTestCase):
 
     def test_no_features_is_just_base(self) -> None:
         with self.current("localhost/bottle/base:latest"):
-            self.assertEqual(features.ensure_built([]), "localhost/bottle/base:latest")
+            self.assertEqual(features.ensure_built([], self.runner), "localhost/bottle/base:latest")
         self.assertEqual(self.built, [])
-
-    def test_build_always_rebuilds_the_combination_and_without_features_base(self) -> None:
-        with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
-            features.build(["jvm"])
-            self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
-            self.built.clear()
-            features.build([])
-        self.assertEqual(self.built, ["localhost/bottle/base:latest", "remove stale"])
 
     def test_base_isnt_a_feature_to_ask_for(self) -> None:
         self.assertNotIn("base", features.available())
@@ -839,7 +831,7 @@ class RemoveStaleTest(FeatureTestCase):
                 mock.patch.object(features.images, "forget", side_effect=lambda tag, cli=None: self.deleted.append(tag)), \
                 mock.patch.object(features.images, "remove_unused", side_effect=lambda in_use, cli=None: self.kept.update(in_use)), \
                 mock.patch.object(bottles_, "load", return_value=bottles):
-            return features.remove_stale()
+            return features.remove_stale(runners.Runner())
 
     def test_forgets_stale_images_and_keeps_every_archive_a_bottle_was_made_from(self) -> None:
         removed = self.run_with({

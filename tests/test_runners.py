@@ -9,7 +9,7 @@ from tests.support import GitTestCase
 
 class GetTest(unittest.TestCase):
     def test_local_is_the_default(self) -> None:
-        self.assertIsInstance(runners.get(), runners.LocalRunner)
+        self.assertEqual(runners.get().name, "local")
         self.assertIs(runners.get("local"), runners.get())
 
     def test_no_other_runner_yet(self) -> None:
@@ -18,22 +18,15 @@ class GetTest(unittest.TestCase):
 
 
 class LocalRunnerTest(GitTestCase):
-    """The local runner is bottle-cli, images and bottled here, as bottle used them before runners."""
+    """The local runner is bottle-cli here."""
 
     def setUp(self) -> None:
         super().setUp()
-        patcher = mock.patch.object(runners.prereqs, "ensure_cli")   # its bottle-cli as it is
+        patcher = mock.patch.object(runners.krun.prereqs, "ensure_cli")   # its bottle-cli as it is
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_starting_binds_its_machine_at_bottled_then_starts_it(self) -> None:
-        calls = []
-        with mock.patch.object(runners.daemon, "bind", side_effect=lambda *a: calls.append(("bind", *a))), \
-                mock.patch.object(runners.krun, "start", side_effect=lambda *a: calls.append(("start", *a))):
-            runners.get().start("b-machine", "b", (), ["tools"])
-        self.assertEqual(calls, [("bind", "b", "b-machine", (), ["tools"]), ("start", "b-machine")])
-
-    def test_a_machines_routes_are_to_bottleds_socket_here(self) -> None:
+    def test_a_machines_routes_are_to_folio_serves_sockets_here(self) -> None:
         policy = {"cache": [], "routes": [{"address": "192.0.2.1", "port": 80, "service": "host"}]}
         with mock.patch.object(runners.krun, "create") as create, mock.patch.object(runners.krun, "configure") as configure:
             runners.get().create("m", Path("/stages/a.ext4"), [], {}, 512, network=policy)
@@ -49,7 +42,7 @@ class LocalRunnerTest(GitTestCase):
 
     def test_mounts_are_bottle_clis_and_a_machine_has_all_the_cores(self) -> None:
         with mock.patch.object(runners.krun, "create") as create, mock.patch.object(runners.os, "cpu_count", return_value=12):
-            runners.get().create("m", Path("/stages/a.ext4"), [runners.Mount(Path("/repo/objects"), "/mnt/objects/w")],
+            runners.get().create("m", Path("/stages/a.ext4"), [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                  {"A": "1"}, 512, 50)
         create.assert_called_once_with("m", "/stages/a.ext4", [runners.krun.Mount(Path("/repo/objects"), "/mnt/objects/w")],
                                        {"A": "1"}, 512, 12, 50, None, None, None, None)
@@ -59,26 +52,14 @@ class RemoteRunnerTest(unittest.TestCase):
     """A runner elsewhere is bottle-cli's: its machines by RUNNER/NAME, its images and CAs bottle-cli's there."""
 
     def test_its_machines_are_named_runner_slash_name_its_images_asked_there(self) -> None:
-        box = runners.RemoteRunner("box")
-        box._is_ready = True   # its bottle-cli, here and there, as these sources are
+        box = runners.Runner("box")
         with mock.patch.object(runners.krun, "start") as start, \
-                mock.patch.object(runners.daemon, "bind") as bind, \
-                mock.patch.object(runners.krun, "state", return_value="running") as state:
-            box.start("m", "b", (), ["tools"])
+                mock.patch.object(runners.krun, "state", return_value="running") as state, \
+                mock.patch.object(runners.krun.prereqs, "ensure_cli"):
+            box.start("m")
             self.assertEqual(box.state("m"), "running")
-        bind.assert_called_once_with("b", "m", (), ["tools"])   # bottled knows it by the name its routes give
+            self.assertEqual(box.cli.command(["images", "/s", "--json"])[1:], ["on", "box", "images", "/s", "--json"])
+            command = box.exec_command("m", ["bash", "-l"], user="genie", tty=True)
         start.assert_called_once_with("box/m")
         state.assert_called_once_with("box/m")
-        self.assertEqual(box.cli.command(["images", "/s", "--json"])[1:], ["on", "box", "images", "/s", "--json"])
-        command = box.exec_command("m", ["bash", "-l"], user="genie", tty=True)
         self.assertEqual(command[1:6], ["machine", "exec", "--name", "box/m", "-t"])
-
-    def test_it_readies_itself_once_before_it_first_asks_bottle_cli_anything(self) -> None:
-        box = runners.RemoteRunner("box")
-        with mock.patch.object(runners.RemoteRunner, "ensure_ready") as ready, \
-                mock.patch.object(runners.krun, "state", return_value=None), \
-                mock.patch.object(runners.krun, "delete"):
-            box.state("m")
-            box.delete("m")
-        ready.assert_called_once_with()
-

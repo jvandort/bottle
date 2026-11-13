@@ -142,7 +142,7 @@ class FakeSmolvm:
             mock.patch.object(bottles.images, "archive_of", self.archive),
             mock.patch.object(daemon, "start", self.daemon_start),
             mock.patch.object(daemon, "stop", self.daemon_stop),
-            mock.patch.object(bottles.runners.prereqs, "ensure_cli"),
+            mock.patch.object(bottles.krun.prereqs, "ensure_cli"),
             mock.patch.object(bottles.specs, "host_memory_mib", return_value=16384),
             mock.patch.object(bottles.cache, "cached_for",
                               side_effect=lambda specs: [bottles.cache.Cached("deb.debian.org", ports=(80,))]),
