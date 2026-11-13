@@ -917,10 +917,6 @@ def _status(response: bytes) -> str | None:
 # --- responses read and sent ------------------------------------------------------
 
 
-# A body framed by chunked transfer coding, not by its length.
-CHUNKED = "chunked"
-
-
 def _route_refused(headers: dict[str, str], why: str, outcome: str) -> Refused:
     """A 403 for a route a credential's feature refuses, saying so to whoever reads it: often an agent.
 

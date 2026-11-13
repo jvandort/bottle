@@ -43,10 +43,6 @@ def ensure_cli() -> None:
     os.environ.setdefault("BOTTLE_DIST_BUILD", str(krun.REPO / "bin" / "bottle-dist"))
 
 
-# What a Linux runner's distribution is built for, by its architecture (uname -m): static, so any distribution's.
-LINUX_TARGETS = {"x86_64": "x86_64-unknown-linux-musl", "aarch64": "aarch64-unknown-linux-musl"}
-
-
 @functools.cache
 def ensure_dist(target: str | None = None) -> Path:
     """The distribution `cargo xtask dist` builds for `target` (a Rust target triple; None: this machine's), from
