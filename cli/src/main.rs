@@ -34,7 +34,7 @@ fn main() -> ExitCode {
                 _ => machine::top("exec", args),
             }
         }
-        Some(command @ ("ls" | "status" | "stop" | "shell")) => {
+        Some(command @ ("ls" | "status" | "start" | "stop" | "shell")) => {
             machine::top(command, args.collect())
         }
         Some(other) => usage_error(&format!("no command {other}")),

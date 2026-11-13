@@ -728,16 +728,20 @@ def ensure_running(name: str) -> Bottle:
     if state != "running":
         runner.ensure_ready()
         bottle = _named_machine(bottle, runner)
-        if not bottle.networked:
+        given = not bottle.networked
+        if given:
             # Made before machines had their own policy: given it now.
             runner.configure(bottle.machine, network(bottle))
             bottle = replace(bottle, networked=True)
             _save(bottle)
         _start_machine(bottle)
         log.info("%s: started", bottle.name)
-        verify_contract(bottle)
-        trust_egress_ca(bottle)
-        point_at_host(bottle)
+        if given:
+            # What was set up in it for the decider is set up again for its policy; one made with its policy has
+            # all it needs on its disk, as bottle-cli's start alone would find it.
+            verify_contract(bottle)
+            trust_egress_ca(bottle)
+            point_at_host(bottle)
     else:
         # Running: bottled, if it had stopped, binds it again as it starts.
         runner.ensure_deciding()

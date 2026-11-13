@@ -32,13 +32,15 @@
 //!
 //!     bottle-cli ls [--json]
 //!     bottle-cli status NAME [--json]
+//!     bottle-cli start NAME
 //!     bottle-cli stop NAME
 //!     bottle-cli exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!     bottle-cli shell NAME
 //!
 //! `shell` is a login shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
-//! terminal; a machine that isn't running isn't started (bottle starts its bottles, with their
-//! network).
+//! terminal. `start` starts a machine with its own network policy, if it has one, and nothing else;
+//! `shell` and `exec` start one that has, if it's stopped. One made without (a machine of bottle's
+//! from before, until bottle gives it one) is started with no network.
 
 use std::env;
 use std::fs;
@@ -56,7 +58,7 @@ use crate::FAILED;
 
 pub const USAGE: &str =
     "machine create|start|stop|delete|ls|status|exec ... (see cli/src/machine.rs)";
-pub const TOP_USAGE: &str = "ls [--json] | status NAME [--json] | stop NAME | shell NAME \
+pub const TOP_USAGE: &str = "ls [--json] | status NAME [--json] | start NAME | stop NAME | shell NAME \
     | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
 
 /// How long a stopped machine's VM gets to end, before it's killed.
@@ -187,6 +189,14 @@ impl Machine {
     /// Its network policy, if it was made with one.
     fn network(&self) -> PathBuf {
         self.dir.join("network.json")
+    }
+
+    /// Started, if it's stopped and needs nothing to start: it has a network policy of its own.
+    fn up(&self) -> io::Result<()> {
+        if self.exists() && !self.running() && self.network().exists() {
+            self.start(&crate::boot::Net::None)?;
+        }
+        Ok(())
     }
 
     /// Its agent's socket: in its directory, unless that's too long a path for a unix socket (104
@@ -785,8 +795,8 @@ fn exec(args: Vec<String>) -> ExitCode {
     crate::exec::main(std::iter::once(socket).chain(defaults).chain(rest))
 }
 
-/// The machine-wide commands, by name (see the module's doc): `ls`, `status`, `stop`, `exec`,
-/// `shell`.
+/// The machine-wide commands, by name (see the module's doc): `ls`, `status`, `start`, `stop`,
+/// `exec`, `shell`.
 pub fn top(command: &str, args: Vec<String>) -> ExitCode {
     let (name, rest) = match args.split_first() {
         Some((name, rest)) if command != "ls" && !name.starts_with('-') => {
@@ -799,7 +809,11 @@ pub fn top(command: &str, args: Vec<String>) -> ExitCode {
     let result = match command {
         "ls" => ls(&rest),
         "status" => status(&named(rest)),
+        "start" if rest.is_empty() => {
+            Machine::new(&name).and_then(|m| m.start(&crate::boot::Net::None))
+        }
         "stop" => Machine::new(&name).and_then(|m| m.stop()),
+        "exec" | "shell" if let Err(e) = Machine::new(&name).and_then(|m| m.up()) => Err(e),
         "exec" => return exec(named(rest)),
         "shell" => {
             if !rest.is_empty() {

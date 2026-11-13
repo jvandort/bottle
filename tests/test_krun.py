@@ -200,14 +200,13 @@ class KrunBottleTest(GitTestCase):
         self.assertFalse({"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} & set(self.created["env"]))
         self.assertEqual(self.created["memory_mib"], 8192)
 
-    def test_a_stopped_bottle_starts_with_a_new_binding_and_its_setup_again(self) -> None:
+    def test_a_stopped_bottle_starts_bound_again(self) -> None:
         bottle = self.create()
         bottles.stop("b")
         self.assertEqual(self.calls[-2:], ["stop", "release b"])
         self.calls.clear()
         bottles.ensure_running("b")
-        self.assertEqual(self.calls, ["bind b", "start", "contract as genie",
-                                      "trust CA as root", "trust caching CA as root", "bottle.host as root"])
+        self.assertEqual(self.calls, ["bind b", "start"])
         self.assertEqual(self.machines[bottle.machine], "running")
 
     def test_a_running_bottle_keeps_its_binding_and_has_bottled_running(self) -> None:

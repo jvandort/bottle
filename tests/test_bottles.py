@@ -479,10 +479,20 @@ class EnsureRunningTest(BottleTestCase):
         self.assertEqual(fake.configured[bottle.machine]["routes"], fake.create_args["network"]["routes"])
         self.assertTrue(bottles.get("example").networked)
 
-    def test_starting_verifies_the_contract_and_gives_bottle_host(self) -> None:
+    def test_starting_is_binding_and_starting_alone(self) -> None:
+        # Its CA, bottle.host and what the contract checked are on its disk, from when it was made.
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
+        fake.calls.clear()
+        bottles.ensure_running("example")
+        self.assertEqual(fake.calls, ["bind", "start"])
+
+    def test_one_given_its_policy_as_it_starts_is_set_up_for_it(self) -> None:
+        fake = self.fake()
+        bottle = self.create()
+        fake.machines[bottle.machine] = "stopped"
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
         fake.calls.clear()
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["bind", "start", "verify_contract", "trust_egress_ca", "point_at_host"])
@@ -495,10 +505,11 @@ class EnsureRunningTest(BottleTestCase):
         bottles.ensure_running("example")
         self.assertEqual(fake.calls, ["daemon_start"])
 
-    def test_starting_installs_the_egress_ca_as_root(self) -> None:
+    def test_given_its_policy_it_trusts_its_machines_ca_as_root(self) -> None:
         fake = self.fake()
         bottle = self.create()
         fake.machines[bottle.machine] = "stopped"
+        bottles._save(dataclasses.replace(bottles.get("example"), networked=False))
         fake.trusted = None
         bottles.ensure_running("example")
         self.assertEqual(fake.cache_trusted, ("root", "the machine's CA's certificate"))

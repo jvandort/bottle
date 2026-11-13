@@ -390,5 +390,11 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     f.ok(&["machine", "stop", "--name", "m2"]);
     f.ok(&["machine", "configure", "--name", "m2", "--network", &other]);
     assert_ne!(f.ok(&["ca", "certificate", "m2"]), pem);
+    // Stopped, it's started by what needs it running: nothing else is needed.
+    f.ok(&["exec", "m2", "--", "true"]);
+    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "running\n");
+    f.ok(&["stop", "m2"]);
+    f.ok(&["start", "m2"]);
+    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "running\n");
     f.ok(&["machine", "delete", "--name", "m2", "-f"]);
 }
