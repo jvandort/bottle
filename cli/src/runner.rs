@@ -535,10 +535,7 @@ fn mark(name: &str, detached: Option<&[String]>) -> io::Result<()> {
 /// The machines running on `runner`, by their names there.
 fn running(runner: &Runner) -> io::Result<Vec<String>> {
     let output = runner
-        .cli(
-            &["machine".into(), "ls".into(), "--json".into()],
-            Some(false),
-        )
+        .cli(&["ls".into(), "--json".into()], Some(false))
         .stdin(Stdio::null())
         .output()?;
     runner.reached(&output)?;
@@ -589,8 +586,7 @@ fn detach(name: &str, offline: bool) -> io::Result<()> {
                 )));
             }
             for machine in &named {
-                let args = ["--name".to_string(), machine.clone()];
-                if crate::remote::machine("stop", &args) != Some(ExitCode::SUCCESS) {
+                if crate::remote::machine("stop", machine, &[]) != ExitCode::SUCCESS {
                     return Err(other(format!("couldn't stop {machine}")));
                 }
                 println!("Stopped {machine}");

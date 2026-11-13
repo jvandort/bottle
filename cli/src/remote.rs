@@ -53,21 +53,21 @@ fn forwards(runner: &str, name: &str) -> Forwards {
         .unwrap_or_default()
 }
 
-/// Handles `machine COMMAND ARGS` if it names a runner's machine (`--name RUNNER/NAME`): None if
-/// it doesn't.
-pub fn machine(command: &str, args: &[String]) -> Option<ExitCode> {
-    let at = args.iter().position(|a| a == "--name")?;
-    let (runner, name) = runner::split(args.get(at + 1)?)?;
+/// `COMMAND RUNNER/NAME ARGS`, a machine command for a runner's machine: this program's, there,
+/// by the machine's name there.
+pub fn machine(command: &str, qualified: &str, args: &[String]) -> ExitCode {
+    let Some((runner, name)) = runner::split(qualified) else {
+        return crate::usage_error(&format!("{qualified}: not RUNNER/NAME"));
+    };
     let (runner, name) = (runner.to_string(), name.to_string());
     let mut there = args.to_vec();
-    there[at + 1] = name.clone();
-    Some(report((|| -> io::Result<ExitCode> {
+    report((|| -> io::Result<ExitCode> {
         let runner = Runner::named(&runner)?;
         match command {
             "create" | "configure" => {
                 runner.ensure_dist()?;
                 let policy = give_network(&runner, &name, &mut there)?;
-                let code = pass(&runner, command, &there, policy.as_deref())?;
+                let code = pass(&runner, command, &name, &there, policy.as_deref())?;
                 if code != ExitCode::SUCCESS {
                     let _ = fs::remove_dir_all(record(&runner.name, &name));
                 }
@@ -78,12 +78,12 @@ pub fn machine(command: &str, args: &[String]) -> Option<ExitCode> {
                 start(&runner, &name)
             }
             "stop" => {
-                let code = pass(&runner, command, &there, None)?;
+                let code = pass(&runner, command, &name, &there, None)?;
                 end_forward(&runner.name, &name);
                 Ok(code)
             }
             "delete" => {
-                let code = pass(&runner, command, &there, None)?;
+                let code = pass(&runner, command, &name, &there, None)?;
                 if code == ExitCode::SUCCESS {
                     end_forward(&runner.name, &name);
                     let _ = fs::remove_dir_all(record(&runner.name, &name));
@@ -92,17 +92,13 @@ pub fn machine(command: &str, args: &[String]) -> Option<ExitCode> {
             }
             "rename" => {
                 let to = args
-                    .iter()
-                    .position(|a| a == "--to")
-                    .and_then(|i| args.get(i + 1))
-                    .ok_or_else(|| io::Error::other("no --to"))?;
+                    .first()
+                    .ok_or_else(|| io::Error::other("rename takes the machine's new name"))?;
                 let to = runner::split(to)
                     .map_or(to.as_str(), |(_, n)| n)
                     .to_string();
-                if let Some(i) = there.iter().position(|a| a == "--to") {
-                    there[i + 1] = to.clone();
-                }
-                let code = pass(&runner, command, &there, None)?;
+                there[0] = to.clone();
+                let code = pass(&runner, command, &name, &there, None)?;
                 if code == ExitCode::SUCCESS && record(&runner.name, &name).exists() {
                     fs::rename(record(&runner.name, &name), record(&runner.name, &to))?;
                 }
@@ -118,15 +114,20 @@ pub fn machine(command: &str, args: &[String]) -> Option<ExitCode> {
                 }
                 // Attached wholly, a terminal and all: this process becomes the ssh.
                 let tty = there.iter().any(|a| a == "-t");
-                let full: Vec<String> = ["machine".to_string(), "exec".to_string()]
+                let full: Vec<String> = ["exec".to_string(), name.clone()]
                     .into_iter()
                     .chain(there)
                     .collect();
                 Err(runner.cli(&full, Some(tty)).exec())
             }
-            _ => pass(&runner, command, &there, None),
+            "shell" => Ok(machine(
+                "exec",
+                qualified,
+                &crate::machine::LOGIN.map(String::from),
+            )),
+            _ => pass(&runner, command, &name, &there, None),
         }
-    })()))
+    })())
 }
 
 fn report(result: io::Result<ExitCode>) -> ExitCode {
@@ -136,14 +137,15 @@ fn report(result: io::Result<ExitCode>) -> ExitCode {
     })
 }
 
-/// `machine COMMAND ARGS` there, `input` its stdin (else this process's): its exit status.
+/// `COMMAND NAME ARGS` there, `input` its stdin (else this process's): its exit status.
 fn pass(
     runner: &Runner,
     command: &str,
+    name: &str,
     args: &[String],
     input: Option<&[u8]>,
 ) -> io::Result<ExitCode> {
-    let full: Vec<String> = ["machine".to_string(), command.to_string()]
+    let full: Vec<String> = [command.to_string(), name.to_string()]
         .into_iter()
         .chain(args.iter().cloned())
         .collect();
@@ -211,7 +213,7 @@ fn give_network(runner: &Runner, name: &str, args: &mut [String]) -> io::Result<
 
 /// `name`'s state there; None if there's no such machine.
 fn state(runner: &Runner, name: &str) -> io::Result<Option<String>> {
-    let args = ["machine", "status", "--name", name, "--json"].map(String::from);
+    let args = ["status", name, "--json"].map(String::from);
     let output = runner
         .cli(&args, Some(false))
         .stdin(Stdio::null())
@@ -231,8 +233,7 @@ fn state(runner: &Runner, name: &str) -> io::Result<Option<String>> {
 
 /// Starts `name` there, and here the process that forwards its routes while it runs.
 fn start(runner: &Runner, name: &str) -> io::Result<ExitCode> {
-    let args = ["--name".to_string(), name.to_string()];
-    let code = pass(runner, "start", &args, None)?;
+    let code = pass(runner, "start", name, &[], None)?;
     if code == ExitCode::SUCCESS && !forwards(&runner.name, name).is_empty() {
         begin_forward(&runner.name, name)?;
     }
@@ -419,10 +420,7 @@ pub fn listed() -> Vec<serde_json::Value> {
             destination: entry.ssh,
         };
         let asked = runner
-            .cli(
-                &["machine".into(), "ls".into(), "--json".into()],
-                Some(false),
-            )
+            .cli(&["ls".into(), "--json".into()], Some(false))
             .stdin(Stdio::null())
             .output();
         let listed = asked.and_then(|output| {

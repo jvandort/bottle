@@ -232,7 +232,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
 pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     let args = match parse(args) {
         Ok(args) => args,
-        Err(e) => return crate::usage_error(&e),
+        Err(e) => return crate::own_usage_error(&e, USAGE),
     };
     let Err(e) = boot(&args);
     eprintln!("bottle-cli: {e}");

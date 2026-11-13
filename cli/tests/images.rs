@@ -84,6 +84,7 @@ fn a_tag_names_an_image_its_listed_by_and_gc_keeps() {
         "tag",
         "tools",
         "localhost/bottle/base:with-tools",
+        "--store",
         store.at(),
     ]);
     assert_eq!(
@@ -91,7 +92,7 @@ fn a_tag_names_an_image_its_listed_by_and_gc_keeps() {
         [disk(&store, "base"), disk(&store, "tools")]
     );
     let listed: serde_json::Value =
-        serde_json::from_str(&store.ok(&["images", store.at(), "--json"])).unwrap();
+        serde_json::from_str(&store.ok(&["images", "--store", store.at(), "--json"])).unwrap();
     assert_eq!(
         listed,
         serde_json::json!([{"tag": "localhost/bottle/base:with-tools", "name": "tools",
@@ -104,37 +105,43 @@ fn a_tag_names_an_image_its_listed_by_and_gc_keeps() {
         "tag",
         "localhost/bottle/base:with-tools",
         "again",
+        "--store",
         store.at(),
     ]);
-    assert_eq!(store.ok(&["images", store.at()]).lines().count(), 2);
+    assert_eq!(
+        store.ok(&["images", "--store", store.at()]).lines().count(),
+        2
+    );
 
-    let deleted = store.ok(&["gc", store.at()]);
+    let deleted = store.ok(&["gc", "--store", store.at()]);
     assert_eq!(deleted.trim(), "deleted old"); // untagged, unused; tools' lower stays with it
     assert_eq!(store.stages(), ["base", "tools"]);
 
-    store.ok(&["image", "rm", "again", store.at()]);
+    store.ok(&["image", "rm", "again", "--store", store.at()]);
     store.ok(&[
         "image",
         "rm",
         "localhost/bottle/base:with-tools",
+        "--store",
         store.at(),
     ]);
     let out = store.cli(&[
         "image",
         "rm",
         "localhost/bottle/base:with-tools",
+        "--store",
         store.at(),
     ]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no image tagged"));
-    store.ok(&["gc", store.at()]);
+    store.ok(&["gc", "--store", store.at()]);
     assert!(store.stages().is_empty());
 }
 
 #[test]
 fn what_isnt_there_cant_be_tagged() {
     let store = Store::new("missing");
-    let out = store.cli(&["image", "tag", "nope", "t", store.at()]);
+    let out = store.cli(&["image", "tag", "nope", "t", "--store", store.at()]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no image nope"));
     assert!(!Path::new(&store.dir.join("tags.json")).exists());

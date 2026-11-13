@@ -1,28 +1,28 @@
-//! `bottle-cli build`, `import` and `pull`: stages made in VMs, in a store (see bottle-disk's
-//! build), each printing the disks of the image it made, bottom first, as `boot` takes them; and
-//! `gc`, which deletes the stages nothing needs.
+//! `bottle-cli image`, `images` and `gc`: images, stages made in VMs, in a store (see bottle-disk's
+//! build); each command that makes one prints the disks of the image it made, bottom first, as
+//! `boot` takes them.
 //!
-//!     bottle-cli build RECIPE STORE [--network FILE | --net-direct]
-//!     bottle-cli import ARCHIVE STORE [--network FILE | --net-direct]
-//!     bottle-cli pull REFERENCE STORE [--network FILE | --net-direct]
-//!     bottle-cli gc STORE [IMAGE]...
-//!     bottle-cli image build RECIPE STORE [--tag TAG] [--network FILE | --net-direct]
-//!     bottle-cli image tag IMAGE TAG STORE
-//!     bottle-cli image rm TAG STORE
-//!     bottle-cli images STORE [--json]
+//!     bottle-cli image build RECIPE [--tag TAG] [--store PATH] [--network FILE | --net-direct]
+//!     bottle-cli image import ARCHIVE [--store PATH] [--network FILE | --net-direct]
+//!     bottle-cli image pull REFERENCE [--store PATH] [--network FILE | --net-direct]
+//!     bottle-cli image tag IMAGE TAG [--store PATH]
+//!     bottle-cli image rm TAG [--store PATH]
+//!     bottle-cli images [--store PATH] [--json]
+//!     bottle-cli gc [--store PATH] [IMAGE]...
 //!
-//! RECIPE is a JSON file, steps run on the stage it's `from` (see bottle_disk::build::Recipe);
-//! ARCHIVE an OCI layout archive of one image; REFERENCE an image in a registry
-//! (`debian:trixie-slim`, `name@sha256:...`), fetched by curl, streamed into the import (see
-//! bottle_disk::registry). Images are a store's stages by their tags (Store::tags): `image build`
-//! builds a recipe whose base is a registry's image (`pull`: its reference) or one of the store's
-//! (`from`: a tag, or a stage's name; a relative mount source is beside RECIPE), and tags what
-//! it made; `image tag` and `image rm` name and
-//! unname stages; `images` lists the tags. gc keeps every tagged image, every machine's stages,
-//! running or not, and IMAGEs'. Each VM
-//! is `bottle-cli boot`, this program again, its console kept for when it fails; libkrun and the
-//! rest are found as boot finds them, and the network options are boot's: a build's VM has the
-//! network they say.
+//! The store is $BOTTLE_HOME/stages, unless --store names another. RECIPE is a JSON file, steps
+//! run on the stage it's `from` (see bottle_disk::build::Recipe); ARCHIVE an OCI layout archive of
+//! one image; REFERENCE an image in a registry (`debian:trixie-slim`, `name@sha256:...`), fetched
+//! by curl, streamed into the import (see bottle_disk::registry). Images are a store's stages by
+//! their tags (Store::tags): `image build` builds a recipe whose base is a registry's image (`pull`:
+//! its reference) or one of the store's (`from`: a tag, or a stage's name; a relative mount source
+//! is beside RECIPE), and tags what it made; `image tag` and `image rm` name and unname stages;
+//! `images` lists the tags. gc keeps every tagged image, every machine's stages, running or not,
+//! and IMAGEs'. Each VM is `bottle-cli boot`, this program again, its console kept for when it
+//! fails; libkrun and the rest are found as boot finds them, and the network options are boot's: a
+//! build's VM has the network they say. A build's cached https hosts are answered with the caching
+//! CA builds share (BUILDS_CA), whose certificate a step asking for it (an environment variable
+//! BOTTLE_BUILD_CA) is given: an apt step, which trusts it for those hosts.
 
 use std::env;
 use std::fs;
@@ -39,26 +39,41 @@ use bottle_disk::registry::{Reference, Registry};
 use crate::FAILED;
 use crate::boot::Net;
 
-/// The caching CA builds' cached hosts are answered with: bottle/ca.py's BUILDS.
+/// The caching CA builds' cached hosts are answered with.
 const BUILDS_CA: &str = "bottle-builds";
+/// What a step asks for the builds' CA's certificate by, in its environment.
+const BUILD_CA: &str = "BOTTLE_BUILD_CA";
 
-pub const BUILD_USAGE: &str = "build RECIPE STORE [--network FILE | --net-direct]";
-pub const IMPORT_USAGE: &str = "import ARCHIVE STORE [--network FILE | --net-direct]";
-pub const PULL_USAGE: &str = "pull REFERENCE STORE [--network FILE | --net-direct]";
-pub const GC_USAGE: &str = "gc STORE [IMAGE]...";
-pub const IMAGE_USAGE: &str = "image build RECIPE STORE [--tag TAG] [--network FILE | --net-direct] \
-    | image tag IMAGE TAG STORE | image rm TAG STORE";
-pub const IMAGES_USAGE: &str = "images STORE [--json]";
+pub const USAGE: &str = "image build RECIPE [--tag TAG] [--store PATH] [--network FILE | --net-direct] \
+    | image import ARCHIVE [...] | image pull REFERENCE [...] | image tag IMAGE TAG [--store PATH] \
+    | image rm TAG [--store PATH] | images [--store PATH] [--json] | gc [--store PATH] [IMAGE]...";
+
+/// The store, unless a command's --store names another: $BOTTLE_HOME/stages.
+pub fn default_store() -> PathBuf {
+    crate::runner::home().join("stages")
+}
+
+/// `--store PATH`, taken out of `args`; else the default store.
+fn take_store(args: &mut Vec<String>) -> Result<PathBuf, ExitCode> {
+    let Some(at) = args.iter().position(|a| a == "--store") else {
+        return Ok(default_store());
+    };
+    if at + 1 >= args.len() {
+        return Err(crate::usage_error("--store needs a PATH"));
+    }
+    let path = args.remove(at + 1);
+    args.remove(at);
+    Ok(PathBuf::from(path))
+}
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";
 const MEM_MIB: &str = "4096";
 
-/// Two arguments, and the network options (see boot's Net), in any order.
-fn two_and_net(
-    args: impl Iterator<Item = String>,
-    what: &str,
-) -> Result<(String, String, Net), ExitCode> {
+/// One argument, the store (take_store) and the network options (see boot's Net), in any order.
+fn one_and_net(args: Vec<String>, what: &str) -> Result<(String, PathBuf, Net), ExitCode> {
+    let mut args = args;
+    let store = take_store(&mut args)?;
     let mut positional = Vec::new();
     let mut net = Net::None;
     let mut args = args.into_iter();
@@ -69,34 +84,19 @@ fn two_and_net(
             None => positional.push(arg),
         }
     }
-    match <[String; 2]>::try_from(positional) {
-        Ok([a, b]) => Ok((a, b, net)),
+    match <[String; 1]>::try_from(positional) {
+        Ok([a]) => Ok((a, store, net)),
         Err(_) => Err(crate::usage_error(what)),
     }
 }
 
-pub fn build(args: impl Iterator<Item = String>) -> ExitCode {
-    let (recipe, store, net) = match two_and_net(args, "build needs RECIPE and STORE") {
+fn import(args: Vec<String>) -> ExitCode {
+    let (archive, store, net) = match one_and_net(args, "image import needs ARCHIVE") {
         Ok(args) => args,
         Err(code) => return code,
     };
     report((|| {
-        let store = store_at(Path::new(&store))?;
-        let json = fs::read(&recipe).map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
-        let recipe: Recipe = serde_json::from_slice(&json)
-            .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
-        let name = store.build(&recipe, &Boot { net })?;
-        store.disks(&name)
-    })())
-}
-
-pub fn import(args: impl Iterator<Item = String>) -> ExitCode {
-    let (archive, store, net) = match two_and_net(args, "import needs ARCHIVE and STORE") {
-        Ok(args) => args,
-        Err(code) => return code,
-    };
-    report((|| {
-        let store = store_at(Path::new(&store))?;
+        let store = store_at(&store)?;
         let archive = Archive::open(Path::new(&archive))?;
         let image = archive.image()?;
         let name = store.import(&image, |l| archive.layer(l), &Boot { net })?;
@@ -104,13 +104,13 @@ pub fn import(args: impl Iterator<Item = String>) -> ExitCode {
     })())
 }
 
-pub fn pull(args: impl Iterator<Item = String>) -> ExitCode {
-    let (reference, store, net) = match two_and_net(args, "pull needs REFERENCE and STORE") {
+fn pull(args: Vec<String>) -> ExitCode {
+    let (reference, store, net) = match one_and_net(args, "image pull needs REFERENCE") {
         Ok(args) => args,
         Err(code) => return code,
     };
     report((|| {
-        let store = store_at(Path::new(&store))?;
+        let store = store_at(&store)?;
         let mut registry =
             Registry::new(Reference::parse(&reference)?, &store.dir.join("registry"));
         let image = registry.image()?;
@@ -119,20 +119,31 @@ pub fn pull(args: impl Iterator<Item = String>) -> ExitCode {
     })())
 }
 
-/// `image build|tag|rm`: images by their tags.
+/// `image build|import|pull|tag|rm`: images by their tags.
 pub fn image(mut args: impl Iterator<Item = String>) -> ExitCode {
-    match args.next().as_deref() {
+    let command = args.next();
+    let mut args: Vec<String> = args.collect();
+    if matches!(command.as_deref(), Some("tag" | "rm")) {
+        let store = match take_store(&mut args) {
+            Ok(store) => store,
+            Err(code) => return code,
+        };
+        args.push(store.to_string_lossy().into_owned());
+    }
+    match command.as_deref() {
         Some("build") => image_build(args),
-        Some("tag") => match <[String; 3]>::try_from(args.collect::<Vec<_>>()) {
+        Some("import") => import(args),
+        Some("pull") => pull(args),
+        Some("tag") => match <[String; 3]>::try_from(args) {
             Ok([image, tag, store]) => report((|| {
                 let store = store_for_reading(Path::new(&store))?;
                 let name = store.resolve(&image)?;
                 store.tag(&tag, &name)?;
                 store.disks(&name)
             })()),
-            Err(_) => crate::usage_error("image tag needs IMAGE, TAG and STORE"),
+            Err(_) => crate::usage_error("image tag needs IMAGE and TAG"),
         },
-        Some("rm") => match <[String; 2]>::try_from(args.collect::<Vec<_>>()) {
+        Some("rm") => match <[String; 2]>::try_from(args) {
             Ok([tag, store]) => report((|| {
                 let store = store_for_reading(Path::new(&store))?;
                 if !store.untag(&tag)? {
@@ -140,15 +151,15 @@ pub fn image(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 Ok(vec![])
             })()),
-            Err(_) => crate::usage_error("image rm needs TAG and STORE"),
+            Err(_) => crate::usage_error("image rm needs TAG"),
         },
-        _ => crate::usage_error("image takes build, tag or rm"),
+        _ => crate::usage_error(USAGE),
     }
 }
 
-/// `image build RECIPE STORE [--tag TAG]`: the recipe's base pulled (`pull`) or found (`from`, a
-/// tag or a stage), the recipe built on it, and what it made tagged.
-fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
+/// `image build RECIPE [--tag TAG]`: the recipe's base pulled (`pull`) or found (`from`, a tag or a
+/// stage), the recipe built on it, and what it made tagged.
+fn image_build(args: Vec<String>) -> ExitCode {
     let mut tag = None;
     let mut rest = Vec::new();
     let mut args = args.into_iter();
@@ -162,13 +173,12 @@ fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
             rest.push(arg);
         }
     }
-    let (recipe, store, net) =
-        match two_and_net(rest.into_iter(), "image build needs RECIPE and STORE") {
-            Ok(args) => args,
-            Err(code) => return code,
-        };
+    let (recipe, store, net) = match one_and_net(rest, "image build needs RECIPE") {
+        Ok(args) => args,
+        Err(code) => return code,
+    };
     report((|| {
-        let store = store_at(Path::new(&store))?;
+        let store = store_at(&store)?;
         let json = fs::read(&recipe).map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
         let mut value: serde_json::Value = serde_json::from_slice(&json)
             .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
@@ -195,6 +205,7 @@ fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
                 )));
             }
         };
+        give_builds_ca(&mut value, &net)?;
         let path = recipe;
         let mut recipe: Recipe =
             serde_json::from_value(value).map_err(|e| io::Error::other(format!("{path}: {e}")))?;
@@ -216,16 +227,47 @@ fn image_build(args: impl Iterator<Item = String>) -> ExitCode {
     })())
 }
 
-/// `images STORE [--json]`: the store's tags, each with its stage, disks and labels.
+/// The certificate of the builds' caching CA, for the hosts `net`'s policy terminates, in each of
+/// the recipe's steps that asks for it (BUILD_CA in its environment).
+fn give_builds_ca(recipe: &mut serde_json::Value, net: &Net) -> io::Result<()> {
+    let Some(steps) = recipe.get_mut("steps").and_then(|s| s.as_array_mut()) else {
+        return Ok(());
+    };
+    let asking: Vec<&mut serde_json::Value> = steps
+        .iter_mut()
+        .filter_map(|step| {
+            step.get_mut("env")
+                .filter(|env| env.get(BUILD_CA).is_some())
+        })
+        .collect();
+    if asking.is_empty() {
+        return Ok(());
+    }
+    let hosts = match net {
+        Net::Policy(path) => crate::boot::policy(path)?.terminated_hosts(),
+        _ => vec![],
+    };
+    let certificate = bottle_agent_client::ca::certificate(BUILDS_CA, &hosts)?.unwrap_or_default();
+    for env in asking {
+        env[BUILD_CA] = certificate.clone().into();
+    }
+    Ok(())
+}
+
+/// `images [--json]`: the store's tags, each with its stage, disks and labels.
 pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
-    let args: Vec<String> = args.collect();
-    let (store, json) = match args.as_slice() {
-        [store] => (store, false),
-        [store, flag] | [flag, store] if flag == "--json" => (store, true),
-        _ => return crate::usage_error(IMAGES_USAGE),
+    let mut args: Vec<String> = args.collect();
+    let store = match take_store(&mut args) {
+        Ok(store) => store,
+        Err(code) => return code,
+    };
+    let json = match args.as_slice() {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => return crate::usage_error(USAGE),
     };
     let listed = (|| -> io::Result<Vec<serde_json::Value>> {
-        let store = store_for_reading(Path::new(store))?;
+        let store = store_for_reading(&store)?;
         let mut images = Vec::new();
         for (tag, name) in store.tags()? {
             // A tag whose stage is gone (deleted by hand) is listed as such, not an error.
@@ -264,13 +306,14 @@ pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
 /// `gc STORE [IMAGE]...`: deletes the stages in STORE no machine uses, and none of IMAGEs (top
 /// stages' names, or disks) or of its tagged images is made of. What a machine uses is safe
 /// whether it runs or not.
-pub fn gc(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let Some(store) = args.next() else {
-        return crate::usage_error("gc needs STORE");
+pub fn gc(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut keep: Vec<String> = args.collect();
+    let store = match take_store(&mut keep) {
+        Ok(store) => store,
+        Err(code) => return code,
     };
-    let keep: Vec<String> = args.collect();
     let result = (|| -> io::Result<Vec<String>> {
-        let store = store_for_reading(Path::new(&store))?;
+        let store = store_for_reading(&store)?;
         let mut kept = std::collections::BTreeSet::new();
         let in_use = crate::machine::disks_in_use()?;
         for name in store.tags()?.values() {

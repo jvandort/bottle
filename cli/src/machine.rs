@@ -1,49 +1,39 @@
-//! `bottle-cli machine`: bottles' VMs, kept, as smolvm keeps its machines: made once, started and
-//! stopped any number of times, their disks kept between.
+//! bottle-cli's machines: bottles' VMs, kept: made once, started and stopped any number of times,
+//! their disks kept between. By name, each command's first argument:
 //!
-//!     bottle-cli machine create --name NAME --image DISK [--cpus N] [--mem MIB] [--storage GIB]
-//!                               [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
-//!                               [--workdir DIR] [--label NAME=VALUE]... [--network FILE|-]
-//!     bottle-cli machine start --name NAME [--net-direct]
-//!     bottle-cli machine stop --name NAME
-//!     bottle-cli machine delete --name NAME [-f]
-//!     bottle-cli machine rename --name NAME --to NEW
-//!     bottle-cli machine configure --name NAME --network FILE|-
-//!     bottle-cli machine ls [--json]
-//!     bottle-cli machine status --name NAME [--json]
-//!     bottle-cli machine exec --name NAME [-i] [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--]
-//!                             COMMAND [ARG]...
-//!
-//! DISK is a stage's disk in a store (as `build` and `import` print them, the last): the image is
-//! it and the stages below it; its environment is everything's in the machine, under -e's; and what
-//! it runs, its entrypoint and command, is started at each start, as smolvm starts a container's. Mounts are read-only, whatever they say. A machine is a directory,
-//! $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at most), and,
-//! while it runs, its pid, its agent's socket and its console's log. Started, it runs in the
-//! background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's arguments, to
-//! try this without VMs); start returns once its agent answers. Its network is the policy it was
-//! made with (--network: kept as its network.json, see bottle-agent-client's policy), every
-//! connection decided by it, cached and routed hosts' TLS answered with its own caching CA (see
-//! `bottle-cli ca`), made for that policy's hosts as it starts. Without one, with --net-direct,
-//! every connection's allowed; otherwise, it has none. A machine is "created" until it's
-//! first started, then "running" or "stopped". --user and --workdir are who and where `exec` runs a
-//! command unless it says; labels are its creator's, shown by `ls`.
-//!
-//! The same, machine-wide and by name, at the top level (what `bottle` will be):
-//!
-//!     bottle-cli info [--json]
-//!     bottle-cli ls [--json]
-//!     bottle-cli status NAME [--json]
-//!     bottle-cli start NAME
+//!     bottle-cli create NAME --image IMAGE [--store PATH] [--cpus N] [--mem MIB] [--storage GIB]
+//!                       [-v SOURCE:TARGET[:ro]]... [-e NAME=VALUE]... [--user USER]
+//!                       [--workdir DIR] [--label NAME=VALUE]... [--network FILE|-]
+//!     bottle-cli start NAME [--net-direct]
 //!     bottle-cli stop NAME
+//!     bottle-cli status NAME [--json]
 //!     bottle-cli exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...
 //!     bottle-cli shell NAME
+//!     bottle-cli configure NAME --network FILE|-
+//!     bottle-cli rename NAME NEW
+//!     bottle-cli delete NAME [-f]
+//!     bottle-cli ls [--json]
+//!     bottle-cli info [--json]
 //!
-//! `info` is this machine's: its memory and cores, what machines here can have, and its
-//! $BOTTLE_HOME. `shell` is a login
-//! shell, the user's own ($SHELL, as the agent sets it from /etc/passwd), in a
-//! terminal. `start` starts a machine with its own network policy, if it has one, and nothing else;
-//! `shell` and `exec` start one that has, if it's stopped. One made without (a machine of bottle's
-//! from before, until bottle gives it one) is started with no network.
+//! IMAGE is a tag in a store (its default, $BOTTLE_HOME/stages, or --store's), or a stage's disk
+//! (as `image build` prints them, the last): the image is it and the stages below it; its
+//! environment is everything's in the machine, under -e's; and what it runs, its entrypoint and
+//! command, is started at each start. Mounts are read-only, whatever they say. A machine is a
+//! directory, $BOTTLE_HOME/krun/machines/NAME: its config, its own disk (sparse, --storage GIB at
+//! most), and, while it runs, its pid, its agent's socket and its console's log. Started, it runs
+//! in the background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's
+//! arguments, to try this without VMs); start returns once its agent answers. Its network is the
+//! policy it was made with (--network: kept as its network.json, see bottle-agent-client's policy),
+//! every connection decided by it, cached and routed hosts' TLS answered with its own caching CA,
+//! made for that policy's hosts as it starts. Without one, with --net-direct, every connection's
+//! allowed; otherwise, it has none. A machine is "created" until it's first started, then "running"
+//! or "stopped". --user and --workdir are who and where `exec` runs a command unless it says;
+//! labels are its creator's, shown by `ls`. `shell` is a login shell, the user's own ($SHELL, as
+//! the agent sets it from /etc/passwd), in a terminal; `shell` and `exec` start a stopped machine
+//! that has its policy. `configure` gives a stopped machine another policy. `info` is this
+//! machine's: its memory and cores, what machines here can have, and its $BOTTLE_HOME.
+//!
+//! A runner's machine is RUNNER/NAME, every command the same (see remote.rs).
 
 use std::env;
 use std::fs;
@@ -59,11 +49,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::FAILED;
 
-pub const USAGE: &str =
-    "machine create|start|stop|delete|ls|status|exec ... (see cli/src/machine.rs)";
-pub const TOP_USAGE: &str = "info [--json] | ls [--json] | status NAME [--json] | start NAME | stop NAME | shell NAME \
-    | cp SRC DST (either NAME:PATH) \
-    | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]...";
+pub const USAGE: &str = "create NAME --image IMAGE [--store PATH] [OPTION]... | start NAME [--net-direct] \
+    | stop NAME | status NAME [--json] | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]... \
+    | shell NAME | configure NAME --network FILE|- | rename NAME NEW | delete NAME [-f] | ls [--json] \
+    | info [--json] | cp SRC DST (either NAME:PATH)";
 
 /// How long a stopped machine's VM gets to end, before it's killed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -91,31 +80,56 @@ struct Config {
     labels: std::collections::BTreeMap<String, String>,
 }
 
-pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let command = args.next();
-    let args: Vec<String> = args.collect();
-    // A runner's machine, RUNNER/NAME: asked of this program there (see remote.rs).
-    if let Some(command) = &command
-        && let Some(code) = crate::remote::machine(command, &args)
-    {
-        return code;
+/// A machine command (see the module's doc): `ls`, or one whose first argument is a machine's name.
+pub fn main(command: &str, args: Vec<String>) -> ExitCode {
+    if command == "ls" {
+        return done(ls(&args));
     }
-    let result = match command.as_deref() {
-        Some("create") => create(&args),
-        Some("start") => start(&args),
-        Some("stop") => named(&args).and_then(|m| m.stop()),
-        Some("delete") => delete(&args),
-        Some("rename") => rename(&args),
-        Some("configure") => configure(&args),
-        Some("ls") => ls(&args),
-        Some("status") => status(&args),
-        Some("exec") => return exec(args),
-        _ => {
-            return crate::usage_error(
-                "machine needs create, start, stop, delete, rename, configure, ls, status or exec",
-            );
-        }
+    let Some((name, rest)) = args.split_first().filter(|(n, _)| !n.starts_with('-')) else {
+        return crate::usage_error(&format!("{command} needs a machine's name"));
     };
+    // A runner's machine, RUNNER/NAME: asked of this program there (see remote.rs).
+    if crate::runner::split(name).is_some() {
+        return crate::remote::machine(command, name, rest);
+    }
+    let machine = match Machine::new(name) {
+        Ok(machine) => machine,
+        Err(e) => return crate::usage_error(&e.to_string()),
+    };
+    done(match command {
+        "create" => create(&machine, rest),
+        "start" => start(&machine, rest),
+        "stop" if rest.is_empty() => machine.stop(),
+        "status" => status(&machine, rest),
+        "configure" => configure(&machine, rest),
+        "rename" => rename(&machine, rest),
+        "delete" => delete(&machine, rest),
+        "exec" | "shell" => {
+            if let Err(e) = machine.up() {
+                return done(Err(e));
+            }
+            if command == "exec" {
+                return exec(&machine, rest.to_vec());
+            }
+            if !rest.is_empty() {
+                return crate::usage_error("shell takes a machine's name alone");
+            }
+            return exec(&machine, LOGIN.map(String::from).to_vec());
+        }
+        _ => return crate::usage_error(USAGE),
+    })
+}
+
+/// What `shell` runs: a login shell, the user's own, in a terminal.
+pub const LOGIN: [&str; 5] = [
+    "-t",
+    "--",
+    "/bin/sh",
+    "-c",
+    r#"exec "${SHELL:-/bin/sh}" -l"#,
+];
+
+fn done(result: io::Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -152,20 +166,6 @@ pub fn is_machine(name: &str) -> bool {
 struct Machine {
     name: String,
     dir: PathBuf,
-}
-
-/// The machine named by --name in `args`.
-fn named(args: &[String]) -> io::Result<Machine> {
-    let mut name = None;
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--name" => name = args.next().cloned(),
-            "--json" | "-f" => {}
-            other_arg => return Err(other(format!("unknown option {other_arg}"))),
-        }
-    }
-    Machine::new(&name.ok_or_else(|| other("no --name"))?)
 }
 
 impl Machine {
@@ -415,9 +415,9 @@ impl Machine {
     }
 }
 
-fn create(args: &[String]) -> io::Result<()> {
-    let mut name = None;
+fn create(machine: &Machine, args: &[String]) -> io::Result<()> {
     let mut image = None;
+    let mut store = None;
     let mut config = Config {
         image: Vec::new(),
         cpus: 2,
@@ -443,8 +443,8 @@ fn create(args: &[String]) -> io::Result<()> {
                 .map_err(|_| other(format!("{arg} {v}: not a number")))
         };
         match arg.as_str() {
-            "--name" => name = Some(value()?),
-            "--image" => image = Some(PathBuf::from(value()?)),
+            "--image" => image = Some(value()?),
+            "--store" => store = Some(PathBuf::from(value()?)),
             // As many as the hypervisor has for it, at most: boot sees to that.
             "--cpus" => config.cpus = number(value()?).map(|n: u64| n.min(255) as u8)?,
             "--mem" => config.mem_mib = number(value()?)? as u32,
@@ -480,12 +480,11 @@ fn create(args: &[String]) -> io::Result<()> {
             other_arg => return Err(other(format!("unknown option {other_arg}"))),
         }
     }
-    let machine = Machine::new(&name.ok_or_else(|| other("no --name"))?)?;
     let image = image.ok_or_else(|| other("no --image"))?;
     if machine.exists() {
         return Err(other(format!("there's a machine {} already", machine.name)));
     }
-    let (disks, image_env, run) = image_of(&image)?;
+    let (disks, image_env, run) = image_of(&disk_of(&image, store.as_deref())?)?;
     // The image's environment first: a machine's own -e overrides it.
     config.env.splice(0..0, image_env);
     (config.image, config.run) = (disks, run);
@@ -505,6 +504,29 @@ fn create(args: &[String]) -> io::Result<()> {
         let _ = fs::remove_dir_all(&machine.dir);
     }
     made
+}
+
+/// The top stage's disk of `image`: a stage's disk as given, else a tag in `store` (its default, if
+/// None).
+fn disk_of(image: &str, store: Option<&Path>) -> io::Result<PathBuf> {
+    if Path::new(image).is_file() {
+        return Ok(image.into());
+    }
+    let dir = store.map_or_else(crate::build::default_store, Path::to_path_buf);
+    let store = Store {
+        dir: dir.clone(),
+        mke2fs: PathBuf::new(),
+    };
+    let name = store.resolve(image).map_err(|e| {
+        other(format!(
+            "{image}: not a disk, nor an image in {}: {e}",
+            dir.display()
+        ))
+    })?;
+    store
+        .disks(&name)?
+        .pop()
+        .ok_or_else(|| other(format!("{image} has no stages")))
 }
 
 /// An image's disks, environment and what it runs (see image_of).
@@ -539,19 +561,17 @@ fn image_of(disk: &Path) -> io::Result<Image> {
     ))
 }
 
-/// `machine start --name NAME [--net-direct]`: the network is its policy's, if it has one; else
-/// the start's.
-fn start(args: &[String]) -> io::Result<()> {
+/// `start NAME [--net-direct]`: the network is its policy's, if it has one; else the start's.
+fn start(machine: &Machine, args: &[String]) -> io::Result<()> {
     let mut net = crate::boot::Net::None;
-    let mut rest = Vec::new();
     let mut given = args.iter();
     while let Some(arg) = given.next() {
         match net.take(arg, || given.next().cloned()) {
             Some(taken) => taken.map_err(other)?,
-            None => rest.push(arg.clone()),
+            None => return Err(other(format!("unknown option {arg}"))),
         }
     }
-    named(&rest)?.start(&net)
+    machine.start(&net)
 }
 
 /// The hosts whose TLS machine `name`'s network policy has terminated here, for its caching CA;
@@ -585,9 +605,11 @@ pub fn disks_in_use() -> io::Result<Vec<PathBuf>> {
     Ok(disks)
 }
 
-fn delete(args: &[String]) -> io::Result<()> {
-    let machine = named(args)?;
+fn delete(machine: &Machine, args: &[String]) -> io::Result<()> {
     machine.must_exist()?;
+    if let Some(arg) = args.iter().find(|a| *a != "-f") {
+        return Err(other(format!("unknown option {arg}")));
+    }
     if args.iter().any(|a| a == "-f") {
         if let Some(pid) = machine.pid().filter(|_| machine.running()) {
             // SAFETY: kill with a pid.
@@ -603,20 +625,13 @@ fn delete(args: &[String]) -> io::Result<()> {
     bottle_agent_client::ca::forget(&machine.name)
 }
 
-/// `machine configure`: a stopped machine's network policy, given again (its creator's, when what
-/// it was made with changes, or one made before machines had their own).
-fn configure(args: &[String]) -> io::Result<()> {
-    let (mut name, mut network) = (None, None);
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--name" => name = args.next(),
-            "--network" => network = args.next(),
-            other_arg => return Err(other(format!("unknown option {other_arg}"))),
-        }
-    }
-    let machine = Machine::new(name.ok_or_else(|| other("no --name"))?)?;
-    let network = network.ok_or_else(|| other("no --network"))?;
+/// `configure NAME --network FILE|-`: a stopped machine's network policy, given again (its
+/// creator's, when what it was made with changes).
+fn configure(machine: &Machine, args: &[String]) -> io::Result<()> {
+    let network = match args {
+        [flag, network] if flag == "--network" => network,
+        _ => return Err(other("configure takes --network FILE|-")),
+    };
     machine.must_exist()?;
     if machine.running() {
         return Err(other(format!("{} is running: stop it first", machine.name)));
@@ -627,19 +642,12 @@ fn configure(args: &[String]) -> io::Result<()> {
     fs::rename(staged, machine.network())
 }
 
-/// `machine rename`: a stopped machine, under another name; its disk, config and logs with it.
-fn rename(args: &[String]) -> io::Result<()> {
-    let (mut name, mut to) = (None, None);
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--name" => name = args.next(),
-            "--to" => to = args.next(),
-            other_arg => return Err(other(format!("unknown option {other_arg}"))),
-        }
-    }
-    let machine = Machine::new(name.ok_or_else(|| other("no --name"))?)?;
-    let new = Machine::new(to.ok_or_else(|| other("no --to"))?)?;
+/// `rename NAME NEW`: a stopped machine, under another name; its disk, config and logs with it.
+fn rename(machine: &Machine, args: &[String]) -> io::Result<()> {
+    let [to] = args else {
+        return Err(other("rename takes the machine's new name"));
+    };
+    let new = Machine::new(to)?;
     machine.must_exist()?;
     if machine.running() {
         return Err(other(format!("{} is running: stop it first", machine.name)));
@@ -759,8 +767,10 @@ fn image_name(disks: &[PathBuf]) -> String {
         .unwrap_or(stage)
 }
 
-fn status(args: &[String]) -> io::Result<()> {
-    let machine = named(args)?;
+fn status(machine: &Machine, args: &[String]) -> io::Result<()> {
+    if let Some(arg) = args.iter().find(|a| *a != "--json") {
+        return Err(other(format!("unknown option {arg}")));
+    }
     let state = machine
         .state()
         .ok_or_else(|| other(format!("no machine {}", machine.name)))?;
@@ -777,28 +787,7 @@ fn status(args: &[String]) -> io::Result<()> {
 
 /// `machine exec`: `exec` on the machine's socket. -i is taken and ignored, stdin being always
 /// passed on.
-fn exec(args: Vec<String>) -> ExitCode {
-    let mut name = None;
-    let mut rest = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--name" => name = args.next(),
-            "-i" => {}
-            "--" => {
-                rest.push(arg);
-                rest.extend(args.by_ref());
-            }
-            _ => rest.push(arg),
-        }
-    }
-    let machine = match name
-        .ok_or_else(|| other("no --name"))
-        .and_then(|n| Machine::new(&n))
-    {
-        Ok(machine) => machine,
-        Err(e) => return crate::usage_error(&e.to_string()),
-    };
+fn exec(machine: &Machine, rest: Vec<String>) -> ExitCode {
     if !machine.running() {
         eprintln!("bottle-cli: {} isn't running", machine.name);
         return ExitCode::from(FAILED);
@@ -824,7 +813,7 @@ fn exec(args: Vec<String>) -> ExitCode {
 pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.collect();
     if !(args.is_empty() || args == ["--json"]) {
-        return crate::usage_error(TOP_USAGE);
+        return crate::usage_error(USAGE);
     }
     // SAFETY: sysconf has no preconditions.
     let (pages, page) = unsafe {
@@ -848,75 +837,6 @@ pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
-}
-
-/// The machine-wide commands, by name (see the module's doc): `ls`, `status`, `start`, `stop`,
-/// `exec`, `shell`.
-pub fn top(command: &str, args: Vec<String>) -> ExitCode {
-    let (name, rest) = match args.split_first() {
-        Some((name, rest)) if command != "ls" && !name.starts_with('-') => {
-            (name.clone(), rest.to_vec())
-        }
-        _ if command == "ls" => (String::new(), args),
-        _ => return crate::usage_error(&format!("{command} needs a machine's name")),
-    };
-    let named = |rest: Vec<String>| [vec!["--name".to_string(), name.clone()], rest].concat();
-    // A runner's machine, RUNNER/NAME: as `machine`'s commands have it.
-    if crate::runner::split(&name).is_some() {
-        let (command, args) = match command {
-            "shell" if rest.is_empty() => (
-                "exec",
-                named(
-                    [
-                        "-t",
-                        "--",
-                        "/bin/sh",
-                        "-c",
-                        r#"exec "${SHELL:-/bin/sh}" -l"#,
-                    ]
-                    .map(String::from)
-                    .to_vec(),
-                ),
-            ),
-            "status" | "start" | "stop" | "exec" => (command, named(rest)),
-            _ => return crate::usage_error(TOP_USAGE),
-        };
-        return crate::remote::machine(command, &args).unwrap_or(ExitCode::from(FAILED));
-    }
-    if matches!(command, "exec" | "shell")
-        && let Err(e) = Machine::new(&name).and_then(|m| m.up())
-    {
-        eprintln!("bottle-cli: {e}");
-        return ExitCode::from(FAILED);
-    }
-    let result = match command {
-        "ls" => ls(&rest),
-        "status" => status(&named(rest)),
-        "start" if rest.is_empty() => {
-            Machine::new(&name).and_then(|m| m.start(&crate::boot::Net::None))
-        }
-        "stop" => Machine::new(&name).and_then(|m| m.stop()),
-        "exec" => return exec(named(rest)),
-        "shell" => {
-            if !rest.is_empty() {
-                return crate::usage_error("shell takes a machine's name alone");
-            }
-            let login = r#"exec "${SHELL:-/bin/sh}" -l"#;
-            return exec(named(
-                ["-t", "--", "/bin/sh", "-c", login]
-                    .map(String::from)
-                    .to_vec(),
-            ));
-        }
-        _ => return crate::usage_error(TOP_USAGE),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("bottle-cli: {e}");
-            ExitCode::from(FAILED)
-        }
-    }
 }
 
 #[cfg(test)]

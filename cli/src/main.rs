@@ -1,6 +1,6 @@
-//! bottle-cli: the host's side of bottles that bottle runs on libkrun itself. For now, `exec`,
-//! `boot`, the VM's launcher, `build` and `import`, which make images' stages in VMs, and
-//! `machine`, bottles' VMs kept, started and stopped.
+//! bottle-cli: machines, libkrun VMs, kept, started and stopped by name, here and on runners
+//! (machine.rs, runner.rs, remote.rs), and the images they boot (build.rs). `boot`, a machine's
+//! VM, and `forward`, a runner's machine's forwards, are its own processes.
 
 use std::process::ExitCode;
 
@@ -20,51 +20,49 @@ const FAILED: u8 = 255;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("boot") => boot::main(args),
-        Some("build") => build::build(args),
-        Some("import") => build::import(args),
-        Some("pull") => build::pull(args),
-        Some("gc") => build::gc(args),
-        Some("image") => build::image(args),
-        Some("images") => build::images(args),
-        Some("info") => machine::info(args),
-        Some("machine") => machine::main(args),
-        Some("ca") => ca::main(args),
-        Some("runner") => runner::main(args),
-        Some("on") => runner::on(args),
-        Some("cp") => copy::main(args),
-        Some("forward") => remote::forward(args),
+        Some(
+            command @ ("create" | "start" | "stop" | "status" | "shell" | "configure" | "rename"
+            | "delete" | "ls"),
+        ) => machine::main(command, args.collect()),
         Some("exec") => {
             let args: Vec<String> = args.collect();
             match args.split_first() {
-                // On an agent's socket: what `machine exec` and `exec NAME` come to.
+                // On an agent's socket: what `exec NAME` comes to.
                 Some((flag, rest)) if flag == "--socket" => exec::main(rest.iter().cloned()),
-                _ => machine::top("exec", args),
+                _ => machine::main("exec", args),
             }
         }
-        Some(command @ ("ls" | "status" | "start" | "stop" | "shell")) => {
-            machine::top(command, args.collect())
-        }
+        Some("cp") => copy::main(args),
+        Some("info") => machine::info(args),
+        Some("image") => build::image(args),
+        Some("images") => build::images(args),
+        Some("gc") => build::gc(args),
+        Some("ca") => ca::main(args),
+        Some("runner") => runner::main(args),
+        Some("on") => runner::on(args),
+        // Its own processes: a machine's VM, and a runner's machine's forwards.
+        Some("boot") => boot::main(args),
+        Some("forward") => remote::forward(args),
         Some(other) => usage_error(&format!("no command {other}")),
         None => usage_error("no command"),
     }
 }
 
+/// Says what's wrong with the command line of one of its own processes (`boot`, `exec --socket`),
+/// and how that goes.
+fn own_usage_error(problem: &str, usage: &str) -> ExitCode {
+    eprintln!("bottle-cli: {problem}");
+    eprintln!("usage: bottle-cli {usage}");
+    ExitCode::from(FAILED)
+}
+
 /// Says what's wrong with the command line, and how it goes.
 fn usage_error(problem: &str) -> ExitCode {
     eprintln!("bottle-cli: {problem}");
-    eprintln!("usage: bottle-cli {}", machine::TOP_USAGE);
-    eprintln!("   or: bottle-cli {}", exec::USAGE);
-    eprintln!("   or: bottle-cli {}", boot::USAGE);
-    eprintln!("   or: bottle-cli {}", ca::USAGE);
+    eprintln!("usage: bottle-cli {}", machine::USAGE);
+    eprintln!("   or: bottle-cli {}", build::USAGE);
     eprintln!("   or: bottle-cli {}", runner::USAGE);
-    eprintln!("   or: bottle-cli {}", build::BUILD_USAGE);
-    eprintln!("   or: bottle-cli {}", build::IMPORT_USAGE);
-    eprintln!("   or: bottle-cli {}", build::PULL_USAGE);
-    eprintln!("   or: bottle-cli {}", build::GC_USAGE);
-    eprintln!("   or: bottle-cli {}", build::IMAGE_USAGE);
-    eprintln!("   or: bottle-cli {}", build::IMAGES_USAGE);
-    eprintln!("   or: bottle-cli {}", machine::USAGE);
+    eprintln!("   or: bottle-cli {}", ca::USAGE);
     ExitCode::from(FAILED)
 }
 

@@ -37,9 +37,8 @@ pub fn dist(triple: &str, out: &Path) -> Result<()> {
     let mac = root().join("target/dist");
     mac_dist(&mac)?;
     let cli = mac.join("bottle-cli");
+    // Its own home, so its images are in its own default store.
     let home = target().join("builder");
-    let store = home.join("stages");
-    fs::create_dir_all(&store).map_err(|e| format!("{}: {e}", store.display()))?;
     let bottle_cli = |args: &[&str]| {
         let mut command = Command::new(&cli);
         command.args(args).env("BOTTLE_HOME", &home);
@@ -49,23 +48,21 @@ pub fn dist(triple: &str, out: &Path) -> Result<()> {
     step(&format!(
         "the builder, {DEBIAN} with what builds for {triple}"
     ));
-    let store_arg = store.to_str().ok_or("a non-UTF-8 path")?;
-    let debian = last_line(bottle_cli(&["pull", DEBIAN, store_arg, "--net-direct"]))?;
+    let debian = last_line(bottle_cli(&["image", "pull", DEBIAN, "--net-direct"]))?;
     let recipe = recipe(arch, stem(&debian)?)?;
     let file = home.join(format!("builder-{arch}.json"));
     fs::write(&file, serde_json(&recipe)).map_err(|e| e.to_string())?;
     let image = last_line(bottle_cli(&[
+        "image",
         "build",
         file.to_str().unwrap(),
-        store_arg,
         "--net-direct",
     ]))?;
 
     // A machine per image: one from other scripts is new, and the old one goes.
     let machine = format!("builder-{arch}-{}", &stem(&image)?[..12]);
-    let listed: serde_json::Value =
-        serde_json::from_slice(&output(bottle_cli(&["machine", "ls", "--json"]))?)
-            .map_err(|e| format!("bottle-cli machine ls: {e}"))?;
+    let listed: serde_json::Value = serde_json::from_slice(&output(bottle_cli(&["ls", "--json"]))?)
+        .map_err(|e| format!("bottle-cli ls: {e}"))?;
     let machines: Vec<&str> = listed
         .as_array()
         .into_iter()
@@ -76,7 +73,7 @@ pub fn dist(triple: &str, out: &Path) -> Result<()> {
         .iter()
         .filter(|name| name.starts_with(&format!("builder-{arch}-")) && **name != machine)
     {
-        run(&mut bottle_cli(&["machine", "delete", "--name", old, "-f"]))?;
+        run(&mut bottle_cli(&["delete", old, "-f"]))?;
     }
     if !machines.contains(&machine.as_str()) {
         let cpus = std::thread::available_parallelism()
@@ -84,22 +81,15 @@ pub fn dist(triple: &str, out: &Path) -> Result<()> {
             .to_string();
         let source = format!("{}:{SOURCE}:ro", root().display());
         run(&mut bottle_cli(&[
-            "machine", "create", "--name", &machine, "--image", &image, "--cpus", &cpus, "--mem",
-            MEM_MIB, "-v", &source,
+            "create", &machine, "--image", &image, "--cpus", &cpus, "--mem", MEM_MIB, "-v", &source,
         ]))?;
     }
-    run(&mut bottle_cli(&[
-        "machine",
-        "start",
-        "--name",
-        &machine,
-        "--net-direct",
-    ]))?;
+    run(&mut bottle_cli(&["start", &machine, "--net-direct"]))?;
     let built = build_in(&bottle_cli, &machine, triple, out);
-    let stopped = run(&mut bottle_cli(&["machine", "stop", "--name", &machine]));
+    let stopped = run(&mut bottle_cli(&["stop", &machine]));
     built.and(stopped)?;
     // The stages the builder's machine isn't made of.
-    run(&mut bottle_cli(&["gc", store_arg, &image]))
+    run(&mut bottle_cli(&["gc", &image]))
 }
 
 /// `cargo xtask dist` in the builder, for `triple`; its distribution, out of it, into `out`.
@@ -113,17 +103,7 @@ fn build_in(
     let there = format!("{WORK}/dist-{triple}");
     let target_dir = format!("CARGO_TARGET_DIR={WORK}/target");
     let exec = |argv: &[&str]| {
-        let mut args = vec![
-            "machine",
-            "exec",
-            "--name",
-            machine,
-            "-w",
-            SOURCE,
-            "-e",
-            &target_dir,
-            "--",
-        ];
+        let mut args = vec!["exec", machine, "-w", SOURCE, "-e", &target_dir, "--"];
         args.extend_from_slice(argv);
         bottle_cli(&args)
     };

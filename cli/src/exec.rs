@@ -70,7 +70,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut args = match parse(args) {
         Ok(args) => args,
-        Err(e) => return crate::usage_error(&e),
+        Err(e) => return crate::own_usage_error(&e, USAGE),
     };
     // Before any thread starts, so they all inherit it: these signals are waited for, below, and
     // never interrupt anything.

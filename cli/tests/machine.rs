@@ -162,8 +162,8 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // A machine left running by a failure: killed, its namespace and loop devices with it.
-        let _ = self.cli(&["machine", "delete", "--name", "m1", "-f"]);
-        let _ = self.cli(&["machine", "delete", "--name", "m2", "-f"]);
+        let _ = self.cli(&["delete", "m1", "-f"]);
+        let _ = self.cli(&["delete", "m2", "-f"]);
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -178,9 +178,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     let image = f.dir.join("store/host.ext4").display().to_string();
     let share = format!("{}:/mnt/share:ro", f.dir.join("share").display());
     f.ok(&[
-        "machine",
         "create",
-        "--name",
         "m1",
         "--image",
         &image,
@@ -195,7 +193,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         "--label",
         "thread=fix-it",
     ]);
-    assert_eq!(f.ok(&["machine", "status", "--name", "m1"]), "created\n");
+    assert_eq!(f.ok(&["status", "m1"]), "created\n");
     let listed: serde_json::Value = serde_json::from_str(&f.ok(&["ls", "--json"])).unwrap();
     assert_eq!(
         (
@@ -211,22 +209,14 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     );
     assert_eq!(listed[0]["image"], "host"); // its top stage: no tag names it
     assert!(f.ok(&["ls"]).contains("thread=fix-it"));
-    assert!(
-        !f.cli(&["machine", "create", "--name", "m1", "--image", &image])
-            .status
-            .success()
-    );
+    assert!(!f.cli(&["create", "m1", "--image", &image]).status.success());
 
-    f.ok(&["machine", "start", "--name", "m1"]);
+    f.ok(&["start", "m1"]);
     assert_eq!(
-        f.ok(&["machine", "status", "--name", "m1", "--json"]),
+        f.ok(&["status", "m1", "--json"]),
         "{\"name\":\"m1\",\"state\":\"running\"}\n"
     );
-    let exec = |script: &str| {
-        f.ok(&[
-            "machine", "exec", "--name", "m1", "-i", "--", "sh", "-c", script,
-        ])
-    };
+    let exec = |script: &str| f.ok(&["exec", "m1", "--", "sh", "-c", script]);
     assert_eq!(
         exec("cat /proc/sys/kernel/hostname; echo $GREETING; echo $IMAGE_ONLY; cat /mnt/share/f"),
         "m1\nhello there\nfrom the image\nshared\n"
@@ -235,9 +225,7 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     // What the image runs is running: its entrypoint and command, with the machine's env.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !f
-        .cli(&[
-            "machine", "exec", "--name", "m1", "--", "test", "-e", "/run/ran",
-        ])
+        .cli(&["exec", "m1", "--", "test", "-e", "/run/ran"])
         .status
         .success()
     {
@@ -255,19 +243,15 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     exec("echo kept > /kept");
 
     f.ok(&["stop", "m1"]);
-    assert_eq!(f.ok(&["machine", "status", "--name", "m1"]), "stopped\n");
+    assert_eq!(f.ok(&["status", "m1"]), "stopped\n");
     let out = f.cli(&["shell", "m1"]);
     assert!(!out.status.success()); // not started for it: bottle starts bottles
     assert!(String::from_utf8_lossy(&out.stderr).contains("m1 isn't running"));
     // Stopped, it can be renamed, all of it; running, it can't.
-    f.ok(&["machine", "rename", "--name", "m1", "--to", "m2"]);
-    assert!(
-        !f.cli(&["machine", "status", "--name", "m1"])
-            .status
-            .success()
-    );
-    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "stopped\n");
-    f.ok(&["machine", "rename", "--name", "m2", "--to", "m1"]);
+    f.ok(&["rename", "m1", "m2"]);
+    assert!(!f.cli(&["status", "m1"]).status.success());
+    assert_eq!(f.ok(&["status", "m2"]), "stopped\n");
+    f.ok(&["rename", "m2", "m1"]);
     let disk = f.dir.join("home/krun/machines/m1/disk.ext4");
     let fsck = Command::new("e2fsck")
         .arg("-fn")
@@ -279,16 +263,12 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         "{}",
         String::from_utf8_lossy(&fsck.stdout)
     );
-    assert!(
-        !f.cli(&["machine", "exec", "--name", "m1", "--", "true"])
-            .status
-            .success()
-    );
+    assert!(!f.cli(&["exec", "m1", "--", "true"]).status.success());
 
     // Its disk is kept between runs.
-    f.ok(&["machine", "start", "--name", "m1"]);
+    f.ok(&["start", "m1"]);
     assert_eq!(exec("cat /kept"), "kept\n");
-    f.ok(&["machine", "stop", "--name", "m1"]);
+    f.ok(&["stop", "m1"]);
 
     // gc: what a machine uses stays, stopped or not, as does what's named; the rest goes.
     let store = f.dir.join("store");
@@ -301,18 +281,17 @@ fn machines_are_made_started_used_stopped_and_deleted() {
         .unwrap();
     }
     let store_arg = store.display().to_string();
-    assert_eq!(f.ok(&["gc", &store_arg, "named"]), "deleted unused\n");
+    assert_eq!(
+        f.ok(&["gc", "--store", &store_arg, "named"]),
+        "deleted unused\n"
+    );
     assert!(store.join("host.ext4").exists() && store.join("named.ext4").exists());
     assert!(!store.join("unused.ext4").exists() && !store.join("unused.json").exists());
 
-    f.ok(&["machine", "delete", "--name", "m1"]);
+    f.ok(&["delete", "m1"]);
     assert!(!f.dir.join("home/krun/machines/m1").exists());
-    assert!(
-        !f.cli(&["machine", "status", "--name", "m1"])
-            .status
-            .success()
-    );
-    assert_eq!(f.ok(&["machine", "ls", "--json"]), "[]\n");
+    assert!(!f.cli(&["status", "m1"]).status.success());
+    assert_eq!(f.ok(&["ls", "--json"]), "[]\n");
 }
 
 #[test]
@@ -325,20 +304,10 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     let image = f.dir.join("store/host.ext4").display().to_string();
     let bad = f.dir.join("bad.json");
     fs::write(&bad, r#"{"routes": [{"host": "x.example"}]}"#).unwrap();
-    let refused = f.cli(&[
-        "machine",
-        "create",
-        "--name",
-        "m2",
-        "--image",
-        &image,
-        "--network",
-    ]);
+    let refused = f.cli(&["create", "m2", "--image", &image, "--network"]);
     assert!(!refused.status.success());
     let refused = f.cli(&[
-        "machine",
         "create",
-        "--name",
         "m2",
         "--image",
         &image,
@@ -354,9 +323,7 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     )
     .unwrap();
     f.ok(&[
-        "machine",
         "create",
-        "--name",
         "m2",
         "--image",
         &image,
@@ -369,9 +336,9 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     let pem = f.ok(&["ca", "certificate", "m2"]);
     assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
     // Started with nothing but its name; the network's its own.
-    let refused = f.cli(&["machine", "start", "--name", "m2", "--net-direct"]);
+    let refused = f.cli(&["start", "m2", "--net-direct"]);
     assert!(!refused.status.success(), "another network than its own");
-    f.ok(&["machine", "start", "--name", "m2"]);
+    f.ok(&["start", "m2"]);
     let machine = f.dir.join("home/krun/machines/m2");
     let options: serde_json::Value =
         serde_json::from_slice(&fs::read(machine.join("boot-options.json")).unwrap()).unwrap();
@@ -385,16 +352,16 @@ fn a_machine_made_with_a_network_policy_starts_with_it_and_its_caching_ca() {
     let other = f.dir.join("other.json");
     fs::write(&other, r#"{"cache": [{"host": "other.example"}]}"#).unwrap();
     let other = other.display().to_string();
-    let refused = f.cli(&["machine", "configure", "--name", "m2", "--network", &other]);
+    let refused = f.cli(&["configure", "m2", "--network", &other]);
     assert!(!refused.status.success(), "running");
-    f.ok(&["machine", "stop", "--name", "m2"]);
-    f.ok(&["machine", "configure", "--name", "m2", "--network", &other]);
+    f.ok(&["stop", "m2"]);
+    f.ok(&["configure", "m2", "--network", &other]);
     assert_ne!(f.ok(&["ca", "certificate", "m2"]), pem);
     // Stopped, it's started by what needs it running: nothing else is needed.
     f.ok(&["exec", "m2", "--", "true"]);
-    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "running\n");
+    assert_eq!(f.ok(&["status", "m2"]), "running\n");
     f.ok(&["stop", "m2"]);
     f.ok(&["start", "m2"]);
-    assert_eq!(f.ok(&["machine", "status", "--name", "m2"]), "running\n");
-    f.ok(&["machine", "delete", "--name", "m2", "-f"]);
+    assert_eq!(f.ok(&["status", "m2"]), "running\n");
+    f.ok(&["delete", "m2", "-f"]);
 }

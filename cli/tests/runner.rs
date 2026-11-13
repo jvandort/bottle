@@ -115,7 +115,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         for machine in ["box/m", "here"] {
-            let _ = self.cli(&["machine", "delete", "--name", machine, "-f"]);
+            let _ = self.cli(&["delete", machine, "-f"]);
         }
         let _ = fs::remove_dir_all(&self.dir);
     }
@@ -165,10 +165,7 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
         serde_json::from_str(&f.ok(&["on", "box", "info", "--json"])).unwrap();
     let home = info["home"].as_str().unwrap().to_string();
     assert_eq!(home, f.there().join(".bottle").display().to_string());
-    assert_eq!(
-        f.ok(&["on", "box", "images", &format!("{home}/stages"), "--json"]),
-        "[]\n"
-    );
+    assert_eq!(f.ok(&["on", "box", "images", "--json"]), "[]\n");
 
     // Made with a route to a socket here: there, to one of its own, forwarded while it runs.
     let here = f.dir.join("here.sock");
@@ -183,9 +180,7 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
     .unwrap();
     let image = f.dir.join("store/s.ext4").display().to_string();
     f.ok(&[
-        "machine",
         "create",
-        "--name",
         "box/m",
         "--image",
         &image,
@@ -303,7 +298,7 @@ fn a_runners_machines_are_this_machines_by_runner_slash_name_their_routes_forwar
         !f.cli(&["runner", "rm", "box"]).status.success(),
         "it has machines"
     );
-    f.ok(&["machine", "delete", "--name", "box/m"]);
+    f.ok(&["delete", "box/m"]);
     assert!(!record.exists());
     f.ok(&["runner", "rm", "box"]);
     assert_eq!(f.ok(&["runner", "ls"]), "");
@@ -319,9 +314,7 @@ fn cp_copies_into_out_of_and_between_machines_here_and_a_runners() {
     let workdir = work.display().to_string();
     for name in ["here", "box/m"] {
         f.ok(&[
-            "machine",
             "create",
-            "--name",
             name,
             "--image",
             &image,
