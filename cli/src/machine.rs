@@ -32,8 +32,6 @@
 //! the agent sets it from /etc/passwd), in a terminal; `shell` and `exec` start a stopped machine
 //! that has its policy. `configure` gives a stopped machine another policy. `info` is this
 //! machine's: its memory and cores, what machines here can have, and its $BOTTLE_HOME.
-//!
-//! A runner's machine is RUNNER/NAME, every command the same (see remote.rs).
 
 use std::env;
 use std::fs;
@@ -92,10 +90,6 @@ pub fn main(command: &str, args: Vec<String>) -> ExitCode {
     let Some((name, rest)) = args.split_first().filter(|(n, _)| !n.starts_with('-')) else {
         return crate::usage_error(&format!("{command} needs a machine's name"));
     };
-    // A runner's machine, RUNNER/NAME: asked of this program there (see remote.rs).
-    if crate::runner::split(name).is_some() {
-        return crate::remote::machine(command, name, rest);
-    }
     let machine = match Machine::new(name) {
         Ok(machine) => machine,
         Err(e) => return crate::usage_error(&e.to_string()),
@@ -149,22 +143,12 @@ fn other(message: impl Into<String>) -> io::Error {
 
 /// Where machines are: $BOTTLE_HOME/krun/machines.
 fn machines() -> PathBuf {
-    let home = env::var_os("BOTTLE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".bottle"));
-    home.join("krun/machines")
+    crate::home().join("krun/machines")
 }
 
-/// Whether `name` is a machine there is: this machine's, or a runner's (RUNNER/NAME, its runner
-/// added).
+/// Whether `name` is a machine there is.
 pub fn is_machine(name: &str) -> bool {
-    match crate::runner::split(name) {
-        Some((runner, rest)) => {
-            Machine::new(rest).is_ok()
-                && crate::runner::registered().is_ok_and(|r| r.contains_key(runner))
-        }
-        None => Machine::new(name).is_ok_and(|m| m.exists()),
-    }
+    Machine::new(name).is_ok_and(|m| m.exists())
 }
 
 struct Machine {
@@ -679,7 +663,7 @@ fn ls(args: &[String]) -> io::Result<()> {
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut rows: Vec<_> = found
+    let rows: Vec<_> = found
         .iter()
         .map(|(name, state, config)| {
             let mut row = serde_json::json!({"name": name, "state": state});
@@ -693,8 +677,6 @@ fn ls(args: &[String]) -> io::Result<()> {
             row
         })
         .collect();
-    // And every runner's, RUNNER/NAME (see remote.rs).
-    rows.extend(crate::remote::listed());
     if json {
         println!("{}", serde_json::Value::Array(rows));
         return Ok(());
@@ -826,7 +808,7 @@ pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let memory_mib = (pages.max(0) as u64 * page.max(0) as u64) >> 20;
     let cpus = thread::available_parallelism().map_or(1, |n| n.get());
-    let home = crate::runner::home();
+    let home = crate::home();
     if args.is_empty() {
         println!(
             "memory  {memory_mib} MiB\ncpus    {cpus}\nhome    {}",

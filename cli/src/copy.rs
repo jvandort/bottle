@@ -1,9 +1,8 @@
 //! `bottle-cli cp SRC DST`: a file or a directory copied into, out of, or between machines, as
 //! cp -r would: into DST if it's a directory, else as DST. MACHINE:PATH is a path in that machine
-//! (a relative one from its workdir, as `exec` runs there), RUNNER/NAME:PATH one in a runner's;
-//! any other is a path here, and one side at least is in a machine. A shorthand, as `shell` is, for
-//! what `exec` does: a tar, packed by tar on one side and unpacked by it on the other, by way of
-//! this machine.
+//! (a relative one from its workdir, as `exec` runs there); any other is a path here, and one side
+//! at least is in a machine. A shorthand, as `shell` is, for what `exec` does: a tar, packed by tar
+//! on one side and unpacked by it on the other, by way of this machine.
 //!
 //! In a machine, it's its tar's, as `exec`'s user there. Here, it's unpacked by this machine's tar,
 //! which keeps it to where it's unpacked. Either way it's unpacked beside DST first, so nothing is

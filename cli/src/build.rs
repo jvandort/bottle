@@ -50,7 +50,7 @@ pub const USAGE: &str = "image build RECIPE [--tag TAG] [--network FILE | --net-
 
 /// The store: $BOTTLE_HOME/stages.
 pub fn store() -> PathBuf {
-    crate::runner::home().join("stages")
+    crate::home().join("stages")
 }
 
 /// A build VM's size: builds compile things.

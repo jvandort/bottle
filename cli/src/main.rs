@@ -1,6 +1,7 @@
-//! bottle-cli: machines, libkrun VMs, kept, started and stopped by name, here and on runners
-//! (machine.rs, runner.rs, remote.rs), and the images they boot (build.rs). `boot`, a machine's
-//! VM, and `forward`, a runner's machine's forwards, are its own processes.
+//! bottle-cli: this machine's machines, libkrun VMs, kept, started and stopped by name
+//! (machine.rs), and the images they boot (build.rs). `boot`, a machine's VM, is its own process.
+//! Another machine's are its bottle-cli's, there: whoever reaches it runs that (folio does, over
+//! ssh). Its state is in $BOTTLE_HOME, else ~/.bottle (home).
 
 use std::process::ExitCode;
 
@@ -9,8 +10,6 @@ mod build;
 mod copy;
 mod exec;
 mod machine;
-mod remote;
-mod runner;
 mod upkeep;
 
 /// A failure of bottle-cli's own, not a command's: as ssh has it.
@@ -36,11 +35,8 @@ fn main() -> ExitCode {
         Some("image") => build::image(args),
         Some("images") => build::images(args),
         Some("gc") => build::gc(args),
-        Some("runner") => runner::main(args),
-        Some("on") => runner::on(args),
-        // Its own processes: a machine's VM, and a runner's machine's forwards.
+        // Its own process: a machine's VM.
         Some("boot") => boot::main(args),
-        Some("forward") => remote::forward(args),
         Some(other) => usage_error(&format!("no command {other}")),
         None => usage_error("no command"),
     }
@@ -59,8 +55,16 @@ fn usage_error(problem: &str) -> ExitCode {
     eprintln!("bottle-cli: {problem}");
     eprintln!("usage: bottle-cli {}", machine::USAGE);
     eprintln!("   or: bottle-cli {}", build::USAGE);
-    eprintln!("   or: bottle-cli {}", runner::USAGE);
     ExitCode::from(FAILED)
+}
+
+/// $BOTTLE_HOME, else ~/.bottle.
+pub fn home() -> std::path::PathBuf {
+    std::env::var_os("BOTTLE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bottle")
+        })
 }
 
 /// `tar`, to pack an archive for a Linux machine: on a Mac, bsdtar without the extended attributes
