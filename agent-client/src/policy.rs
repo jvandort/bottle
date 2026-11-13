@@ -22,6 +22,45 @@ pub struct Policy {
     pub allow_private: Vec<String>,
     #[serde(default)]
     pub hand: Vec<Hand>,
+    /// The hosts whose downloads are kept here (see cache.rs), as bottled's cache.Cached has them.
+    #[serde(default)]
+    pub cache: Vec<Cached>,
+}
+
+/// A host whose downloads are kept, asked on `ports`: those at paths matching `include`, if it
+/// says any, but for paths matching `exclude`; `immutable` if what's at a path never changes,
+/// whatever the host says about keeping it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Cached {
+    pub host: String,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default = "https_port")]
+    pub ports: Vec<u16>,
+    #[serde(default)]
+    pub immutable: bool,
+}
+
+fn https_port() -> Vec<u16> {
+    vec![HTTPS_PORT]
+}
+
+/// Where a cached host is asked: over https, whose TLS is terminated here, or plain http.
+pub const HTTPS_PORT: u16 = 443;
+pub const HTTP_PORT: u16 = 80;
+
+impl Cached {
+    pub fn matches(&self, host: &str) -> bool {
+        glob(&self.host, host)
+    }
+
+    /// Whether a request for `path` isn't one to keep.
+    pub fn excludes(&self, path: &str) -> bool {
+        (!self.include.is_empty() && !self.include.iter().any(|p| glob_case(p, path)))
+            || self.exclude.iter().any(|p| glob_case(p, path))
+    }
 }
 
 /// A connection bottled must see: to an address, into a network, or by name, each on a port.
@@ -39,6 +78,8 @@ pub enum Local {
     Hand,
     Direct,
     Deny,
+    /// Answered here, from the store where it can be: the policy's cache entry for its host.
+    Cache(usize),
 }
 
 impl Policy {
@@ -75,17 +116,27 @@ impl Policy {
             })
         };
         let name = name_in(first);
+        // Over https, the name a ClientHello claims; over plain http, an HTTP request's Host.
+        let tls = first.first() == Some(&0x16);
         match &name {
             Some(name) if named_here(name) => return Local::Hand,
+            Some(name) => {
+                if let Some(i) = self.cache.iter().position(|c| {
+                    c.ports.contains(&port) && tls == (port != HTTP_PORT) && c.matches(name)
+                }) {
+                    return Local::Cache(i);
+                }
+            }
             None if opening_unread(first)
-                && self
+                && (self
                     .hand
                     .iter()
-                    .any(|r| matches!(r, Hand::Name { port: p, .. } if *p == port)) =>
+                    .any(|r| matches!(r, Hand::Name { port: p, .. } if *p == port))
+                    || self.cache.iter().any(|c| c.ports.contains(&port))) =>
             {
                 return Local::Hand;
             }
-            _ => {}
+            None => {}
         }
         let IpAddr::V4(v4) = ip else {
             return Local::Hand;
@@ -155,10 +206,12 @@ fn is_global(ip: Ipv4Addr) -> bool {
 /// Whether `name` matches `pattern`, as fnmatch does, without case: `*` any run of characters, `?`
 /// one.
 fn glob(pattern: &str, name: &str) -> bool {
-    let (p, n): (Vec<char>, Vec<char>) = (
-        pattern.to_lowercase().chars().collect(),
-        name.to_lowercase().chars().collect(),
-    );
+    glob_case(&pattern.to_lowercase(), &name.to_lowercase())
+}
+
+/// Whether `text` matches `pattern`, as fnmatchcase does: `*` any run of characters, `?` one.
+fn glob_case(pattern: &str, text: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
     let (mut i, mut j) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while j < n.len() {
@@ -432,6 +485,52 @@ mod tests {
             p.decide(to("10.1.2.3", 443), &client_hello("evil.example"), corp),
             Local::Deny
         );
+    }
+
+    #[test]
+    fn a_cached_hosts_connections_are_answered_here_unless_bottled_must_see_them() {
+        let p = policy(
+            r#"{"hand": [{"name": "both.example", "port": 443}], "cache": [
+                {"host": "repo.maven.example", "exclude": ["*/maven-metadata.xml*"]},
+                {"host": "both.example"},
+                {"host": "deb.debian.example", "include": ["/debian/*.deb"], "ports": [80], "immutable": true}]}"#,
+        );
+        let nothing = |_: &str| vec![];
+        let get = |host: &str| format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes();
+        let maven = client_hello("repo.maven.example");
+        assert_eq!(
+            p.decide(to("1.2.3.4", 443), &maven, nothing),
+            Local::Cache(0)
+        );
+        assert_eq!(
+            p.decide(to("1.2.3.4", 80), &get("deb.debian.example"), nothing),
+            Local::Cache(2)
+        );
+        // A credential's host is bottled's, cached or not.
+        assert_eq!(
+            p.decide(to("1.2.3.4", 443), &client_hello("both.example"), nothing),
+            Local::Hand
+        );
+        // Plain http on the https port, or TLS on the plain one, isn't the cache's.
+        assert_eq!(
+            p.decide(to("1.2.3.4", 443), &get("repo.maven.example"), nothing),
+            Local::Direct
+        );
+        assert_eq!(
+            p.decide(
+                to("1.2.3.4", 80),
+                &client_hello("deb.debian.example"),
+                nothing
+            ),
+            Local::Direct
+        );
+        let (maven, deb) = (&p.cache[0], &p.cache[2]);
+        assert!(maven.excludes("/org/x/maven-metadata.xml.sha1"));
+        assert!(!maven.excludes("/org/x/1.0/x-1.0.jar"));
+        assert!(!deb.excludes("/debian/pool/main/h/hello/hello_2.10-5_amd64.deb"));
+        assert!(deb.excludes("/debian/dists/trixie/InRelease"));
+        assert!(deb.excludes("/DEBIAN/pool/x.deb")); // paths match with case
+        assert_eq!(maven.ports, [443]);
     }
 
     #[test]

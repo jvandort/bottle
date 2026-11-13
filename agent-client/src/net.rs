@@ -267,7 +267,9 @@ fn connect(mut conn: UnixStream, to: SocketAddr, decider: Option<&Decider>) -> i
                 );
                 Decision::Deny
             }
-            Some(Local::Hand) | None => decider.decide(to, &first).unwrap_or(Decision::Deny),
+            Some(Local::Hand | Local::Cache(_)) | None => {
+                decider.decide(to, &first).unwrap_or(Decision::Deny)
+            }
         },
     };
     let far = match decision {
