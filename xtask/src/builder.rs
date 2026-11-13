@@ -9,12 +9,13 @@
 //!
 //! The builder's machines and images are bottle-cli's in their own home, target/builder, apart from
 //! bottle's: the machine is kept, stopped, between builds, its disk with cargo's builds and
-//! downloads (WORK), so the next build builds only what's changed. An image built from other
-//! scripts is a new machine, as is one with other memory or CPUs: $BOTTLE_BUILDER_MEM (MiB,
+//! xtask's downloads (WORK), so the next build builds only what's changed. An image built from
+//! other scripts is a new machine, as is one with other memory or CPUs: $BOTTLE_BUILDER_MEM (MiB,
 //! default MEM_MIB) and $BOTTLE_BUILDER_CPUS (default, all of this Mac's), to find what builds
-//! best. With $BOTTLE_BUILDER_WORK=mount, WORK is this Mac's target/builder/work instead, mounted
-//! there, cargo's home (its crates and git checkouts) in it too, so a new machine starts with all
-//! of it: what to measure against the machine's own disk, which compiles faster or slower. Its network is
+//! best. Cargo's home, its crates and git checkouts (CARGO), is this Mac's target/builder/cargo,
+//! mounted, writable, so a new machine fetches none of them again; its builds stay on the
+//! machine's disk, where rustc writes them over twice as fast as over the mount (measured: from
+//! nothing, 28 s against 65; after a change, 3 s against 4). Its network is
 //! direct (--net-direct): it's this repo's build, fetching crates and what xtask downloads, as on a
 //! Mac.
 
@@ -34,6 +35,8 @@ const DEBIAN: &str = "debian:trixie-slim";
 const SOURCE: &str = "/src";
 /// Where the builder keeps cargo's builds and the distributions it makes, on its own disk.
 const WORK: &str = "/var/cache/bottle-dist";
+/// Where the builder's cargo home is: this Mac's target/builder/cargo, mounted.
+const CARGO: &str = "/var/cache/bottle-cargo";
 /// The builder's memory, by default: rustc's, building libkrun, for both targets at once (killed
 /// with 2048 MiB, from nothing; 3072 builds).
 const MEM_MIB: &str = "4096";
@@ -73,17 +76,8 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
             .map_or(4, |n| n.get())
             .to_string()
     });
-    let mount = match env::var("BOTTLE_BUILDER_WORK").as_deref() {
-        Ok("mount") => true,
-        Ok("disk") | Err(_) => false,
-        Ok(other) => return Err(format!("BOTTLE_BUILDER_WORK={other}: disk or mount")),
-    };
-    let work = home.join("work");
-    let machine = format!(
-        "builder-{}-{mem}m-{cpus}c{}",
-        &stem(&image)?[..12],
-        if mount { "-mount" } else { "" }
-    );
+    // (-cargo: one with cargo's home mounted, not one from before it was.)
+    let machine = format!("builder-{}-{mem}m-{cpus}c-cargo", &stem(&image)?[..12]);
     let listed: serde_json::Value = serde_json::from_slice(&output(bottle_cli(&["ls", "--json"]))?)
         .map_err(|e| format!("bottle-cli ls: {e}"))?;
     let machines: Vec<&str> = listed
@@ -100,19 +94,16 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
     }
     if !machines.contains(&machine.as_str()) {
         let source = format!("{}:{SOURCE}:ro", root().display());
-        let mut create = bottle_cli(&[
+        let cargo = home.join("cargo");
+        fs::create_dir_all(&cargo).map_err(|e| format!("{}: {e}", cargo.display()))?;
+        let cargo = format!("{}:{CARGO}:rw", cargo.display());
+        run(&mut bottle_cli(&[
             "create", &machine, "--image", &image, "--cpus", &cpus, "--mem", &mem, "-v", &source,
-        ]);
-        if mount {
-            fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-            create
-                .arg("-v")
-                .arg(format!("{}:{WORK}:rw", work.display()));
-        }
-        run(&mut create)?;
+            "-v", &cargo,
+        ]))?;
     }
     run(&mut bottle_cli(&["start", &machine, "--net-direct"]))?;
-    let built = build_in(&bottle_cli, &machine, mount, dists);
+    let built = build_in(&bottle_cli, &machine, dists);
     let stopped = run(&mut bottle_cli(&["stop", &machine]));
     built.and(stopped)?;
     // The stages the builder's machine isn't made of.
@@ -124,21 +115,25 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
 fn build_in(
     bottle_cli: &dyn Fn(&[&str]) -> Command,
     machine: &str,
-    mount: bool,
     dists: &[(String, PathBuf)],
 ) -> Result<()> {
     let triples: Vec<&str> = dists.iter().map(|(t, _)| t.as_str()).collect();
     step(&format!("{}' dists, in the builder", triples.join(", ")));
     let work = Path::new(WORK).join("target");
     let target_dir = format!("CARGO_TARGET_DIR={}", work.display());
-    // Mounted, cargo's home is kept there too; else it's the machine's own.
-    let cargo_home = format!("CARGO_HOME={WORK}/cargo");
+    let cargo_home = format!("CARGO_HOME={CARGO}");
     let exec = |argv: &[&str]| {
-        let mut args = vec!["exec", machine, "-w", SOURCE, "-e", &target_dir];
-        if mount {
-            args.extend(["-e", &cargo_home]);
-        }
-        args.push("--");
+        let mut args = vec![
+            "exec",
+            machine,
+            "-w",
+            SOURCE,
+            "-e",
+            &target_dir,
+            "-e",
+            &cargo_home,
+            "--",
+        ];
         args.extend_from_slice(argv);
         bottle_cli(&args)
     };
