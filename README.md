@@ -81,9 +81,10 @@ A runner, for bottles on another machine, needs:
 
 Nothing else, and no root: bottle copies bottle-cli there, built on your Mac
 for the runner's architecture: static, so it runs on any distribution. It's
-all a runner has of bottle. Your Mac builds it in a Linux VM of its own bottle-cli
-(`cargo xtask dist --target x86_64-unknown-linux-musl`, which bottle runs when
-it's needed; the first time takes a while). (Untested on a real runner yet.)
+all a runner has of bottle. Your Mac builds Linux's, for both architectures,
+in a Linux VM of its own bottle-cli, whenever it builds its own (in a
+checkout, `bin/bottle` does; the first time takes a while). (Untested on a
+real runner yet.)
 
 ## Commands
 
@@ -288,10 +289,11 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
 `bin/bottle` and `bin/folio`, shell scripts, build bottle-cli from the
 checkout first when its sources have changed since it was (`bin/bottle-build`:
 a hash of their contents, `sha256sum`'s, against the one the last build left,
-then `cargo xtask dist` if they differ, which builds and copies only what's
-changed; for each distribution, this machine's and the ones runners take:
-on a Mac, Linux's two, built in a Linux VM; on Linux, the other
-architecture's, with Debian's cross gcc), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
+then one `cargo xtask dist` for every distribution whose sources differ,
+which builds and copies only what's changed: this machine's and the ones
+runners take, on a Mac Linux's two, by one cargo in a Linux VM, and on Linux
+the other architecture's, by the same cargo as its own, with Debian's cross
+gcc), then run bottle-cli, or folio with `BOTTLE_CLI` naming it. Nothing
 else builds it: folio runs `$BOTTLE_CLI`, else `bottle-cli` on `PATH`. folio's tests,
 the suites that drive bottle-cli from folio's side among them, are in
 [folio](folio/README.md#development).
