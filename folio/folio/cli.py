@@ -564,25 +564,10 @@ def _serve_start(args: argparse.Namespace) -> int:
     if not args.foreground:
         print("Started folio serve" if daemon.start() else "folio serve is already running")
         return 0
-    import asyncio
-    import logging
-
-    from .bottle import store
-
-    store.log_to_file(daemon.LOG, daemon.home())
-    # A terminal running it by hand sees what it logs, too.
-    if sys.stderr.isatty():
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(store.LOG_FORMAT))
-        logging.getLogger().addHandler(handler)
-    # A crash is logged, stamped, rather than left to a bare traceback on stderr.
-    sys.excepthook = lambda *exc_info: logging.getLogger("folio.serve").critical("folio serve crashed",
-                                                                                exc_info=exc_info)
     try:
-        asyncio.run(daemon.serve())
+        return daemon.run()
     except KeyboardInterrupt:
-        pass
-    return 0
+        return 0
 
 
 def _serve_stop(args: argparse.Namespace) -> int:

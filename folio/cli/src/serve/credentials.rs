@@ -103,16 +103,9 @@ impl Injection {
         port == self.port && fnmatch(&host.to_lowercase(), &self.host.to_lowercase())
     }
 
-    /// Whether a request for `path` (canonical) is never sent to this host: also with an extension
-    /// on its last segment, which some servers route as the path without it.
+    /// Whether a request for `path` (canonical) is never sent to this host.
     fn forbids(&self, method: &str, path: &str) -> bool {
-        let unsuffixed = match path.rsplit_once('.') {
-            Some((stem, ext)) if !ext.contains('/') && !stem.ends_with('/') => stem,
-            _ => path,
-        };
-        self.forbid
-            .iter()
-            .any(|r| r.matches(method, path) || r.matches(method, unsuffixed))
+        crate::routes::forbids(&self.forbid, method, path)
     }
 
     fn named(&self) -> String {
@@ -125,12 +118,8 @@ impl Injection {
 
     /// Whether the credential may go on a request for `path` (canonical).
     fn allows(&self, method: &str, path: &str) -> bool {
-        self.allow.is_empty()
-            || self
-                .allow
-                .iter()
-                .chain(self.rewrites.iter().map(|w| &w.route))
-                .any(|r| r.matches(method, path))
+        let rewritten: Vec<Route> = self.rewrites.iter().map(|w| w.route.clone()).collect();
+        crate::routes::allows(&self.allow, &rewritten, method, path)
     }
 
     /// The value to send in place of `presented`, this injection's header as the bottle sent it;
@@ -278,8 +267,12 @@ fn destination(host: &str) -> Result<(String, u16), String> {
 
 /// What's attached to `host` for `credential`: its properties file's line for the host (by the
 /// host, or a URL of it; a host with a port its host:port line, else its bare host's), else the
-/// Keychain's.
-fn value_for(credential: &Credential, host: &str) -> Result<Option<String>, String> {
+/// Keychain's (`keychain`).
+fn value_for(
+    credential: &Credential,
+    host: &str,
+    keychain: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
     if let Some(properties) = &credential.properties {
         let mut keys = BTreeMap::new();
         for (key, value) in read_properties(properties)? {
@@ -309,43 +302,53 @@ fn value_for(credential: &Credential, host: &str) -> Result<Option<String>, Stri
 /// unauthenticated, and the server says so); two credentials claiming a host is a mistake in the
 /// features, refused rather than resolved arbitrarily.
 pub fn injections_for(specs: &[String]) -> Result<Vec<Injection>, String> {
+    let mut credentials = Vec::new();
+    for feature in features::resolve(specs)? {
+        credentials.extend(feature.resolved_credentials()?);
+    }
+    injections_of(credentials, &keychain)
+}
+
+/// What's attached for `credentials`, their values from their properties files or `keychain`.
+fn injections_of(
+    credentials: Vec<Credential>,
+    keychain: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<Injection>, String> {
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     let mut injections = Vec::new();
-    for feature in features::resolve(specs)? {
-        for credential in feature.resolved_credentials()? {
-            for host in &credential.inject.hosts {
-                let owner = claimed
-                    .entry(host.to_lowercase())
-                    .or_insert_with(|| credential.name.clone());
-                if *owner != credential.name {
-                    return Err(format!(
-                        "credentials {} and {} both claim {host}",
-                        crate::repr(owner),
-                        crate::repr(&credential.name)
-                    ));
-                }
+    for credential in credentials {
+        for host in &credential.inject.hosts {
+            let owner = claimed
+                .entry(host.to_lowercase())
+                .or_insert_with(|| credential.name.clone());
+            if *owner != credential.name {
+                return Err(format!(
+                    "credentials {} and {} both claim {host}",
+                    crate::repr(owner),
+                    crate::repr(&credential.name)
+                ));
             }
-            for host in &credential.inject.hosts {
-                let Some(value) = value_for(&credential, host)? else {
-                    continue;
-                };
-                let (pattern, port) = destination(host)?;
-                injections.push(Injection {
-                    host: pattern,
-                    port,
-                    header: credential.inject.header.clone(),
-                    value: credential
-                        .inject
-                        .value
-                        .replace(features::CREDENTIAL_PLACEHOLDER, &value),
-                    standin: STANDIN.into(),
-                    credential: value,
-                    rewrites: credential.inject.rewrites.clone(),
-                    forbid: credential.inject.forbid.clone(),
-                    allow: credential.inject.allow.clone(),
-                    feature: credential.name.clone(),
-                });
-            }
+        }
+        for host in &credential.inject.hosts {
+            let Some(value) = value_for(&credential, host, keychain)? else {
+                continue;
+            };
+            let (pattern, port) = destination(host)?;
+            injections.push(Injection {
+                host: pattern,
+                port,
+                header: credential.inject.header.clone(),
+                value: credential
+                    .inject
+                    .value
+                    .replace(features::CREDENTIAL_PLACEHOLDER, &value),
+                standin: STANDIN.into(),
+                credential: value,
+                rewrites: credential.inject.rewrites.clone(),
+                forbid: credential.inject.forbid.clone(),
+                allow: credential.inject.allow.clone(),
+                feature: credential.name.clone(),
+            });
         }
     }
     Ok(injections)
@@ -487,7 +490,7 @@ fn inside(
     } else {
         format!("{path}?{query}")
     };
-    let Some(route) = canonical(&path) else {
+    let Some(route) = crate::routes::canonical(&path) else {
         return Err(Refused::bad_request());
     };
     let headers = head.headers();
@@ -663,61 +666,6 @@ fn host_of(authority: &str) -> String {
         None => host.split(':').next().unwrap_or_default(),
     };
     host.to_lowercase()
-}
-
-/// A request's path as a server is likely to route it, lowercase; None if it should go to none:
-/// escapes decoded until there are none left (a server, or one in front of it, may decode twice), a
-/// backslash a slash, a segment's parameters (`;jsessionid=...`) dropped, and empty segments, `.`
-/// and `..` resolved. Erring wide is the point: a route is only ever refused on this, never opened.
-pub fn canonical(path: &str) -> Option<String> {
-    let mut path = path.to_string();
-    let mut settled = false;
-    for _ in 0..4 {
-        let decoded = percent_decoded(&path);
-        if decoded == path {
-            settled = true;
-            break;
-        }
-        path = decoded;
-    }
-    if !settled || path.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
-        return None;
-    }
-    let mut segments: Vec<&str> = Vec::new();
-    let replaced = path.replace('\\', "/");
-    for segment in replaced.split('/') {
-        let segment = segment.split(';').next().unwrap_or("");
-        match segment {
-            ".." => {
-                segments.pop();
-            }
-            "" | "." => {}
-            s => segments.push(s),
-        }
-    }
-    Some(format!("/{}", segments.join("/")).to_lowercase())
-}
-
-/// `s` with %XX escapes decoded, as UTF-8 (anything else as U+FFFD), as Python's unquote does.
-fn percent_decoded(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
-                .ok()
-                .and_then(|h| u8::from_str_radix(h, 16).ok());
-            if let Some(b) = hex {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// All of a request's body, by its Content-Length or chunked; refused past MAX_BODY_BYTES, or
@@ -1185,17 +1133,6 @@ mod tests {
     }
 
     #[test]
-    fn a_path_as_a_server_routes_it() {
-        assert_eq!(
-            canonical("/api/auth//%74oken;x").as_deref(),
-            Some("/api/auth/token")
-        );
-        assert_eq!(canonical("/a/./b/../c\\D").as_deref(), Some("/a/c/d"));
-        assert_eq!(canonical("/%2574").as_deref(), Some("/t"));
-        assert_eq!(canonical("/a%00b"), None);
-    }
-
-    #[test]
     fn a_responses_status_skips_interim_ones() {
         assert_eq!(
             status_of(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\n\r\n").as_deref(),
@@ -1226,5 +1163,135 @@ mod tests {
             ("a.example.com".into(), 8443)
         );
         assert!(destination("a:x").is_err());
+    }
+
+    fn credentials(specs: &[&str]) -> Vec<Credential> {
+        let specs: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+        let mut credentials = Vec::new();
+        for feature in features::resolve(&specs).unwrap() {
+            credentials.extend(feature.resolved_credentials().unwrap());
+        }
+        credentials
+    }
+
+    fn logged_in(value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |_| Some(value.to_string())
+    }
+
+    fn logged_out(_: &str) -> Option<String> {
+        None
+    }
+
+    const TEAMCITY: [&str; 2] = ["teamcity:server=https://ci.corp.example.com", "tools"];
+
+    #[test]
+    fn only_the_bottles_features_are_injected() {
+        let [claude] =
+            &injections_of(credentials(&["claude", "tools"]), &logged_in("tok")).unwrap()[..]
+        else {
+            panic!("one injection")
+        };
+        assert_eq!(
+            (claude.host.as_str(), claude.value.as_str()),
+            ("api.anthropic.com", "Bearer tok")
+        );
+        assert!(
+            injections_of(credentials(&["tools"]), &logged_in("tok"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_proxy_gets_the_real_one_in_place_of_the_stand_in() {
+        let [i] = &injections_of(credentials(&TEAMCITY), &logged_in("tc-token")).unwrap()[..]
+        else {
+            panic!("one injection")
+        };
+        assert_eq!(
+            (i.host.as_str(), i.port, i.header.as_str(), i.value.as_str()),
+            (
+                "ci.corp.example.com",
+                443,
+                "Authorization",
+                "Bearer tc-token"
+            )
+        );
+        // Given in place of the stand-in only, and bare for Basic credentials.
+        assert_eq!(
+            (i.standin.as_str(), i.credential.as_str()),
+            (STANDIN, "tc-token")
+        );
+    }
+
+    #[test]
+    fn nothing_is_injected_until_it_is_logged_in() {
+        assert!(
+            injections_of(credentials(&TEAMCITY), &logged_out)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn one_host_belongs_to_one_credential() {
+        let mut both = credentials(&TEAMCITY);
+        let mut other = both[0].clone();
+        other.name = "other".into();
+        both.push(other);
+        let error = injections_of(both, &logged_in("tok")).err().unwrap();
+        assert!(error.contains("both claim ci.corp.example.com"), "{error}");
+    }
+
+    #[test]
+    fn a_properties_files_line_for_each_server_else_the_keychain() {
+        let dir = std::env::temp_dir().join(format!("keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = dir.join("keys.properties");
+        std::fs::write(
+            &keys,
+            "# written by provisionDevelocityAccessKey\nge.example.com=ge-key\n\
+             https://dv.corp.example.com/ = dv-key\nother.example.com\\:8443:port-key\n\
+             \n! another comment\nempty.example.com=\n",
+        )
+        .unwrap();
+        let keys = keys.display();
+        let values =
+            |servers: &str, keychain: &dyn Fn(&str) -> Option<String>| -> Vec<(String, String)> {
+                let spec = format!("develocity:server={servers},keyFile={keys}");
+                injections_of(credentials(&[&spec]), keychain)
+                    .unwrap()
+                    .into_iter()
+                    .map(|i| (i.host, i.value))
+                    .collect()
+            };
+        let unread = |_: &str| -> Option<String> { panic!("the file has it") };
+        let pair = |h: &str, v: &str| (h.to_string(), v.to_string());
+        assert_eq!(
+            values("https://dv.corp.example.com", &unread),
+            [pair("dv.corp.example.com", "Bearer dv-key")]
+        );
+        assert_eq!(
+            values(
+                "https://ge.example.com,https://dv.corp.example.com",
+                &logged_out
+            ),
+            [
+                pair("ge.example.com", "Bearer ge-key"),
+                pair("dv.corp.example.com", "Bearer dv-key")
+            ]
+        );
+        assert_eq!(
+            values("other.example.com:8443", &unread),
+            [pair("other.example.com", "Bearer port-key")]
+        );
+        assert_eq!(
+            values("https://new.example.com", &logged_in("stored-key")),
+            [pair("new.example.com", "Bearer stored-key")]
+        );
+        assert_eq!(values("https://new.example.com", &logged_out), []);
+        // An empty line is no credential: the Keychain's, if any.
+        assert_eq!(values("empty.example.com", &logged_out), []);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

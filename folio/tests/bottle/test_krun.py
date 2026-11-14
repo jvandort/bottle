@@ -146,7 +146,7 @@ class KrunBottleTest(GitTestCase):
             self.calls.append("delete")
             self.machines.pop(name, None)
 
-        bind = lambda bottle, *args: self.calls.append(f"bind {bottle}")
+        bind = lambda bottle, *args, **kw: self.calls.append(f"bind {bottle}")
         for target, name, value in (
             (bottles.runners.krun, "create", create), (bottles.runners.krun, "start", start), (bottles.runners.krun, "stop", stop),
             (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),

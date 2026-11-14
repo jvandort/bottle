@@ -1,4 +1,4 @@
-"""After a bottle's push: bring the hub's checked-out branches up to what it pushed (see bottle/host.py).
+"""After a bottle's push: bring the hub's checked-out branches up to what it pushed (see folio-cli's serve/git.rs).
 
 Run by hooks/post-receive, on the controller, in the hub's git dir, once the
 push's refs have moved. Stdin is receive-pack's `<old> <new> <ref>` lines, the

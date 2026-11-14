@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from folio.bottle import egress, features, runners
+from folio.bottle import features, runners
 from folio.bottle.errors import BottleError
 
 
@@ -67,12 +67,11 @@ class RealFeaturesTest(unittest.TestCase):
         self.assertEqual(credential.inject.standin, "GH_TOKEN")
         self.assertNotIn("GH_TOKEN", github.container_env)
 
-    def injection(self, feature_id: str) -> egress.Injection:
-        """The feature's credential as bottled attaches it, but for the host and the value."""
-        [credential] = features.load(feature_id).credentials
-        inject = credential.inject
-        return egress.Injection(host="x", header=inject.header, value="v", standin=features.STANDIN, credential="v",
-                                rewrites=inject.rewrites, forbid=inject.forbid, allow=inject.allow)
+    def route(self, feature_id: str, method: str, path: str) -> dict:
+        """What folio serve does with a request for `path` to the feature's credential's hosts: whether it's
+        forbidden, and whether the credential goes on it (folio-cli features route)."""
+        [credential] = features._folio_cli("route", feature_id, method, path)["credentials"]
+        return credential
 
     def test_routes_that_mint_export_or_grant_credentials_are_forbidden(self) -> None:
         # The report's critical and high rows (2026-10-25), on each feature's hosts.
@@ -118,7 +117,7 @@ class RealFeaturesTest(unittest.TestCase):
             ("claude", "GET", "/v1/organizations/api_keys"),
         ):
             with self.subTest(f"{feature_id} {method} {path}"):
-                self.assertTrue(self.injection(feature_id).forbids(method, egress._canonical(path)))
+                self.assertTrue(self.route(feature_id, method, path)["forbidden"])
 
     def test_what_the_tools_need_is_not_forbidden(self) -> None:
         for feature_id, method, path in (
@@ -147,10 +146,8 @@ class RealFeaturesTest(unittest.TestCase):
             ("claude", "GET", "/api/claude_code/policy_limits"),
         ):
             with self.subTest(f"{feature_id} {method} {path}"):
-                injection = self.injection(feature_id)
-                route = egress._canonical(path)
-                self.assertFalse(injection.forbids(method, route))
-                self.assertTrue(injection.allows(method, route))
+                route = self.route(feature_id, method, path)
+                self.assertEqual((route["forbidden"], route["allowed"]), (False, True))
 
     def test_the_rest_doesnt_get_the_credential(self) -> None:
         for feature_id, method, path in (
@@ -169,16 +166,16 @@ class RealFeaturesTest(unittest.TestCase):
             ("claude", "POST", "/api/frame/upload"),
         ):
             with self.subTest(f"{feature_id} {method} {path}"):
-                self.assertFalse(self.injection(feature_id).allows(method, egress._canonical(path)))
+                self.assertFalse(self.route(feature_id, method, path)["allowed"])
 
     def test_develocity_attaches_its_key_only_where_its_tools_use_it(self) -> None:
-        injection = self.injection("develocity")
         for method, path in (("POST", "/api/builds"), ("GET", "/admin"), ("GET", "/scans/publish/gradle/4.6.1/token")):
             with self.subTest(f"{method} {path}"):
-                self.assertFalse(injection.allows(method, egress._canonical(path)))
+                self.assertFalse(self.route("develocity", method, path)["allowed"])
+        [credential] = features.load("develocity").credentials
         # Where Gradle's Develocity plugin presents it other than as a header's token.
         self.assertEqual(
-            {(r.route.text, r.header, r.json, r.encoding) for r in injection.rewrites},
+            {(r.route, r.header, r.json, r.encoding) for r in credential.inject.rewrites},
             {("POST /scans/publish/*/*/token", "", "accessKey", "raw"),
              ("GET /distribution-broker/**", "X-User-Access-Key", "", "base64")})
 

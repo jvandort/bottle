@@ -123,5 +123,26 @@ mod tests {
             (80, Some("bottle.host"), true, Some("m1"))
         );
         assert!(read(&mut &b"GET / HTTP/1.1\r\n\r\n"[..]).is_err());
+        let plain = read(&mut header([192, 0, 2, 1], 80, None, false, "m1").as_slice()).unwrap();
+        assert_eq!((plain.name, plain.tls), (None, false));
+        for end in [0, 10, 20, bytes.len() - 1] {
+            assert!(read(&mut &bytes[..end]).is_err(), "cut at {end}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_address() {
+        let mut bytes = SIGNATURE.to_vec();
+        bytes.extend([VERSION_2_PROXY, TCP_OVER_IPV6, 0, 36]);
+        bytes.extend([0; 16]);
+        bytes.extend(
+            "2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        bytes.extend([0, 0, 0, 22]);
+        let h = read(&mut bytes.as_slice()).unwrap();
+        assert_eq!((h.address.to_string(), h.port), ("2001:db8::1".into(), 22));
     }
 }

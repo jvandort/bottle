@@ -17,12 +17,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from folio.bottle import apt as apt_module, cache as cache_module, egress, images, krun
+from folio.bottle import apt as apt_module, cache as cache_module, images, krun
 from folio.bottle.errors import BottleError
 
 FEATURES = Path(__file__).resolve().parents[2] / "features"
 BASE = images.BASE
-# What a bottle gets in place of a credential, where it needs one to believe it's logged in (see egress.py).
+# What a bottle gets in place of a credential, where it needs one to believe it's logged in (folio-cli's
+# serve/credentials.rs puts the real one in its place).
 STANDIN = "the-egress-proxy-holds-the-real-one"
 CREDENTIAL_PLACEHOLDER = "${credential}"
 OPTION_REFERENCE = re.compile(r"\$\{([^}]*)\}")
@@ -43,9 +44,21 @@ class Inject:
     value: str  # the header value, with ${credential} where the real one goes
     header: str = "Authorization"
     standin: str | None = None
-    forbid: tuple[egress.Route, ...] = ()
-    allow: tuple[egress.Route, ...] = ()
-    rewrites: tuple[egress.Rewrite, ...] = ()
+    # Routes as written (`POST /api/auth/token`): never sent; the only ones it goes on, if any; and where else
+    # it's presented. folio-cli's to read (routes.rs).
+    forbid: tuple[str, ...] = ()
+    allow: tuple[str, ...] = ()
+    rewrites: tuple["Rewrite", ...] = ()
+
+
+@dataclass(frozen=True)
+class Rewrite:
+    """Where else, on the requests `route` names, a tool presents the stand-in: in a header, or a JSON field."""
+
+    route: str
+    header: str = ""
+    json: str = ""
+    encoding: str = "raw"
 
 
 @dataclass(frozen=True)
@@ -143,10 +156,8 @@ def _credential(c: dict) -> Credential:
     inject = c["inject"]
     return Credential(c["name"], c["description"], Inject(
         hosts=tuple(inject["hosts"]), value=inject["value"], header=inject["header"], standin=inject["standin"],
-        forbid=tuple(egress.Route.parse(r) for r in inject["forbid"]),
-        allow=tuple(egress.Route.parse(r) for r in inject["allow"]),
-        rewrites=tuple(egress.Rewrite(egress.Route.parse(r["route"]), r["header"], r["json"], r["encoding"])
-                       for r in inject["rewrite"]),
+        forbid=tuple(inject["forbid"]), allow=tuple(inject["allow"]),
+        rewrites=tuple(Rewrite(r["route"], r["header"], r["json"], r["encoding"]) for r in inject["rewrite"]),
     ), c["properties"])
 
 

@@ -1,33 +1,55 @@
 import asyncio
-import dataclasses
 from pathlib import Path
-import json
-import os
 import subprocess
-import zlib
 import unittest
-from unittest import mock
 
-from folio.bottle import egress, host
+from folio.bottle import daemon, host
 from folio.bottle.errors import BottleError
-from tests.bottle.support import GitTestCase, run
+from tests.bottle.support import GitTestCase, bridge, run
+
+MACHINE = "t-m"
 
 
-async def serve_bottle_host(services: host.HostServices) -> tuple[asyncio.Server, dict[str, str]]:
-    """bottle.host as a bottle reaches it: each connection a flow to host.ADDRESS, decided and served.
+class BottleHost:
+    """folio serve answering a bottle with `repos` at bottle.host, and a stand-in for the bottle's machine that
+    carries git's connections there (support.bridge); closed, both go."""
 
-    Returns the server, and an environment pointing git's http://bottle.host/ at it.
-    """
-    gateway = egress.Gateway("t", services=services)
+    def __init__(self, server) -> None:
+        self.server = server
 
-    async def decider(reader, writer) -> None:
-        await gateway.serve(egress.Flow(host.ADDRESS, 80), reader, writer)
+    def close(self) -> None:
+        self.server.close()
+        daemon.stop()
+        daemon._wait_gone()
 
-    server = await asyncio.start_server(decider, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.http://127.0.0.1:{port}/.insteadOf",
-           "GIT_CONFIG_VALUE_0": "http://bottle.host/", "BOTTLE_HOST_PORT": str(port)}
-    return server, env
+    async def wait_closed(self) -> None:
+        await self.server.wait_closed()
+
+
+def served_log() -> str:
+    """What folio serve has logged."""
+    from folio.bottle.store import log_path
+
+    return log_path(daemon.LOG, daemon.home()).read_text()
+
+
+# daemon.bind as it is, for tests that stand in for it (test_bottles') and serve bottle.host too.
+_bind = daemon.bind
+
+
+def bind(*repos: host.Served) -> None:
+    _bind("t", MACHINE, repos)
+
+
+async def serve_bottle_host(*repos: host.Served) -> tuple[BottleHost, dict[str, str]]:
+    """bottle.host as a bottle reaches it: folio serve, given a bottle with `repos`, and git's http://bottle.host/
+    pointed at a stand-in for its machine. Returns what to close, and the environment."""
+    bind(*repos)
+    server, port = await bridge(daemon.services_sockets()["host"], host.ADDRESS, 80, MACHINE, host.HOST)
+    env = {**__import__("os").environ, "GIT_CONFIG_COUNT": "1",
+           "GIT_CONFIG_KEY_0": f"url.http://127.0.0.1:{port}/.insteadOf", "GIT_CONFIG_VALUE_0": "http://bottle.host/",
+           "BOTTLE_HOST_PORT": str(port)}
+    return BottleHost(server), env
 
 
 class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
@@ -51,9 +73,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         remotes = tuple(host.Remote.parse(spec) for spec in (
             "origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out",
         ))
-        services = host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),))
-        self.services = services
-        server, self.env = await serve_bottle_host(services)
+        self.served = host.Served(self.repo / ".git", remotes)
+        server, self.env = await serve_bottle_host(self.served)
         self.addAsyncCleanup(self._close, server)
         # The same setup as a bottle's /workspace.
         self.workspace = self.tmp / "workspace"
@@ -107,9 +128,9 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failed_pull_through_still_serves_what_the_repo_has(self) -> None:
         run("git", "-C", self.repo, "remote", "set-url", "origin", str(self.tmp / "gone"))
-        with self.assertLogs("bottle.egress", "WARNING"):
-            await self.fetch()
+        await self.fetch()
         self.assertIn("origin/release", self.branches())
+        self.assertIn("pull-through: git fetch origin", served_log())
 
     async def test_origin_is_read_only(self) -> None:
         await self.fetch()
@@ -215,11 +236,13 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_push_without_a_namespace_is_refused(self) -> None:
         # Fail closed: with no namespace a push would write the host's own refs.
         # Remote.parse never makes such a remote; this is the hook catching one anyway.
+        # folio serve takes remotes only as specs, and refuses one that would push to no namespace: what
+        # hooks/pre-receive would catch is never served.
         await self.work()
-        self.services.repos = (dataclasses.replace(self.services.repos[0], remotes=(host.Remote("work", host.HEADS, host.NS),)),)
-        result = await self.push("work")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no namespace", result.stderr)
+        with self.assertRaisesRegex(BottleError, "invalid remote"):
+            daemon._request({**daemon.bind_message("t", MACHINE, (self.served,)),
+                             "repos": [{"git_dir": str(self.repo / ".git"), "at": "",
+                                        "remotes": ["work:fetch=heads,push=ns/"]}]}, start=False)
         self.assertNotIn("refs/heads/work", self.host_refs())
 
     async def test_the_repos_own_hooks_never_run(self) -> None:
@@ -260,8 +283,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.repo = self.make_repo("app")
         remotes = (host.Remote.parse("agent:fetch=ns/t-out,push=ns/t-out"),)
-        server, self.env = await serve_bottle_host(
-            host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),)))
+        server, self.env = await serve_bottle_host(host.Served(self.repo / ".git", remotes))
         self.addAsyncCleanup(RemotesTest._close, server)
         for key, value in (("url", str(self.repo)), ("fetch", "+refs/heads/*:refs/remotes/bottle/t/*"),
                            ("uploadpack", "git --namespace=t-out upload-pack")):
@@ -296,13 +318,12 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_a_tracking_branch_follows_files_and_all_and_the_bottle_is_told(self) -> None:
         pushed = self.write("a.txt", "second\n")
-        with self.assertLogs("bottle.egress", "INFO") as logs:
-            said = await self.push()
+        said = await self.push()
         self.assertEqual(pushed, self.users())
         self.assertEqual("second\n", (self.repo / "a.txt").read_text())
         self.assertEqual(pushed, self.users("bottle/t/genie/x"))  # as if the user had fetched
         self.assertEqual(f"bottle: moved the user's genie/x to {pushed[:12]}, files and all", said)
-        self.assertIn("moved the user's genie/x", "\n".join(logs.output))
+        self.assertIn("moved the user's genie/x", served_log())
 
     async def test_uncommitted_changes_elsewhere_come_along(self) -> None:
         (self.repo / "mine.txt").write_text("not committed\n")
@@ -398,313 +419,6 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
             host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main")
 
 
-class PullThroughTest(unittest.IsolatedAsyncioTestCase):
-    """Fetches of origin for one repo, asked for at once: shared, and never older than the asking."""
-
-    async def asyncSetUp(self) -> None:
-        self.started: list[asyncio.Event] = []
-        self.release: list[asyncio.Event] = []
-
-        async def fetch(git_dir: Path) -> None:
-            started, release = asyncio.Event(), asyncio.Event()
-            self.started.append(started)
-            self.release.append(release)
-            started.set()
-            await release.wait()
-
-        patcher = mock.patch.object(host, "_fetch_origin", fetch)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    async def finish(self, *pulls: asyncio.Task) -> None:
-        while not all(p.done() for p in pulls):
-            for release in self.release:
-                release.set()
-            await asyncio.sleep(0)
-
-    async def test_asked_at_once_one_fetch(self) -> None:
-        pulls = [asyncio.create_task(host.pull_through(Path("/repo"))) for _ in range(5)]
-        await self.finish(*pulls)
-        self.assertEqual(len(self.started), 1)
-
-    async def test_asked_while_one_runs_the_next_is_shared(self) -> None:
-        first = asyncio.create_task(host.pull_through(Path("/repo")))
-        while not self.started:
-            await asyncio.sleep(0)
-        later = [asyncio.create_task(host.pull_through(Path("/repo"))) for _ in range(3)]
-        await asyncio.sleep(0)
-        self.assertEqual(len(self.started), 1)  # the next waits for the running one
-        self.assertFalse(any(p.done() for p in later))
-        await self.finish(first, *later)
-        self.assertEqual(len(self.started), 2)
-
-    async def test_each_repo_its_own(self) -> None:
-        pulls = [asyncio.create_task(host.pull_through(Path(f"/repo{i}"))) for i in range(2)]
-        await self.finish(*pulls)
-        self.assertEqual(len(self.started), 2)
-
-    async def test_a_request_given_up_on_leaves_the_fetch_to_the_rest(self) -> None:
-        given_up = asyncio.create_task(host.pull_through(Path("/repo")))
-        kept = asyncio.create_task(host.pull_through(Path("/repo")))
-        while not self.started:
-            await asyncio.sleep(0)
-        given_up.cancel()
-        await self.finish(kept)
-        self.assertTrue(kept.done() and not kept.cancelled())
-        self.assertEqual(len(self.started), 1)
-
-
-class RoutingTest(unittest.TestCase):
-    """Which mount's repo a /git/... request is for: each mount's remotes are under its path."""
-
-    def setUp(self) -> None:
-        agent = host.Remote.parse("agent:fetch=ns/a,push=ns/a")
-        self.workspace = host.Served(Path("/repos/app/.git"), (agent, host.Remote.parse("origin:fetch=upstream")), "workspace")
-        self.notes = host.Served(Path("/repos/notes/.git"), (agent,), "notes")
-        self.nested = host.Served(Path("/repos/deep/.git"), (agent,), "workspace/deep")
-        self.services = host.HostServices((self.workspace, self.notes, self.nested))
-
-    def test_each_mount_by_its_path(self) -> None:
-        for path, served, remote, rest in (
-            ("/git/workspace/agent/info/refs", self.workspace, "agent", "/info/refs"),
-            ("/git/workspace/origin/git-upload-pack", self.workspace, "origin", "/git-upload-pack"),
-            ("/git/notes/agent/info/refs", self.notes, "agent", "/info/refs"),
-            ("/git/workspace/deep/agent/info/refs", self.nested, "agent", "/info/refs"),
-        ):
-            with self.subTest(path):
-                routed = self.services.route(path)
-                assert routed is not None
-                self.assertEqual((routed[0], routed[1].name, routed[2]), (served, remote, rest))
-
-    def test_nothing_else(self) -> None:
-        for path in ("/git/agent/info/refs", "/git/notes/origin/info/refs", "/git/other/agent/x", "/messages"):
-            with self.subTest(path):
-                self.assertIsNone(self.services.route(path))
-
-    def test_a_bottle_from_before_mounts_keeps_its_remotes_at_git(self) -> None:
-        legacy = host.HostServices((host.Served(Path("/repos/app/.git"), self.workspace.remotes, ""),))
-        routed = legacy.route("/git/agent/info/refs")
-        assert routed is not None
-        self.assertEqual(routed[1].name, "agent")
-
-    def test_a_repo_thats_gone_serves_nothing(self) -> None:
-        gone = host.HostServices((host.Served(None, self.workspace.remotes, "workspace"),))
-        self.assertIsNone(gone.route("/git/workspace/agent/info/refs"))
-
-
-class MessagesTest(unittest.IsolatedAsyncioTestCase):
-    """A bottle's messages to other bottles, POSTed to http://bottle.host/messages, as the decider hands them on."""
-
-    async def asyncSetUp(self) -> None:
-        self.delivered: list[tuple[str, str, str]] = []
-        self.refusal: host.ServiceError | None = None
-
-        async def deliver(sender: str, to: str, text: str) -> None:
-            if self.refusal:
-                raise self.refusal
-            self.delivered.append((sender, to, text))
-
-        self.asked: list[str] = []
-
-        async def peers(asker: str) -> list[dict]:
-            if self.refusal:
-                raise self.refusal
-            self.asked.append(asker)
-            return [{"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}]
-
-        server, self.env = await serve_bottle_host(host.HostServices(bottle="b", deliver=deliver, peers=peers))
-        self.addAsyncCleanup(self._close, server)
-
-    async def _close(self, server: asyncio.Server) -> None:
-        server.close()
-        await server.wait_closed()
-
-    async def post(self, body: bytes, method: bytes = b"POST") -> bytes:
-        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["BOTTLE_HOST_PORT"]))
-        writer.write(method + b" /messages HTTP/1.1\r\nHost: bottle.host\r\nContent-Type: application/json\r\n"
-                     b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-        response = await reader.read()
-        writer.close()
-        return response
-
-    async def test_a_message_is_delivered_as_from_the_bottle_that_sent_it(self) -> None:
-        response = await self.post(json.dumps({"to": "broker", "text": "done: genie/x-2"}).encode())
-        self.assertTrue(response.startswith(b"HTTP/1.1 200"), response[:40])
-        self.assertEqual([("b", "broker", "done: genie/x-2")], self.delivered)
-
-    async def test_an_undelivered_message_answers_with_why(self) -> None:
-        self.refusal = host.ServiceError(504, "Gateway Timeout", "broker has no session that took the message within 10s")
-        response = await self.post(json.dumps({"to": "broker", "text": "hi"}).encode())
-        self.assertTrue(response.startswith(b"HTTP/1.1 504"), response[:40])
-        self.assertIn(b"broker has no session", response)
-
-    async def test_a_bad_message_is_refused_saying_why(self) -> None:
-        for body, why in (
-            (b"not json", b"is JSON"),
-            (b"[]", b"JSON object"),
-            (json.dumps({"text": "hi"}).encode(), b"needs to"),
-            (json.dumps({"to": " ", "text": "hi"}).encode(), b"needs to"),
-            (json.dumps({"to": 1, "text": "hi"}).encode(), b"needs to"),
-            (json.dumps({"to": "broker"}).encode(), b"needs text"),
-            (json.dumps({"to": "broker", "text": "hi", "from": "other"}).encode(), b"not from"),
-            (json.dumps({"to": "broker", "text": "x" * host.MAX_MESSAGE}).encode(), b"at most"),
-        ):
-            with self.subTest(body[:40]):
-                response = await self.post(body)
-                self.assertTrue(response.startswith(b"HTTP/1.1 400"), response[:40])
-                self.assertIn(why, response)
-        self.assertEqual([], self.delivered)
-
-    async def test_only_post(self) -> None:
-        response = await self.post(b"", method=b"GET")
-        self.assertTrue(response.startswith(b"HTTP/1.1 405"), response[:40])
-
-    async def get_bottles(self) -> bytes:
-        reader, writer = await asyncio.open_connection("127.0.0.1", int(self.env["BOTTLE_HOST_PORT"]))
-        writer.write(b"GET /bottles HTTP/1.1\r\nHost: bottle.host\r\n\r\n")
-        response = await reader.read()
-        writer.close()
-        return response
-
-    async def test_the_running_bottles_are_listed_as_json(self) -> None:
-        response = await self.get_bottles()
-        self.assertTrue(response.startswith(b"HTTP/1.1 200"), response[:40])
-        self.assertIn(b"Content-Type: application/json", response)
-        self.assertEqual([{"name": "app-1a2b3c4d-foo", "repo": "app", "thread": "foo"}],
-                         json.loads(response.partition(b"\r\n\r\n")[2]))
-        self.assertEqual(["b"], self.asked)
-
-    async def test_a_refused_listing_says_why(self) -> None:
-        self.refusal = host.ServiceError(403, "Forbidden", "listing bottles needs the list-bottles permission")
-        response = await self.get_bottles()
-        self.assertTrue(response.startswith(b"HTTP/1.1 403"), response[:40])
-        self.assertIn(b"needs the list-bottles permission", response)
-
-    async def test_services_that_deliver_nothing_take_no_messages(self) -> None:
-        server, env = await serve_bottle_host(host.HostServices(bottle="b"))
-        self.addAsyncCleanup(self._close, server)
-        self.env = env
-        response = await self.post(json.dumps({"to": "broker", "text": "hi"}).encode())
-        self.assertTrue(response.startswith(b"HTTP/1.1 404"), response[:40])
-
-
-class NoServicesTest(unittest.IsolatedAsyncioTestCase):
-    async def test_a_gateway_without_services_refuses_bottle_host(self) -> None:
-        with self.assertRaises(egress.Refused):
-            await egress.Gateway("t").decide(egress.Flow(host.ADDRESS, 80))
-
-
-class FakeWriter:
-    """The little of asyncio.StreamWriter that _relay_cgi uses: write and drain."""
-
-    def __init__(self) -> None:
-        self.written = b""
-
-    def write(self, data: bytes) -> None:
-        self.written += data
-
-    async def drain(self) -> None:
-        pass
-
-
-class ReadBodyTest(unittest.IsolatedAsyncioTestCase):
-    async def body(self, raw: bytes, headers: dict[str, str]) -> bytes:
-        reader = asyncio.StreamReader()
-        reader.feed_data(raw)
-        reader.feed_eof()
-        return await host.read_body(reader, headers)
-
-    async def test_content_length(self) -> None:
-        self.assertEqual(await self.body(b"hello", {"content-length": "5"}), b"hello")
-
-    async def test_chunked(self) -> None:
-        raw = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
-        self.assertEqual(await self.body(raw, {"transfer-encoding": "chunked"}), b"hello world")
-
-    async def test_no_body(self) -> None:
-        self.assertEqual(await self.body(b"", {}), b"")
-
-    async def test_chunked_carries_a_binary_body_intact(self) -> None:
-        """A packfile is binary, and dechunking must not touch a byte of it."""
-        payload = bytes(range(256)) * 4
-        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(payload), payload)
-        self.assertEqual(await self.body(raw, {"transfer-encoding": "chunked"}), payload)
-
-    async def test_gzip_stays_compressed_here(self) -> None:
-        """read_body only frames; the gzip apt sends is decompressed in _git,
-        after dechunking, so read_body hands back the compressed bytes as they
-        arrived rather than looking inside them."""
-        blob = zlib.compress(b"payload")
-        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(blob), blob)
-        self.assertEqual(await self.body(raw, {"transfer-encoding": "chunked",
-                                               "content-encoding": "gzip"}), blob)
-
-    async def test_chunked_over_the_limit_is_refused(self) -> None:
-        big = b"x" * (host.MAX_BODY + 1)
-        raw = b"%x\r\n%s\r\n0\r\n\r\n" % (len(big), big)
-        with self.assertRaises(ValueError):
-            await self.body(raw, {"transfer-encoding": "chunked"})
-
-    async def test_content_length_over_the_limit_is_refused(self) -> None:
-        with self.assertRaises(ValueError):
-            await self.body(b"", {"content-length": str(host.MAX_BODY + 1)})
-
-
-class RelayCgiTest(unittest.IsolatedAsyncioTestCase):
-    """git http-backend speaks CGI; _relay_cgi turns that into an HTTP response.
-
-    The corner it has to get right is the boundary between the CGI header block
-    and a binary body: parse it wrong and either the status is lost or the
-    packfile is corrupted.
-    """
-
-    async def relay(self, output: bytes) -> bytes:
-        writer = FakeWriter()
-        await host._relay_cgi(output, writer)
-        return writer.written
-
-    async def head_and_body(self, output: bytes) -> tuple[bytes, bytes]:
-        head, _, body = (await self.relay(output)).partition(b"\r\n\r\n")
-        return head, body
-
-    async def test_status_becomes_the_http_status_line(self) -> None:
-        head, _ = await self.head_and_body(
-            b"Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnope")
-        self.assertTrue(head.startswith(b"HTTP/1.1 404 Not Found\r\n"))
-
-    async def test_a_missing_status_defaults_to_200(self) -> None:
-        head, _ = await self.head_and_body(b"Content-Type: text/plain\r\n\r\nhi")
-        self.assertTrue(head.startswith(b"HTTP/1.1 200 OK\r\n"))
-
-    async def test_bare_lf_separators_are_accepted(self) -> None:
-        """CGI programs may use LF where HTTP wants CRLF."""
-        head, body = await self.head_and_body(
-            b"Content-Type: text/plain\nStatus: 201 Created\n\nmade")
-        self.assertTrue(head.startswith(b"HTTP/1.1 201 Created\r\n"))
-        self.assertEqual(body, b"made")
-
-    async def test_a_binary_body_survives_byte_for_byte(self) -> None:
-        payload = bytes(range(256)) * 8      # every byte, including CR, LF, NUL
-        head, body = await self.head_and_body(
-            b"Content-Type: application/x-git-upload-pack-result\r\n\r\n" + payload)
-        self.assertEqual(body, payload)
-        self.assertIn(b"Content-Length: %d\r\n" % len(payload), head)
-
-    async def test_framing_headers_are_not_duplicated(self) -> None:
-        """If http-backend sets its own Content-Length or Connection, the relay
-        must not emit a second copy -- one framing is set here."""
-        response = await self.relay(
-            b"Content-Type: text/plain\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\nok")
-        self.assertEqual(response.count(b"Content-Length:"), 1)
-        self.assertEqual(response.count(b"Connection:"), 1)
-        self.assertIn(b"Content-Length: 2\r\n", response)   # ours, the real length
-        self.assertIn(b"Connection: close\r\n", response)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RemoteParseTest(unittest.TestCase):
     def test_parses(self) -> None:
         for spec, remote in (
@@ -748,8 +462,7 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         remotes = tuple(host.Remote.parse(spec) for spec in (
             "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",
         ))
-        services = host.HostServices((host.Served(self.repo / ".git", remotes, view_dir=self.tmp / "view.git"),))
-        server, self.env = await serve_bottle_host(services)
+        server, self.env = await serve_bottle_host(host.Served(self.repo / ".git", remotes))
         self.addAsyncCleanup(RemotesTest._close, server)
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)

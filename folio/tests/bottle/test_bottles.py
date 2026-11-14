@@ -93,13 +93,14 @@ class FakeSmolvm:
         self.attached = dict(name=name, argv=argv, user=user, workdir=workdir, tty=tty, env=env)
         return ["smolvm-exec", name, *argv]
 
-    def bind(self, bottle, machine, repos=(), features=(), runner="local"):
+    def bind(self, bottle, machine, repos=(), features=(), runner="local", **given):
         self._step("bind")
         self.egress_repos = tuple(repos)
         self.egress_git_dir = repos[0].git_dir if repos else None
         self.egress_features = tuple(features)
         self.egress_remotes = repos[0].remotes if repos else ()
         self.bound.add(bottle)
+        self.bind_given = given
         self.bound_machines[bottle] = machine
 
     def release_egress(self, bottle):
@@ -1017,9 +1018,7 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
             context="Extra.\n",
         )
         [mount] = self.bottle.mounts
-        services = host.HostServices((host.Served(bottles.git_dir(mount), mount.remotes, mount.at or "",
-                                                  self.tmp / "view.git"),))
-        server, env = await serve_bottle_host(services)
+        server, env = await serve_bottle_host(host.Served(bottles.git_dir(mount), mount.remotes, mount.at or ""))
         self.addAsyncCleanup(self._close, server)
         self.workspace, self.home = self.tmp / "workspace", self.tmp / "home"
         self.home.mkdir()

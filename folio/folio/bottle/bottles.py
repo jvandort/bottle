@@ -11,7 +11,7 @@ Each bottle has:
     objects mounted read-only, and the network policy it decides its
     connections by (network), which routes some to folio serve: bottle.host,
     which serves each mount's git remotes, ssh to bottles, and its credentials'
-    hosts (see services.py, egress.py, host.py)
+    hosts (see services.py, host.py; folio-cli's serve/)
   - for each mount, a checkout at its path that borrows those objects via
     alternates. Which paths is the bottle's creator's to say; none is special,
     but the first is where a shell or a command starts (genie's home without one).
@@ -455,7 +455,7 @@ def _start_machine(bottle: Bottle) -> None:
     """Start the bottle's machine, folio serve answering what it routes there as this bottle's, its credentials
     read now. bottle-cli makes the machine's caching CA as it starts, for its policy's hosts, and gives it to the
     bottle to trust (the base image's entrypoint does)."""
-    daemon.bind(bottle.name, bottle.machine, served(bottle), bottle.features, bottle.runner)
+    daemon.bind(**_binding(bottle))
     runner_of(bottle).start(bottle.machine)
 
 
@@ -505,6 +505,31 @@ def git_dir(mount: Mount) -> Path | None:
 def served(bottle: Bottle) -> tuple[host.Served, ...]:
     """What folio serve serves the bottle at bottle.host: each mount's repo and remotes."""
     return tuple(host.Served(git_dir(m), m.remotes, m.at) for m in bottle.mounts)
+
+
+def _binding(bottle: Bottle) -> dict:
+    """What folio serve is told of the bottle (daemon.bind_message's arguments): all it needs of it."""
+    return {
+        "bottle": bottle.name, "machine": bottle.machine, "repos": served(bottle), "features": bottle.features,
+        "runner": bottle.runner, "id": bottle.id, "permissions": bottle.spec.get("permissions", []),
+        "labels": specs.labels(bottle.spec), "repo": Path(bottle.mounts[0].repo).name if bottle.mounts else None,
+        "ssh": [{"name": g.name, "bottle": g.bottle, "id": g.id, "address": g.address} for g in bottle.ssh],
+    }
+
+
+def bind_messages() -> list[dict]:
+    """What folio serve is told of every ready bottle as it starts, to answer them before anyone else: wherever
+    they run, but on a runner detached (turned off). One it can't be told of (its runner unreachable) is left
+    out, as it can't be reached either."""
+    messages = []
+    for bottle in load().values():
+        if bottle.status != "ready" or (bottle.runner != runners.LOCAL and runners.is_detached(bottle.runner)):
+            continue
+        try:
+            messages.append(daemon.bind_message(**_binding(bottle)))
+        except BottleError as e:
+            log.warning("%s: folio serve won't answer it: %s", bottle.name, e)
+    return messages
 
 
 def _machine_env(features: tuple[str, ...] | list[str], permissions: tuple[str, ...] | list[str] = (),

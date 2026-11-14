@@ -25,7 +25,7 @@ import subprocess
 from folio.bottle.errors import BottleError
 
 KEYS = ("features", "memory", "disk", "permissions", "labels")
-# What a bottle may be allowed beyond answering messages (see messages.py), and
+# What a bottle may be allowed beyond answering messages (folio-cli's serve/messages.rs), and
 # what its agent is told it can do with each (bottles.context).
 PERMISSIONS = {
     "list-bottles": "You can list the other running bottles: `GET http://bottle.host/bottles` "

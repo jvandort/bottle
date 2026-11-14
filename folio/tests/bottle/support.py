@@ -49,6 +49,48 @@ class GitTestCase(unittest.TestCase):
         return run("git", "-C", repo, "rev-parse", "HEAD")
 
 
+def header(address: str, port: int, name: str | None = None, tls: bool = False, machine: str | None = "b-m") -> bytes:
+    """What bottle-cli writes before a routed connection's bytes (agent-client's net.rs, proxy_header): a PROXY
+    protocol v2 header, with its fields (the name the bottle asked for, whether it spoke TLS, its machine)."""
+    import ipaddress
+
+    ip = ipaddress.ip_address(address)
+    body = bytes(len(ip.packed)) + ip.packed + bytes(2) + port.to_bytes(2, "big")
+    for kind, value in ((0x02, name.encode() if name else None), (0x20, bytes([0x01, 0, 0, 0, 0]) if tls else None),
+                        (0xE0, machine.encode() if machine else None)):
+        if value is not None:
+            body += bytes([kind]) + len(value).to_bytes(2, "big") + value
+    family = 0x11 if ip.version == 4 else 0x21
+    return b"\r\n\r\n\x00\r\nQUIT\n" + bytes([0x21, family]) + len(body).to_bytes(2, "big") + body
+
+
+async def bridge(socket_path: "Path", address: str, port: int, machine: str, name: str | None = None):
+    """A TCP server on 127.0.0.1 standing in for a bottle's machine: each connection carried to folio serve's
+    socket at `socket_path` as bottle-cli carries one the machine routes there, after a PROXY header saying it was
+    to `address`:`port` (`name`) from `machine`. Returns the server and its port."""
+    import asyncio
+
+    async def pipe(reader, writer) -> None:
+        try:
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+            if writer.can_write_eof():
+                writer.write_eof()
+        except (ConnectionError, OSError):
+            pass
+
+    async def carry(reader, writer) -> None:
+        there_reader, there_writer = await asyncio.open_unix_connection(str(socket_path))
+        there_writer.write(header(address, port, name, machine=machine))
+        await asyncio.gather(pipe(reader, there_writer), pipe(there_reader, writer))
+        writer.close()
+        there_writer.close()
+
+    server = await asyncio.start_server(carry, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
 def run(*args: str | Path) -> str:
     result = subprocess.run([str(a) for a in args], capture_output=True, text=True, check=True)
     return result.stdout.strip()

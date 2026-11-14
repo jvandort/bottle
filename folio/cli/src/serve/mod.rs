@@ -420,26 +420,30 @@ fn raise_open_files() -> u64 {
         rlim_max: 0,
     };
     // SAFETY: getrlimit and setrlimit read and write the structure they're given.
-    unsafe {
-        libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit);
-        let mut target = if limit.rlim_max == libc::RLIM_INFINITY {
-            OPEN_FILES
-        } else {
-            OPEN_FILES.min(limit.rlim_max)
+    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+    let hard = (limit.rlim_max != libc::RLIM_INFINITY).then_some(limit.rlim_max as u64);
+    raised(limit.rlim_cur as u64, hard, |soft| {
+        let wanted = libc::rlimit {
+            rlim_cur: soft as _,
+            rlim_max: limit.rlim_max,
         };
-        // macOS refuses more than kern.maxfilesperproc, whatever the hard limit says.
-        while target > limit.rlim_cur {
-            let wanted = libc::rlimit {
-                rlim_cur: target as _,
-                rlim_max: limit.rlim_max,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &wanted) == 0 {
-                return target;
-            }
-            target /= 2;
+        // SAFETY: as above.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &wanted) == 0 }
+    })
+}
+
+/// The limit on open files raised from `soft` towards OPEN_FILES, by `set`, which says whether the
+/// system took it: no higher than `hard` (None: unlimited), and never lowered.
+fn raised(soft: u64, hard: Option<u64>, mut set: impl FnMut(u64) -> bool) -> u64 {
+    let mut target = hard.map_or(OPEN_FILES, |h| OPEN_FILES.min(h));
+    // macOS refuses more than kern.maxfilesperproc, whatever the hard limit says.
+    while target > soft {
+        if set(target) {
+            return target;
         }
-        limit.rlim_cur
+        target /= 2;
     }
+    soft
 }
 
 /// This program's code, as ping says it: a hash of the program itself.
@@ -604,4 +608,26 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
     drop(routed);
     let _ = fs::remove_file(&control);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limit_on_open_files_is_raised_as_far_as_its_let() {
+        let mut set = Vec::new();
+        assert_eq!(
+            raised(256, None, |n| {
+                set.push(n);
+                true
+            }),
+            OPEN_FILES
+        );
+        assert_eq!(set, [OPEN_FILES]);
+        assert_eq!(raised(256, Some(4096), |_| true), 4096);
+        // macOS: an unlimited hard limit, and kern.maxfilesperproc below what's asked for.
+        assert_eq!(raised(256, None, |n| n <= 24576), 16384);
+        assert_eq!(raised(100_000, None, |_| panic!("never lowered")), 100_000);
+    }
 }

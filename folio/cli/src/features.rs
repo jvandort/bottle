@@ -146,6 +146,7 @@
 //!     folio-cli features resolve [SPEC...]
 //!     folio-cli features image [SPEC...]
 //!     folio-cli features cached [--build] [SPEC...]
+//!     folio-cli features route SPEC METHOD PATH
 //!
 //! Each writes JSON: the features a bottle can ask for (all but base, which every bottle has); one,
 //! as its definition says, with the options SPEC sets, and what they make of it as far as they can
@@ -1686,9 +1687,36 @@ pub fn resolve(requested: &[String]) -> Result<Vec<Feature>> {
     Ok(order)
 }
 
+/// What folio serve does with a request for `path` by `method` to the hosts of SPEC's
+/// credentials: the path as a server routes it (null: refused as no route), and for each credential
+/// whether the request is forbidden (never sent), and whether the credential would go on it, if it
+/// presents the stand-in.
+fn route(spec: &str, method: &str, path: &str) -> Result<Value> {
+    let (id, settings) = parse_spec(spec)?;
+    let feature = load(&id)?.configured(&settings)?;
+    let canonical = crate::routes::canonical(path);
+    let credentials: Vec<Value> = feature
+        .credentials
+        .iter()
+        .map(|c| {
+            let rewritten: Vec<Route> = c.inject.rewrites.iter().map(|r| r.route.clone()).collect();
+            let (forbidden, allowed) = match &canonical {
+                Some(p) => (
+                    crate::routes::forbids(&c.inject.forbid, method, p),
+                    crate::routes::allows(&c.inject.allow, &rewritten, method, p),
+                ),
+                None => (true, false),
+            };
+            json!({"name": c.name, "forbidden": forbidden, "allowed": allowed && !forbidden})
+        })
+        .collect();
+    Ok(json!({"path": canonical, "credentials": credentials}))
+}
+
 // --- the command ----------------------------------------------------------------
 
-const USAGE: &str = "features list | features show SPEC | features canonical SPEC... \
+const USAGE: &str = "features list | features show SPEC | features route SPEC METHOD PATH \
+                     | features canonical SPEC... \
                      | features resolve [SPEC...] | features image [SPEC...] \
                      | features cached [--build] [SPEC...]";
 
@@ -1710,6 +1738,7 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
         (Some("image"), []) => images::base(),
         (Some("image"), specs) => resolve(specs).and_then(|features| images::image(&features)),
+        (Some("route"), [spec, method, path]) => route(spec, method, path),
         (Some("cached"), [flag]) if flag == "--build" => images::build_cached(),
         (Some("cached"), specs) => resolve(specs).map(|features| images::cached_for(&features)),
         _ => return crate::usage_error(USAGE),

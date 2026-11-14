@@ -75,12 +75,6 @@ class DeclaredTest(unittest.TestCase):
         with self.assertRaisesRegex(BottleError, "no feature declares a credential named 'nope' \\(known: claude, develocity, github, teamcity\\)"):
             auth.get_declared("nope")
 
-    def test_only_the_bottles_features_are_injected(self) -> None:
-        with mock.patch.object(auth, "get", return_value="tok"):
-            [claude] = auth.injections_for(["claude", "tools"])
-            self.assertEqual((claude.host, claude.value), ("api.anthropic.com", "Bearer tok"))
-            self.assertEqual(auth.injections_for(["tools"]), [])
-
 
 class StandinTest(unittest.TestCase):
     """What a bottle gets instead of a credential: a fake token, so a tool starts at all."""
@@ -107,33 +101,9 @@ class InjectedCredentialTest(unittest.TestCase):
 
     specs = ["teamcity:server=https://ci.corp.example.com", "tools"]
 
-    def test_the_proxy_gets_the_real_one(self) -> None:
-        with mock.patch.object(auth, "get", return_value="tc-token"):
-            [injection] = auth.injections_for(self.specs)
-        self.assertEqual(injection.host, "ci.corp.example.com")
-        self.assertEqual((injection.header, injection.value), ("Authorization", "Bearer tc-token"))
-        self.assertEqual(injection.port, 443)
-        # Given in place of the stand-in only, and bare for Basic credentials.
-        self.assertEqual((injection.standin, injection.credential), (features.STANDIN, "tc-token"))
-
-    def test_nothing_is_injected_until_it_is_logged_in(self) -> None:
-        with mock.patch.object(auth, "get", return_value=None):
-            self.assertEqual(auth.injections_for(self.specs), [])
-
     def test_its_machine_routes_its_credentials_hosts_and_ports_logged_in_or_not(self) -> None:
         with mock.patch.object(auth, "get", return_value=None):
             self.assertEqual(auth.credential_destinations(self.specs), [("ci.corp.example.com", 443)])
-
-    def test_one_host_belongs_to_one_credential(self) -> None:
-        claimed = features.Credential(
-            "other", "Another token",
-            inject=features.Inject(hosts=("ci.corp.example.com",), value="Bearer ${credential}"),
-        )
-        with mock.patch.object(auth, "get", return_value="tok"), \
-                mock.patch.object(auth, "credentials_for", return_value=[
-                    auth.credentials_for(self.specs)[0], claimed]), \
-                self.assertRaisesRegex(BottleError, "both claim ci.corp.example.com"):
-            auth.injections_for(self.specs)
 
 
 class PropertiesTest(unittest.TestCase):
@@ -161,26 +131,9 @@ class PropertiesTest(unittest.TestCase):
     def test_no_file_is_no_lines(self) -> None:
         self.assertEqual(auth.read_properties(self.keys.with_name("nope")), {})
 
-    def test_the_servers_line_is_attached_without_the_keychain(self) -> None:
-        with mock.patch.object(auth, "get", side_effect=AssertionError("the file has it")):
-            [injection] = auth.injections_for(self.specs)
-        self.assertEqual((injection.host, injection.value), ("dv.corp.example.com", "Bearer dv-key"))
-
-    def test_each_server_gets_its_own_line(self) -> None:
+    def test_each_server_is_routed(self) -> None:
         specs = [f"develocity:server=https://ge.example.com,https://dv.corp.example.com,keyFile={self.keys}"]
-        with mock.patch.object(auth, "get", return_value=None):
-            injections = auth.injections_for(specs)
-        self.assertEqual([(i.host, i.value) for i in injections],
-                         [("ge.example.com", "Bearer ge-key"), ("dv.corp.example.com", "Bearer dv-key")])
         self.assertEqual(auth.credential_destinations(specs), [("dv.corp.example.com", 443), ("ge.example.com", 443)])
-
-    def test_a_host_with_no_line_falls_back_to_the_keychain(self) -> None:
-        specs = [f"develocity:server=https://new.example.com,keyFile={self.keys}"]
-        with mock.patch.object(auth, "get", return_value="stored-key"):
-            [injection] = auth.injections_for(specs)
-        self.assertEqual(injection.value, "Bearer stored-key")
-        with mock.patch.object(auth, "get", return_value=None):
-            self.assertEqual(auth.injections_for(specs), [])
 
     def test_an_empty_line_is_no_credential(self) -> None:
         [credential] = auth.credentials_for([f"develocity:server=empty.example.com,keyFile={self.keys}"])

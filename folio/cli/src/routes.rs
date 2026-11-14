@@ -54,9 +54,7 @@ impl Route {
         })
     }
 
-    /// Whether a request for `path`, already canonical, by `method`, is one of this route's: what
-    /// folio serve asks of a credential's routes.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether a request for `path`, already canonical, by `method`, is one of this route's.
     pub fn matches(&self, method: &str, path: &str) -> bool {
         let literal: Vec<Token> = path.to_lowercase().chars().map(Token::Char).collect();
         (self.methods.is_empty() || self.methods.contains(&method.to_uppercase()))
@@ -81,6 +79,84 @@ impl Route {
             })
         })
     }
+}
+
+/// A request's path as a server is likely to route it, lowercase; None if it should go to none:
+/// escapes decoded until there are none left (a server, or one in front of it, may decode twice), a
+/// backslash a slash, a segment's parameters (`;jsessionid=...`) dropped, and empty segments, `.`
+/// and `..` resolved. Erring wide is the point: a route is only ever refused on this, never opened.
+pub fn canonical(path: &str) -> Option<String> {
+    let mut path = path.to_string();
+    let mut settled = false;
+    for _ in 0..4 {
+        let decoded = percent_decoded(&path);
+        if decoded == path {
+            settled = true;
+            break;
+        }
+        path = decoded;
+    }
+    if !settled || path.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
+        return None;
+    }
+    let mut segments: Vec<&str> = Vec::new();
+    let replaced = path.replace('\\', "/");
+    for segment in replaced.split('/') {
+        let segment = segment.split(';').next().unwrap_or("");
+        match segment {
+            ".." => {
+                segments.pop();
+            }
+            "" | "." => {}
+            s => segments.push(s),
+        }
+    }
+    Some(format!("/{}", segments.join("/")).to_lowercase())
+}
+
+/// `s` with %XX escapes decoded, as UTF-8 (anything else as U+FFFD), as Python's unquote does.
+fn percent_decoded(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
+            if let Some(b) = hex {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether a request for `path` (canonical) by `method` is one of `forbid`'s: also with an
+/// extension on its last segment, which some servers route as the path without it
+/// (`/api/auth/token.json`): a refusal errs wide.
+pub fn forbids(forbid: &[Route], method: &str, path: &str) -> bool {
+    let unsuffixed = match path.rsplit_once('.') {
+        Some((stem, ext)) if !ext.contains('/') && !stem.ends_with('/') => stem,
+        _ => path,
+    };
+    forbid
+        .iter()
+        .any(|r| r.matches(method, path) || r.matches(method, unsuffixed))
+}
+
+/// Whether a credential with routes `allow`, and rewrites on `rewritten`, may go on a request for
+/// `path` (canonical) by `method`: anywhere, when it has no allow routes.
+pub fn allows(allow: &[Route], rewritten: &[Route], method: &str, path: &str) -> bool {
+    allow.is_empty()
+        || allow
+            .iter()
+            .chain(rewritten)
+            .any(|r| r.matches(method, path))
 }
 
 /// A route's path as the paths its `{a,b}` groups stand for: `/{a,b}/c` is `/a/c` and `/b/c`.
@@ -244,6 +320,22 @@ mod tests {
         let star = route("POST /api/*/token");
         assert!(star.matches("POST", "/api/v2/token"));
         assert!(!star.matches("POST", "/api/v2/x/token"));
+    }
+
+    #[test]
+    fn a_path_as_a_server_routes_it() {
+        assert_eq!(
+            canonical("/api/auth//%74oken;x").as_deref(),
+            Some("/api/auth/token")
+        );
+        assert_eq!(canonical("/a/./b/../c\\D").as_deref(), Some("/a/c/d"));
+        assert_eq!(canonical("/%2574").as_deref(), Some("/t"));
+        assert_eq!(canonical("/a%00b"), None);
+        assert_eq!(
+            canonical("/%252525252574"),
+            None,
+            "escaped past what's decoded"
+        );
     }
 
     #[test]

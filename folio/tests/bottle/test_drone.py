@@ -22,9 +22,8 @@ from unittest import mock
 from folio.bottle import bottles, daemon, features, host, images, repos, runners, services
 from folio.bottle.host import Remote, Served
 from folio.bottle.errors import BottleError
-from tests.bottle.support import (GitTestCase, built_cli, built_folio_cli, manifest, register_runner, run, stop_bottle,
-                                  thread_dir, write_bottles)
-from tests.bottle.test_services import header
+from tests.bottle.support import (GitTestCase, built_cli, built_folio_cli, header, manifest, register_runner, run,
+                                  stop_bottle, thread_dir, write_bottles)
 
 FAKE_SSH = r"""#!/usr/bin/env bash
 forwards=()
@@ -136,7 +135,7 @@ class DroneCase(GitTestCase):
     def guest_connects(self, machine: str, address: str, port: int, first: bytes, said: str | None = None) -> bytes:
         """A connection from `machine`'s guest, as bottle-cli there gives it to the socket its routes name for
         bottle.host, forwarded to folio serve here: the machine it's from as the PROXY header says, `machine` unless
-        `said`."""
+        `said`. One closed unanswered may be reset, if it hadn't read all that was sent."""
         there = Path(runners.get("box").services_sockets()["host"])
         for _ in range(100):   # its runner's forward, made in the background as it was bound
             if there.exists():
@@ -147,8 +146,11 @@ class DroneCase(GitTestCase):
             s.connect(str(there))
             s.sendall(header(address, port, machine=said or machine) + first)
             answer = b""
-            while chunk := s.recv(65536):
-                answer += chunk
+            try:
+                while chunk := s.recv(65536):
+                    answer += chunk
+            except ConnectionResetError:
+                pass
         return answer
 
 

@@ -4,10 +4,10 @@ Features declare the credentials they need (customizations.bottle.credentials
 in their devcontainer-feature.json): a name, and where the credential goes.
 Each is stored in the macOS Keychain, set from stdin (`folio auth set`).
 
-A credential never enters a bottle. folio serve hands it to that bottle's
-gateway (injections_for), which puts it in place of the stand-in on the bottle's
-requests to the hosts the feature named, on HTTPS connections the machine
-makes (see egress.py). The agent can spend the credential against those
+A credential never enters a bottle. folio serve reads it when a bottle is bound
+(folio-cli's serve/credentials.rs) and puts it in place of the stand-in on the
+bottle's requests to the hosts the feature named, on HTTPS connections it makes
+itself. The agent can spend the credential against those
 hosts, and can't read it -- so a bottle that leaks everything it holds leaks
 no credential.
 
@@ -32,7 +32,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from folio.bottle import egress, features
+from folio.bottle import features
 from folio.bottle.errors import BottleError
 from folio.bottle.store import bottle_home
 
@@ -171,11 +171,6 @@ def from_properties(credential: features.Credential, host: str) -> str | None:
     return keys.get(host.lower()) or keys.get(pattern.lower())
 
 
-def value_for(credential: features.Credential, host: str) -> str | None:
-    """What's attached to `host` for `credential`: its properties file's line for the host, else the Keychain's."""
-    return from_properties(credential, host) or get(credential.name)
-
-
 def set_value(name: str, value: str) -> None:
     get_declared(name)
     put(name, value.strip())
@@ -202,44 +197,6 @@ def warn_unset(specs: tuple[str, ...] | list[str]) -> None:
             continue
         print(f"bottle: {credential.name} ({credential.description}) isn't set: `folio auth set {credential.name}`",
               file=sys.stderr)
-
-
-def injections_for(specs: tuple[str, ...] | list[str]) -> list[egress.Injection]:
-    """What folio serve attaches for a bottle with these features: one per injected credential.
-
-    Read from its properties file or the Keychain here, in folio serve, so the
-    value goes no further than the gateway. A credential that isn't logged in is left out; the bottle then
-    reaches the host unauthenticated, and the server says so.
-
-    A request to a host that several patterns match is served by the first
-    credential that claims it, in the features' install order. Two credentials
-    claiming the same host is a mistake in the features, and is refused here
-    rather than resolved arbitrarily.
-    """
-    injections, claimed = [], {}
-    for credential in credentials_for(specs):
-        for host in credential.inject.hosts:
-            owner = claimed.setdefault(host.lower(), credential.name)
-            if owner != credential.name:
-                raise BottleError(f"credentials {owner!r} and {credential.name!r} both claim {host}")
-        for host in credential.inject.hosts:
-            value = value_for(credential, host)
-            if value is None:
-                continue
-            pattern, port = destination(host)
-            injections.append(egress.Injection(
-                host=pattern,
-                port=port,
-                header=credential.inject.header,
-                value=credential.inject.value.replace(features.CREDENTIAL_PLACEHOLDER, value),
-                standin=features.STANDIN,
-                credential=value,
-                rewrites=credential.inject.rewrites,
-                forbid=credential.inject.forbid,
-                allow=credential.inject.allow,
-                feature=credential.name,
-            ))
-    return injections
 
 
 def credential_destinations(specs: tuple[str, ...] | list[str]) -> list[tuple[str, int]]:
