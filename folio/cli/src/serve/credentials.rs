@@ -899,8 +899,8 @@ fn relay_tls(
 ) -> io::Result<(u64, u64)> {
     let mut client = client.try_clone()?;
     let (mut up, mut down) = (0u64, 0u64);
-    conn.writer().write_all(head)?;
-    conn.writer().write_all(buffered)?;
+    send_whole(&mut conn, &mut tcp, head)?;
+    send_whole(&mut conn, &mut tcp, buffered)?;
     up += (head.len() + buffered.len()) as u64;
     client.set_nonblocking(true)?;
     tcp.set_nonblocking(true)?;
@@ -915,10 +915,14 @@ fn relay_tls(
                 Err(e) => return Err(e),
             }
         }
+        // More from the bottle only once what it sent before is gone: rustls keeps at most 64 KiB
+        // unsent (taking nothing more past it), and the host may take its time.
+        let reading = client_open && !conn.wants_write();
         let mut fds = [
             libc::pollfd {
-                fd: client.as_raw_fd(),
-                events: if client_open { libc::POLLIN } else { 0 },
+                // A negative descriptor is ignored, its hangup too.
+                fd: if reading { client.as_raw_fd() } else { -1 },
+                events: libc::POLLIN,
                 revents: 0,
             },
             libc::pollfd {
@@ -935,14 +939,15 @@ fn relay_tls(
             }
             return Err(e);
         }
-        if client_open && fds[0].revents != 0 {
-            match client.read(&mut buf) {
+        if reading && fds[0].revents != 0 {
+            // No more than rustls takes at once, its buffer empty.
+            match client.read(&mut buf[..16 * 1024]) {
                 Ok(0) => {
                     client_open = false;
                     conn.send_close_notify();
                 }
                 Ok(n) => {
-                    conn.writer().write_all(&buf[..n])?;
+                    send_whole(&mut conn, &mut tcp, &buf[..n])?;
                     up += n as u64;
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
@@ -987,6 +992,39 @@ fn relay_tls(
             if ended {
                 let _ = client.shutdown(std::net::Shutdown::Both);
                 return Ok((up, down));
+            }
+        }
+    }
+}
+
+/// `data` given to rustls whole for the host: what rustls won't take yet waits for what it has to
+/// go to the host first, `tcp` blocking or not.
+fn send_whole(
+    conn: &mut rustls::ClientConnection,
+    tcp: &mut TcpStream,
+    mut data: &[u8],
+) -> io::Result<()> {
+    loop {
+        let n = conn.writer().write(data)?;
+        data = &data[n..];
+        if data.is_empty() {
+            return Ok(());
+        }
+        while conn.wants_write() {
+            match conn.write_tls(tcp) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    let mut fd = libc::pollfd {
+                        fd: tcp.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    // SAFETY: poll reads and writes the descriptor it's given, which outlives the call.
+                    if unsafe { libc::poll(&mut fd, 1, 60_000) } == 0 {
+                        return Err(ErrorKind::TimedOut.into());
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
     }

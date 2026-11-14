@@ -163,7 +163,8 @@ impl Drop for Host {
 }
 
 /// The host's side of a connection: each request it's sent, as it was sent (a body by its
-/// Content-Length); "hello" back, or, asked to upgrade, 101 and whatever comes after, echoed.
+/// Content-Length, a big one after a pause); "hello" back, or, asked to upgrade, 101 and whatever
+/// comes after, echoed.
 fn answer(
     config: Arc<rustls::ServerConfig>,
     tcp: std::net::TcpStream,
@@ -190,6 +191,10 @@ fn answer(
                 .map(|v| v.trim().parse::<usize>().unwrap())
         })
         .unwrap_or(0);
+    if length > 64 * 1024 {
+        // Taken slowly, as a far host might: what sends it has to wait for it.
+        std::thread::sleep(Duration::from_millis(300));
+    }
     let mut body = vec![0; length];
     let _ = tls.read_exact(&mut body);
     let upgrade = head.to_lowercase().contains("upgrade: websocket");
@@ -564,6 +569,42 @@ fn the_stand_in_is_replaced_where_a_rewrite_says_and_in_kind() {
         sent.contains(&format!("X-User-Access-Key: {other}")),
         "{sent}"
     );
+}
+
+#[test]
+fn a_body_bigger_than_what_tls_keeps_unsent_goes_whole() {
+    let host = Host::start(
+        "f",
+        "develocity",
+        json!({"rewrite": [{"route": "POST /scans/publish/*/*/token", "json": "accessKey"}]}),
+    );
+    let post = |path: &str, body: &str| {
+        format!(
+            "POST {path} HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    // Relayed as the bottle sends it, many times over what rustls keeps unsent (64 KiB), to a
+    // host slow to take it: a Claude conversation's request, say.
+    let body = "x".repeat(4 << 20);
+    let answer = host.send(post("/v1/messages", &body).as_bytes());
+    let sent = host.received.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(answer.ends_with("hello"), "{answer}");
+    let (_, sent_body) = sent.split_once("\r\n\r\n").unwrap();
+    assert!(
+        sent_body == body,
+        "{} of {} bytes",
+        sent_body.len(),
+        body.len()
+    );
+
+    // Read whole for the credential, and sent whole after the head.
+    let body = json!({"accessKey": STANDIN, "pad": "x".repeat(900 * 1024)}).to_string();
+    let sent = host.sent_for(post("/scans/publish/gradle/4.6.1/token", &body).as_bytes());
+    let (_, sent_body) = sent.split_once("\r\n\r\n").unwrap();
+    let sent_body: Value = serde_json::from_str(sent_body).unwrap();
+    assert_eq!(sent_body["accessKey"], REAL);
+    assert_eq!(sent_body["pad"].as_str().unwrap().len(), 900 * 1024);
 }
 
 #[test]
