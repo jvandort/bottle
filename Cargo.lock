@@ -452,6 +452,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "libc",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "serde",

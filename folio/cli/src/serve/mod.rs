@@ -188,13 +188,31 @@ pub fn relay<W: Write + Send + 'static>(
     mut back: UnixStream,
 ) -> (u64, u64) {
     let sending = thread::spawn(move || {
-        let sent = io::copy(&mut client, &mut to).unwrap_or(0);
+        let sent = pass(&mut client, &mut to);
         drop(to);
         sent
     });
-    let down = io::copy(&mut from, &mut back).unwrap_or(0);
+    let down = pass(&mut from, &mut back);
     let _ = back.shutdown(Shutdown::Both);
     (sending.join().unwrap_or(0), down)
+}
+
+/// Passes on what `from` reads as it comes, until it ends: the bytes passed. Not io::copy, whose
+/// splice between a socket and a pipe waits to fill its buffer, where ssh waits for each line.
+fn pass(from: &mut impl Read, to: &mut impl Write) -> u64 {
+    let mut buf = vec![0; 64 * 1024];
+    let mut passed = 0;
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) | Err(_) => return passed,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).and_then(|()| to.flush()).is_err() {
+                    return passed;
+                }
+                passed += n as u64;
+            }
+        }
+    }
 }
 
 /// A runner's forward: a thread, told to stop by `stop`.
