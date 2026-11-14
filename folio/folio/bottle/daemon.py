@@ -37,8 +37,6 @@ MAX_SOCKET_PATH = 100
 LOG = "serve"
 # What it serves, each on a socket of its own, which a machine's routes name (services.network).
 SERVICES = ("host", "ssh", "credentials")
-# bottle's hooks, which a push from a bottle runs (folio-cli's serve/git.rs).
-HOOKS = Path(__file__).resolve().parent / "hooks"
 
 
 def home() -> Path:
@@ -219,7 +217,7 @@ def _launch(background: bool) -> subprocess.Popen:
     command = [krun.folio_binary(), "serve", "--control", str(socket_path()), "--restore",
                *(arg for name, path in services_sockets().items() for arg in ("--service", f"{name}={path}"))]
     env = {**os.environ, "FOLIO_HOME": str(home()), "FOLIO_FEATURES": str(features.FEATURES),
-           "FOLIO_HOOKS": str(HOOKS), "BOTTLE_PYTHON": sys.executable, "BOTTLE_CLI": krun.binary()}
+           "BOTTLE_CLI": krun.binary()}
     try:
         if background:
             with os.fdopen(open_log(LOG, home()), "a") as out:

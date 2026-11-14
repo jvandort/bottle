@@ -5,9 +5,9 @@
 //!
 //! A remote that takes pushes writes one namespace, which confines the push: every ref
 //! receive-pack resolves is inside it, and the hub's own refs aren't advertised. Pushes are
-//! append-only, refusing force-pushes and deletes; bottle's hooks run (hooks/pre-receive refuses a
-//! push with no namespace; post-receive has the hub's checked-out branches follow it, by
-//! follow.py, run by $BOTTLE_PYTHON), and the repo's own hooks never do.
+//! append-only, refusing force-pushes and deletes; bottle's hooks run (hook.rs: pre-receive refuses
+//! a push with no namespace; post-receive has the hub's checked-out branches follow it), and the
+//! repo's own hooks never do.
 
 use std::collections::HashMap;
 use std::fs;
@@ -33,18 +33,6 @@ const CGI_DROP: [&str; 4] = [
     "connection",
     "transfer-encoding",
 ];
-
-/// bottle's hooks: $FOLIO_HOOKS (what folio's Python says), else this checkout's.
-fn hooks() -> PathBuf {
-    std::env::var_os("FOLIO_HOOKS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../folio/bottle/hooks"
-            ))
-        })
-}
 
 /// Answers a request for `remote` of `repo`; an outcome for the log.
 pub fn serve(
@@ -135,7 +123,13 @@ fn receive(
     query: &str,
     body: &[u8],
 ) -> Option<Vec<u8>> {
-    let hooks = hooks().display().to_string();
+    let hooks = match super::hook::hooks_dir() {
+        Ok(dir) => dir.display().to_string(),
+        Err(e) => {
+            log!("bottle.egress", "can't write bottle's hooks: {e}");
+            return None;
+        }
+    };
     let config = [
         ("http.receivepack", "true"),
         // bottle's rules; the repo's own hooks never run.
@@ -159,12 +153,8 @@ fn receive(
             unique()
         ))
     });
-    let python = std::env::var("BOTTLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let extra: Vec<(String, String)> = match &hook_log {
-        Some(path) => vec![
-            ("BOTTLE_PYTHON".into(), python),
-            ("BOTTLE_HOOK_LOG".into(), path.display().to_string()),
-        ],
+        Some(path) => vec![("FOLIO_HOOK_LOG".into(), path.display().to_string())],
         None => vec![],
     };
     let out = http_backend(

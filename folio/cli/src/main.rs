@@ -14,6 +14,7 @@
 //!     folio-cli on NAME COMMAND [ARG]...
 //!     folio-cli features list|show|canonical|resolve|image|cached ...
 //!     folio-cli serve --control PATH --service NAME=PATH... [--restore]
+//!     folio-cli hook pre-receive|post-receive   (git's, for a push folio serve takes)
 //!
 //! It runs bottle's code only by running bottle-cli: here ($BOTTLE_CLI, else bottle-cli on PATH),
 //! for the distributions beside it, and on a runner, over ssh. Its state is in folio's home,
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
         Some("on") => runner::on(args),
         Some("features") => features::main(args),
         Some("serve") => serve::main(args),
+        Some("hook") => serve::hook::main(args),
         _ => usage_error(USAGE),
     }
 }

@@ -25,6 +25,7 @@
 mod credentials;
 mod gateway;
 mod git;
+pub mod hook;
 mod host;
 mod http;
 pub mod log;
