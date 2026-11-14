@@ -32,7 +32,7 @@ class ExecTest(FolioTestCase):
         self.assertIn("give the command", refused.stderr)
 
     def test_a_thread_without_a_sidecar_has_none_to_run_in(self) -> None:
-        refused = self.folio("exec", "--sidecar", "fix-it", "--", "true")
+        refused = self.folio("sidecar", "exec", "fix-it", "--", "true")
         self.assertIn("has no sidecar", refused.stderr)
 
 
@@ -61,6 +61,11 @@ class CopyTest(FolioTestCase):
     def test_one_side_names_a_thread(self) -> None:
         refused = self.folio("cp", "a", "b")
         self.assertIn("name one, THREAD:PATH", refused.stderr)
+
+    def test_a_sidecar_has_the_same_commands(self) -> None:
+        refused = self.folio("sidecar", "cp", "fix-it:report.txt", ".")
+        self.assertIn("has no sidecar", refused.stderr)
+        self.assertIn("thread's sidecar: name one", self.folio("sidecar", "cp", "a", "b").stderr)
 
 
 class CopyCommandsTest(unittest.TestCase):

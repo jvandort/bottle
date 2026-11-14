@@ -134,7 +134,7 @@ pushes into too, so fetch and merge before you push, and a push refused as not
 a fast-forward lost a race: fetch, merge, push again. It's scratch: a pause of
 the thread deletes it and keeps nothing of it, so push what's worth keeping.
 To hand the user a file or a directory from here, give them the command that
-copies it to their current directory: `folio cp --sidecar {thread}:<path> .`
+copies it to their current directory: `folio sidecar cp {thread}:<path> .`
 """
 
 

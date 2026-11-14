@@ -188,6 +188,8 @@ folio sidecar configure fix-it --memory 64G --disk 100G --no-feature jvm
 folio sidecar configure fix-it   # shows it
 folio sidecar remove fix-it
 folio sidecar shell fix-it     # a shell of your own there, while the thread runs
+folio sidecar exec fix-it -- make test           # one command there
+folio sidecar cp fix-it:/workspace/build/report .  # a copy out of it (or into it)
 ```
 
 `folio sidecar configure` takes what `folio configure` does (below), for the
@@ -555,15 +557,15 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio new THREAD [--from BRANCH] [--runner RUNNER]` | Start a thread: its bottle and its lane |
 | `folio claude [THREAD] [--runner RUNNER]` | Attach to the thread's Claude, starting the thread if it's new |
 | `folio shell [THREAD] [--runner RUNNER]` | Attach to the thread's shell, starting the thread if it's new |
-| `folio exec [--sidecar] [-t] THREAD [--] COMMAND...` | Run one command in a thread's bottle (or its sidecar), wherever it runs, and exit with its status |
-| `folio cp [--sidecar] SRC DST` | Copy into or out of a thread's bottle (or its sidecar), wherever it runs: `THREAD:PATH`, or a path here |
+| `folio exec [-t] THREAD [--] COMMAND...` | Run one command in a thread's bottle, wherever it runs, and exit with its status |
+| `folio cp SRC DST` | Copy into or out of a thread's bottle, wherever it runs: `THREAD:PATH`, or a path here |
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure [--feature F] [--no-feature F] [--memory M] [--disk D \| --no-disk] [--runner R \| --no-runner]` | The repo's spec, its threads' features, memory and disk, and its runner: shown without options |
-| `folio sidecar configure` / `remove` / `shell [THREAD]` | A thread's sidecar (see Sidecars) |
+| `folio sidecar configure` / `remove` / `shell` / `exec` / `cp` | A thread's sidecar (see Sidecars): `shell`, `exec` and `cp` as for its bottle |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` (`ls`) | Every repo folio has state for |
 | `folio runner add` / `ls` / `check` / `ssh` / `detach` / `attach` / `rm` | The other machines folio makes bottles on (see Runners) |
