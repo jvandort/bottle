@@ -108,8 +108,8 @@ def canonical_features(specs: list[str]) -> tuple[str, ...]:
 
     result: dict[str, str] = {}
     for spec in specs:
-        feature_id, settings = features.parse_spec(spec)
-        canonical = features.load(feature_id).configured(settings).spec
+        canonical = features.canonical(spec)
+        feature_id = canonical.partition(":")[0]
         if feature_id in result and result[feature_id] != canonical:
             raise BottleError(f"feature {feature_id} given twice with different options")
         result[feature_id] = canonical

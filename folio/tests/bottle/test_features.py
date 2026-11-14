@@ -539,16 +539,10 @@ class OptionTest(FeatureTestCase):
         [feature] = features.resolve([spec])
         return feature
 
-    def test_parse(self) -> None:
-        self.assertEqual(features.parse_spec("f"), ("f", {}))
-        self.assertEqual(features.parse_spec("f:version=17,docs=true"), ("f", {"version": "17", "docs": "true"}))
-        self.assertEqual(features.parse_spec("f:list=1,2,3,x=y"), ("f", {"list": "1,2,3", "x": "y"}))
-        self.assertEqual(features.parse_spec("f:url=a=b"), ("f", {"url": "a=b"}))
-
     def test_bad_specs(self) -> None:
         for spec in ("f:", "f:version", "f:=1", "f:,x=1", "f:version=1,version=2"):
             with self.subTest(spec), self.assertRaises(BottleError):
-                features.parse_spec(spec)
+                features.resolve([spec])
 
     def test_values_and_spec(self) -> None:
         f = self.one("f:version=17,docs=true")

@@ -41,9 +41,7 @@ class Cached:
 
 def cached_for(specs: tuple[str, ...] | list[str]) -> list[Cached]:
     """The hosts a bottle with these features has its downloads kept for: those its features name, and the apt
-    repositories its image has (see apt.py)."""
-    from folio.bottle import apt, features  # which import this module
+    repositories its image has (folio-cli's features.rs and images.rs)."""
+    from folio.bottle import features  # which imports this module
 
-    resolved = features.resolve(list(specs))
-    named = [Cached(host.lower(), f.cache.exclude) for f in resolved if f.cache for host in f.cache.hosts]
-    return named + apt.cached((*apt.DEBIAN, *(r for f in resolved for r in f.apt.repositories)))
+    return features.cached_for(list(specs))

@@ -614,7 +614,9 @@ cargo test -p folio-cli
 
 folio is becoming a Rust program, folio-cli (`cli/`, in bottle's Cargo
 workspace), which folio's Python is a front end for, as bottle's Python was
-for bottle-cli: so far, runners (`folio runner`, `cli/src/runner.rs`). It
+for bottle-cli: so far, runners (`folio runner`, `cli/src/runner.rs`) and features
+(`cli/src/features.rs`, which says what a feature's `devcontainer-feature.json` may hold, and
+`images.rs`, what builds their images; `folio/bottle/features.py` is its front end). It
 runs bottle's code only by running bottle-cli, never by linking bottle's
 crates (`cli/tests/boundary.rs` checks).
 
