@@ -421,8 +421,8 @@ fn raise_open_files() -> u64 {
     };
     // SAFETY: getrlimit and setrlimit read and write the structure they're given.
     unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
-    let hard = (limit.rlim_max != libc::RLIM_INFINITY).then_some(limit.rlim_max as u64);
-    raised(limit.rlim_cur as u64, hard, |soft| {
+    let hard = (limit.rlim_max != libc::RLIM_INFINITY).then_some(limit.rlim_max);
+    raised(limit.rlim_cur, hard, |soft| {
         let wanted = libc::rlimit {
             rlim_cur: soft as _,
             rlim_max: limit.rlim_max,

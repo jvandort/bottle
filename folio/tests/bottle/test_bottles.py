@@ -831,7 +831,8 @@ class SpecBottleTest(BottleTestCase):
 
     def test_refuses_an_invalid_name(self) -> None:
         self.fake()
-        for name in ("", "-a", "a/b", "a b"):
+        # Nor does one look like a message's address (folio-cli's serve/messages.rs: NAME~SIGNATURE).
+        for name in ("", "-a", "a/b", "a b", "broker~abc"):
             with self.subTest(name), self.assertRaisesRegex(BottleError, "invalid name"):
                 self.create(name)
 

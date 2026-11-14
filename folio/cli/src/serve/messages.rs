@@ -40,8 +40,11 @@ pub type Undelivered = (u16, &'static str, String);
 
 /// The key, made the first time it's needed; only its owner can read it.
 fn key() -> std::io::Result<Vec<u8>> {
-    let path = crate::home().join("messages.key");
-    if let Ok(key) = fs::read(&path) {
+    key_at(&crate::home().join("messages.key"))
+}
+
+fn key_at(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    if let Ok(key) = fs::read(path) {
         return Ok(key);
     }
     fs::create_dir_all(path.parent().unwrap())?;
@@ -51,14 +54,14 @@ fn key() -> std::io::Result<Vec<u8>> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
     {
         Ok(mut file) => file.write_all(&fresh)?,
         // Made by someone else since.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
-    fs::read(&path)
+    fs::read(path)
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -98,21 +101,28 @@ fn base32(bytes: &[u8]) -> String {
     out
 }
 
-fn signature(target: &str, holder: &str) -> std::io::Result<String> {
-    let digest = hmac_sha256(&key()?, format!("{target}\0{holder}").as_bytes());
-    Ok(base32(&digest)[..SIGNATURE_CHARS].to_string())
+fn signature(key: &[u8], target: &str, holder: &str) -> String {
+    let digest = hmac_sha256(key, format!("{target}\0{holder}").as_bytes());
+    base32(&digest)[..SIGNATURE_CHARS].to_string()
 }
 
 /// The address by which `holder` reaches `target`.
 pub fn address(target: &str, holder: &str) -> std::io::Result<String> {
-    Ok(format!("{target}{MARK}{}", signature(target, holder)?))
+    Ok(format!(
+        "{target}{MARK}{}",
+        signature(&key()?, target, holder)
+    ))
 }
 
 /// The bottle `to` reaches, when `holder` sends to it; None if it isn't an address issued to
 /// `holder`.
 fn target(to: &str, holder: &str) -> Option<String> {
+    target_by(&key().ok()?, to, holder)
+}
+
+fn target_by(key: &[u8], to: &str, holder: &str) -> Option<String> {
     let (name, given) = to.rsplit_once(MARK)?;
-    let expected = signature(name, holder).ok()?;
+    let expected = signature(key, name, holder);
     // In constant time: a signature's prefix right says nothing.
     let same = given.len() == expected.len()
         && given
@@ -173,6 +183,13 @@ pub fn deliver(
     let mut child =
         child.map_err(|e| (502, "Bad Gateway", format!("couldn't deliver to {to}: {e}")))?;
     let _ = child.stdin.take().unwrap().write_all(text.as_bytes());
+    // Read as it comes: one that says a lot would otherwise wait for it to be read, and never exit.
+    let mut stderr = child.stderr.take().unwrap();
+    let said = std::thread::spawn(move || {
+        let mut said = String::new();
+        let _ = stderr.read_to_string(&mut said);
+        said
+    });
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -200,10 +217,7 @@ pub fn deliver(
         ));
     }
     if !status.success() {
-        let mut said = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let _ = stderr.read_to_string(&mut said);
-        }
+        let said = said.join().unwrap_or_default();
         let why = if said.trim().is_empty() {
             format!("exit {}", status.code().unwrap_or(-1))
         } else {
@@ -238,5 +252,38 @@ mod tests {
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
         assert_eq!(base32(b"foobar"), "mzxw6ytboi");
+    }
+
+    #[test]
+    fn an_address_reaches_its_target_from_its_holder_alone() {
+        let key = b"k";
+        let address = format!("broker{MARK}{}", signature(key, "broker", "foo"));
+        assert_eq!(target_by(key, &address, "foo").as_deref(), Some("broker"));
+        assert_eq!(target_by(key, &address, "bar"), None);
+        assert_eq!(target_by(b"another key", &address, "foo"), None);
+        let signature = address.rsplit_once(MARK).unwrap().1;
+        assert_eq!(
+            target_by(key, &format!("other{MARK}{signature}"), "foo"),
+            None
+        );
+        assert_eq!(target_by(key, &format!("{MARK}{signature}"), "foo"), None);
+        let mut changed = address.clone();
+        let last = changed.pop().unwrap();
+        changed.push(if last == 'a' { 'b' } else { 'a' });
+        assert_eq!(target_by(key, &changed, "foo"), None);
+        assert_eq!(target_by(key, "broker", "foo"), None);
+    }
+
+    #[test]
+    fn the_key_is_made_once_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("msgkey-{}", std::process::id()));
+        let path = dir.join("messages.key");
+        let key = key_at(&path).unwrap();
+        assert_eq!(key.len(), KEY_BYTES);
+        assert_eq!(key_at(&path).unwrap(), key);
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
