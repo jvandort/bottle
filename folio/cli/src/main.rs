@@ -1,6 +1,6 @@
 //! folio-cli: folio's own program, which folio's Python is becoming a front end for, as bottle's
-//! Python was for bottle-cli. What it does so far: runners (runner.rs), and features (features.rs,
-//! routes.rs) and what builds an image of them (images.rs).
+//! Python was for bottle-cli. What it does so far: runners (runner.rs), features (features.rs,
+//! routes.rs) and what builds an image of them (images.rs), and folio serve (serve/).
 //!
 //!     folio-cli runner add NAME --ssh DESTINATION
 //!     folio-cli runner ls [--json]
@@ -13,6 +13,7 @@
 //!     folio-cli runner forward NAME THERE=HERE...
 //!     folio-cli on NAME COMMAND [ARG]...
 //!     folio-cli features list|show|canonical|resolve|image|cached ...
+//!     folio-cli serve --control PATH --service NAME=PATH... [--restore]
 //!
 //! It runs bottle's code only by running bottle-cli: here ($BOTTLE_CLI, else bottle-cli on PATH),
 //! for the distributions beside it, and on a runner, over ssh. Its state is in folio's home,
@@ -23,6 +24,7 @@ mod features;
 mod images;
 mod routes;
 mod runner;
+mod serve;
 
 use std::env;
 use std::path::PathBuf;
@@ -33,7 +35,8 @@ const FAILED: u8 = 255;
 
 const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|home|forward ... \
                      | folio-cli on NAME COMMAND [ARG]... \
-                     | folio-cli features list|show|canonical|resolve|image|cached ...";
+                     | folio-cli features list|show|canonical|resolve|image|cached ... \
+                     | folio-cli serve --control PATH --service NAME=PATH... [--restore]";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         Some("runner") => runner::main(args),
         Some("on") => runner::on(args),
         Some("features") => features::main(args),
+        Some("serve") => serve::main(args),
         _ => usage_error(USAGE),
     }
 }

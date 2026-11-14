@@ -798,6 +798,14 @@ fn rm(name: &str) -> io::Result<()> {
 
 /// `runner forward NAME THERE=HERE...` (see the module's doc).
 fn forward(name: &str, forwards: &[String]) -> io::Result<()> {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    forward_until(name, forwards, &|| unsafe { libc::getppid() } != parent)
+}
+
+/// Forwards `forwards` (THERE=HERE) to runner `name` until `gone` says to stop: `runner forward`'s
+/// loop, which folio serve runs in a thread of its own for each runner it forwards to.
+pub fn forward_until(name: &str, forwards: &[String], gone: &dyn Fn() -> bool) -> io::Result<()> {
     let runner = Runner::named(name)?;
     let pairs: Vec<(&str, &str)> = forwards
         .iter()
@@ -806,13 +814,10 @@ fn forward(name: &str, forwards: &[String]) -> io::Result<()> {
                 .ok_or_else(|| other(format!("{f}: not THERE=HERE")))
         })
         .collect::<io::Result<_>>()?;
-    // SAFETY: getppid has no preconditions.
-    let parent = unsafe { libc::getppid() };
-    let gone = || unsafe { libc::getppid() } != parent;
     let mut backoff = Duration::from_secs(1);
     while !gone() {
         let since = Instant::now();
-        match connect(&runner, &pairs, &gone) {
+        match connect(&runner, &pairs, gone) {
             Ok(None) => return Ok(()),
             Ok(Some(why)) => eprintln!("folio-cli: forward to {name} dropped: {why}"),
             Err(e) => eprintln!("folio-cli: forward to {name}: {e}"),

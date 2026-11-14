@@ -1,0 +1,242 @@
+//! Messages between bottles, and the addresses that say who may write to whom, without a table.
+//!
+//! A bottle sends a message to `to`: a bottle's name, or an address, `<name>~<signature>` (names
+//! can't hold a `~`). An address is issued to one bottle, the holder, for reaching another, the
+//! target: its signature is an HMAC, under a key that never leaves the controller (messages.key in
+//! folio's home), of both their names. folio serve hands one out as the `from` of every message it
+//! delivers (the sender's address, issued to the recipient), so a bottle can answer whoever wrote
+//! to it, and no one else. A bare name is for bottles with the message-any permission, which start
+//! conversations. Deleting the key revokes every address at once.
+//!
+//! A message is delivered by `bottle-event send` in the recipient (the claude feature's channel),
+//! which queues it and waits until its session takes it, or says none did in time (exit 75).
+
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use super::log::log;
+use super::{Bottle, Server, exec_command};
+
+const MARK: char = '~';
+const KEY_BYTES: usize = 32;
+/// 26 base32 characters: 130 bits of the HMAC, well past guessing.
+const SIGNATURE_CHARS: usize = 26;
+/// How long a message waits for its bottle's session to take it, and how much longer the exec that
+/// waits is given.
+const DELIVERY_TIMEOUT: u64 = 10;
+const DELIVERY_GRACE: u64 = 15;
+const BOTTLE_EVENT: &str = "/usr/local/bin/bottle-event";
+/// What bottle-event exits when no session took the event in time (EX_TEMPFAIL).
+const NOT_TAKEN: i32 = 75;
+
+/// Why a message wasn't delivered: an HTTP status, its reason, and what the sender is told.
+pub type Undelivered = (u16, &'static str, String);
+
+/// The key, made the first time it's needed; only its owner can read it.
+fn key() -> std::io::Result<Vec<u8>> {
+    let path = crate::home().join("messages.key");
+    if let Ok(key) = fs::read(&path) {
+        return Ok(key);
+    }
+    fs::create_dir_all(path.parent().unwrap())?;
+    let mut fresh = [0u8; KEY_BYTES];
+    fs::File::open("/dev/urandom")?.read_exact(&mut fresh)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut file) => file.write_all(&fresh)?,
+        // Made by someone else since.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    fs::read(&path)
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let pad = |byte: u8| block.map(|b| b ^ byte);
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .into()
+}
+
+/// RFC 4648 base32, lowercase, unpadded.
+fn base32(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let (mut out, mut buffer, mut bits) = (String::new(), 0u32, 0);
+    for &b in bytes {
+        buffer = (buffer << 8) | u32::from(b);
+        bits += 8;
+        while bits >= 5 {
+            out.push(ALPHABET[((buffer >> (bits - 5)) & 31) as usize] as char);
+            bits -= 5;
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+fn signature(target: &str, holder: &str) -> std::io::Result<String> {
+    let digest = hmac_sha256(&key()?, format!("{target}\0{holder}").as_bytes());
+    Ok(base32(&digest)[..SIGNATURE_CHARS].to_string())
+}
+
+/// The address by which `holder` reaches `target`.
+pub fn address(target: &str, holder: &str) -> std::io::Result<String> {
+    Ok(format!("{target}{MARK}{}", signature(target, holder)?))
+}
+
+/// The bottle `to` reaches, when `holder` sends to it; None if it isn't an address issued to
+/// `holder`.
+fn target(to: &str, holder: &str) -> Option<String> {
+    let (name, given) = to.rsplit_once(MARK)?;
+    let expected = signature(name, holder).ok()?;
+    // In constant time: a signature's prefix right says nothing.
+    let same = given.len() == expected.len()
+        && given
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0, |d, (a, b)| d | (a ^ b))
+            == 0;
+    (!name.is_empty() && same).then(|| name.to_string())
+}
+
+/// Hands `text` from `sender` to the bottle `to` reaches, as an event from `sender` (its address,
+/// issued to the recipient, so it can answer): returns once the recipient's session has taken it.
+pub fn deliver(
+    server: &Arc<Server>,
+    sender: &Bottle,
+    to: &str,
+    text: &str,
+) -> Result<(), Undelivered> {
+    let named = if to.contains(MARK) {
+        target(to, &sender.name)
+    } else {
+        sender
+            .permissions
+            .iter()
+            .any(|p| p == "message-any")
+            .then(|| to.to_string())
+    };
+    if named.as_deref() == Some(sender.name.as_str()) {
+        return Err((
+            400,
+            "Bad Request",
+            "a bottle can't send a message to itself".into(),
+        ));
+    }
+    // The same whether there's no such bottle or the sender may not reach it: a refusal gives
+    // nothing away.
+    let Some(recipient) = named.and_then(|n| server.bound(&n)) else {
+        return Err((
+            404,
+            "Not Found",
+            format!("no running bottle you can reach as {to}"),
+        ));
+    };
+    let reply_to = address(&sender.name, &recipient.name)
+        .map_err(|e| (502, "Bad Gateway", format!("couldn't deliver to {to}: {e}")))?;
+    let timeout = DELIVERY_TIMEOUT.to_string();
+    let command = exec_command(
+        &recipient,
+        &[BOTTLE_EVENT, "send", "-t", &timeout, "-f", &reply_to],
+        "genie",
+    );
+    let child = Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child =
+        child.map_err(|e| (502, "Bad Gateway", format!("couldn't deliver to {to}: {e}")))?;
+    let _ = child.stdin.take().unwrap().write_all(text.as_bytes());
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None)
+                if started.elapsed() > Duration::from_secs(DELIVERY_TIMEOUT + DELIVERY_GRACE) =>
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err((
+                    504,
+                    "Gateway Timeout",
+                    format!("couldn't reach {to} to deliver the message"),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err((502, "Bad Gateway", format!("couldn't deliver to {to}: {e}"))),
+        }
+    };
+    if status.code() == Some(NOT_TAKEN) {
+        return Err((
+            504,
+            "Gateway Timeout",
+            format!("{to} has no session that took the message within {DELIVERY_TIMEOUT}s"),
+        ));
+    }
+    if !status.success() {
+        let mut said = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut said);
+        }
+        let why = if said.trim().is_empty() {
+            format!("exit {}", status.code().unwrap_or(-1))
+        } else {
+            said.trim().to_string()
+        };
+        return Err((
+            502,
+            "Bad Gateway",
+            format!("couldn't deliver to {to}: {why}"),
+        ));
+    }
+    log!(
+        "bottle.daemon",
+        "{}: delivered a message from {}",
+        recipient.name,
+        sender.name
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_and_base32_as_their_rfcs_have_them() {
+        // RFC 4231's test case 2.
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(base32(b"foobar"), "mzxw6ytboi");
+    }
+}

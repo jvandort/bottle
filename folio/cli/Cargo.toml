@@ -8,6 +8,9 @@ publish.workspace = true
 # folio runs bottle's code by running bottle-cli, never by linking it: none of bottle's crates
 # (bottle-cli, bottle-disk, bottle-agent*) is a dependency here (tests/boundary.rs checks).
 [dependencies]
+flate2.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
