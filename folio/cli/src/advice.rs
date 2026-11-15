@@ -164,7 +164,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// As folio's Python said it, word for word (fixtures written by it).
+    /// As folio says it, word for word: tests/fixtures/advice*.txt are what an agent is told,
+    /// written by folio's Python and kept as they were, so a change to the wording shows in review.
     #[test]
     fn as_it_was() {
         let spec = json!({"features": ["tools", "jvm:version=21"], "memory": "8G"});
@@ -175,12 +176,12 @@ mod tests {
                 &["/workspace", "/notes"],
                 &sidecar("box", &spec)
             ),
-            include_str!("fixtures/advice.txt")
+            include_str!("../tests/fixtures/advice.txt")
         );
         let spec = json!({"features": [], "memory": "2G"});
         assert_eq!(
             sidecar_itself("fix-it", "project") + &durable(&["/notes"]) + &sidecar("box", &spec),
-            include_str!("fixtures/advice-sidecar.txt")
+            include_str!("../tests/fixtures/advice-sidecar.txt")
         );
     }
 }
