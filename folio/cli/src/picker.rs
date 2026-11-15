@@ -108,6 +108,18 @@ impl Picker {
     }
 }
 
+/// The terminal's size, as curses had it: $COLUMNS and $LINES if they're set, else the terminal's
+/// own, else 80 by 24.
+fn size() -> (u16, u16) {
+    let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u16>().ok()).filter(|n| *n > 0);
+    let (width, height) = terminal::size().unwrap_or((0, 0));
+    let or = |given: u16, default: u16| if given > 0 { given } else { default };
+    (
+        env("COLUMNS").unwrap_or(or(width, 80)),
+        env("LINES").unwrap_or(or(height, 24)),
+    )
+}
+
 /// Show the picker on this terminal; what was chosen, or None.
 pub fn pick(title: &str, choices: Vec<Choice>) -> Result<Option<Choice>, String> {
     let mut picker = Picker::new(title, choices);
@@ -116,7 +128,7 @@ pub fn pick(title: &str, choices: Vec<Choice>) -> Result<Option<Choice>, String>
     terminal::enable_raw_mode().map_err(failed)?;
     let shown = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
     let chosen = shown.and_then(|()| loop {
-        let (width, height) = terminal::size()?;
+        let (width, height) = size();
         queue!(out, terminal::Clear(terminal::ClearType::All))?;
         for (row, (text, current)) in picker.lines(height as usize).into_iter().enumerate() {
             let text: String = text.chars().take((width as usize).saturating_sub(1)).collect();
