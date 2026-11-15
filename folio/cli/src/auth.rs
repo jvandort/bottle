@@ -262,9 +262,17 @@ mod tests {
             let bin = tmp.path().join("bin");
             std::fs::create_dir(&bin).unwrap();
             std::os::unix::fs::symlink(FAKE, bin.join("security")).unwrap();
-            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
             tempdir::set(&env, "PATH", &path);
-            tempdir::set(&env, "FAKE_KEYCHAIN", tmp.path().join("keychain").to_str().unwrap());
+            tempdir::set(
+                &env,
+                "FAKE_KEYCHAIN",
+                tmp.path().join("keychain").to_str().unwrap(),
+            );
             let home = std::env::var("HOME").unwrap_or_default();
             tempdir::set(&env, "BOTTLE_HOME", &format!("{home}/.bottle"));
             Keychain { _env: env, tmp }
@@ -308,7 +316,10 @@ mod tests {
         assert_eq!(service(), "bottle");
         tempdir::set(&keychain._env, "BOTTLE_HOME", "/tmp/elsewhere");
         let other = service();
-        assert!(other.starts_with("bottle:") && other.len() == "bottle:".len() + 12, "{other}");
+        assert!(
+            other.starts_with("bottle:") && other.len() == "bottle:".len() + 12,
+            "{other}"
+        );
     }
 
     #[test]
@@ -322,9 +333,15 @@ mod tests {
             set_value("nope", "x").unwrap_err(),
             "no feature declares a credential named 'nope' (known: claude, develocity, github, teamcity)"
         );
-        let status: Vec<(String, String, bool)> =
-            status().unwrap().into_iter().map(|(d, set)| (d.credential.name, d.feature, set)).collect();
-        assert_eq!(status[0], ("claude".to_string(), "claude".to_string(), false));
+        let status: Vec<(String, String, bool)> = status()
+            .unwrap()
+            .into_iter()
+            .map(|(d, set)| (d.credential.name, d.feature, set))
+            .collect();
+        assert_eq!(
+            status[0],
+            ("claude".to_string(), "claude".to_string(), false)
+        );
     }
 
     #[test]
@@ -337,11 +354,20 @@ mod tests {
         );
         // teamcity writes its stand-in into the CLI's config file, in install.sh: the one the
         // proxy replaces.
-        assert!(standins_for(&specs(&["teamcity:server=ci.example.com"])).unwrap().is_empty());
-        let install = std::fs::read_to_string(crate::features::dir().join("teamcity/install.sh")).unwrap();
+        assert!(
+            standins_for(&specs(&["teamcity:server=ci.example.com"]))
+                .unwrap()
+                .is_empty()
+        );
+        let install =
+            std::fs::read_to_string(crate::features::dir().join("teamcity/install.sh")).unwrap();
         assert!(install.contains(&format!("token: {STANDIN}")));
         assert_eq!(
-            credential_destinations(&specs(&["teamcity:server=https://ci.corp.example.com", "tools"])).unwrap(),
+            credential_destinations(&specs(&[
+                "teamcity:server=https://ci.corp.example.com",
+                "tools"
+            ]))
+            .unwrap(),
             [("ci.corp.example.com".to_string(), 443)]
         );
     }
@@ -359,28 +385,73 @@ mod tests {
         .unwrap();
         let keys = keys.display();
         let one = |spec: String| credentials_for(&[spec]).unwrap().remove(0);
-        let both = format!("develocity:server=https://ge.example.com,https://dv.corp.example.com,keyFile={keys}");
+        let both = format!(
+            "develocity:server=https://ge.example.com,https://dv.corp.example.com,keyFile={keys}"
+        );
         assert_eq!(
             credential_destinations(&[both]).unwrap(),
-            [("dv.corp.example.com".to_string(), 443), ("ge.example.com".to_string(), 443)]
+            [
+                ("dv.corp.example.com".to_string(), 443),
+                ("ge.example.com".to_string(), 443)
+            ]
         );
-        let credential = one(format!("develocity:server=empty.example.com,keyFile={keys}"));
-        assert_eq!(from_properties(&credential, "empty.example.com").unwrap(), None);
-        let credential = one(format!("develocity:server=other.example.com:8443,keyFile={keys}"));
-        assert_eq!(from_properties(&credential, "other.example.com:8443").unwrap().as_deref(), Some("port-key"));
-        let credential = one(format!("develocity:server=https://dv.corp.example.com,keyFile={keys}"));
-        assert_eq!(from_properties(&credential, "dv.corp.example.com").unwrap().as_deref(), Some("dv-key"));
+        let credential = one(format!(
+            "develocity:server=empty.example.com,keyFile={keys}"
+        ));
+        assert_eq!(
+            from_properties(&credential, "empty.example.com").unwrap(),
+            None
+        );
+        let credential = one(format!(
+            "develocity:server=other.example.com:8443,keyFile={keys}"
+        ));
+        assert_eq!(
+            from_properties(&credential, "other.example.com:8443")
+                .unwrap()
+                .as_deref(),
+            Some("port-key")
+        );
+        let credential = one(format!(
+            "develocity:server=https://dv.corp.example.com,keyFile={keys}"
+        ));
+        assert_eq!(
+            from_properties(&credential, "dv.corp.example.com")
+                .unwrap()
+                .as_deref(),
+            Some("dv-key")
+        );
         let credential = one("develocity:server=dv.corp.example.com".into());
-        assert_eq!(credential.properties.as_deref(), Some("~/.gradle/develocity/keys.properties"));
+        assert_eq!(
+            credential.properties.as_deref(),
+            Some("~/.gradle/develocity/keys.properties")
+        );
     }
 
     #[test]
     fn a_credential_goes_over_https_to_a_host_or_a_host_and_port() {
-        assert_eq!(destination("ci.example.com").unwrap(), ("ci.example.com".to_string(), 443));
-        assert_eq!(destination("*.example.com").unwrap(), ("*.example.com".to_string(), 443));
-        assert_eq!(destination("ci.example.com:8111").unwrap(), ("ci.example.com".to_string(), 8111));
-        for host in ["ci.example.com:https", "ci.example.com:0", "ci.example.com:99999"] {
-            assert!(destination(host).unwrap_err().contains("isn't a host for a credential"), "{host}");
+        assert_eq!(
+            destination("ci.example.com").unwrap(),
+            ("ci.example.com".to_string(), 443)
+        );
+        assert_eq!(
+            destination("*.example.com").unwrap(),
+            ("*.example.com".to_string(), 443)
+        );
+        assert_eq!(
+            destination("ci.example.com:8111").unwrap(),
+            ("ci.example.com".to_string(), 8111)
+        );
+        for host in [
+            "ci.example.com:https",
+            "ci.example.com:0",
+            "ci.example.com:99999",
+        ] {
+            assert!(
+                destination(host)
+                    .unwrap_err()
+                    .contains("isn't a host for a credential"),
+                "{host}"
+            );
         }
     }
 }
