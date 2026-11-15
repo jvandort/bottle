@@ -150,6 +150,34 @@ def main(argv: list[str]) -> int:
                     home = bottle["home"]
                     return subprocess.run(rewritten, env={**os.environ, "HOME": home}).returncode
             save(state)
+        case ["cp", src, dst]:
+            # As bottle-cli's cp: NAME:PATH in a bottle (a relative one from its first mount, as exec runs there),
+            # else a path here; cp -r's way, and where it went said, NAME:PATH if it's in a bottle.
+            def mounts(name: str) -> list[dict]:
+                return sorted(bottles[name]["mounts"], key=lambda m: len(m["path"]), reverse=True)
+
+            def side(arg: str) -> tuple[str | None, Path]:
+                name, colon, path = arg.partition(":")
+                if not colon or name not in bottles:
+                    return None, Path(arg)
+                path = path if path.startswith("/") else f"{bottles[name]['mounts'][0]['path']}/{path}"
+                for mount in mounts(name):
+                    if path.startswith(mount["path"]):
+                        return name, Path(mount["dir"] + path[len(mount["path"]):])
+                fail(f"{path} isn't in {name}'s mounts")
+
+            (_, from_), (to_name, to) = side(src), side(dst)
+            target = to / from_.name if to.is_dir() else to
+            if from_.is_dir():
+                shutil.copytree(from_, target)
+            else:
+                shutil.copy2(from_, target)
+            went = str(target)
+            for mount in mounts(to_name) if to_name else ():
+                if went.startswith(mount["dir"]):
+                    went = f"{to_name}:{mount['path']}{went[len(mount['dir']):]}"
+                    break
+            print(went)
         case _:
             fail(f"the fake doesn't know {argv}")
     return 0

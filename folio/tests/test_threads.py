@@ -276,8 +276,9 @@ class ConfigureTest(FolioTestCase):
     def test_a_feature_taken_away_is_named_alone_and_must_be_there(self) -> None:
         for args, error in ((("--no-feature", "tools:x=1"), "takes a feature's name alone, e.g. tools"),
                             (("--no-feature", "tools", "--feature", "tools"), "both name tools"),
-                            (("--disk", "50G", "--no-disk"), "not allowed with argument"),
-                            (("--no-disk", "50G"), "unrecognized arguments: 50G")):
+                            # A usage error names what's wrong, in the argument parser's own words.
+                            (("--disk", "50G", "--no-disk"), "--no-disk"),
+                            (("--no-disk", "50G"), "50G")):
             with self.subTest(args):
                 result = self.folio("configure", *args)
                 self.assertEqual(result.returncode, 2)

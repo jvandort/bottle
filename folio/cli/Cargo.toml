@@ -8,6 +8,8 @@ publish.workspace = true
 # folio runs bottle's code by running bottle-cli, never by linking it: none of bottle's crates
 # (bottle-cli, bottle-disk, bottle-agent*) is a dependency here (tests/boundary.rs checks).
 [dependencies]
+clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context"] }
+crossterm = { version = "=0.29.0", default-features = false, features = ["events"] }
 flate2.workspace = true
 tar.workspace = true
 rustls.workspace = true

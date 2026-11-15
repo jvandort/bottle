@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-FOLIO = Path(__file__).resolve().parents[2] / "bin" / "folio"
+# What the tests run as folio: bin/folio, or $FOLIO_UNDER_TEST (a folio binary, say).
+FOLIO = Path(os.environ.get("FOLIO_UNDER_TEST") or Path(__file__).resolve().parents[2] / "bin" / "folio")
 FAKE_BOTTLE = Path(__file__).resolve().parent / "fake_bottle.py"
 CLI_ENGINE = Path(__file__).resolve().parent / "cli_engine.py"
 

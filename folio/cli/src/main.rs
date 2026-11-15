@@ -26,12 +26,16 @@ mod auth;
 mod bottle_cli;
 mod bottles;
 mod builds;
+mod cli;
 mod broker;
 mod daemon;
+mod engine;
 mod features;
 mod git;
 mod lanes;
 mod notes;
+mod obsidian;
+mod picker;
 mod images;
 mod pyjson;
 mod repos;
@@ -43,6 +47,7 @@ mod services;
 mod snapshots;
 mod specs;
 mod store;
+mod threads;
 #[cfg(test)]
 mod tempdir;
 
@@ -59,14 +64,17 @@ const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|h
                      | folio-cli serve --control PATH --service NAME=PATH... [--restore]";
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    match args.next().as_deref() {
-        Some("runner") => runner::main(args),
-        Some("on") => runner::on(args),
-        Some("features") => features::main(args),
-        Some("serve") => serve::main(args),
-        Some("hook") => serve::hook::main(args),
-        _ => usage_error(USAGE),
+    let all: Vec<String> = env::args().collect();
+    let mut args = all.iter().skip(1).cloned();
+    match all.get(1).map(String::as_str) {
+        Some("on") => runner::on(args.by_ref().skip(1)),
+        Some("features") => features::main(args.by_ref().skip(1)),
+        // folio serve itself, as folio starts it; `serve start|stop` are folio's commands.
+        Some("serve") if !matches!(all.get(2).map(String::as_str), Some("start" | "stop" | "-h" | "--help") | None) => {
+            serve::main(args.by_ref().skip(1))
+        }
+        Some("hook") => serve::hook::main(args.by_ref().skip(1)),
+        _ => cli::main(all),
     }
 }
 

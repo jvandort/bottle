@@ -127,36 +127,19 @@ def attach(name: str, argv: list[str], tty: bool | None = None) -> NoReturn:
 
 
 def copy(src: tuple[str | None, str], dst: tuple[str | None, str]) -> str:
-    """Copy as `cp -r` would, between here and bottles: a bottle's path is in its mounts' clones, a relative one
-    from its first mount (as exec runs there). Where it went, as the bottle has it if it's in one."""
-    import shutil
-
-    bottles_ = json.loads(Path(os.environ["FAKE_BOTTLE_STATE"]).read_text())["bottles"]
-
-    def mounts(name: str) -> list[dict]:
-        return sorted(bottles_[name]["mounts"], key=lambda m: len(m["path"]), reverse=True)
-
-    def here(name: str | None, path: str) -> Path:
+    """Copy as `cp -r` would, between here and bottles, as bottle-cli's cp: each side NAME:PATH, or a path here. Where
+    it went, as the bottle has it if it's in one."""
+    def side(name: str | None, path: str) -> str:
         if name is None:
-            return Path(path)
-        path = path if path.startswith("/") else f"{bottles_[name]['mounts'][0]['path']}/{path}"
-        for mount in mounts(name):
-            if path.startswith(mount["path"]):
-                return Path(mount["dir"] + path[len(mount["path"]):])
-        raise FolioError(f"{path} isn't in {name}'s mounts")
+            return path if path.startswith("/") or ":" not in path else f"./{path}"
+        return f"{name}:{path or '.'}"
 
-    from_, to = here(*src), here(*dst)
-    target = to / from_.name if to.is_dir() else to
-    if from_.is_dir():
-        shutil.copytree(from_, target)
-    else:
-        shutil.copy2(from_, target)
-    if dst[0] is None:
-        return str(target)
-    for mount in mounts(dst[0]):
-        if str(target).startswith(mount["dir"]):
-            return mount["path"] + str(target)[len(mount["dir"]):]
-    return str(target)
+    result = subprocess.run([*command(), "cp", side(*src), side(*dst)], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise FolioError("copying failed")
+    went = result.stdout.strip()
+    return went.split(":", 1)[1] if dst[0] is not None else went
 
 
 @contextmanager
