@@ -368,7 +368,54 @@ impl Runner {
     /// bottle-cli there, the build for its architecture of the one here: what differs of it copied
     /// over, file by file, by each file's sha256: that distribution's manifest (MANIFEST) against
     /// what sha256sum says of the runner's copy.
+    /// Where it's recorded that the runner's distribution was found current, on the shared
+    /// connection there is now: `INODE TARGET MANIFEST-HASH`, the connection's control socket's
+    /// inode, the distribution's target, and a hash of its manifest here.
+    fn checked_path(&self) -> PathBuf {
+        let mut path = self.control_path().into_os_string();
+        path.push(".checked");
+        PathBuf::from(path)
+    }
+
+    /// What says the runner's distribution is current: its control socket's inode, and what it was
+    /// checked against (`target`'s manifest here, hashed).
+    fn checked_as(&self, target: &str) -> Option<String> {
+        use sha2::Digest;
+        use std::os::unix::fs::MetadataExt;
+        let inode = fs::metadata(self.control_path()).ok()?.ino();
+        let manifest = fs::read(dist_for(target).ok()?.join(MANIFEST)).ok()?;
+        let hash: String = sha2::Sha256::digest(&manifest)[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Some(format!("{inode} {target} {hash}"))
+    }
+
+    /// Whether the runner's distribution was found current on the connection there is now, and
+    /// this distribution hasn't changed since: the check, and the hashing of everything there, is
+    /// once a connection, not once a command.
+    fn found_current(&self) -> bool {
+        let Ok(recorded) = fs::read_to_string(self.checked_path()) else {
+            return false;
+        };
+        let target = recorded.split(' ').nth(1).unwrap_or_default();
+        self.checked_as(target)
+            .is_some_and(|now| now == recorded.trim())
+    }
+
     fn ensure_dist(&self) -> io::Result<()> {
+        if self.found_current() {
+            return Ok(());
+        }
+        let checked = self.check_dist()?;
+        if let Some(checked) = self.checked_as(&checked) {
+            let _ = fs::write(self.checked_path(), checked);
+        }
+        Ok(())
+    }
+
+    /// The runner's distribution brought up to date with this one: its target.
+    fn check_dist(&self) -> io::Result<String> {
         let found = self.run(
             &format!(r#"uname -m; cd "$HOME/{DIST}" 2>/dev/null && sha256sum -- * 2>/dev/null"#),
             None,
@@ -405,7 +452,7 @@ impl Runner {
             .collect();
         let gone: Vec<&String> = theirs.keys().filter(|n| !ours.contains_key(*n)).collect();
         if changed.is_empty() && gone.is_empty() {
-            return Ok(());
+            return Ok(target.to_string());
         }
         let names = |names: &[&String]| {
             names
@@ -464,7 +511,7 @@ impl Runner {
                 String::from_utf8_lossy(&copied.stderr).trim()
             )));
         }
-        Ok(())
+        Ok(target.to_string())
     }
 
     /// What it is: its os, arch, and whether it has kvm and git.

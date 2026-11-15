@@ -13,10 +13,16 @@ use std::time::{Duration, Instant};
 
 /// ssh, as far as folio-cli uses it: options up to --, the destination, and a command, run here
 /// as if there, in its own home. A forward is a symlink there to the socket here, held while this
-/// runs. /dev/kvm is what $FAKE_KVM names. "down" can't be reached.
+/// runs. /dev/kvm is what $FAKE_KVM names. "down" can't be reached. A shared connection's control
+/// socket is a file, made by the first ssh that'd be its master.
 const FAKE_SSH: &str = r#"#!/usr/bin/env bash
-forwards=()
-while [ "$1" != "--" ]; do [ "$1" = -R ] && forwards+=("$2"); shift; done
+forwards=() control= master=
+while [ "$1" != "--" ]; do
+  case "$1" in -R) forwards+=("$2") ;; ControlPath=*) control=${1#ControlPath=} ;; ControlMaster=auto) master=1 ;; esac
+  shift
+done
+# A shared connection's master: its control socket, a file here, made if it isn't there.
+[ -n "$master" ] && [ -n "$control" ] && [ ! -e "$control" ] && : > "$control"
 shift; destination=$1; shift
 echo "$destination $*" >> "$FAKE_LOG"
 if [ "$destination" = down ]; then
@@ -445,4 +451,41 @@ fn a_runner_that_cant_be_reached_says_so() {
         ),
         "{said}"
     );
+}
+
+#[test]
+fn its_distribution_is_checked_once_a_connection() {
+    let f = Fixture::new("d");
+    f.ok(&["runner", "add", "box", "--ssh", "box"]);
+    let checks = || {
+        fs::read_to_string(f.dir.join("ssh.log"))
+            .unwrap()
+            .matches("sha256sum")
+            .count()
+    };
+    f.ok(&["on", "box", "info", "--json"]);
+    let after_first = checks();
+    f.ok(&["on", "box", "info", "--json"]);
+    f.ok(&["on", "box", "images", "--json"]);
+    assert_eq!(
+        checks(),
+        after_first,
+        "checked again on the same connection"
+    );
+    // A new connection (the runner rebooted, say): checked again.
+    let control = fs::read_dir(f.dir.join("folio/ssh"))
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().is_some_and(|x| x == "sock"))
+        .unwrap()
+        .path();
+    fs::remove_file(&control).unwrap();
+    f.ok(&["on", "box", "info", "--json"]);
+    assert_eq!(checks(), after_first + 1);
+    // This side's distribution changed: checked, and brought up to date.
+    fs::write(f.dist().join("extra"), "new").unwrap();
+    manifest(&f.dist());
+    f.ok(&["on", "box", "info", "--json"]);
+    assert_eq!(checks(), after_first + 2);
+    assert!(f.there().join(".bottle/dist/extra").exists());
 }
