@@ -341,6 +341,179 @@ pub fn disk_gib(spec: &Value) -> Option<u64> {
 mod tests {
     use super::*;
 
+    fn canon(data: Value) -> Result<Value, String> {
+        canonical(&data, None, "this machine")
+    }
+
+    #[test]
+    fn features_are_sorted_with_defaults_left_out() {
+        let spec = canon(
+            json!({"features": ["tools", "jvm:version=25,additionalVersions=17,21", "claude"], "memory": "2G"}),
+        );
+        assert_eq!(
+            spec.unwrap(),
+            json!({"features": ["claude", "jvm:additionalVersions=17,21", "tools"], "memory": "2G"})
+        );
+    }
+
+    #[test]
+    fn a_spec_gives_its_memory_as_a_size() {
+        assert_eq!(canon(json!({"memory": "8g"})).unwrap()["memory"], "8G");
+        assert_eq!(
+            canon(json!({"memory": "2G"})).unwrap(),
+            json!({"features": [], "memory": "2G"})
+        );
+        for data in [
+            json!({}),
+            json!({"features": ["tools"]}),
+            json!({"memory": "all"}),
+        ] {
+            assert!(canon(data.clone()).is_err(), "{data}");
+        }
+    }
+
+    #[test]
+    fn dependencies_are_left_to_the_feature_and_its_its_own_canonical_form() {
+        // Resolved, so a missing or cyclic dependency fails here; but the spec keeps what was asked
+        // for, not what it pulls in.
+        assert_eq!(
+            canon(json!({"features": ["chromium"], "memory": "2G"})).unwrap()["features"],
+            json!(["chromium"])
+        );
+        let spec =
+            canon(json!({"features": ["tools", "jvm:version=21"], "memory": "2048m"})).unwrap();
+        assert_eq!(canon(spec.clone()).unwrap(), spec);
+    }
+
+    #[test]
+    fn refuses() {
+        for (data, message) in [
+            (json!([]), "a spec is a JSON object"),
+            (json!({"feature": ["tools"]}), "unknown key feature"),
+            (json!({"features": "tools"}), "features is a list"),
+            (json!({"features": [1]}), "features is a list"),
+            (json!({"features": ["nope"]}), "no feature named 'nope'"),
+            (
+                json!({"features": ["jvm:version=21", "jvm"]}),
+                "given twice with different options",
+            ),
+            (json!({"features": ["teamcity"]}), "needs its server option"),
+            (json!({}), "a spec needs its memory"),
+            (json!({"memory": 8}), "memory is a string"),
+            (json!({"memory": "lots"}), "invalid memory"),
+            (
+                json!({"memory": "2G", "permissions": "message-any"}),
+                "permissions is a list",
+            ),
+            (
+                json!({"memory": "2G", "permissions": ["root"]}),
+                "unknown permission root; there are list-bottles, message-any",
+            ),
+            (
+                json!({"memory": "2G", "labels": ["thread"]}),
+                "labels map names to values",
+            ),
+            (
+                json!({"memory": "2G", "labels": {"Thread": "x"}}),
+                "invalid label 'Thread'",
+            ),
+            (
+                json!({"memory": "2G", "labels": {"thread": 1}}),
+                "label thread's value must be printable text",
+            ),
+            (
+                json!({"memory": "2G", "labels": {"thread": "a\nb"}}),
+                "label thread's value must be printable text",
+            ),
+        ] {
+            let refused = canon(data.clone()).unwrap_err();
+            assert!(refused.contains(message), "{data}: {refused}");
+        }
+    }
+
+    #[test]
+    fn permissions_are_sorted_once_each_and_left_out_when_none() {
+        let spec = canon(
+            json!({"memory": "2G", "permissions": ["message-any", "list-bottles", "message-any"]}),
+        )
+        .unwrap();
+        assert_eq!(spec["permissions"], json!(["list-bottles", "message-any"]));
+        assert!(
+            canon(json!({"memory": "2G", "permissions": []}))
+                .unwrap()
+                .get("permissions")
+                .is_none()
+        );
+        assert_eq!(canon(spec.clone()).unwrap(), spec);
+    }
+
+    #[test]
+    fn labels_its_creators_and_one_saved_before_them() {
+        let spec =
+            canon(json!({"memory": "2G", "labels": {"thread": "fix-it", "repo": "app"}})).unwrap();
+        assert_eq!(spec["labels"], json!({"repo": "app", "thread": "fix-it"}));
+        assert!(
+            canon(json!({"memory": "2G"}))
+                .unwrap()
+                .get("labels")
+                .is_none()
+        );
+        let pairs = |p: &[(&str, &str)]| {
+            p.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            labels(&spec),
+            pairs(&[("repo", "app"), ("thread", "fix-it")])
+        );
+        assert_eq!(
+            labels(&json!({"memory": "2G", "thread": "old"})),
+            pairs(&[("thread", "old")])
+        );
+        assert_eq!(labels(&json!({"memory": "2G"})), pairs(&[]));
+    }
+
+    #[test]
+    fn a_disk_in_whole_g_or_none() {
+        let spec = canon(json!({"memory": "2G", "disk": "50g"})).unwrap();
+        assert_eq!(
+            (spec["disk"].as_str(), disk_gib(&spec)),
+            (Some("50G"), Some(50))
+        );
+        assert_eq!(canon(spec.clone()).unwrap(), spec);
+        assert_eq!(disk_gib(&canon(json!({"memory": "2G"})).unwrap()), None);
+        for disk in [
+            json!("50"),
+            json!("512M"),
+            json!("0G"),
+            json!(50),
+            json!("1.5G"),
+        ] {
+            assert!(
+                canon(json!({"memory": "2G", "disk": disk}))
+                    .unwrap_err()
+                    .contains("invalid disk"),
+                "{disk}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spec_alone_asks_for_any_memory_and_one_for_a_runner_fits_it() {
+        // Which machine it's for is its bottle's to know, and to check it against.
+        assert_eq!(canon(json!({"memory": "512G"})).unwrap()["memory"], "512G");
+        assert_eq!(
+            canonical(&json!({"memory": "8G"}), Some(16384), "runner box").unwrap()["memory"],
+            "8G"
+        );
+        assert_eq!(
+            canonical(&json!({"memory": "32G"}), Some(16384), "runner box").unwrap_err(),
+            "memory 32G is more than runner box has (16384M)"
+        );
+        assert!(host_memory_mib().unwrap() > 0);
+    }
+
     #[test]
     fn memory_is_a_size_in_m_or_g_that_fits() {
         assert_eq!(canonical_memory("8g", None, "this machine").unwrap(), "8G");

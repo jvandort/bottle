@@ -431,6 +431,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_bottle_keeps_debians_packages_and_a_build_apts_alone() {
+        let cached = cached_for(&[]);
+        let debian = cached
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["host"] == "deb.debian.org")
+            .unwrap();
+        let mut include: Vec<&str> = debian["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_str().unwrap())
+            .collect();
+        include.sort();
+        assert_eq!(include, ["/debian-security/*.deb", "/debian/*.deb"]);
+        assert_eq!(
+            (&debian["ports"], &debian["immutable"]),
+            (&json!([HTTP_PORT]), &json!(true))
+        );
+        // Maven's hosts are the jvm feature's to cache in a bottle; in a build only apt trusts the
+        // builds' CA.
+        let hosts = |cached: &Value| {
+            cached
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["host"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let jvm = features::resolve(&["jvm".to_string()]).unwrap();
+        assert!(hosts(&cached_for(&jvm)).contains(&"repo.maven.apache.org".to_string()));
+        let built = hosts(&build_cached().unwrap());
+        assert!(
+            !built.contains(&"repo.maven.apache.org".to_string())
+                && built.contains(&"deb.debian.org".to_string())
+        );
+    }
+
+    #[test]
     fn quoted_as_pythons_shlex_quotes() {
         assert_eq!(quote("tools"), "tools");
         assert_eq!(quote(""), "''");

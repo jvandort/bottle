@@ -610,9 +610,57 @@ mod tests {
 
     #[test]
     fn named_after_a_urls_last_segment() {
-        assert_eq!(name_from_url("https://github.com/org/widget.git"), "widget");
-        assert_eq!(name_from_url("git@host:org/gadget.git"), "gadget");
-        assert_eq!(name_from_url("/srv/repos/plain/"), "plain");
+        for (url, name) in [
+            ("https://github.com/example/project.git", "project"),
+            ("https://github.com/example/project", "project"),
+            ("git@github.com:example/project.git", "project"),
+            ("host:project.git", "project"),
+            ("https://example.com/org/repo/", "repo"),
+            ("/srv/git/tools.git", "tools"),
+        ] {
+            assert_eq!(name_from_url(url), name, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_bottles_repo_is_named_after_origin_else_its_directory() {
+        let _env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        let repo = tempdir::repo(&tmp.path().join("checkout"));
+        g(&[
+            "-C",
+            repo.to_str().unwrap(),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/project.git",
+        ]);
+        assert_eq!(derive_name(&repo), "project");
+        assert_eq!(
+            derive_name(&tempdir::repo(&tmp.path().join("my-tool"))),
+            "my-tool"
+        );
+    }
+
+    #[test]
+    fn a_bottles_repo_is_a_repos_root_through_a_symlink_and_nothing_else() {
+        let _env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        let repo = tempdir::repo(&tmp.path().join("project"));
+        assert_eq!(toplevel(&repo).unwrap(), repo);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        assert_eq!(toplevel(&link).unwrap(), repo);
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        assert_eq!(
+            toplevel(&tmp.path().join("nope")).unwrap_err(),
+            format!("{}/nope is not a directory", tmp.path().display())
+        );
+        assert_eq!(
+            toplevel(&plain).unwrap_err(),
+            format!("{} is not a git repo", plain.display())
+        );
     }
 
     #[test]
