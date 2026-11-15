@@ -92,10 +92,16 @@ impl Runner {
     pub fn services_sockets(&self) -> Result<BTreeMap<String, String>, String> {
         let here = daemon::services_sockets();
         if self.name == LOCAL {
-            return Ok(here.into_iter().map(|(k, v)| (k, v.display().to_string())).collect());
+            return Ok(here
+                .into_iter()
+                .map(|(k, v)| (k, v.display().to_string()))
+                .collect());
         }
         let there = format!("{}/{SERVICES}/{}", home(&self.name)?, controller_key());
-        Ok(here.into_keys().map(|name| (name.clone(), format!("{there}/{name}.sock"))).collect())
+        Ok(here
+            .into_keys()
+            .map(|name| (name.clone(), format!("{there}/{name}.sock")))
+            .collect())
     }
 
     /// What folio serve forwards to a runner while it answers bottles there, as `runner forward`
@@ -117,8 +123,17 @@ impl Runner {
             return repos::objects_dir(repo);
         }
         let git_dir = repos::objects_dir(repo)?.parent().unwrap().to_path_buf();
-        let ssh = [bottle_cli::me(), "runner".into(), "ssh".into(), self.name.clone()];
-        let there = format!("{}/{MIRRORS}/{}.git", home(&self.name)?, mirror_key(&git_dir));
+        let ssh = [
+            bottle_cli::me(),
+            "runner".into(),
+            "ssh".into(),
+            self.name.clone(),
+        ];
+        let there = format!(
+            "{}/{MIRRORS}/{}.git",
+            home(&self.name)?,
+            mirror_key(&git_dir)
+        );
         let made = Command::new(&ssh[0])
             .args(&ssh[1..])
             .arg(format!(
@@ -137,11 +152,20 @@ impl Runner {
         }
         // git runs this program's ssh, a "simple" one to it: the runner's name for a host, and
         // git's command.
-        let ssh_command = ssh[..3].iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+        let ssh_command = ssh[..3]
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
         let pushed = Command::new("git")
             .arg("-C")
             .arg(&git_dir)
-            .args(["push", "--quiet", "--mirror", &format!("{}:{there}", self.name)])
+            .args([
+                "push",
+                "--quiet",
+                "--mirror",
+                &format!("{}:{there}", self.name),
+            ])
             .env("GIT_SSH_COMMAND", ssh_command)
             .env("GIT_SSH_VARIANT", "simple")
             .stdin(Stdio::null())
@@ -171,7 +195,11 @@ impl Runner {
     }
 
     pub fn configure(&self, machine: &str, network: &Value) -> Result<(), String> {
-        bottle_cli::configure(machine, &services::with_sockets(network, &self.services_sockets()?), &self.cli)
+        bottle_cli::configure(
+            machine,
+            &services::with_sockets(network, &self.services_sockets()?),
+            &self.cli,
+        )
     }
 
     pub fn start(&self, machine: &str) -> Result<(), String> {
@@ -199,7 +227,13 @@ impl Runner {
         bottle_cli::states(&cli)
     }
 
-    pub fn exec(&self, machine: &str, argv: &[String], user: Option<&str>, input: Option<&str>) -> Result<String, String> {
+    pub fn exec(
+        &self,
+        machine: &str,
+        argv: &[String],
+        user: Option<&str>,
+        input: Option<&str>,
+    ) -> Result<String, String> {
         let how = Exec {
             user,
             ..Default::default()
@@ -240,12 +274,6 @@ pub fn registered() -> Result<BTreeMap<String, bool>, String> {
     crate::runner::detached().map_err(|e| e.to_string())
 }
 
-/// Whether `name` was detached (`folio runner detach`), to be turned off: nothing asks it anything
-/// until it's used again, which attaches it.
-pub fn is_detached(name: &str) -> Result<bool, String> {
-    Ok(name != LOCAL && registered()?.get(name).copied().unwrap_or(false))
-}
-
 /// Runner `name`'s user's home there, as runner.rs keeps it (asking the runner once).
 pub fn home(name: &str) -> Result<String, String> {
     crate::runner::home(name).map_err(|e| e.to_string())
@@ -258,10 +286,15 @@ pub fn controller_key() -> String {
     // SAFETY: gethostname writes at most the length it's given.
     let host = unsafe {
         libc::gethostname(name.as_mut_ptr().cast(), name.len());
-        std::ffi::CStr::from_ptr(name.as_ptr().cast()).to_string_lossy().into_owned()
+        std::ffi::CStr::from_ptr(name.as_ptr().cast())
+            .to_string_lossy()
+            .into_owned()
     };
     let key = format!("{host}\0{}", crate::home().display());
-    Sha256::digest(key.as_bytes())[..4].iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(key.as_bytes())[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The runner named `name`: this machine, or one added with `folio runner add`.

@@ -25,18 +25,18 @@ mod advice;
 mod auth;
 mod bottle_cli;
 mod bottles;
+mod broker;
 mod builds;
 mod cli;
-mod broker;
 mod daemon;
 mod engine;
 mod features;
 mod git;
+mod images;
 mod lanes;
 mod notes;
 mod obsidian;
 mod picker;
-mod images;
 mod pyjson;
 mod repos;
 mod routes;
@@ -47,9 +47,9 @@ mod services;
 mod snapshots;
 mod specs;
 mod store;
-mod threads;
 #[cfg(test)]
 mod tempdir;
+mod threads;
 
 use std::env;
 use std::path::PathBuf;
@@ -58,11 +58,6 @@ use std::process::ExitCode;
 /// What this program exits when it fails, as bottle-cli does.
 const FAILED: u8 = 255;
 
-const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|home|forward ... \
-                     | folio-cli on [--connect-timeout SECONDS] NAME COMMAND [ARG]... \
-                     | folio-cli features list|show|canonical|resolve|image|cached ... \
-                     | folio-cli serve --control PATH --service NAME=PATH... [--restore]";
-
 fn main() -> ExitCode {
     let all: Vec<String> = env::args().collect();
     let mut args = all.iter().skip(1).cloned();
@@ -70,7 +65,12 @@ fn main() -> ExitCode {
         Some("on") => runner::on(args.by_ref().skip(1)),
         Some("features") => features::main(args.by_ref().skip(1)),
         // folio serve itself, as folio starts it; `serve start|stop` are folio's commands.
-        Some("serve") if !matches!(all.get(2).map(String::as_str), Some("start" | "stop" | "-h" | "--help") | None) => {
+        Some("serve")
+            if !matches!(
+                all.get(2).map(String::as_str),
+                Some("start" | "stop" | "-h" | "--help") | None
+            ) =>
+        {
             serve::main(args.by_ref().skip(1))
         }
         Some("hook") => serve::hook::main(args.by_ref().skip(1)),

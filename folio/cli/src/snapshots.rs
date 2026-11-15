@@ -71,7 +71,14 @@ pub fn workspace_in(workspace: &str) -> String {
 /// Points the checkout at `path` at its bottle's objects and remotes' URLs, as bottle's status
 /// gives them.
 pub fn repoint(path: &str, objects: &str, urls: &BTreeMap<String, String>) -> String {
-    let mut lines = vec!["set -e".to_string(), format!("echo {} > {}/.git/objects/info/alternates", q(objects), q(path))];
+    let mut lines = vec![
+        "set -e".to_string(),
+        format!(
+            "echo {} > {}/.git/objects/info/alternates",
+            q(objects),
+            q(path)
+        ),
+    ];
     for (name, url) in urls {
         lines.push(format!(
             "git -C {p} remote set-url {n} {u} 2>/dev/null || git -C {p} remote add {n} {u}",
@@ -84,7 +91,10 @@ pub fn repoint(path: &str, objects: &str, urls: &BTreeMap<String, String>) -> St
 }
 
 pub fn claude_out() -> String {
-    let excludes: Vec<String> = CLAUDE_LEFT_OUT.iter().map(|n| format!("--exclude='./{n}'")).collect();
+    let excludes: Vec<String> = CLAUDE_LEFT_OUT
+        .iter()
+        .map(|n| format!("--exclude='./{n}'"))
+        .collect();
     format!(
         "mkdir -p \"$HOME/.claude\" && cd \"$HOME/.claude\" && tar -czf - {} .",
         excludes.join(" ")
@@ -96,7 +106,8 @@ pub const CLAUDE_IN: &str = "mkdir -p \"$HOME/.claude\" && cd \"$HOME/.claude\" 
 /// Fail unless `path` is a whole gzipped tar: read to the end, every member.
 pub fn check(path: &Path) -> Result<(), String> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    read_through(path).map_err(|e| format!("{name} came back incomplete ({e}); nothing was changed"))
+    read_through(path)
+        .map_err(|e| format!("{name} came back incomplete ({e}); nothing was changed"))
 }
 
 fn read_through(path: &Path) -> std::io::Result<()> {
@@ -131,7 +142,10 @@ mod tests {
             claude_out(),
             "mkdir -p \"$HOME/.claude\" && cd \"$HOME/.claude\" && tar -czf - --exclude='./CLAUDE.md' --exclude='./plugins' --exclude='./cache' --exclude='./telemetry' --exclude='./policy-limits*' --exclude='./remote-settings.json' --exclude='./backups' ."
         );
-        let urls = BTreeMap::from([("origin".to_string(), "http://bottle.host/git/workspace/origin".to_string())]);
+        let urls = BTreeMap::from([(
+            "origin".to_string(),
+            "http://bottle.host/git/workspace/origin".to_string(),
+        )]);
         assert_eq!(
             repoint("/workspace", "/mnt/objects/workspace", &urls),
             "set -e\necho /mnt/objects/workspace > /workspace/.git/objects/info/alternates\ngit -C /workspace remote set-url origin http://bottle.host/git/workspace/origin 2>/dev/null || git -C /workspace remote add origin http://bottle.host/git/workspace/origin"
@@ -142,7 +156,10 @@ mod tests {
     fn a_whole_archive_passes_and_a_cut_one_doesnt() {
         let tmp = crate::tempdir::Dir::new();
         let whole = tmp.path().join("claude.tar.gz");
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(File::create(&whole).unwrap(), Default::default()));
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            File::create(&whole).unwrap(),
+            Default::default(),
+        ));
         let data = vec![7u8; 100_000];
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
@@ -152,8 +169,15 @@ mod tests {
         check(&whole).unwrap();
         let bytes = std::fs::read(&whole).unwrap();
         let cut = tmp.path().join("cut.tar.gz");
-        File::create(&cut).unwrap().write_all(&bytes[..bytes.len() / 2]).unwrap();
-        assert!(check(&cut).unwrap_err().starts_with("cut.tar.gz came back incomplete ("));
+        File::create(&cut)
+            .unwrap()
+            .write_all(&bytes[..bytes.len() / 2])
+            .unwrap();
+        assert!(
+            check(&cut)
+                .unwrap_err()
+                .starts_with("cut.tar.gz came back incomplete (")
+        );
         let empty = tmp.path().join("claude.tar.gz.empty");
         File::create(&empty).unwrap();
         assert!(check(&empty).is_err());

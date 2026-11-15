@@ -80,7 +80,9 @@ impl Picker {
     pub fn press(&mut self, key: Key) -> (bool, Option<Choice>) {
         let last = self.choices.len().saturating_sub(1);
         match key {
-            Key::Enter if !self.choices.is_empty() => return (true, Some(self.choices[self.index].clone())),
+            Key::Enter if !self.choices.is_empty() => {
+                return (true, Some(self.choices[self.index].clone()));
+            }
             Key::Leave => return (true, None),
             Key::Down => self.index = (self.index + 1).min(last),
             Key::Up => self.index = self.index.saturating_sub(1),
@@ -102,7 +104,10 @@ impl Picker {
         let mut lines = vec![(self.title.clone(), false), (String::new(), false)];
         for (i, choice) in self.choices.iter().enumerate().skip(self.top).take(rows) {
             let current = i == self.index;
-            lines.push((format!("{} {}", if current { '>' } else { ' ' }, choice.label), current));
+            lines.push((
+                format!("{} {}", if current { '>' } else { ' ' }, choice.label),
+                current,
+            ));
         }
         lines
     }
@@ -111,7 +116,12 @@ impl Picker {
 /// The terminal's size, as curses had it: $COLUMNS and $LINES if they're set, else the terminal's
 /// own, else 80 by 24.
 fn size() -> (u16, u16) {
-    let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u16>().ok()).filter(|n| *n > 0);
+    let env = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|n| *n > 0)
+    };
     let (width, height) = terminal::size().unwrap_or((0, 0));
     let or = |given: u16, default: u16| if given > 0 { given } else { default };
     (
@@ -127,25 +137,35 @@ pub fn pick(title: &str, choices: Vec<Choice>) -> Result<Option<Choice>, String>
     let failed = |e: std::io::Error| format!("the terminal: {e}");
     terminal::enable_raw_mode().map_err(failed)?;
     let shown = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
-    let chosen = shown.and_then(|()| loop {
-        let (width, height) = size();
-        queue!(out, terminal::Clear(terminal::ClearType::All))?;
-        for (row, (text, current)) in picker.lines(height as usize).into_iter().enumerate() {
-            let text: String = text.chars().take((width as usize).saturating_sub(1)).collect();
-            queue!(out, cursor::MoveTo(0, row as u16))?;
-            if current {
-                queue!(out, SetAttribute(Attribute::Reverse), Print(text), SetAttribute(Attribute::Reset))?;
-            } else {
-                queue!(out, Print(text))?;
+    let chosen = shown.and_then(|()| {
+        loop {
+            let (width, height) = size();
+            queue!(out, terminal::Clear(terminal::ClearType::All))?;
+            for (row, (text, current)) in picker.lines(height as usize).into_iter().enumerate() {
+                let text: String = text
+                    .chars()
+                    .take((width as usize).saturating_sub(1))
+                    .collect();
+                queue!(out, cursor::MoveTo(0, row as u16))?;
+                if current {
+                    queue!(
+                        out,
+                        SetAttribute(Attribute::Reverse),
+                        Print(text),
+                        SetAttribute(Attribute::Reset)
+                    )?;
+                } else {
+                    queue!(out, Print(text))?;
+                }
             }
-        }
-        out.flush()?;
-        if let Event::Key(key) = event::read()?
-            && key.kind != KeyEventKind::Release
-        {
-            let (done, choice) = picker.press(Key::of(key));
-            if done {
-                break Ok(choice);
+            out.flush()?;
+            if let Event::Key(key) = event::read()?
+                && key.kind != KeyEventKind::Release
+            {
+                let (done, choice) = picker.press(Key::of(key));
+                if done {
+                    break Ok(choice);
+                }
             }
         }
     });
@@ -192,7 +212,10 @@ mod tests {
     fn enter_chooses_and_q_or_esc_or_control_c_leave() {
         let mut p = picker_of(3, false);
         p.press(Key::Down);
-        assert_eq!(p.press(key(KeyCode::Enter)).1.unwrap().thread.as_deref(), Some("t1"));
+        assert_eq!(
+            p.press(key(KeyCode::Enter)).1.unwrap().thread.as_deref(),
+            Some("t1")
+        );
         let control_c = Key::of(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         for k in [key(KeyCode::Char('q')), key(KeyCode::Esc), control_c] {
             assert_eq!(picker_of(3, false).press(k), (true, None));
@@ -206,17 +229,25 @@ mod tests {
 
     #[test]
     fn the_new_entry_comes_first() {
-        assert_eq!(picker_of(2, true).press(Key::Enter), (true, Some(new_thread())));
+        assert_eq!(
+            picker_of(2, true).press(Key::Enter),
+            (true, Some(new_thread()))
+        );
     }
 
     #[test]
     fn draws_the_title_and_marks_the_current_choice() {
         let mut p = picker_of(2, false);
         p.press(Key::Down);
-        let expected: Vec<(String, bool)> = [("title", false), ("", false), ("  t0", false), ("> t1", true)]
-            .iter()
-            .map(|(t, c)| (t.to_string(), *c))
-            .collect();
+        let expected: Vec<(String, bool)> = [
+            ("title", false),
+            ("", false),
+            ("  t0", false),
+            ("> t1", true),
+        ]
+        .iter()
+        .map(|(t, c)| (t.to_string(), *c))
+        .collect();
         assert_eq!(p.lines(10), expected);
     }
 

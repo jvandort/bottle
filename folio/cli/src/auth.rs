@@ -69,7 +69,11 @@ fn get_declared(name: &str) -> Result<Declared, String> {
         format!(
             "no feature declares a credential named {} (known: {})",
             crate::repr(name),
-            if names.is_empty() { "none".to_string() } else { names.join(", ") }
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
         )
     })
 }
@@ -82,12 +86,18 @@ pub fn get(name: &str) -> Option<String> {
 
 /// Store `value`. It goes to `security` on stdin, never on a command line.
 fn put(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() || value.contains(['"', '\\', '\n', '\r']) || !value.chars().all(|c| !c.is_control()) {
+    if value.is_empty()
+        || value.contains(['"', '\\', '\n', '\r'])
+        || !value.chars().all(|c| !c.is_control())
+    {
         return Err(format!(
             "{name}: the value is empty or has characters bottle can't store (quotes, backslashes, control)"
         ));
     }
-    let command = format!("add-generic-password -U -s \"{}\" -a \"{name}\" -w \"{value}\"\n", service());
+    let command = format!(
+        "add-generic-password -U -s \"{}\" -a \"{name}\" -w \"{value}\"\n",
+        service()
+    );
     let failed = |why: String| format!("couldn't store {name} in the Keychain: {why}");
     let mut child = Command::new("security")
         .arg("-i")
@@ -97,10 +107,19 @@ fn put(name: &str, value: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| failed(e.to_string()))?;
     let _ = child.stdin.take().unwrap().write_all(command.as_bytes());
-    let output = child.wait_with_output().map_err(|e| failed(e.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| failed(e.to_string()))?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() || stderr.to_lowercase().contains("error") || get(name).as_deref() != Some(value) {
-        return Err(failed(if stderr.is_empty() { "unknown error".into() } else { stderr }));
+    if !output.status.success()
+        || stderr.to_lowercase().contains("error")
+        || get(name).as_deref() != Some(value)
+    {
+        return Err(failed(if stderr.is_empty() {
+            "unknown error".into()
+        } else {
+            stderr
+        }));
     }
     Ok(())
 }
@@ -152,7 +171,11 @@ fn from_properties(credential: &Credential, host: &str) -> Result<Option<String>
     for (key, value) in read_properties(properties)? {
         if !value.is_empty() {
             let key = key.to_lowercase();
-            let key = key.strip_prefix("https://").unwrap_or(&key).trim_end_matches('/').to_string();
+            let key = key
+                .strip_prefix("https://")
+                .unwrap_or(&key)
+                .trim_end_matches('/')
+                .to_string();
             keys.insert(key, value);
         }
     }

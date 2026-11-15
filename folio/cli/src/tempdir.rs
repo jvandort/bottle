@@ -30,35 +30,63 @@ impl Drop for Dir {
     }
 }
 
-/// The environment folio's tests run in, set once for the process (tests run in parallel, and the
-/// environment is the process's): folio's home a temporary one, and git configured by nothing but
-/// what a test sets, committing as Test.
-pub fn isolated() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let home = std::env::temp_dir().join(format!("folio-test-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let vars = [
-            ("FOLIO_HOME", home.to_str().unwrap()),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-            ("GIT_AUTHOR_NAME", "Test"),
-            ("GIT_AUTHOR_EMAIL", "test@example.com"),
-            ("GIT_COMMITTER_NAME", "Test"),
-            ("GIT_COMMITTER_EMAIL", "test@example.com"),
-        ];
-        for (key, value) in vars {
-            // SAFETY: once, before any test reads the environment (each calls this first).
-            unsafe { std::env::set_var(key, value) };
-        }
-    });
+/// The environment folio's tests run in, for a test that reads it or folio's home: held while the
+/// test runs, so one test at a time has it (the environment is the process's, and tests run in
+/// parallel). Git is configured by nothing but what a test sets, committing as Test; folio's home
+/// is a fresh one for each test.
+pub struct Isolated {
+    _held: std::sync::MutexGuard<'static, ()>,
+    home: Dir,
+}
+
+impl Isolated {
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+}
+
+pub fn isolated() -> Isolated {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let held = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = Dir::new();
+    let vars = [
+        ("FOLIO_HOME", home.path().to_str().unwrap()),
+        ("BOTTLE_HOME", "/nonexistent/bottle-home"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_AUTHOR_NAME", "Test"),
+        ("GIT_AUTHOR_EMAIL", "test@example.com"),
+        ("GIT_COMMITTER_NAME", "Test"),
+        ("GIT_COMMITTER_EMAIL", "test@example.com"),
+    ];
+    for (key, value) in vars {
+        // SAFETY: under the lock every test that reads the environment holds.
+        unsafe { std::env::set_var(key, value) };
+    }
+    for key in ["FOLIO_BOTTLE", "FAKE_CLI_FAIL", "FAKE_CLI_MISSING"] {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(key) };
+    }
+    Isolated { _held: held, home }
+}
+
+/// Set `key` for the rest of an isolated test.
+pub fn set(_: &Isolated, key: &str, value: &str) {
+    // SAFETY: under the lock the Isolated holds.
+    unsafe { std::env::set_var(key, value) };
 }
 
 /// git `args`, which must succeed; its stdout, trimmed.
 pub fn git(args: &[&str]) -> String {
-    let out = std::process::Command::new("git").args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 

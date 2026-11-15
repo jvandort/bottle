@@ -54,7 +54,13 @@ mod tests {
             z: u8,
             a: f64,
         }
-        assert_eq!(dumps(&S { z: 1, a: 0.0 }, false), "{\n  \"z\": 1,\n  \"a\": 0.0\n}");
-        assert_eq!(dumps(&S { z: 1, a: 0.0 }, true), "{\n  \"a\": 0.0,\n  \"z\": 1\n}");
+        assert_eq!(
+            dumps(&S { z: 1, a: 0.0 }, false),
+            "{\n  \"z\": 1,\n  \"a\": 0.0\n}"
+        );
+        assert_eq!(
+            dumps(&S { z: 1, a: 0.0 }, true),
+            "{\n  \"a\": 0.0,\n  \"z\": 1\n}"
+        );
     }
 }

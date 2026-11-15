@@ -38,8 +38,11 @@ pub fn binary() -> String {
         .unwrap_or_else(|| "bottle-cli".into())
 }
 
-/// This program, as a command line names it.
+/// This program, as a command line names it: $FOLIO_CLI, if it's set, else the one running.
 pub fn me() -> String {
+    if let Some(given) = std::env::var("FOLIO_CLI").ok().filter(|c| !c.is_empty()) {
+        return given;
+    }
     std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "folio-cli".into())
@@ -125,10 +128,18 @@ impl Cli {
 
     /// `bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged
     /// `tag`: its progress on this process's stderr, the disks it made on stdout.
-    pub fn build(&self, recipe: &Value, network: &Value, context: &Path, tag: &str) -> Result<Output, String> {
+    pub fn build(
+        &self,
+        recipe: &Value,
+        network: &Value,
+        context: &Path,
+        tag: &str,
+    ) -> Result<Output, String> {
         let here = tempdir()?;
         let mut made = recipe.clone();
-        let source = context.canonicalize().unwrap_or_else(|_| context.to_path_buf());
+        let source = context
+            .canonicalize()
+            .unwrap_or_else(|_| context.to_path_buf());
         made["mount"]["source"] = source.display().to_string().into();
         let write = |name: &str, value: &Value| {
             std::fs::write(here.join(name), value.to_string()).map_err(|e| e.to_string())
@@ -255,7 +266,10 @@ pub fn create(machine: &Create, cli: &Cli) -> Result<(), String> {
         args.extend(["--label".into(), format!("{key}={value}")]);
     }
     for m in &machine.mounts {
-        args.extend(["-v".into(), format!("{}:{}:ro", m.source.display(), m.target)]);
+        args.extend([
+            "-v".into(),
+            format!("{}:{}:ro", m.source.display(), m.target),
+        ]);
     }
     for (key, value) in &machine.env {
         args.extend(["-e".into(), format!("{key}={value}")]);
@@ -305,18 +319,17 @@ pub fn python_dumps(value: &Value) -> String {
 /// Give a stopped machine the policy its connections are decided by (one made before it had one,
 /// say).
 pub fn configure(machine: &str, network: &Value, cli: &Cli) -> Result<(), String> {
-    run(cli, &strings(&["configure", machine, "--network", "-"]), Some(python_dumps(network).as_bytes()))?;
+    run(
+        cli,
+        &strings(&["configure", machine, "--network", "-"]),
+        Some(python_dumps(network).as_bytes()),
+    )?;
     Ok(())
 }
 
 /// Start a machine: by the policy it was made with, nothing else needed.
 pub fn start(machine: &str, cli: &Cli) -> Result<(), String> {
     run(cli, &strings(&["start", machine]), None)?;
-    Ok(())
-}
-
-pub fn stop(machine: &str, cli: &Cli) -> Result<(), String> {
-    run(cli, &strings(&["stop", machine]), None)?;
     Ok(())
 }
 
@@ -331,13 +344,22 @@ pub fn delete(machine: &str, cli: &Cli) -> Result<(), String> {
 /// Every machine there, whoever made them, by name: its state, as state says it.
 pub fn states(cli: &Cli) -> Result<BTreeMap<String, String>, String> {
     let listed = run(cli, &strings(&["ls", "--json"]), None)?;
-    let machines: Value = serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed })
-        .map_err(|e| format!("bottle-cli ls: {e}"))?;
+    let machines: Value = serde_json::from_str(if listed.trim().is_empty() {
+        "[]"
+    } else {
+        &listed
+    })
+    .map_err(|e| format!("bottle-cli ls: {e}"))?;
     Ok(machines
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|m| Some((m.get("name")?.as_str()?.to_string(), m.get("state")?.as_str()?.to_string())))
+        .filter_map(|m| {
+            Some((
+                m.get("name")?.as_str()?.to_string(),
+                m.get("state")?.as_str()?.to_string(),
+            ))
+        })
         .collect())
 }
 
@@ -345,8 +367,12 @@ pub fn states(cli: &Cli) -> Result<BTreeMap<String, String>, String> {
 pub fn state(machine: &str, cli: &Cli) -> Result<Option<String>, String> {
     match run(cli, &strings(&["status", machine, "--json"]), None) {
         Ok(said) => {
-            let status: Value = serde_json::from_str(&said).map_err(|e| format!("bottle-cli status: {e}"))?;
-            Ok(status.get("state").and_then(Value::as_str).map(String::from))
+            let status: Value =
+                serde_json::from_str(&said).map_err(|e| format!("bottle-cli status: {e}"))?;
+            Ok(status
+                .get("state")
+                .and_then(Value::as_str)
+                .map(String::from))
         }
         Err(Error::Missing(_)) => Ok(None),
         Err(Error::Failed(m)) => Err(m),
@@ -383,8 +409,18 @@ pub fn exec_args(machine: &str, argv: &[String], how: &Exec) -> Vec<String> {
 }
 
 /// Run a command in a running machine and return its output; `input` is its stdin.
-pub fn exec(machine: &str, argv: &[String], how: &Exec, input: Option<&str>, cli: &Cli) -> Result<String, String> {
-    Ok(run(cli, &exec_args(machine, argv, how), Some(input.unwrap_or_default().as_bytes()))?)
+pub fn exec(
+    machine: &str,
+    argv: &[String],
+    how: &Exec,
+    input: Option<&str>,
+    cli: &Cli,
+) -> Result<String, String> {
+    Ok(run(
+        cli,
+        &exec_args(machine, argv, how),
+        Some(input.unwrap_or_default().as_bytes()),
+    )?)
 }
 
 /// The command line that runs `argv` in a machine with stdin attached (and a terminal, if
@@ -419,7 +455,10 @@ mod tests {
 
     #[test]
     fn json_as_pythons_dumps_wrote_it() {
-        assert_eq!(python_dumps(&json!({"a": [1, "\u{e9}"], "b": {}})), "{\"a\": [1, \"\\u00e9\"], \"b\": {}}");
+        assert_eq!(
+            python_dumps(&json!({"a": [1, "\u{e9}"], "b": {}})),
+            "{\"a\": [1, \"\\u00e9\"], \"b\": {}}"
+        );
     }
 
     #[test]
@@ -432,13 +471,29 @@ mod tests {
         };
         assert_eq!(
             exec_args("m", &["git".into(), "push".into()], &how),
-            ["exec", "m", "-t", "-u", "genie", "-w", "/workspace", "-e", "A=1", "--", "git", "push"]
+            [
+                "exec",
+                "m",
+                "-t",
+                "-u",
+                "genie",
+                "-w",
+                "/workspace",
+                "-e",
+                "A=1",
+                "--",
+                "git",
+                "push"
+            ]
         );
     }
 
     #[test]
     fn its_message_is_the_last_line_it_said() {
-        assert_eq!(error_of("warming up\nbottle-cli: no machine m\n"), "no machine m");
+        assert_eq!(
+            error_of("warming up\nbottle-cli: no machine m\n"),
+            "no machine m"
+        );
         assert_eq!(error_of("something else\n"), "something else");
     }
 }

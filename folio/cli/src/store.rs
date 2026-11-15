@@ -66,7 +66,11 @@ pub fn write_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
 pub fn write_json_sorted(path: &Path, data: &impl Serialize) -> Result<(), String> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let staging = path.with_file_name(format!(".{name}.tmp"));
-    replace_with(path, &staging, format!("{}\n", pyjson::dumps(data, true)).as_bytes())
+    replace_with(
+        path,
+        &staging,
+        format!("{}\n", pyjson::dumps(data, true)).as_bytes(),
+    )
 }
 
 fn replace_with(path: &Path, staging: &Path, content: &[u8]) -> Result<(), String> {
@@ -174,7 +178,9 @@ fn remove_leftovers(directory: &Path, keep: Option<&Path>) {
     for entry in entries.flatten() {
         let path = entry.path();
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        if is_dir && Some(path.as_path()) != keep && is_slot_name(&entry.file_name().to_string_lossy())
+        if is_dir
+            && Some(path.as_path()) != keep
+            && is_slot_name(&entry.file_name().to_string_lossy())
         {
             let _ = fs::remove_dir_all(&path);
         }
@@ -243,7 +249,10 @@ mod tests {
         let first = write_slot(&dir, vec![("a", bytes(b"1")), ("big", bytes(b"archive"))]).unwrap();
         let inode = fs::metadata(first.join("big")).unwrap().ino();
         let second = write_slot(&dir, vec![("a", bytes(b"2"))]).unwrap();
-        assert_eq!((read(&dir, "a"), read(&dir, "big")), (b"2".to_vec(), b"archive".to_vec()));
+        assert_eq!(
+            (read(&dir, "a"), read(&dir, "big")),
+            (b"2".to_vec(), b"archive".to_vec())
+        );
         assert_eq!(fs::metadata(second.join("big")).unwrap().ino(), inode);
     }
 
@@ -271,7 +280,10 @@ mod tests {
         fs::create_dir(dir.join("notes")).unwrap();
         assert_eq!(read(&dir, "a"), b"1");
         let second = write_slot(&dir, vec![("a", bytes(b"2"))]).unwrap();
-        let mut expected = vec![second.file_name().unwrap().to_string_lossy().into_owned(), "notes".into()];
+        let mut expected = vec![
+            second.file_name().unwrap().to_string_lossy().into_owned(),
+            "notes".into(),
+        ];
         expected.sort();
         assert_eq!(slots(&dir), expected);
         assert!(!first.exists());
@@ -284,7 +296,11 @@ mod tests {
         assert_eq!(read_json(&path).unwrap(), None);
         write_json(&path, &serde_json::json!({"a": 1})).unwrap();
         assert_eq!(read_json(&path).unwrap(), Some(serde_json::json!({"a": 1})));
-        let names: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
         assert_eq!(names, ["x.json"]);
     }
 

@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use crate::git::{git, git_input, succeeds};
 
@@ -49,22 +49,26 @@ pub fn bottle_remotes(thread: &str) -> Vec<String> {
     ]
 }
 
-/// The lane remote's hooks: in folio's home, written once a process (folio may have moved since).
+/// The lane remote's hooks: in folio's home, written once a process (folio may have moved since),
+/// and again if they've gone.
 fn hooks() -> Result<PathBuf, String> {
-    static WRITTEN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    WRITTEN
-        .get_or_init(|| {
-            let dir = crate::home().join("hooks").join("lane");
-            let failed = |e: std::io::Error| format!("{}: {e}", dir.display());
-            fs::create_dir_all(&dir).map_err(failed)?;
-            // Whole or not at all: a push may be running the one there.
-            let partial = dir.join(format!(".pre-receive.{}", std::process::id()));
-            fs::write(&partial, PRE_RECEIVE).map_err(failed)?;
-            fs::set_permissions(&partial, fs::Permissions::from_mode(0o755)).map_err(failed)?;
-            fs::rename(&partial, dir.join("pre-receive")).map_err(failed)?;
-            Ok(dir)
-        })
-        .clone()
+    static WRITTEN: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let dir = crate::home().join("hooks").join("lane");
+    let mut written = WRITTEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if written.as_ref() == Some(&dir) && dir.join("pre-receive").exists() {
+        return Ok(dir);
+    }
+    let failed = |e: std::io::Error| format!("{}: {e}", dir.display());
+    fs::create_dir_all(&dir).map_err(failed)?;
+    // Whole or not at all: a push may be running the one there.
+    let partial = dir.join(format!(".pre-receive.{}", std::process::id()));
+    fs::write(&partial, PRE_RECEIVE).map_err(failed)?;
+    fs::set_permissions(&partial, fs::Permissions::from_mode(0o755)).map_err(failed)?;
+    fs::rename(&partial, dir.join("pre-receive")).map_err(failed)?;
+    *written = Some(dir.clone());
+    Ok(dir)
 }
 
 /// Make the lane remote `bottle/<thread>` of the repo: fetch the out lane, push to the in lane.
@@ -74,7 +78,12 @@ fn hooks() -> Result<PathBuf, String> {
 /// `git push` writes what it reads. Every setting is written with --replace-all, so registering
 /// again repairs a remote that was edited.
 pub fn register(repo: &Path, thread: &str) -> Result<(), String> {
-    register_remote(repo, &remote_name(thread), &namespace(thread, OUT), &namespace(thread, IN))
+    register_remote(
+        repo,
+        &remote_name(thread),
+        &namespace(thread, OUT),
+        &namespace(thread, IN),
+    )
 }
 
 /// Make `name` a lane remote of the repo: fetch reads namespace `out`, push writes `in_`.
@@ -98,7 +107,15 @@ pub fn register_remote(repo: &Path, name: &str, out: &str, in_: &str) -> Result<
         ("curateDelete", "true".into()),
     ];
     for (key, value) in settings {
-        git(&["config", "--replace-all", &format!("remote.{name}.{key}"), &value], Some(repo))?;
+        git(
+            &[
+                "config",
+                "--replace-all",
+                &format!("remote.{name}.{key}"),
+                &value,
+            ],
+            Some(repo),
+        )?;
     }
     Ok(())
 }
@@ -127,7 +144,10 @@ pub fn forget(repo: &Path, thread: &str) -> Result<(), String> {
         git_input(&["update-ref", "--stdin"], repo, &input)?;
     }
     let remote = remote_name(thread);
-    if succeeds(&["config", "--get", &format!("remote.{remote}.url")], Some(repo)) {
+    if succeeds(
+        &["config", "--get", &format!("remote.{remote}.url")],
+        Some(repo),
+    ) {
         git(&["remote", "remove", &remote], Some(repo))?;
     }
     Ok(())
@@ -136,17 +156,27 @@ pub fn forget(repo: &Path, thread: &str) -> Result<(), String> {
 /// Move every ref of namespace `old` to namespace `new`, in one update-ref transaction.
 pub fn move_namespace(repo: &Path, old: &str, new: &str) -> Result<(), String> {
     let prefix = format!("refs/namespaces/{old}/");
-    let refs = git(&["for-each-ref", "--format=%(objectname) %(refname)", &prefix], Some(repo))?;
+    let refs = git(
+        &["for-each-ref", "--format=%(objectname) %(refname)", &prefix],
+        Some(repo),
+    )?;
     let mut moves = String::new();
     for line in refs.lines() {
         let Some((commit, r)) = line.split_once(' ') else {
             continue;
         };
-        let moved = format!("refs/namespaces/{new}/{}", r.strip_prefix(&prefix).unwrap_or(r));
+        let moved = format!(
+            "refs/namespaces/{new}/{}",
+            r.strip_prefix(&prefix).unwrap_or(r)
+        );
         moves += &format!("create {moved} {commit}\ndelete {r} {commit}\n");
     }
     if !moves.is_empty() {
-        git_input(&["update-ref", "--stdin"], repo, &format!("start\n{moves}commit\n"))?;
+        git_input(
+            &["update-ref", "--stdin"],
+            repo,
+            &format!("start\n{moves}commit\n"),
+        )?;
     }
     Ok(())
 }
@@ -167,18 +197,40 @@ pub fn rename(repo: &Path, old: &str, new: &str) -> Result<(), String> {
         }
     }
     if !moves.is_empty() {
-        git_input(&["update-ref", "--stdin"], repo, &format!("start\n{moves}commit\n"))?;
+        git_input(
+            &["update-ref", "--stdin"],
+            repo,
+            &format!("start\n{moves}commit\n"),
+        )?;
     }
-    if succeeds(&["config", "--get", &format!("remote.{}.url", remote_name(old))], Some(repo)) {
-        git(&["remote", "rename", &remote_name(old), &remote_name(new)], Some(repo))?;
+    if succeeds(
+        &[
+            "config",
+            "--get",
+            &format!("remote.{}.url", remote_name(old)),
+        ],
+        Some(repo),
+    ) {
+        git(
+            &["remote", "rename", &remote_name(old), &remote_name(new)],
+            Some(repo),
+        )?;
     }
     register(repo, new)
 }
 
 /// The lane's refs: branch name (or, with `full`, the whole ref) to commit.
-pub fn branches(repo: &Path, thread: &str, direction: &str, full: bool) -> Result<BTreeMap<String, String>, String> {
+pub fn branches(
+    repo: &Path,
+    thread: &str,
+    direction: &str,
+    full: bool,
+) -> Result<BTreeMap<String, String>, String> {
     let prefix = format!("refs/namespaces/{}/", namespace(thread, direction));
-    let out = git(&["for-each-ref", "--format=%(objectname) %(refname)", &prefix], Some(repo))?;
+    let out = git(
+        &["for-each-ref", "--format=%(objectname) %(refname)", &prefix],
+        Some(repo),
+    )?;
     let heads = format!("{prefix}refs/heads/");
     Ok(out
         .lines()
@@ -200,7 +252,19 @@ pub fn branches(repo: &Path, thread: &str, direction: &str, full: bool) -> Resul
 pub fn unintegrated(repo: &Path, thread: &str) -> Result<Vec<String>, String> {
     let mut result = Vec::new();
     for (branch, commit) in branches(repo, thread, OUT, false)? {
-        if !git(&["rev-list", "-n1", &commit, "--not", "--branches", "--remotes=origin"], Some(repo))?.is_empty() {
+        if !git(
+            &[
+                "rev-list",
+                "-n1",
+                &commit,
+                "--not",
+                "--branches",
+                "--remotes=origin",
+            ],
+            Some(repo),
+        )?
+        .is_empty()
+        {
             result.push(branch);
         }
     }
@@ -209,15 +273,29 @@ pub fn unintegrated(repo: &Path, thread: &str) -> Result<Vec<String>, String> {
 
 /// Of a bottle's own branch tips (name to commit), those with commits the lane and the user don't
 /// have.
-pub fn unsaved(repo: &Path, thread: &str, tips: &BTreeMap<String, String>) -> Result<Vec<String>, String> {
+pub fn unsaved(
+    repo: &Path,
+    thread: &str,
+    tips: &BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
     let mut lane: Vec<String> = branches(repo, thread, OUT, false)?.into_values().collect();
     lane.sort();
     lane.dedup();
     let mut result = Vec::new();
     for (name, commit) in tips {
-        let missing = !succeeds(&["cat-file", "-e", &format!("{commit}^{{commit}}")], Some(repo));
+        let missing = !succeeds(
+            &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+            Some(repo),
+        );
         let unreached = || -> Result<bool, String> {
-            let mut args = vec!["rev-list", "-n1", commit.as_str(), "--not", "--branches", "--remotes=origin"];
+            let mut args = vec![
+                "rev-list",
+                "-n1",
+                commit.as_str(),
+                "--not",
+                "--branches",
+                "--remotes=origin",
+            ];
             args.extend(lane.iter().map(String::as_str));
             Ok(!git(&args, Some(repo))?.is_empty())
         };
@@ -236,6 +314,7 @@ mod tests {
 
     /// Real git: the lane's namespaces in a repo, and the remote that reads and writes them.
     struct Lane {
+        _env: tempdir::Isolated,
         _tmp: tempdir::Dir,
         repo: PathBuf,
         head: String,
@@ -243,12 +322,17 @@ mod tests {
 
     impl Lane {
         fn new() -> Lane {
-            tempdir::isolated();
+            let env = tempdir::isolated();
             let tmp = tempdir::Dir::new();
             let repo = tempdir::repo(&tmp.path().join("project"));
             register(&repo, "t").unwrap();
             let head = g(&["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"]);
-            Lane { _tmp: tmp, repo, head }
+            Lane {
+                _env: env,
+                _tmp: tmp,
+                repo,
+                head,
+            }
         }
 
         fn git(&self, args: &[&str]) -> String {
@@ -259,7 +343,11 @@ mod tests {
 
         /// What the agent's `git push agent` lands as: a ref in the out lane.
         fn bottle_pushes(&self, branch: &str, commit: &str) {
-            self.git(&["update-ref", &format!("refs/namespaces/t-out/refs/heads/{branch}"), commit]);
+            self.git(&[
+                "update-ref",
+                &format!("refs/namespaces/t-out/refs/heads/{branch}"),
+                commit,
+            ]);
         }
 
         /// A commit in the repo's object store that no branch reaches, as a bottle's push leaves.
@@ -269,7 +357,12 @@ mod tests {
         }
 
         fn push(&self, args: &[&str]) -> std::process::Output {
-            Command::new("git").arg("push").args(args).current_dir(&self.repo).output().unwrap()
+            Command::new("git")
+                .arg("push")
+                .args(args)
+                .current_dir(&self.repo)
+                .output()
+                .unwrap()
         }
 
         fn lane(&self) -> BTreeMap<String, String> {
@@ -278,14 +371,22 @@ mod tests {
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn the_bottle_is_served_each_lane_as_a_remote_of_its_own() {
         assert_eq!(
             bottle_remotes("t"),
-            ["origin:fetch=upstream", "host:fetch=heads", "agent:fetch=ns/t-out,push=ns/t-out", "user:fetch=ns/t-in"]
+            [
+                "origin:fetch=upstream",
+                "host:fetch=heads",
+                "agent:fetch=ns/t-out,push=ns/t-out",
+                "user:fetch=ns/t-in"
+            ]
         );
     }
 
@@ -297,14 +398,20 @@ mod tests {
         lane.git(&["fetch", "-q", "bottle/t"]);
         assert_eq!(lane.git(&["rev-parse", "bottle/t/genie/t-1"]), commit);
         lane.git(&["switch", "-q", "genie/t-1"]); // tracks it, with no more setup
-        assert_eq!(lane.git(&["rev-parse", "--abbrev-ref", "@{u}"]), "bottle/t/genie/t-1");
+        assert_eq!(
+            lane.git(&["rev-parse", "--abbrev-ref", "@{u}"]),
+            "bottle/t/genie/t-1"
+        );
     }
 
     #[test]
     fn pushing_to_the_remote_writes_the_in_lane() {
         let lane = Lane::new();
         lane.git(&["push", "-q", "bottle/t", "main:refs/heads/handed"]);
-        assert_eq!(branches(&lane.repo, "t", IN, false).unwrap(), map(&[("handed", &lane.head)]));
+        assert_eq!(
+            branches(&lane.repo, "t", IN, false).unwrap(),
+            map(&[("handed", &lane.head)])
+        );
         assert_eq!(lane.lane(), map(&[]));
     }
 
@@ -336,7 +443,11 @@ mod tests {
         let pushed = lane.new_commit("pushed");
         lane.bottle_pushes("genie/t-1", &pushed);
         let missing = "1".repeat(40);
-        let tips = map(&[("genie/t-1", &pushed), ("main", &lane.head), ("local", &missing)]);
+        let tips = map(&[
+            ("genie/t-1", &pushed),
+            ("main", &lane.head),
+            ("local", &missing),
+        ]);
         assert_eq!(unsaved(&lane.repo, "t", &tips).unwrap(), ["local"]);
     }
 
@@ -348,7 +459,10 @@ mod tests {
         lane.git(&["fetch", "-q", "bottle/t"]);
         forget(&lane.repo, "t").unwrap();
         let refs = lane.git(&["for-each-ref", "--format=%(refname)"]);
-        assert!(!refs.contains("namespaces") && !refs.contains("bottle/t"), "{refs}");
+        assert!(
+            !refs.contains("namespaces") && !refs.contains("bottle/t"),
+            "{refs}"
+        );
         assert_eq!(lane.git(&["remote"]), "");
         forget(&lane.repo, "t").unwrap(); // and again, with nothing left: fine
     }
@@ -357,9 +471,16 @@ mod tests {
     fn another_threads_lane_is_left_alone() {
         let lane = Lane::new();
         register(&lane.repo, "t-2").unwrap();
-        lane.git(&["update-ref", "refs/namespaces/t-2-out/refs/heads/x", &lane.head]);
+        lane.git(&[
+            "update-ref",
+            "refs/namespaces/t-2-out/refs/heads/x",
+            &lane.head,
+        ]);
         forget(&lane.repo, "t").unwrap();
-        assert_eq!(branches(&lane.repo, "t-2", OUT, false).unwrap(), map(&[("x", &lane.head)]));
+        assert_eq!(
+            branches(&lane.repo, "t-2", OUT, false).unwrap(),
+            map(&[("x", &lane.head)])
+        );
         assert_eq!(lane.git(&["remote"]), "bottle/t-2");
     }
 
@@ -370,8 +491,14 @@ mod tests {
         lane.bottle_pushes("genie/t-1", &work);
         lane.git(&["push", "-q", "bottle/t", "main:refs/heads/handed"]);
         rename(&lane.repo, "t", "u").unwrap();
-        assert_eq!(branches(&lane.repo, "u", OUT, false).unwrap(), map(&[("genie/t-1", &work)]));
-        assert_eq!(branches(&lane.repo, "u", IN, false).unwrap(), map(&[("handed", &lane.head)]));
+        assert_eq!(
+            branches(&lane.repo, "u", OUT, false).unwrap(),
+            map(&[("genie/t-1", &work)])
+        );
+        assert_eq!(
+            branches(&lane.repo, "u", IN, false).unwrap(),
+            map(&[("handed", &lane.head)])
+        );
         assert_eq!(lane.lane(), map(&[]));
         assert_eq!(lane.git(&["remote"]), "bottle/u");
         let pack = lane.git(&["config", "remote.bottle/u.uploadpack"]);
@@ -394,9 +521,19 @@ mod tests {
         let result = lane.push(&["bottle/t", ":refs/heads/genie/t-1"]);
         let said = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{said}");
-        assert!(said.contains("folio: deleted genie/t-1 from the agent's lane"), "{said}");
+        assert!(
+            said.contains("folio: deleted genie/t-1 from the agent's lane"),
+            "{said}"
+        );
         assert_eq!(lane.lane(), map(&[]));
-        assert_eq!(lane.git(&["for-each-ref", "--format=%(refname)", "refs/remotes/bottle/t/"]), "");
+        assert_eq!(
+            lane.git(&[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes/bottle/t/"
+            ]),
+            ""
+        );
     }
 
     #[test]
@@ -407,7 +544,10 @@ mod tests {
         let result = lane.push(&["bottle/t", ":refs/heads/genie/t-1"]);
         let said = String::from_utf8_lossy(&result.stderr);
         assert!(!result.status.success());
-        assert!(said.contains("folio: kept genie/t-1: the agent has pushed to it since you fetched it"), "{said}");
+        assert!(
+            said.contains("folio: kept genie/t-1: the agent has pushed to it since you fetched it"),
+            "{said}"
+        );
         assert_eq!(lane.lane(), map(&[("genie/t-1", &later)]));
     }
 
@@ -415,25 +555,49 @@ mod tests {
     fn one_alongside_a_handover_goes_too() {
         let (lane, _) = fetched();
         let result = lane.push(&["bottle/t", "main", ":refs/heads/genie/t-1"]);
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert_eq!(lane.lane(), map(&[]));
-        assert!(branches(&lane.repo, "t", IN, false).unwrap().contains_key("main"));
+        assert!(
+            branches(&lane.repo, "t", IN, false)
+                .unwrap()
+                .contains_key("main")
+        );
     }
 
     #[test]
     fn curate_integrating_it_deletes_it() {
         let (lane, _) = fetched();
         let curate = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/curate");
-        let run = |args: &[&str]| Command::new(curate).args(args).current_dir(&lane.repo).output().unwrap();
+        let run = |args: &[&str]| {
+            Command::new(curate)
+                .args(args)
+                .current_dir(&lane.repo)
+                .output()
+                .unwrap()
+        };
         lane.git(&["switch", "-q", "genie/t-1"]);
         for args in [&["start", "--from", lane.head.as_str()][..], &["read"]] {
             let result = run(args);
-            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
         }
         lane.git(&["add", "-A"]);
         let result = run(&["integrate", "--into", "main"]);
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-        assert!(String::from_utf8_lossy(&result.stdout).contains("Deleted genie/t-1 from bottle/t."));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("Deleted genie/t-1 from bottle/t.")
+        );
         assert_eq!(lane.lane(), map(&[]));
     }
 

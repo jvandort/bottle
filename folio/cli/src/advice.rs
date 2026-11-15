@@ -128,17 +128,31 @@ pub fn durable(paths: &[&str]) -> String {
 
 /// What a thread's agent is told about its sidecar.
 pub fn sidecar(runner: &str, spec: &Value) -> String {
-    let features: Vec<String> = crate::repos::features_of(spec).iter().map(|f| format!("`{f}`")).collect();
-    let features = if features.is_empty() { "none".to_string() } else { features.join(", ") };
+    let features: Vec<String> = crate::repos::features_of(spec)
+        .iter()
+        .map(|f| format!("`{f}`"))
+        .collect();
+    let features = if features.is_empty() {
+        "none".to_string()
+    } else {
+        features.join(", ")
+    };
     SIDECAR
         .replace("{where}", &format!("runner `{runner}`"))
-        .replace("{memory}", spec.get("memory").and_then(Value::as_str).unwrap_or_default())
+        .replace(
+            "{memory}",
+            spec.get("memory")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
         .replace("{features}", &features)
 }
 
 /// What a sidecar says about itself, to whoever is in it.
 pub fn sidecar_itself(thread: &str, repo: &str) -> String {
-    SIDECAR_ITSELF.replace("{thread}", thread).replace("{repo}", repo)
+    SIDECAR_ITSELF
+        .replace("{thread}", thread)
+        .replace("{repo}", repo)
 }
 
 pub fn advice(thread: &str, repo: &str, paths: &[&str], sidecar: &str) -> String {
@@ -155,7 +169,12 @@ mod tests {
     fn as_it_was() {
         let spec = json!({"features": ["tools", "jvm:version=21"], "memory": "8G"});
         assert_eq!(
-            advice("fix-it", "project", &["/workspace", "/notes"], &sidecar("box", &spec)),
+            advice(
+                "fix-it",
+                "project",
+                &["/workspace", "/notes"],
+                &sidecar("box", &spec)
+            ),
             include_str!("fixtures/advice.txt")
         );
         let spec = json!({"features": [], "memory": "2G"});

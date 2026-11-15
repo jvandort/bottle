@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::bottle_cli::{Cli, images_cli};
-use crate::features::{self, Feature};
 use crate::features::BASE;
+use crate::features::{self, Feature};
 use crate::images::{self, REPOSITORY};
 use crate::runners::Runner;
 use crate::services;
@@ -122,7 +122,8 @@ fn expected_inputs(tag: &str, labels: &BTreeMap<String, String>) -> Option<Strin
 
 /// Whether `image` is built where `cli` runs bottle-cli from what it's built from now.
 fn is_current(image: &str, expected: &str, cli: &Cli) -> Result<bool, String> {
-    Ok(built_labels(image, cli)?.is_some_and(|labels| labels.get(INPUTS_LABEL).map(String::as_str) == Some(expected)))
+    Ok(built_labels(image, cli)?
+        .is_some_and(|labels| labels.get(INPUTS_LABEL).map(String::as_str) == Some(expected)))
 }
 
 /// Build `recipe` into `image`, `context` mounted at its working directory (MOUNT): a stage, in a VM
@@ -133,11 +134,20 @@ fn is_current(image: &str, expected: &str, cli: &Cli) -> Result<bool, String> {
 /// bottle-cli, the CA they're answered behind. `inputs` is the hash of what the image is built from,
 /// recorded as a label. Built where `cli` runs bottle-cli: here, or on a runner, the context sent
 /// there with the recipe.
-fn build_recipe(context: &Path, image: &str, inputs: &str, recipe: &Value, cli: &Cli) -> Result<PathBuf, String> {
+fn build_recipe(
+    context: &Path,
+    image: &str,
+    inputs: &str,
+    recipe: &Value,
+    cli: &Cli,
+) -> Result<PathBuf, String> {
     if let Some(pull) = recipe.get("pull").and_then(Value::as_str) {
         eprintln!("Pulling {pull}...");
     } else if built_labels(recipe["from"].as_str().unwrap_or_default(), cli)?.is_none() {
-        return Err(format!("{} isn't built", recipe["from"].as_str().unwrap_or_default()));
+        return Err(format!(
+            "{} isn't built",
+            recipe["from"].as_str().unwrap_or_default()
+        ));
     }
     let mut labels = recipe.get("labels").cloned().unwrap_or_else(|| json!({}));
     labels[INPUTS_LABEL] = inputs.into();
@@ -148,7 +158,10 @@ fn build_recipe(context: &Path, image: &str, inputs: &str, recipe: &Value, cli: 
         }
     }
     made.insert("mount".into(), json!({"target": MOUNT}));
-    made.insert("steps".into(), recipe.get("steps").cloned().unwrap_or_else(|| json!([])));
+    made.insert(
+        "steps".into(),
+        recipe.get("steps").cloned().unwrap_or_else(|| json!([])),
+    );
     made.insert("labels".into(), labels);
     // The public network, with none of its features' credentials, nothing routed to folio serve;
     // apt repositories kept.
@@ -165,7 +178,8 @@ fn build_recipe(context: &Path, image: &str, inputs: &str, recipe: &Value, cli: 
 /// bottle-cli's images: each tag, its stage, disks and labels.
 fn images_of(cli: &Cli) -> Result<Vec<Value>, String> {
     let listed = images_cli(cli, &["images", "--json"])?;
-    let images: Value = serde_json::from_str(&listed).map_err(|e| format!("bottle-cli images: {e}"))?;
+    let images: Value =
+        serde_json::from_str(&listed).map_err(|e| format!("bottle-cli images: {e}"))?;
     Ok(images.as_array().cloned().unwrap_or_default())
 }
 
@@ -190,7 +204,12 @@ fn built_labels(image: &str, cli: &Cli) -> Result<Option<BTreeMap<String, String
 fn built(cli: &Cli) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
     Ok(images_of(cli)?
         .iter()
-        .map(|i| (i["tag"].as_str().unwrap_or_default().to_string(), labels_of(i)))
+        .map(|i| {
+            (
+                i["tag"].as_str().unwrap_or_default().to_string(),
+                labels_of(i),
+            )
+        })
         .collect())
 }
 

@@ -11,6 +11,9 @@
 //! (bottles::bind_messages), to answer before anyone else. A command finds it running this
 //! program, or restarts it first: one running another may not know what's asked of it.
 
+// The unit tests' folio serve is daemon::fake: what talks to the real one is theirs to leave unused.
+#![cfg_attr(test, allow(dead_code))]
+
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
@@ -55,7 +58,12 @@ fn control() -> PathBuf {
 pub fn services_sockets() -> BTreeMap<String, PathBuf> {
     SERVICES
         .iter()
-        .map(|name| (name.to_string(), socket_path(&format!("services/{name}.sock"))))
+        .map(|name| {
+            (
+                name.to_string(),
+                socket_path(&format!("services/{name}.sock")),
+            )
+        })
         .collect()
 }
 
@@ -138,16 +146,28 @@ pub fn bind_message(binding: &Binding) -> Result<Value, String> {
 /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
 /// folio serve is.
 pub fn bind(binding: &Binding) -> Result<(), String> {
+    #[cfg(test)]
+    return fake::bind(bind_message(binding)?);
+    #[cfg(not(test))]
     request(&bind_message(binding)?, true).map(|_| ())
 }
 
 /// Stop answering `bottle`'s machine, if folio serve is running at all.
 pub fn release(bottle: &str) -> Result<(), String> {
+    #[cfg(test)]
+    return fake::release(bottle);
+    #[cfg(not(test))]
     request(&json!({"op": "release", "bottle": bottle}), false).map(|_| ())
 }
 
 /// Start folio serve in the background. False if it was already running this program.
 pub fn start() -> Result<bool, String> {
+    #[cfg(test)]
+    {
+        fake::CALLS.lock().unwrap().push("start".into());
+        Ok(false)
+    }
+    #[cfg(not(test))]
     match send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => {
             start_daemon()?;
@@ -166,7 +186,10 @@ pub fn stop() -> Result<bool, String> {
         Ok(reply) => reply,
     };
     if reply.get("ok") != Some(&Value::Bool(true)) {
-        let error = reply.get("error").and_then(Value::as_str).unwrap_or("shutdown failed");
+        let error = reply
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("shutdown failed");
         return Err(format!("folio serve: {error}"));
     }
     Ok(true)
@@ -235,11 +258,19 @@ fn request(message: &Value, start: bool) -> Result<Value, String> {
                 log_path().display()
             ));
         }
-        Err(Failure::NotRunning) => return Err(format!("folio serve didn't start; see {}", log_path().display())),
+        Err(Failure::NotRunning) => {
+            return Err(format!(
+                "folio serve didn't start; see {}",
+                log_path().display()
+            ));
+        }
         Err(Failure::Other(e)) => return Err(e),
     };
     if reply.get("ok") != Some(&Value::Bool(true)) {
-        let error = reply.get("error").and_then(Value::as_str).unwrap_or("request failed");
+        let error = reply
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("request failed");
         return Err(format!("folio serve: {error}"));
     }
     Ok(reply)
@@ -269,11 +300,14 @@ fn send(message: &Value, timeout: Duration) -> Result<Value, Failure> {
         .write_all(format!("{message}\n").as_bytes())
         .map_err(closed)?;
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).map_err(closed)?;
+    BufReader::new(&stream)
+        .read_line(&mut line)
+        .map_err(closed)?;
     if line.is_empty() {
         return Err(Failure::Closed);
     }
-    serde_json::from_str(&line).map_err(|e| Failure::Other(format!("folio serve said {line:?}: {e}")))
+    serde_json::from_str(&line)
+        .map_err(|e| Failure::Other(format!("folio serve said {line:?}: {e}")))
 }
 
 /// folio serve, this program's `serve`, on folio serve's sockets, given the bottles to answer
@@ -288,7 +322,9 @@ fn launch(background: bool) -> Result<Child, String> {
         .arg(control())
         .arg("--restore");
     for (name, path) in services_sockets() {
-        command.arg("--service").arg(format!("{name}={}", path.display()));
+        command
+            .arg("--service")
+            .arg(format!("{name}={}", path.display()));
     }
     command
         .env("FOLIO_HOME", crate::home())
@@ -325,11 +361,56 @@ fn start_daemon() -> Result<(), String> {
             _ => return Ok(()),
         }
     }
-    Err(format!("folio serve didn't start; see {}", log_path().display()))
+    Err(format!(
+        "folio serve didn't start; see {}",
+        log_path().display()
+    ))
 }
 
 /// folio serve, in this process's place: `folio serve start --foreground`.
 pub fn run() -> Result<i32, String> {
     let status = launch(false)?.wait().map_err(|e| e.to_string())?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// folio serve, as folio's unit tests have it: what it was told, and nothing started.
+#[cfg(test)]
+pub mod fake {
+    use std::sync::Mutex;
+
+    use serde_json::Value;
+
+    /// What's bound, by bottle: its bind message.
+    pub static BOUND: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+    /// Each bind, release and start, in order.
+    pub static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub fn reset() {
+        BOUND.lock().unwrap().clear();
+        CALLS.lock().unwrap().clear();
+    }
+
+    pub fn bind(message: Value) -> Result<(), String> {
+        let bottle = message["bottle"].as_str().unwrap_or_default().to_string();
+        CALLS.lock().unwrap().push(format!("bind {bottle}"));
+        let mut bound = BOUND.lock().unwrap();
+        bound.retain(|m| m["bottle"] != bottle.as_str());
+        bound.push(message);
+        Ok(())
+    }
+
+    pub fn release(bottle: &str) -> Result<(), String> {
+        CALLS.lock().unwrap().push(format!("release {bottle}"));
+        BOUND.lock().unwrap().retain(|m| m["bottle"] != bottle);
+        Ok(())
+    }
+
+    pub fn bound() -> Vec<String> {
+        BOUND
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m["bottle"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
 }

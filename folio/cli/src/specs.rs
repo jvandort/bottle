@@ -68,7 +68,11 @@ impl Serialize for SpecJson<'_> {
 }
 
 fn permission_names() -> String {
-    PERMISSIONS.iter().map(|(p, _)| *p).collect::<Vec<_>>().join(", ")
+    PERMISSIONS
+        .iter()
+        .map(|(p, _)| *p)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Validate a spec and put it in canonical form. Given `memory_mib`, the memory of the machine it's
@@ -95,11 +99,14 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
     }
     let specs = match data.get("features") {
         None => Vec::new(),
-        Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
-            items.iter().map(|s| s.as_str().unwrap().to_string()).collect()
-        }
+        Some(Value::Array(items)) if items.iter().all(Value::is_string) => items
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect(),
         Some(_) => {
-            return Err(r#"features is a list of feature specs, e.g. ["tools", "jvm:version=25"]"#.into());
+            return Err(
+                r#"features is a list of feature specs, e.g. ["tools", "jvm:version=25"]"#.into(),
+            );
         }
     };
     let mut canonical_specs = canonical_features(&specs)?;
@@ -107,14 +114,19 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
     features::resolve(&canonical_specs)?; // every dependency exists, and none is cyclic
     let memory = match data.get("memory") {
         None | Some(Value::Null) => {
-            return Err(r#"a spec needs its memory, a size in M or G, e.g. {"memory": "8G"}"#.into());
+            return Err(
+                r#"a spec needs its memory, a size in M or G, e.g. {"memory": "8G"}"#.into(),
+            );
         }
         Some(Value::String(memory)) => memory,
         Some(_) => return Err(r#"memory is a string: a size in M or G, e.g. "8G""#.into()),
     };
     let mut spec = Map::new();
     spec.insert("features".into(), json!(canonical_specs));
-    spec.insert("memory".into(), canonical_memory(memory, memory_mib, place)?.into());
+    spec.insert(
+        "memory".into(),
+        canonical_memory(memory, memory_mib, place)?.into(),
+    );
     match data.get("disk") {
         None | Some(Value::Null) => {}
         Some(Value::String(disk)) if is_disk(disk) => {
@@ -217,7 +229,8 @@ fn is_disk(disk: &str) -> bool {
 }
 
 fn is_size(number: &str) -> bool {
-    number.starts_with(|c: char| ('1'..='9').contains(&c)) && number.chars().all(|c| c.is_ascii_digit())
+    number.starts_with(|c: char| ('1'..='9').contains(&c))
+        && number.chars().all(|c| c.is_ascii_digit())
 }
 
 /// A JSON value as Python's repr has it, in a message: a string quoted, others as they are.
@@ -264,8 +277,17 @@ pub fn canonical_features(specs: &[String]) -> Result<Vec<String>, String> {
 
 /// Validate a memory setting: a size in M or G (e.g. 8G), and no bigger than `memory_mib` if it's
 /// given.
-pub fn canonical_memory(value: &str, memory_mib: Option<u64>, place: &str) -> Result<String, String> {
-    let invalid = || format!("invalid memory {}: give a size in M or G, e.g. 8G", crate::repr(value));
+pub fn canonical_memory(
+    value: &str,
+    memory_mib: Option<u64>,
+    place: &str,
+) -> Result<String, String> {
+    let invalid = || {
+        format!(
+            "invalid memory {}: give a size in M or G, e.g. 8G",
+            crate::repr(value)
+        )
+    };
     let (number, unit) = value.split_at(value.len().saturating_sub(1));
     let unit = unit.to_uppercase();
     if !(unit == "M" || unit == "G") || !is_size(number) {
@@ -283,7 +305,8 @@ pub fn canonical_memory(value: &str, memory_mib: Option<u64>, place: &str) -> Re
 /// This machine's memory, in MiB: a Mac's from sysctl, Linux's from /proc/meminfo.
 pub fn host_memory_mib() -> Result<u64, String> {
     if cfg!(target_os = "linux") {
-        let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|e| format!("/proc/meminfo: {e}"))?;
+        let meminfo =
+            std::fs::read_to_string("/proc/meminfo").map_err(|e| format!("/proc/meminfo: {e}"))?;
         for line in meminfo.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
                 let kib: u64 = rest
@@ -329,7 +352,10 @@ mod tests {
         for bad in ["", "G", "08G", "1.5G", "1T", "all"] {
             assert_eq!(
                 canonical_memory(bad, None, "x").unwrap_err(),
-                format!("invalid memory {}: give a size in M or G, e.g. 8G", crate::repr(bad))
+                format!(
+                    "invalid memory {}: give a size in M or G, e.g. 8G",
+                    crate::repr(bad)
+                )
             );
         }
     }
@@ -345,7 +371,10 @@ mod tests {
 
     #[test]
     fn labels_or_a_thread_from_before_them() {
-        assert_eq!(labels(&json!({"thread": "x"})), BTreeMap::from([("thread".to_string(), "x".to_string())]));
+        assert_eq!(
+            labels(&json!({"thread": "x"})),
+            BTreeMap::from([("thread".to_string(), "x".to_string())])
+        );
         assert_eq!(labels(&json!({})), BTreeMap::new());
     }
 }

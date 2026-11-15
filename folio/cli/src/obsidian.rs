@@ -123,14 +123,21 @@ fn register(path: &Path) -> Result<String, String> {
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|e| e.to_string())?;
     let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     config["vaults"][&id] = json!({"path": resolve(path).display().to_string(), "ts": ts});
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let name = config_path.file_name().unwrap_or_default().to_string_lossy();
+    let name = config_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     let staging = config_path.with_file_name(format!(".{name}.folio"));
-    std::fs::write(&staging, crate::bottle_cli::python_dumps(&config)).map_err(|e| e.to_string())?;
+    std::fs::write(&staging, crate::bottle_cli::python_dumps(&config))
+        .map_err(|e| e.to_string())?;
     std::fs::rename(&staging, &config_path).map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -170,7 +177,8 @@ pub fn open_vault(path: &Path) -> Result<String, String> {
     let mut known = vault_id(path);
     if known.is_none() && vaults().is_some() {
         if running() {
-            if !confirm("Obsidian has to restart to add the notes as a vault. Quit and reopen it?") {
+            if !confirm("Obsidian has to restart to add the notes as a vault. Quit and reopen it?")
+            {
                 return Ok("Obsidian is running, and has to restart to add the notes as a vault: quit it, and run \
                            the command again."
                     .into());
@@ -182,7 +190,9 @@ pub fn open_vault(path: &Path) -> Result<String, String> {
         known = Some(register(path)?);
     }
     if let Some(id) = known {
-        let _ = Command::new(command("open")).arg(format!("obsidian://open?vault={}", url_quote(&id))).status();
+        let _ = Command::new(command("open"))
+            .arg(format!("obsidian://open?vault={}", url_quote(&id)))
+            .status();
         return Ok(format!("Opened {} in Obsidian.", path.display()));
     }
     let copied = on_path("pbcopy")
@@ -190,17 +200,27 @@ pub fn open_vault(path: &Path) -> Result<String, String> {
             .stdin(Stdio::piped())
             .spawn()
             .and_then(|mut child| {
-                child.stdin.take().unwrap().write_all(path.display().to_string().as_bytes())?;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(path.display().to_string().as_bytes())?;
                 child.wait()
             })
             .is_ok_and(|s| s.success());
-    let _ = Command::new(command("open")).arg("obsidian://choose-vault").status();
+    let _ = Command::new(command("open"))
+        .arg("obsidian://choose-vault")
+        .status();
     Ok(format!(
         "Obsidian's list of vaults isn't what folio expects, so it's left alone, and Obsidian's vault manager is \
          open: choose \"Open folder as vault\" and open\n\n    {}\n\n{}in the folder picker, ⌘⇧G and {} (~/.folio \
          is hidden).",
         path.display(),
-        if copied { "The path is on your clipboard: " } else { "" },
+        if copied {
+            "The path is on your clipboard: "
+        } else {
+            ""
+        },
         if copied { "paste it" } else { "type it" }
     ))
 }

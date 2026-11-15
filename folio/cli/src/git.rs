@@ -57,7 +57,12 @@ fn command(args: &[&str], repo: Option<&Path>) -> Command {
     git
 }
 
-fn run(args: &[&str], repo: Option<&Path>, input: Option<&str>, check: bool) -> Result<String, String> {
+fn run(
+    args: &[&str],
+    repo: Option<&Path>,
+    input: Option<&str>,
+    check: bool,
+) -> Result<String, String> {
     let mut child = command(args, repo)
         .stdin(if input.is_some() {
             Stdio::piped()

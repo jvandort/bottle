@@ -56,7 +56,12 @@ fn stand_in_failed(args: &[String], code: i32) -> String {
 
 /// The stand-in, reading its stdout. Without `check`, a failure is the caller's to expect, so its
 /// stderr is dropped rather than shown as if something went wrong.
-fn stand_in_run(program: &str, args: &[String], input: Option<&str>, check: bool) -> Result<Ran, String> {
+fn stand_in_run(
+    program: &str,
+    args: &[String],
+    input: Option<&str>,
+    check: bool,
+) -> Result<Ran, String> {
     // Never this terminal for stdin: an exec passes it through to the bottle, which would read what's
     // typed at folio's own prompts.
     let ran = piped(Command::new(program).args(args), input, check)?;
@@ -102,9 +107,17 @@ fn strings(args: &[&str]) -> Vec<String> {
 /// without `check`.
 fn piped(command: &mut Command, input: Option<&str>, check: bool) -> Result<Ran, String> {
     let mut child = command
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
-        .stderr(if check { Stdio::inherit() } else { Stdio::null() })
+        .stderr(if check {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .spawn()
         .map_err(|e| format!("{}: {e}", command.get_program().to_string_lossy()))?;
     if let Some(input) = input {
@@ -127,7 +140,12 @@ pub fn validate_spec(spec: &Value) -> Result<Value, String> {
         return crate::specs::canonical(spec, None, "this machine");
     };
     let file = TempFile::new(&spec.to_string())?;
-    let ran = stand_in_run(&program, &strings(&["spec", "validate", "--json", &file.path()]), None, true)?;
+    let ran = stand_in_run(
+        &program,
+        &strings(&["spec", "validate", "--json", &file.path()]),
+        None,
+        true,
+    )?;
     serde_json::from_str(&ran.stdout).map_err(|e| format!("bottle spec validate: {e}"))
 }
 
@@ -151,10 +169,22 @@ pub fn new(
                 path: m.path.clone(),
                 repo: m.repo.clone(),
                 checkout: m.checkout.clone(),
-                remotes: if m.remotes.is_empty() { None } else { Some(m.remotes.clone()) },
+                remotes: if m.remotes.is_empty() {
+                    None
+                } else {
+                    Some(m.remotes.clone())
+                },
             })
             .collect();
-        bottles::create(owner, spec, name, &requests, context, runner.unwrap_or(runners::LOCAL), ssh)?;
+        bottles::create(
+            owner,
+            spec,
+            name,
+            &requests,
+            context,
+            runner.unwrap_or(runners::LOCAL),
+            ssh,
+        )?;
         return Ok(());
     };
     let spec_file = TempFile::new(&spec.to_string())?;
@@ -176,9 +206,15 @@ pub fn new(
     for (host, bottle) in ssh {
         args.extend(["--ssh".into(), format!("{host}={bottle}")]);
     }
-    let status = Command::new(&program).args(&args).status().map_err(|e| format!("{program}: {e}"))?;
+    let status = Command::new(&program)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("{program}: {e}"))?;
     if !status.success() {
-        return Err(stand_in_failed(&strings(&["new", name]), status.code().unwrap_or(-1)));
+        return Err(stand_in_failed(
+            &strings(&["new", name]),
+            status.code().unwrap_or(-1),
+        ));
     }
     Ok(())
 }
@@ -194,7 +230,8 @@ pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
             let mut args = strings(&["status", "--json"]);
             args.extend(names.iter().cloned());
             let ran = stand_in_run(&program, &args, None, true)?;
-            serde_json::from_str::<Vec<Value>>(&ran.stdout).map_err(|e| format!("bottle status: {e}"))?
+            serde_json::from_str::<Vec<Value>>(&ran.stdout)
+                .map_err(|e| format!("bottle status: {e}"))?
         }
     };
     Ok(rows
@@ -214,7 +251,10 @@ pub fn start(name: &str) -> Result<(), String> {
         .status()
         .map_err(|e| format!("{program}: {e}"))?;
     if !status.success() {
-        return Err(stand_in_failed(&strings(&["start", name]), status.code().unwrap_or(-1)));
+        return Err(stand_in_failed(
+            &strings(&["start", name]),
+            status.code().unwrap_or(-1),
+        ));
     }
     Ok(())
 }
@@ -222,7 +262,9 @@ pub fn start(name: &str) -> Result<(), String> {
 pub fn delete(name: &str) -> Result<(), String> {
     match stand_in() {
         None => bottles::delete(name),
-        Some(program) => stand_in_run(&program, &strings(&["delete", name]), None, true).map(|_| ()),
+        Some(program) => {
+            stand_in_run(&program, &strings(&["delete", name]), None, true).map(|_| ())
+        }
     }
 }
 
@@ -303,11 +345,19 @@ pub fn run_from_file(name: &str, argv: &[String], path: &Path) -> Result<(), Str
 
 /// Replace folio with a command in the bottle, on this terminal: given one (`tty`; None, if this is
 /// one).
-pub fn attach(name: &str, argv: &[String], tty: Option<bool>) -> Result<std::convert::Infallible, String> {
+pub fn attach(
+    name: &str,
+    argv: &[String],
+    tty: Option<bool>,
+) -> Result<std::convert::Infallible, String> {
     // The stand-in is given one only when it's asked for: it never looks for this one.
     let tty = match tty {
         Some(tty) => tty,
-        None => stand_in().is_none() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        None => {
+            stand_in().is_none()
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal()
+        }
     };
     // Flushed: what's buffered goes with this process.
     let _ = std::io::stdout().flush();
@@ -325,7 +375,11 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
                 None => local_side(path),
                 Some(name) => format!("{name}:{}", if path.is_empty() { "." } else { path }),
             };
-            let ran = piped(Command::new(&program).args(["cp", &side(src), &side(dst)]), None, true)?;
+            let ran = piped(
+                Command::new(&program).args(["cp", &side(src), &side(dst)]),
+                None,
+                true,
+            )?;
             if ran.code != 0 {
                 return Err("copying failed".into());
             }
@@ -335,7 +389,11 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
             let sides = [cp_side(src)?, cp_side(dst)?];
             let commands = copy_commands(&sides[0], &sides[1]);
             let (code, sent, stdout) = if commands.len() == 1 {
-                let ran = piped(Command::new(&commands[0][0]).args(&commands[0][1..]), None, true)?;
+                let ran = piped(
+                    Command::new(&commands[0][0]).args(&commands[0][1..]),
+                    None,
+                    true,
+                )?;
                 (ran.code, 0, ran.stdout)
             } else {
                 let mut sender = Command::new(&commands[0][0])
@@ -351,7 +409,11 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
                     .stdout(Stdio::piped())
                     .output()
                     .map_err(|e| format!("{}: {e}", commands[1][0]))?;
-                let sent = sender.wait().map_err(|e| e.to_string())?.code().unwrap_or(-1);
+                let sent = sender
+                    .wait()
+                    .map_err(|e| e.to_string())?
+                    .code()
+                    .unwrap_or(-1);
                 (
                     receiver.status.code().unwrap_or(-1),
                     sent,
@@ -366,7 +428,10 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
     };
     let went = went.trim();
     Ok(match dst.0 {
-        Some(_) => went.split_once(':').map_or(went, |(_, path)| path).to_string(),
+        Some(_) => went
+            .split_once(':')
+            .map_or(went, |(_, path)| path)
+            .to_string(),
         None => went.to_string(),
     })
 }
@@ -388,7 +453,14 @@ fn cp_side((name, path): (Option<&str>, &str)) -> Result<(Cli, String), String> 
     };
     let bottle = bottles::ensure_running(name)?;
     let runner = bottles::runner_of(&bottle)?;
-    Ok((runner.cli, format!("{}:{}", bottle.machine(), if path.is_empty() { "." } else { path })))
+    Ok((
+        runner.cli,
+        format!(
+            "{}:{}",
+            bottle.machine(),
+            if path.is_empty() { "." } else { path }
+        ),
+    ))
 }
 
 /// The command lines that copy `src` to `dst`, each a side as bottle-cli's cp takes it with the

@@ -70,7 +70,10 @@ pub fn with_sockets(policy: &Value, sockets: &BTreeMap<String, String>) -> Value
             if let Some(map) = route.as_object_mut()
                 && let Some(service) = map.remove("service")
             {
-                let socket = sockets.get(service.as_str().unwrap_or_default()).cloned().unwrap_or_default();
+                let socket = sockets
+                    .get(service.as_str().unwrap_or_default())
+                    .cloned()
+                    .unwrap_or_default();
                 map.insert("socket".into(), socket.into());
             }
         }
@@ -86,12 +89,19 @@ mod tests {
     fn a_machines_policy_routes_bottle_host_ssh_and_credentials_here_and_says_what_it_caches() {
         let cached = json!([{"host": "deb.example", "include": ["/debian/*.deb"], "exclude": [], "ports": [80],
                              "immutable": true}]);
-        let credentials = [("api.example".to_string(), 443), ("ci.example".to_string(), 8111), ("api.example".to_string(), 443)];
-        let sockets: BTreeMap<String, String> =
-            [("host", "/h.sock"), ("ssh", "/s.sock"), ("credentials", "/c.sock")]
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+        let credentials = [
+            ("api.example".to_string(), 443),
+            ("ci.example".to_string(), 8111),
+            ("api.example".to_string(), 443),
+        ];
+        let sockets: BTreeMap<String, String> = [
+            ("host", "/h.sock"),
+            ("ssh", "/s.sock"),
+            ("credentials", "/c.sock"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
         let policy = with_sockets(&network(&credentials, &cached), &sockets);
         assert_eq!(
             policy["routes"],

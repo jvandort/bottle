@@ -66,7 +66,10 @@ pub fn migrate(identity: &Repo) -> Result<bool, String> {
     lanes::move_namespace(&new, &lanes::namespace(NAME, lanes::OUT), notes::OUT)?;
     lanes::move_namespace(&new, &lanes::namespace(NAME, lanes::IN), notes::IN)?;
     let remote = lanes::remote_name(NAME);
-    if succeeds(&["config", "--get", &format!("remote.{remote}.url")], Some(&new)) {
+    if succeeds(
+        &["config", "--get", &format!("remote.{remote}.url")],
+        Some(&new),
+    ) {
         git(&["remote", "remove", &remote], Some(&new))?;
     }
     notes::ensure(&new, "Notes")?;

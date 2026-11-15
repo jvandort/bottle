@@ -179,9 +179,11 @@ impl Thread {
 /// A thread's name: lowercase letters and digits, in words joined by '-'.
 pub fn is_name(name: &str) -> bool {
     !name.is_empty()
-        && name
-            .split('-')
-            .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+        && name.split('-').all(|w| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
 }
 
 fn directory(repo: &Repo, name: &str) -> PathBuf {
@@ -211,7 +213,11 @@ pub fn load(repo: &Repo, name: &str) -> Result<Thread, String> {
             "no thread named {} in {} (threads: {})",
             crate::repr(name),
             repo.path.display(),
-            if known.is_empty() { "none".to_string() } else { known.join(", ") }
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
         ));
     };
     read(&slot)
@@ -220,7 +226,11 @@ pub fn load(repo: &Repo, name: &str) -> Result<Thread, String> {
 /// The repo's threads, by name.
 pub fn all(repo: &Repo) -> Result<Vec<Thread>, String> {
     let mut threads = Vec::new();
-    for entry in fs::read_dir(repo.directory()).into_iter().flatten().flatten() {
+    for entry in fs::read_dir(repo.directory())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
@@ -243,13 +253,20 @@ fn mtime(path: &Path) -> f64 {
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 /// When the thread was last used, its state row (states) saying: its bottle's last use; a paused
 /// thread's, when it was paused; else when it was made.
 pub fn last_active(repo: &Repo, thread: &Thread, row: &Value) -> f64 {
-    if let Some(when) = row.get("last_active").and_then(Value::as_f64).filter(|w| *w != 0.0) {
+    if let Some(when) = row
+        .get("last_active")
+        .and_then(Value::as_f64)
+        .filter(|w| *w != 0.0)
+    {
         return when;
     }
     match snapshot(repo, thread) {
@@ -259,7 +276,11 @@ pub fn last_active(repo: &Repo, thread: &Thread, row: &Value) -> f64 {
 }
 
 /// `threads`, most recently active first.
-pub fn recent(repo: &Repo, mut threads: Vec<Thread>, states: &BTreeMap<String, Value>) -> Vec<Thread> {
+pub fn recent(
+    repo: &Repo,
+    mut threads: Vec<Thread>,
+    states: &BTreeMap<String, Value>,
+) -> Vec<Thread> {
     let when = |t: &Thread| last_active(repo, t, &states[&t.name]);
     threads.sort_by(|a, b| when(b).total_cmp(&when(a)));
     threads
@@ -286,7 +307,8 @@ pub fn snapshot_size(repo: &Repo, thread: &Thread) -> Option<u64> {
 
 /// The slot holding the thread's snapshot, if it has one: every snapshot has Claude's archive.
 fn snapshot(repo: &Repo, thread: &Thread) -> Option<PathBuf> {
-    store::current_slot(&directory(repo, &thread.name)).filter(|slot| slot.join(snapshots::CLAUDE_ARCHIVE).exists())
+    store::current_slot(&directory(repo, &thread.name))
+        .filter(|slot| slot.join(snapshots::CLAUDE_ARCHIVE).exists())
 }
 
 /// Where the thread's notes are kept: in its directory, so a rename takes them along.
@@ -329,7 +351,13 @@ fn workdir(thread: &Thread) -> Result<String, String> {
 
 /// A new thread: its bottle (on `runner`, else the repo's) and its lane. Nothing runs in it until
 /// something attaches.
-pub fn create(repo: &Repo, name: &str, base: Option<&str>, is_broker: bool, runner: Option<&str>) -> Result<Thread, String> {
+pub fn create(
+    repo: &Repo,
+    name: &str,
+    base: Option<&str>,
+    is_broker: bool,
+    runner: Option<&str>,
+) -> Result<Thread, String> {
     if !is_name(name) {
         return Err(format!(
             "invalid thread name {}: use lowercase letters and digits, in words joined by '-'",
@@ -337,7 +365,9 @@ pub fn create(repo: &Repo, name: &str, base: Option<&str>, is_broker: bool, runn
         ));
     }
     if store::current_slot(&directory(repo, name)).is_some() {
-        return Err(format!("thread {name} already exists; attach with `folio claude {name}`"));
+        return Err(format!(
+            "thread {name} already exists; attach with `folio claude {name}`"
+        ));
     }
     let thread = Thread {
         name: name.into(),
@@ -389,12 +419,18 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
     }
     // Checked again each time: a feature can have changed since the spec was saved. Checked as
     // saved: validating drops what bottle doesn't know.
-    let spec = engine::validate_spec(&check_repo_spec(repo.spec()?.unwrap_or_else(default_spec), false)?)?;
+    let spec = engine::validate_spec(&check_repo_spec(
+        repo.spec()?.unwrap_or_else(default_spec),
+        false,
+    )?)?;
     repo.remember()?;
     if repo.spec()?.as_ref() != Some(&spec) {
         repo.save_spec(&spec)?;
     }
-    let notes_path = notes::ensure(&notes_dir(repo, &thread.name), &format!("Notes of thread {}", thread.name))?;
+    let notes_path = notes::ensure(
+        &notes_dir(repo, &thread.name),
+        &format!("Notes of thread {}", thread.name),
+    )?;
     let repos_ = vec![
         Mount {
             path: WORKSPACE.into(),
@@ -467,7 +503,10 @@ fn make_sidecar(repo: &Repo, thread: &Thread, repos_: &[Mount]) -> Result<(), St
     let sidecar = thread.sidecar.as_ref().unwrap();
     // Scratch: whatever's left of one is no use.
     if !delete_sidecar(thread)? {
-        return Err(format!("its old one is on runner {}, which is off", sidecar.runner));
+        return Err(format!(
+            "its old one is on runner {}, which is off",
+            sidecar.runner
+        ));
     }
     let spec = check_repo_spec(engine::validate_spec(&sidecar.spec)?, true)?;
     engine::new(
@@ -510,7 +549,10 @@ fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
 fn sidecar_state(thread: &Thread) -> Result<(String, bool), String> {
     let names = [thread.bottle.clone(), thread.sidecar_bottle()];
     let rows = engine::status(&names)?;
-    let state = rows[&names[1]]["state"].as_str().unwrap_or_default().to_string();
+    let state = rows[&names[1]]["state"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let granted = rows[&names[0]]
         .get("ssh")
         .and_then(Value::as_object)
@@ -548,7 +590,11 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
 /// thread is running, which is what the sidecar is for. Nothing keeps it: closing the terminal ends
 /// it.
 pub fn sidecar_shell(repo: &Repo, thread: &Thread) -> Result<std::convert::Infallible, String> {
-    engine::attach(&running_sidecar(repo, thread)?, &["bash".into(), "-l".into()], None)
+    engine::attach(
+        &running_sidecar(repo, thread)?,
+        &["bash".into(), "-l".into()],
+        None,
+    )
 }
 
 /// The thread's sidecar's bottle, while the thread runs, which is what it's for; refused, saying
@@ -594,21 +640,39 @@ fn bottle_for(repo: &Repo, thread: &Thread, sidecar: bool) -> Result<String, Str
 
 /// Replace folio with `argv` in the thread's bottle (or its sidecar), at its first mount, as genie:
 /// its stdin, stdout and exit status this process's, and a terminal, if `tty`.
-pub fn exec(repo: &Repo, thread: &Thread, argv: &[String], sidecar: bool, tty: bool) -> Result<std::convert::Infallible, String> {
+pub fn exec(
+    repo: &Repo,
+    thread: &Thread,
+    argv: &[String],
+    sidecar: bool,
+    tty: bool,
+) -> Result<std::convert::Infallible, String> {
     engine::attach(&bottle_for(repo, thread, sidecar)?, argv, Some(tty))
 }
 
 /// Copy as `cp -r` would, between here and threads' bottles (or their sidecars): each side a thread
 /// and a path in its bottle, a relative one from its first mount, or None and a path here. Where it
 /// went.
-pub fn copy(repo: &Repo, src: (Option<&Thread>, &str), dst: (Option<&Thread>, &str), sidecar: bool) -> Result<String, String> {
+pub fn copy(
+    repo: &Repo,
+    src: (Option<&Thread>, &str),
+    dst: (Option<&Thread>, &str),
+    sidecar: bool,
+) -> Result<String, String> {
     let bottle = |thread: Option<&Thread>| thread.map(|t| bottle_for(repo, t, sidecar)).transpose();
     let (src_bottle, dst_bottle) = (bottle(src.0)?, bottle(dst.0)?);
-    engine::copy((src_bottle.as_deref(), src.1), (dst_bottle.as_deref(), dst.1))
+    engine::copy(
+        (src_bottle.as_deref(), src.1),
+        (dst_bottle.as_deref(), dst.1),
+    )
 }
 
 /// The thread, with `sidecar` (None: none) from its next bottle on; its spec checked first.
-pub fn set_sidecar(repo: &Repo, thread: &Thread, sidecar: Option<Sidecar>) -> Result<Thread, String> {
+pub fn set_sidecar(
+    repo: &Repo,
+    thread: &Thread,
+    sidecar: Option<Sidecar>,
+) -> Result<Thread, String> {
     if thread.broker {
         return Err("the broker has no sidecar".into());
     }
@@ -647,7 +711,9 @@ pub fn place(repo: &Repo, thread: &Thread, runner: &str) -> Result<Thread, Strin
     if thread.broker {
         return Err("the broker runs on this machine".into());
     }
-    let row = states(repo, std::slice::from_ref(thread))?.remove(&thread.name).unwrap();
+    let row = states(repo, std::slice::from_ref(thread))?
+        .remove(&thread.name)
+        .unwrap();
     let place = row.get("runner").and_then(Value::as_str).unwrap_or("local");
     let state = row["state"].as_str().unwrap_or_default();
     if !matches!(state, "paused" | "missing") && place != runner {
@@ -680,7 +746,12 @@ fn undo(repo: &Repo, thread: &Thread) {
 /// One with a sidecar has its sidecar's state too, as "sidecar".
 pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Value>, String> {
     let mut names: Vec<String> = threads.iter().map(|t| t.bottle.clone()).collect();
-    names.extend(threads.iter().filter(|t| t.sidecar.is_some()).map(Thread::sidecar_bottle));
+    names.extend(
+        threads
+            .iter()
+            .filter(|t| t.sidecar.is_some())
+            .map(Thread::sidecar_bottle),
+    );
     let rows = engine::status(&names)?;
     let mut result = BTreeMap::new();
     for t in threads {
@@ -705,14 +776,20 @@ pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Value>
 }
 
 fn state_of(repo: &Repo, thread: &Thread) -> Result<String, String> {
-    Ok(states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string())
+    Ok(
+        states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 /// Attach this terminal to one of the thread's sessions, bringing the thread to running first.
-pub fn attach(repo: &Repo, thread: &Thread, session: &str) -> Result<std::convert::Infallible, String> {
+pub fn attach(
+    repo: &Repo,
+    thread: &Thread,
+    session: &str,
+) -> Result<std::convert::Infallible, String> {
     if !thread.broker {
         lanes::register(&repo.path, &thread.name)?; // brings its remote up to this folio's
     }
@@ -721,7 +798,14 @@ pub fn attach(repo: &Repo, thread: &Thread, session: &str) -> Result<std::conver
     engine::touch(&thread.bottle)?;
     // The bottle has the work now, so a snapshot would only be out of date.
     if snapshot(repo, thread).is_some() {
-        save(repo, thread, SNAPSHOT.iter().map(|name| (*name, Content::Leave)).collect())?;
+        save(
+            repo,
+            thread,
+            SNAPSHOT
+                .iter()
+                .map(|name| (*name, Content::Leave))
+                .collect(),
+        )?;
     }
     // -f detaches anything else on it: closing a terminal doesn't hang up its attach inside the VM.
     let argv: Vec<String> = vec![
@@ -797,7 +881,11 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
                 continue;
             };
             let archive = staging.join(name);
-            engine::run_to_file(&thread.bottle, &sh(snapshots::workspace_out(&path)), &archive)?;
+            engine::run_to_file(
+                &thread.bottle,
+                &sh(snapshots::workspace_out(&path)),
+                &archive,
+            )?;
             snapshots::check(&archive)?;
             for entry in archived.iter_mut().filter(|(n, _)| *n == name) {
                 entry.1 = Content::Move(archive.clone());
@@ -824,7 +912,10 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
 /// The hangup is folio's own: `shpool kill` follows its SIGHUP with a SIGKILL half a second later,
 /// too soon for Claude to have written its conversation out.
 fn stop_sessions(thread: &Thread) -> Result<(), String> {
-    let pids: Vec<String> = sessions(thread)?.iter().map(|s| s["shell_pid"].to_string()).collect();
+    let pids: Vec<String> = sessions(thread)?
+        .iter()
+        .map(|s| s["shell_pid"].to_string())
+        .collect();
     if !pids.is_empty() {
         let mut kill = vec!["kill".to_string(), "-HUP".into()];
         kill.extend(pids.iter().cloned());
@@ -859,13 +950,24 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
             }
             // A snapshot from before notes has none of them.
             if archive.exists() {
-                engine::run_from_file(&thread.bottle, &sh(snapshots::workspace_in(path)), &archive)?;
+                engine::run_from_file(
+                    &thread.bottle,
+                    &sh(snapshots::workspace_in(path)),
+                    &archive,
+                )?;
             }
         }
         // Where this bottle has each mount's objects and remotes: an older snapshot's checkout had
         // them elsewhere.
-        let row = engine::status(std::slice::from_ref(&thread.bottle))?.remove(&thread.bottle).unwrap();
-        for mount in row.get("mounts").and_then(Value::as_array).into_iter().flatten() {
+        let row = engine::status(std::slice::from_ref(&thread.bottle))?
+            .remove(&thread.bottle)
+            .unwrap();
+        for mount in row
+            .get("mounts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let urls: BTreeMap<String, String> = mount["urls"]
                 .as_object()
                 .into_iter()
@@ -879,12 +981,18 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
             );
             engine::run(&thread.bottle, &sh(script), None, true)?;
         }
-        engine::run_from_file(&thread.bottle, &sh(snapshots::CLAUDE_IN), &slot.join(snapshots::CLAUDE_ARCHIVE))?;
+        engine::run_from_file(
+            &thread.bottle,
+            &sh(snapshots::CLAUDE_IN),
+            &slot.join(snapshots::CLAUDE_ARCHIVE),
+        )?;
         // Its conversation, too, was kept under the directory its vault was in.
         if thread.broker {
             engine::run(
                 &thread.bottle,
-                &sh("cd \"$HOME/.claude/projects\" 2>/dev/null && [ -d -workspace ] && [ ! -e -notes ] && mv -- -workspace -notes || true"),
+                &sh(
+                    "cd \"$HOME/.claude/projects\" 2>/dev/null && [ -d -workspace ] && [ ! -e -notes ] && mv -- -workspace -notes || true",
+                ),
                 None,
                 true,
             )?;
@@ -901,23 +1009,39 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
 
 /// The bottle's shpool sessions, as `shpool list --json` has them.
 fn sessions(thread: &Thread) -> Result<Vec<Value>, String> {
-    let listed = engine::run(&thread.bottle, &["shpool".into(), "list".into(), "--json".into()], None, false)?;
+    let listed = engine::run(
+        &thread.bottle,
+        &["shpool".into(), "list".into(), "--json".into()],
+        None,
+        false,
+    )?;
     if listed.code != 0 {
         return Ok(Vec::new());
     }
-    let said: Value = serde_json::from_str(&listed.stdout).map_err(|e| format!("shpool list: {e}"))?;
+    let said: Value =
+        serde_json::from_str(&listed.stdout).map_err(|e| format!("shpool list: {e}"))?;
     Ok(said["sessions"].as_array().cloned().unwrap_or_default())
 }
 
 fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
     if let Some(listed) = sessions(thread)?.into_iter().find(|s| s["name"] == session) {
-        let alive = engine::run(&thread.bottle, &["kill".into(), "-0".into(), listed["shell_pid"].to_string()], None, false)?;
+        let alive = engine::run(
+            &thread.bottle,
+            &["kill".into(), "-0".into(), listed["shell_pid"].to_string()],
+            None,
+            false,
+        )?;
         if alive.code == 0 {
             return Ok(());
         }
         // Its program exited, but shpool keeps the session, and attaching to it would start a
         // plain shell in its place.
-        engine::run(&thread.bottle, &["shpool".into(), "kill".into(), session.into()], None, false)?;
+        engine::run(
+            &thread.bottle,
+            &["shpool".into(), "kill".into(), session.into()],
+            None,
+            false,
+        )?;
     }
     let argv: Vec<String> = vec![
         "env".into(),
@@ -936,7 +1060,11 @@ fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
 
 /// What a session runs, as shpool's --cmd takes it.
 pub fn session_command(session: &str) -> String {
-    ["sh", "-c", session_script(session)].iter().map(|a| lanes::shell_quote(a)).collect::<Vec<_>>().join(" ")
+    ["sh", "-c", session_script(session)]
+        .iter()
+        .map(|a| lanes::shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What deleting the thread would lose, for the user to read first.
@@ -965,7 +1093,13 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
         if state != "running" {
             engine::start(&thread.bottle)?;
         }
-        engine::run(&thread.bottle, &sh(work_script(&workdir(thread)?)), None, true)?.stdout
+        engine::run(
+            &thread.bottle,
+            &sh(work_script(&workdir(thread)?)),
+            None,
+            true,
+        )?
+        .stdout
     };
     let (mut tips, mut dirty) = (BTreeMap::new(), false);
     for line in work.lines() {
@@ -976,7 +1110,11 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
             tips.insert(name.to_string(), commit.to_string());
         }
     }
-    let place = if state == "paused" { "the snapshot" } else { "the bottle" };
+    let place = if state == "paused" {
+        "the snapshot"
+    } else {
+        "the bottle"
+    };
     lost.extend(
         lanes::unsaved(&repo.path, &thread.name, &tips)?
             .into_iter()
@@ -1036,13 +1174,20 @@ pub fn delete(repo: &Repo, thread: &Thread) -> Result<(), String> {
     }
     let dir = directory(repo, &thread.name);
     let kept = notes_dir(repo, &thread.name);
-    for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten() {
+    for entry in fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .flatten()
+    {
         let path = entry.path();
         if path == kept {
             continue;
         }
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        let removed = if is_dir { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        let removed = if is_dir {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
         removed.map_err(|e| format!("{}: {e}", path.display()))?;
     }
     if !kept.exists() {
@@ -1058,7 +1203,14 @@ mod tests {
     #[test]
     fn names_are_kebab_case() {
         assert!(is_name("fix-it") && is_name("a1") && is_name("x-2-y"));
-        assert!(!is_name("") && !is_name("Fix") && !is_name("-x") && !is_name("x-") && !is_name("a--b") && !is_name("a_b"));
+        assert!(
+            !is_name("")
+                && !is_name("Fix")
+                && !is_name("-x")
+                && !is_name("x-")
+                && !is_name("a--b")
+                && !is_name("a_b")
+        );
     }
 
     #[test]
@@ -1087,7 +1239,9 @@ mod tests {
              \"runner\": null,\n  \"sidecar\": {\n    \"runner\": \"box\",\n    \"spec\": {\n      \"features\": [],\n      \
              \"memory\": \"2G\"\n    }\n  }\n}"
         );
-        let read: Thread = serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#).unwrap();
+        let read: Thread =
+            serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#)
+                .unwrap();
         assert_eq!((read.broker, read.sidecar), (false, None));
     }
 }

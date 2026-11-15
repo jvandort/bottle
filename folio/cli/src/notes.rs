@@ -45,7 +45,16 @@ pub fn ensure(path: &Path, first: &str) -> Result<PathBuf, String> {
         fs::create_dir_all(path.join(".obsidian")).map_err(failed)?;
         git(&["add", ".gitignore"], Some(path))?;
         git(
-            &["-c", "user.name=folio", "-c", "user.email=folio@localhost", "commit", "-q", "-m", first],
+            &[
+                "-c",
+                "user.name=folio",
+                "-c",
+                "user.email=folio@localhost",
+                "commit",
+                "-q",
+                "-m",
+                first,
+            ],
             Some(path),
         )?;
     }
@@ -53,6 +62,9 @@ pub fn ensure(path: &Path, first: &str) -> Result<PathBuf, String> {
     // Config alone: the tracking branch needn't exist yet for a push to find the branch that tracks
     // it.
     git(&["config", "branch.main.remote", REMOTE], Some(path))?;
-    git(&["config", "branch.main.merge", "refs/heads/main"], Some(path))?;
+    git(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        Some(path),
+    )?;
     Ok(path.to_path_buf())
 }
