@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ssh, as far as folio-cli uses it: options up to -- (logged, a line a time, in $FAKE_SSH_LOG.options), the
+# destination, and a command for its shell, run here as if at the destination, in a home of its own. "down" can't be
+# reached. The destination is Linux, on what this
+# machine is, and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether it has KVM.
+options=()
+while [ "$1" != "--" ]; do options+=("$1"); shift; done
+echo "${options[*]}" >> "$FAKE_SSH_LOG.options"
+shift
+destination=$1; shift
+echo "$destination $*" >> "$FAKE_SSH_LOG"
+if [ "$destination" = down ]; then
+  echo "ssh: connect to host down port 22: Connection refused" >&2
+  exit 255
+fi
+script="$*"; script=${script//\/dev\/kvm/$FAKE_KVM}
+home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
+cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$script"

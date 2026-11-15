@@ -9,25 +9,8 @@ from folio.bottle import images, runners
 from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, built_cli, built_folio_cli, manifest, register_runner
 
-# ssh, as far as folio-cli uses it: options up to -- (logged, a line a time, in $FAKE_SSH_LOG.options), the
-# destination, and a command for its shell, run here as if at the destination, in a home of its own. "down" can't be
-# reached. The destination is Linux, on what this
-# machine is, and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether it has KVM.
-FAKE_SSH = r"""#!/usr/bin/env bash
-options=()
-while [ "$1" != "--" ]; do options+=("$1"); shift; done
-echo "${options[*]}" >> "$FAKE_SSH_LOG.options"
-shift
-destination=$1; shift
-echo "$destination $*" >> "$FAKE_SSH_LOG"
-if [ "$destination" = down ]; then
-  echo "ssh: connect to host down port 22: Connection refused" >&2
-  exit 255
-fi
-script="$*"; script=${script//\/dev\/kvm/$FAKE_KVM}
-home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
-cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$script"
-"""
+# ssh, as far as folio-cli uses it: tests/fake_ssh.
+FAKE_SSH = (Path(__file__).resolve().parents[1] / "fake_ssh").read_text()
 
 # bottle-cli there: every machine is running (and there's one, bottle-b); it says where its home is; an image build says what it was sent.
 FAKE_CLI = r"""#!/usr/bin/env bash

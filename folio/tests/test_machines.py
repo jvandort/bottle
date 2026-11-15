@@ -2,12 +2,16 @@
 (tests/fake_bottle_cli.py), and folio serve for real. What a thread's bottle is made of, in what order, what's
 rolled back when a step fails, how it's started again, listed and deleted, and the images it's built from."""
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+from tests.bottle.support import manifest
 from tests.support import FOLIO, FolioTestCase, git
 
 FAKE_CLI = Path(__file__).resolve().parent / "fake_bottle_cli.py"
@@ -275,3 +279,60 @@ class AuthTest(MachineTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("isn't set", result.stderr)
         self.assertEqual(self.machine()["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "the-egress-proxy-holds-the-real-one")
+
+
+class RemoteRunnerTest(MachineTestCase):
+    """A thread on a runner: its repo mirrored there, its images built there, its machine made there, all through
+    ssh to it (a stand-in, running "there" here, in a home of its own) and the bottle-cli folio copies there (the
+    stand-in, with a state of its own)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        short = Path(tempfile.mkdtemp(dir="/tmp"))
+        self.addCleanup(shutil.rmtree, short, True)
+        self.remotes, self.there_state = short / "remotes", short / "there.json"
+        (short / "ssh").symlink_to(Path(__file__).resolve().parent / "fake_ssh")
+        (short / "kvm").write_text("")
+        arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
+        dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
+        dist.mkdir(parents=True)
+        (dist / "bottle-cli").write_text(f"#!/bin/sh\nFAKE_CLI_STATE={self.there_state} exec {sys.executable} {FAKE_CLI} \"$@\"\n")
+        (dist / "bottle-cli").chmod(0o755)
+        manifest(dist)
+        self.env |= {"FOLIO_SSH": str(short / "ssh"), "FOLIO_RUNNER_DISTS": str(short / "dists"),
+                     "FAKE_SSH_LOG": str(short / "ssh.log"), "FAKE_REMOTES": str(self.remotes),
+                     "FAKE_KVM": str(short / "kvm")}
+        self.ok("runner", "add", "box", "--ssh", "box")
+
+    def there(self) -> dict:
+        return json.loads(self.there_state.read_text())
+
+    def test_a_thread_on_a_runner_is_made_there(self) -> None:
+        result = self.folio("new", "t", "--runner", "box")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.cli()["machines"], {})   # nothing here
+        machine = self.there()["machines"][f"{self.key}-t"]
+        self.assertEqual(machine["state"], "running")
+        self.assertEqual([b["tag"] for b in self.there()["builds"]],
+                         ["localhost/bottle/base:latest", "localhost/bottle/base:with-tools"])
+        # The repo's objects, from a mirror there brought up to date from here.
+        key = f"project-{hashlib.sha256(str(self.repo / '.git').encode()).hexdigest()[:8]}"
+        mirror = self.remotes / "box" / ".folio" / "git" / f"{key}.git"
+        self.assertEqual(git("--git-dir", str(mirror), "rev-parse", "main"), git("-C", str(self.repo), "rev-parse", "main"))
+        self.assertIn(f"{mirror}/objects:/mnt/objects/workspace:ro", machine["mounts"])
+        # Its routes to folio serve's sockets there, which folio serve forwards here.
+        socket = machine["network"]["routes"][0]["socket"]
+        self.assertTrue(socket.startswith(f"{self.remotes / 'box'}/.folio/services/"), socket)
+        self.assertEqual(self.record()["runner"], "box")
+        rows = {line.split()[0]: line.split()[2] for line in self.ok("list").splitlines()[1:]}
+        self.assertEqual(rows, {"t": "box"})
+
+    def test_a_runner_with_bottles_isnt_removed(self) -> None:
+        self.ok("new", "t", "--runner", "box")
+        result = self.folio("runner", "rm", "box")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"runner box has bottles: {self.key}-t; delete their threads first", result.stderr)
+        self.assertEqual(json.loads(self.ok("runner", "ls", "--json"))[0]["name"], "box")
+        self.ok("delete", "t", "--yes")
+        self.assertEqual(self.there()["machines"], {})
+        self.ok("runner", "rm", "box")

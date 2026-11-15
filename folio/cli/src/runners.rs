@@ -37,6 +37,7 @@ const SERVICES: &str = ".folio/services";
 pub const LIST_TIMEOUT: u32 = 3;
 
 /// Runner `name`: its machines, by their names there, and the bottle-cli that has them (cli).
+#[derive(Debug)]
 pub struct Runner {
     pub name: String,
     pub cli: Cli,
@@ -306,4 +307,133 @@ pub fn get(name: &str) -> Result<Runner, String> {
         ));
     }
     Ok(Runner::new(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir;
+    use serde_json::json;
+
+    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
+
+    fn machine<'a>(network: Option<Value>) -> Create<'a> {
+        Create {
+            name: "m",
+            image: "a",
+            mounts: vec![Mount {
+                source: "/repo/objects".into(),
+                target: "/mnt/objects/w".into(),
+            }],
+            env: BTreeMap::from([("A".into(), "1".into())]),
+            memory_mib: Some(512),
+            cpus: 0,
+            disk_gib: Some(50),
+            user: None,
+            workdir: None,
+            labels: BTreeMap::new(),
+            network,
+        }
+    }
+
+    #[test]
+    fn local_is_here_and_no_other_runner_yet() {
+        let _env = tempdir::isolated();
+        assert_eq!(get(LOCAL).unwrap().name, "local");
+        assert_eq!(get(LOCAL).unwrap().cli, Cli::Local);
+        assert_eq!(
+            get("box").unwrap_err(),
+            "no runner named 'box'; add one with `folio runner add box --ssh DESTINATION`"
+        );
+    }
+
+    #[test]
+    fn a_machine_here_routes_to_folio_serves_sockets_here_mounts_the_repo_and_has_every_core() {
+        let env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+        tempdir::set(
+            &env,
+            "FAKE_CLI_STATE",
+            tmp.path().join("state.json").to_str().unwrap(),
+        );
+        let policy = json!({"cache": [], "routes": [{"address": "192.0.2.1", "port": 80, "service": "host"}]});
+        let here = get(LOCAL).unwrap();
+        here.create(machine(Some(policy.clone()))).unwrap();
+        here.configure("m", &policy).unwrap();
+        let state: Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("state.json")).unwrap())
+                .unwrap();
+        let routed = json!([{"address": "192.0.2.1", "port": 80, "socket": daemon::services_sockets()["host"].display().to_string()}]);
+        assert_eq!(state["machines"]["m"]["network"]["routes"], routed);
+        // SAFETY: sysconf has no preconditions.
+        let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        assert_eq!(state["machines"]["m"]["cpus"], cores.to_string());
+        assert_eq!(
+            state["machines"]["m"]["mounts"],
+            json!(["/repo/objects:/mnt/objects/w:ro"])
+        );
+        let repo = tempdir::repo(&tmp.path().join("example"));
+        assert_eq!(
+            here.objects(&Repo::new("example", &repo)).unwrap(),
+            repo.join(".git/objects")
+        );
+    }
+
+    #[test]
+    fn a_runners_machines_are_its_bottle_clis_by_their_names_there_routed_to_sockets_forwarded_here()
+     {
+        let env = tempdir::isolated();
+        tempdir::set(&env, "FOLIO_CLI", "/opt/folio");
+        std::fs::write(
+            env.home().join("runners.json"),
+            r#"{"version": 1, "runners": {"box": {"ssh": "box", "home": "/home/me"}}}"#,
+        )
+        .unwrap();
+        let boxed = get("box").unwrap();
+        assert_eq!(
+            boxed.cli.command(&["images".into(), "--json".into()]),
+            ["/opt/folio", "on", "box", "images", "--json"]
+        );
+        let how = Exec {
+            user: Some("genie"),
+            tty: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            boxed.exec_command("m", &["bash".into(), "-l".into()], &how)[1..6],
+            ["on", "box", "exec", "m", "-t"]
+        );
+        let key = controller_key();
+        let there = boxed.services_sockets().unwrap();
+        let here = daemon::services_sockets();
+        assert_eq!(
+            there["host"],
+            format!("/home/me/.folio/services/{key}/host.sock")
+        );
+        assert_eq!(
+            there.keys().collect::<Vec<_>>(),
+            here.keys().collect::<Vec<_>>()
+        );
+        let forwards = boxed.forwards().unwrap();
+        assert!(
+            forwards.contains(&format!(
+                "/home/me/.folio/services/{key}/ssh.sock={}",
+                here["ssh"].display()
+            )),
+            "{forwards:?}"
+        );
+        tempdir::set(&env, "FOLIO_CLI", "");
+    }
+
+    #[test]
+    fn a_repos_mirror_on_a_runner_is_named_for_it_and_where_it_is() {
+        let key = mirror_key(std::path::Path::new("/src/app/.git"));
+        assert!(
+            key.starts_with("app-") && key.len() == "app-".len() + 8,
+            "{key}"
+        );
+        assert!(mirror_key(std::path::Path::new("/src/bare.git")).starts_with("bare-"));
+        assert_ne!(key, mirror_key(std::path::Path::new("/elsewhere/app/.git")));
+    }
 }
