@@ -1,10 +1,9 @@
-"""What bottle relies on bottle-cli for (see krun.py's docstring), against a real bottle-cli.
+"""What folio relies on bottle-cli for (folio-cli's bottle_cli.rs says), against a real bottle-cli.
 
-Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built (`cargo
-xtask dist`) or $BOTTLE_CLI naming one. Checks it through bottle's own krun
-module, with a stand-in for bottled's services socket, on one alpine machine made for
-the module and deleted after, its BOTTLE_HOME a temporary directory. Run it
-after changing bottle-cli, the agent or libkrun.
+Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built (`cargo xtask dist`: target/dist/bottle-cli)
+or $BOTTLE_CLI naming one. Checks it as folio drives it, word for word, with a stand-in for folio serve's services
+socket, on one alpine machine made for the module and deleted after, its BOTTLE_HOME a temporary directory. Run
+it after changing bottle-cli, the agent or libkrun.
 """
 
 import fcntl
@@ -22,13 +21,20 @@ import termios
 import threading
 import time
 import unittest
+import json
+import platform
 import uuid
 from pathlib import Path
 from unittest import mock
 
-from folio.bottle import daemon, host, images, krun, services
-from folio.bottle.errors import BottleError
-from tests.bottle.support import krun_present
+BOTTLE_CLI = os.environ.get("BOTTLE_CLI") or str(Path(__file__).resolve().parents[2] / "target" / "dist" / "bottle-cli")
+# Where a bottle reaches bottle.host, and folio serve's services, as folio's policy routes them.
+HOST, HOST_ADDRESS, SERVICES = "bottle.host", "192.0.2.1", ("host", "ssh", "credentials")
+# What bottle-cli says first on a routed connection: a PROXY protocol v2 header, and the fields in it of the name
+# the bottle asked for and its machine.
+SIGNATURE, PP2_TYPE_AUTHORITY, PP2_TYPE_MACHINE = b"\r\n\r\n\x00\r\nQUIT\n", 0x02, 0xE0
+# Where a build's directory is in its VM.
+MOUNT = "/run/bottle-build"
 
 STANDIN = "the-egress-proxy-holds-the-real-one"
 # An address the machine's policy refuses (private, no name allowed there), to see what a refused flow does.
@@ -59,7 +65,7 @@ class StandInService:
     def _answer(self, connection: socket.socket) -> None:
         with connection, connection.makefile("rb") as stream:
             fixed = stream.read(16)
-            if fixed[:12] != services.SIGNATURE:
+            if fixed[:12] != SIGNATURE:
                 return
             body = stream.read(int.from_bytes(fixed[14:16], "big"))
             address, port = socket.inet_ntoa(body[4:8]), int.from_bytes(body[10:12], "big")
@@ -69,14 +75,76 @@ class StandInService:
                 fields[body[at]] = body[at + 3:at + 3 + length].decode(errors="replace")
                 at += 3 + length
             first = stream.readline()
-            self.flows.append((address, port, fields.get(services.PP2_TYPE_AUTHORITY),
-                               fields.get(services.PP2_TYPE_MACHINE), first))
+            self.flows.append((address, port, fields.get(PP2_TYPE_AUTHORITY), fields.get(PP2_TYPE_MACHINE), first))
             body_out = b"answered by the service\n"
             connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body_out)
                                + body_out)
 
     def close(self) -> None:
         self.server.close()
+
+
+class Failed(Exception):
+    """bottle-cli's own failure: its message."""
+
+
+def cli(*args: str, input: str | None = None) -> str:
+    """bottle-cli with `args`, its stdout; Failed, with its message, if it fails."""
+    done = subprocess.run([BOTTLE_CLI, *args], input=input or "", capture_output=True, text=True)
+    if done.returncode != 0:
+        raise Failed(done.stderr.strip().splitlines()[-1].removeprefix("bottle-cli: ") if done.stderr.strip() else "")
+    return done.stdout
+
+
+def network(socket_path: Path) -> str:
+    """A machine's policy, as folio makes one: bottle.host and ssh to bottles routed to `socket_path`, nothing cached."""
+    return json.dumps({"allow_private": [], "cache": [], "routes": [
+        {"address": HOST_ADDRESS, "port": 80, "socket": str(socket_path)},
+        {"network": "192.0.2.0/24", "port": 22, "socket": str(socket_path)},
+    ]})
+
+
+def create(name: str, image: str, mounts: list[tuple[Path, str]], env: dict[str, str], cpus: int,
+           policy: str) -> None:
+    args = ["create", name, "--image", image, "--cpus", str(cpus)]
+    for source, target in mounts:
+        args += ["-v", f"{source}:{target}:ro"]
+    for key, value in env.items():
+        args += ["-e", f"{key}={value}"]
+    cli(*args, "--network", "-", input=policy)
+
+
+def delete(name: str) -> None:
+    if state(name) is not None:
+        cli("delete", name, "-f")
+
+
+def state(name: str) -> str | None:
+    try:
+        return json.loads(cli("status", name, "--json"))["state"]
+    except Failed as e:
+        if str(e).startswith("no machine "):
+            return None
+        raise
+
+
+def exec_args(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
+              env: dict[str, str] | None = None, tty: bool = False) -> list[str]:
+    args = ["exec", name, *(["-t"] if tty else [])]
+    args += ["-u", user] if user else []
+    args += ["-w", workdir] if workdir else []
+    for key, value in (env or {}).items():
+        args += ["-e", f"{key}={value}"]
+    return [*args, "--", *argv]
+
+
+def exec_(name: str, argv: list[str], user: str | None = None, workdir: str | None = None,
+          env: dict[str, str] | None = None) -> str:
+    return cli(*exec_args(name, argv, user, workdir, env))
+
+
+def exec_command(name: str, argv: list[str], tty: bool = False) -> list[str]:
+    return [BOTTLE_CLI, *exec_args(name, argv, tty=tty)]
 
 
 # Made by setUpModule, for every test here.
@@ -87,7 +155,7 @@ work = Path()
 
 def setUpModule() -> None:
     global machine, stand_in, work
-    if not krun_present():
+    if platform.system() != "Darwin" or not os.path.isfile(BOTTLE_CLI):
         raise unittest.SkipTest("needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
     work = Path(tempfile.mkdtemp(prefix="krun-contract-"))
     unittest.addModuleCleanup(shutil.rmtree, work, True)
@@ -100,32 +168,29 @@ def setUpModule() -> None:
     machine = f"contract-{uuid.uuid4().hex[:8]}"
     stand_in = StandInService(work / "services.sock")
     unittest.addModuleCleanup(stand_in.close)
-    alpine = subprocess.run([krun.binary(), "image", "pull", "alpine"], capture_output=True, text=True,
-                            check=True).stdout.split()[-1]
-    krun.create(machine, alpine, mounts=[krun.Mount(work / "ro", "/mnt/ro")],
-                env={"STANDIN": STANDIN}, memory_mib=None, cpus=2,
-                network=services.network([], [], sockets=dict.fromkeys(daemon.SERVICES, str(stand_in.path))))
-    unittest.addModuleCleanup(krun.delete, machine)
-    krun.start(machine)
-    krun.exec_(machine, ["sh", "-c", f"echo '{host.ADDRESS} {host.HOST}' >> /etc/hosts"], user="root")
+    alpine = cli("image", "pull", "alpine").split()[-1]
+    create(machine, alpine, [(work / "ro", "/mnt/ro")], {"STANDIN": STANDIN}, 2, network(stand_in.path))
+    unittest.addModuleCleanup(delete, machine)
+    cli("start", machine)
+    exec_(machine, ["sh", "-c", f"echo '{HOST_ADDRESS} {HOST}' >> /etc/hosts"], user="root")
 
 
 def run(argv: list[str], input: bytes | None = None, **kwargs) -> subprocess.CompletedProcess:
     """`argv` in the machine as bottle runs a command for a caller (bottle exec), bytes in and out."""
-    return subprocess.run(krun.exec_command(machine, argv, **kwargs), input=input, capture_output=True)
+    return subprocess.run(exec_command(machine, argv, **kwargs), input=input, capture_output=True)
 
 
 class DecidedEgressTest(unittest.TestCase):
     def test_bottle_host_is_routed_to_bottleds_socket_and_answered(self) -> None:
-        answer = krun.exec_(machine, ["wget", "-qO-", "-T", "5", "http://bottle.host/git/x"])
+        answer = exec_(machine, ["wget", "-qO-", "-T", "5", "http://bottle.host/git/x"])
         self.assertEqual(answer, "answered by the service\n")
         [(address, port, name, said_machine, first)] = [f for f in stand_in.flows if b"/git/x" in f[4]]
         # Where the bottle connected, the name it asked for, and the machine: what bottle-cli says first.
-        self.assertEqual((address, port, name, said_machine), (host.ADDRESS, 80, host.HOST, machine))
+        self.assertEqual((address, port, name, said_machine), (HOST_ADDRESS, 80, HOST, machine))
         self.assertTrue(first.startswith(b"GET /git/x "), first)
 
     def test_public_flows_go_direct(self) -> None:
-        krun.exec_(machine, ["wget", "-q", "-T", "10", "-O", "/dev/null", "https://example.com"])
+        exec_(machine, ["wget", "-q", "-T", "10", "-O", "/dev/null", "https://example.com"])
         self.assertFalse([f for f in stand_in.flows if f[1] == 443])  # nothing of bottled's
 
     def test_a_denied_flow_fails_at_once(self) -> None:
@@ -137,15 +202,15 @@ class DecidedEgressTest(unittest.TestCase):
 
 class ExecTest(unittest.TestCase):
     def test_as_a_user_in_a_directory(self) -> None:
-        self.assertEqual(krun.exec_(machine, ["id", "-un"], user="root").strip(), "root")
-        self.assertEqual(krun.exec_(machine, ["sh", "-c", 'echo "$(id -un) $(pwd)"'], user="nobody", workdir="/tmp"),
+        self.assertEqual(exec_(machine, ["id", "-un"], user="root").strip(), "root")
+        self.assertEqual(exec_(machine, ["sh", "-c", 'echo "$(id -un) $(pwd)"'], user="nobody", workdir="/tmp"),
                          "nobody /tmp\n")
 
     def test_the_machines_environment_reaches_every_user(self) -> None:
         for user in (None, "nobody"):
             with self.subTest(user=user):
-                self.assertEqual(krun.exec_(machine, ["sh", "-c", 'echo "$STANDIN"'], user=user), STANDIN + "\n")
-        self.assertEqual(krun.exec_(machine, ["sh", "-c", 'echo "$STANDIN"'], env={"STANDIN": "override"}),
+                self.assertEqual(exec_(machine, ["sh", "-c", 'echo "$STANDIN"'], user=user), STANDIN + "\n")
+        self.assertEqual(exec_(machine, ["sh", "-c", 'echo "$STANDIN"'], env={"STANDIN": "override"}),
                          "override\n")
 
     def test_the_commands_status_comes_back(self) -> None:
@@ -153,10 +218,10 @@ class ExecTest(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertEqual(run(["sh", "-c", f"exit {status}"]).returncode, status)
 
-    def test_bottle_clis_own_failures_are_bottle_errors(self) -> None:
-        self.assertIsNone(krun.state(f"no-such-{machine}"))
-        with self.assertRaises(BottleError):
-            krun.exec_(f"no-such-{machine}", ["true"])
+    def test_bottle_clis_own_failures_say_so(self) -> None:
+        self.assertIsNone(state(f"no-such-{machine}"))
+        with self.assertRaisesRegex(Failed, f"^no machine no-such-{machine}"):
+            exec_(f"no-such-{machine}", ["true"])
 
 
 class BytesTest(unittest.TestCase):
@@ -181,7 +246,7 @@ class TtyTest(unittest.TestCase):
         if pid == 0:  # the child, on the pty: never back into the test runner
             try:
                 fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
-                argv = krun.exec_command(machine, ["sh", "-c", "stty size; sleep 4; stty size"], tty=True)
+                argv = exec_command(machine, ["sh", "-c", "stty size; sleep 4; stty size"], tty=True)
                 os.execvp(argv[0], argv)
             finally:
                 os._exit(127)
@@ -209,7 +274,7 @@ class TtyTest(unittest.TestCase):
         if pid == 0:  # the child, on the pty: never back into the test runner
             try:
                 script = "trap 'echo interrupted; exit 3' INT; echo ready; while :; do sleep 0.1; done"
-                argv = krun.exec_command(machine, ["sh", "-c", script], tty=True)
+                argv = exec_command(machine, ["sh", "-c", script], tty=True)
                 os.execvp(argv[0], argv)
             finally:
                 os._exit(127)
@@ -238,25 +303,25 @@ class TtyTest(unittest.TestCase):
 
 class MountTest(unittest.TestCase):
     def test_a_read_only_mount_reads_and_refuses_writes(self) -> None:
-        self.assertEqual(krun.exec_(machine, ["cat", "/mnt/ro/file"]), "from the host\n")
+        self.assertEqual(exec_(machine, ["cat", "/mnt/ro/file"]), "from the host\n")
         self.assertNotEqual(run(["sh", "-c", "echo x > /mnt/ro/new"]).returncode, 0)
         self.assertFalse((work / "ro" / "new").exists())
 
 
 class RestartTest(unittest.TestCase):
     def test_stop_and_start_keep_the_disk(self) -> None:
-        krun.exec_(machine, ["sh", "-c", "echo still here > /root/marker"])
-        krun.stop(machine)
-        self.assertNotEqual(krun.state(machine), "running")
-        krun.start(machine)
-        self.assertEqual(krun.state(machine), "running")
-        self.assertEqual(krun.exec_(machine, ["cat", "/root/marker"]), "still here\n")
+        exec_(machine, ["sh", "-c", "echo still here > /root/marker"])
+        cli("stop", machine)
+        self.assertNotEqual(state(machine), "running")
+        cli("start", machine)
+        self.assertEqual(state(machine), "running")
+        self.assertEqual(exec_(machine, ["cat", "/root/marker"]), "still here\n")
 
 
 class BuildTest(unittest.TestCase):
-    """Bottle builds images with bottle-cli (images.build_recipe): a recipe's steps in a VM on a registry's image,
-    its directory mounted where they run, its connections decided; then a machine boots the stage it made, with
-    the environment the recipe set."""
+    """folio builds images with bottle-cli (builds.rs): a recipe's steps in a VM on a registry's image, its directory
+    mounted where they run, its connections decided; then a machine boots the stage it made, with the environment
+    the recipe set."""
 
     def test_a_built_image_boots(self) -> None:
         context = work / "probe"
@@ -264,18 +329,22 @@ class BuildTest(unittest.TestCase):
         (context / "install.sh").write_text("#!/bin/sh\nset -e\nwget -q -T 10 -O /dev/null https://example.com\n"
                                             "cat message > /hello\n")
         (context / "message").write_text("built by bottle-cli\n")
-        recipe = {"pull": "alpine", "steps": [{"env": {"PROBE": "set by the recipe"}},
-                                              {"run": images.interpreter(context / "install.sh"), "cwd": images.MOUNT}]}
-        disk = images.build_recipe(context, "localhost/bottle/probe:latest", "probe", recipe)
-        self.assertIsNotNone(images.built_labels("localhost/bottle/probe:latest"))
-        built = f"{machine}-built"
-        krun.create(built, str(disk), mounts=[], env={}, memory_mib=None, cpus=1,
-                    network=services.network([], [], sockets=dict.fromkeys(daemon.SERVICES, str(stand_in.path))))
-        self.addCleanup(krun.delete, built)
-        krun.start(built)
-        self.assertEqual(krun.exec_(built, ["cat", "/hello"]), "built by bottle-cli\n")
-        self.assertEqual(krun.exec_(built, ["sh", "-c", 'echo "$PROBE"']), "set by the recipe\n")
-
+        recipe = {"pull": "alpine", "mount": {"source": str(context), "target": MOUNT},
+                  "labels": {"bottle.inputs": "probe"},
+                  "steps": [{"env": {"PROBE": "set by the recipe"}}, {"run": ["/bin/sh", "./install.sh"], "cwd": MOUNT}]}
+        (work / "recipe.json").write_text(json.dumps(recipe))
+        (work / "build-network.json").write_text(json.dumps({"cache": []}))
+        disk = subprocess.run([BOTTLE_CLI, "image", "build", str(work / "recipe.json"), "--tag",
+                               "localhost/bottle/probe:latest", "--network", str(work / "build-network.json")],
+                              stdout=subprocess.PIPE, text=True, check=True).stdout.split()[-1]
+        built = [i for i in json.loads(cli("images", "--json")) if i["tag"] == "localhost/bottle/probe:latest"]
+        self.assertEqual(built[0]["labels"]["bottle.inputs"], "probe")
+        name = f"{machine}-built"
+        create(name, disk, [], {}, 1, network(stand_in.path))
+        self.addCleanup(delete, name)
+        cli("start", name)
+        self.assertEqual(exec_(name, ["cat", "/hello"]), "built by bottle-cli\n")
+        self.assertEqual(exec_(name, ["sh", "-c", 'echo "$PROBE"']), "set by the recipe\n")
 
 if __name__ == "__main__":
     unittest.main()
