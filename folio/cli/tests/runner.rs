@@ -13,12 +13,15 @@ use std::time::{Duration, Instant};
 
 /// ssh, as far as folio-cli uses it: options up to --, the destination, and a command, run here
 /// as if there, in its own home. A forward is a symlink there to the socket here, held while this
-/// runs. /dev/kvm is what $FAKE_KVM names.
+/// runs. /dev/kvm is what $FAKE_KVM names. "down" can't be reached.
 const FAKE_SSH: &str = r#"#!/usr/bin/env bash
 forwards=()
 while [ "$1" != "--" ]; do [ "$1" = -R ] && forwards+=("$2"); shift; done
 shift; destination=$1; shift
 echo "$destination $*" >> "$FAKE_LOG"
+if [ "$destination" = down ]; then
+  echo "ssh: connect to host down port 22: Connection refused" >&2; exit 255
+fi
 home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
 if [ ${#forwards[@]} -gt 0 ]; then
   for f in "${forwards[@]}"; do ln -sfn "${f#*:}" "${f%%:*}"; done
@@ -376,5 +379,70 @@ fn runners_bottle_cli_had_are_folios_until_folio_has_its_own() {
         !fs::read_to_string(f.dir.join("bottle/runners.json"))
             .unwrap()
             .contains("detached")
+    );
+}
+
+#[test]
+fn a_build_sends_its_context_with_the_recipe_and_builds_there() {
+    let f = Fixture::new("b");
+    // The runner's bottle-cli, for this: says what the build it was given mounts.
+    let dist = f.dist();
+    fs::write(
+        dist.join("bottle-cli"),
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"image build\") echo \"built from $(cat \"$(dirname \"$3\")/context/install.sh\")\" >&2; exit 1 ;;\n  *) echo '{}' ;;\nesac\n",
+    )
+    .unwrap();
+    manifest(&dist);
+    f.ok(&["runner", "add", "box", "--ssh", "box"]);
+    let context = f.dir.join("context");
+    fs::create_dir_all(&context).unwrap();
+    fs::write(context.join("install.sh"), "the context's install.sh").unwrap();
+    let recipe = f.dir.join("recipe.json");
+    fs::write(
+        &recipe,
+        format!(
+            r#"{{"pull": "debian", "mount": {{"source": "{}", "target": "/run/b"}}, "steps": []}}"#,
+            context.display()
+        ),
+    )
+    .unwrap();
+    let network = f.dir.join("network.json");
+    fs::write(&network, r#"{"cache": []}"#).unwrap();
+    let built = f.cli(&[
+        "on",
+        "box",
+        "image",
+        "build",
+        recipe.to_str().unwrap(),
+        "--tag",
+        "t",
+        "--network",
+        network.to_str().unwrap(),
+    ]);
+    assert!(!built.status.success());
+    let said = String::from_utf8_lossy(&built.stderr);
+    assert!(
+        said.contains("built from the context's install.sh"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_runner_that_cant_be_reached_says_so() {
+    let f = Fixture::new("u");
+    fs::create_dir_all(f.dir.join("folio")).unwrap();
+    fs::write(
+        f.dir.join("folio/runners.json"),
+        r#"{"version": 1, "runners": {"down": {"ssh": "down"}}}"#,
+    )
+    .unwrap();
+    let asked = f.cli(&["on", "down", "info", "--json"]);
+    assert!(!asked.status.success());
+    let said = String::from_utf8_lossy(&asked.stderr);
+    assert!(
+        said.contains(
+            "runner down is unreachable (ssh: connect to host down port 22: Connection refused"
+        ),
+        "{said}"
     );
 }
