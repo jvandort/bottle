@@ -451,7 +451,236 @@ pub fn images_cli(cli: &Cli, args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempdir;
     use serde_json::json;
+
+    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
+
+    /// bottle-cli, as tests/fake_bottle_cli.py stands in for it, and what it was asked, word for
+    /// word.
+    struct Fake {
+        _env: tempdir::Isolated,
+        tmp: tempdir::Dir,
+    }
+
+    impl Fake {
+        fn new() -> Fake {
+            let env = tempdir::isolated();
+            let tmp = tempdir::Dir::new();
+            tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+            tempdir::set(
+                &env,
+                "FAKE_CLI_STATE",
+                tmp.path().join("state.json").to_str().unwrap(),
+            );
+            Fake { _env: env, tmp }
+        }
+
+        fn state(&self) -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(self.tmp.path().join("state.json")).unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn last(&self) -> Value {
+            self.state()["calls"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone()
+        }
+    }
+
+    fn machine<'a>(name: &'a str, network: Option<Value>) -> Create<'a> {
+        Create {
+            name,
+            image: "/stages/b.ext4",
+            mounts: vec![],
+            env: BTreeMap::new(),
+            memory_mib: None,
+            cpus: 2,
+            disk_gib: None,
+            user: None,
+            workdir: None,
+            labels: BTreeMap::new(),
+            network,
+        }
+    }
+
+    #[test]
+    fn create_makes_a_machine_with_read_only_mounts_and_its_defaults() {
+        let fake = Fake::new();
+        create(
+            &Create {
+                mounts: vec![Mount {
+                    source: "/repo/.git/objects".into(),
+                    target: "/mnt/repo/objects".into(),
+                }],
+                env: BTreeMap::from([("TOKEN".into(), "stand-in".into())]),
+                memory_mib: Some(8192),
+                cpus: 32,
+                disk_gib: Some(50),
+                ..machine("bottle-b", None)
+            },
+            &Cli::Local,
+        )
+        .unwrap();
+        assert_eq!(
+            fake.last(),
+            json!([
+                "create",
+                "bottle-b",
+                "--image",
+                "/stages/b.ext4",
+                "--cpus",
+                "32",
+                "--mem",
+                "8192",
+                "--storage",
+                "50",
+                "-v",
+                "/repo/.git/objects:/mnt/repo/objects:ro",
+                "-e",
+                "TOKEN=stand-in"
+            ])
+        );
+        create(&machine("m", None), &Cli::Local).unwrap();
+        assert_eq!(
+            fake.last(),
+            json!(["create", "m", "--image", "/stages/b.ext4", "--cpus", "2"])
+        );
+        create(
+            &Create {
+                user: Some("genie"),
+                workdir: Some("/workspace"),
+                labels: BTreeMap::from([("thread".into(), "fix-it".into())]),
+                ..machine("fix-it", None)
+            },
+            &Cli::Local,
+        )
+        .unwrap();
+        let last = fake.last();
+        assert_eq!(
+            last.as_array().unwrap()[6..],
+            json!([
+                "--user",
+                "genie",
+                "--workdir",
+                "/workspace",
+                "--label",
+                "thread=fix-it"
+            ])
+            .as_array()
+            .unwrap()[..]
+        );
+    }
+
+    #[test]
+    fn a_network_policy_is_given_on_stdin_at_create_and_configure() {
+        let fake = Fake::new();
+        let policy = json!({"routes": [{"address": "192.0.2.1", "port": 80, "socket": "/s"}]});
+        create(&machine("b", Some(policy.clone())), &Cli::Local).unwrap();
+        assert_eq!(fake.state()["machines"]["b"]["network"], policy);
+        configure("b", &policy, &Cli::Local).unwrap();
+        assert_eq!(fake.last(), json!(["configure", "b", "--network", "-"]));
+        assert_eq!(fake.state()["machines"]["b"]["configured"], 1);
+    }
+
+    #[test]
+    fn a_machines_state_and_every_machines() {
+        let fake = Fake::new();
+        assert_eq!(state("m", &Cli::Local).unwrap(), None);
+        create(&machine("a", None), &Cli::Local).unwrap();
+        create(&machine("b", None), &Cli::Local).unwrap();
+        start("a", &Cli::Local).unwrap();
+        assert_eq!(fake.last(), json!(["start", "a"]));
+        assert_eq!(state("a", &Cli::Local).unwrap().as_deref(), Some("running"));
+        let all = states(&Cli::Local).unwrap();
+        assert_eq!(
+            all,
+            BTreeMap::from([
+                ("a".into(), "running".into()),
+                ("b".into(), "created".into())
+            ])
+        );
+        // Deleting one that isn't there asks its status, and deletes nothing.
+        delete("gone", &Cli::Local).unwrap();
+        assert_eq!(fake.last(), json!(["status", "gone", "--json"]));
+        delete("a", &Cli::Local).unwrap();
+        assert_eq!(fake.last(), json!(["delete", "a", "-f"]));
+    }
+
+    #[test]
+    fn an_exec_gives_its_command_stdin_and_returns_its_output_or_its_failure() {
+        let fake = Fake::new();
+        create(&machine("m", None), &Cli::Local).unwrap();
+        start("m", &Cli::Local).unwrap();
+        let how = Exec {
+            user: Some("genie"),
+            ..Default::default()
+        };
+        assert_eq!(
+            exec("m", &["cat".into()], &how, Some("in"), &Cli::Local).unwrap(),
+            "in"
+        );
+        assert_eq!(
+            fake.last(),
+            json!(["exec", "m", "-u", "genie", "--", "cat"])
+        );
+        let failed = exec(
+            "m",
+            &[
+                "sh".into(),
+                "-c".into(),
+                "echo nope: not found >&2; exit 127".into(),
+            ],
+            &how,
+            None,
+            &Cli::Local,
+        );
+        assert_eq!(failed.unwrap_err(), "nope: not found");
+        assert_eq!(
+            exec("gone", &["true".into()], &how, None, &Cli::Local).unwrap_err(),
+            "no machine gone"
+        );
+        assert_eq!(
+            exec_command(
+                "m",
+                &["claude".into()],
+                &Exec {
+                    tty: true,
+                    ..Default::default()
+                },
+                &Cli::Local
+            )[1..4],
+            ["exec", "m", "-t"]
+        );
+    }
+
+    #[test]
+    fn the_binary_is_bottle_clis_unless_named_and_a_runners_is_through_this_program() {
+        let env = tempdir::isolated();
+        tempdir::set(&env, "BOTTLE_CLI", "");
+        assert_eq!(binary(), "bottle-cli");
+        tempdir::set(&env, "BOTTLE_CLI", "/opt/bottle-cli");
+        assert_eq!(binary(), "/opt/bottle-cli");
+        tempdir::set(&env, "FOLIO_CLI", "/opt/folio");
+        assert_eq!(
+            Cli::runner("box").command(&["ls".into()]),
+            ["/opt/folio", "on", "box", "ls"]
+        );
+        let quick = Cli::Runner {
+            name: "box".into(),
+            connect_timeout: Some(3),
+        };
+        assert_eq!(
+            quick.command(&[]),
+            ["/opt/folio", "on", "--connect-timeout", "3", "box"]
+        );
+        tempdir::set(&env, "FOLIO_CLI", "");
+    }
 
     #[test]
     fn json_as_pythons_dumps_wrote_it() {

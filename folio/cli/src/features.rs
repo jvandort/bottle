@@ -203,8 +203,8 @@ const OPTION_KEYS: [&str; 5] = ["type", "default", "description", "proposals", "
 
 type Result<T> = std::result::Result<T, String>;
 
-/// Where a unit test has its features, on its own thread (tests run in parallel; the environment
-/// is the process's).
+// Where a unit test has its features, on its own thread (tests run in parallel; the environment is
+// the process's).
 #[cfg(test)]
 thread_local! {
     pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
