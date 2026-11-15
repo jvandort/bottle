@@ -37,6 +37,7 @@ pub struct Mount {
 }
 
 /// What a command run with pipes said, and how it ended.
+#[derive(Debug)]
 pub struct Ran {
     pub code: i32,
     pub stdout: String,
@@ -475,4 +476,153 @@ pub fn copy_commands(src: &(Cli, String), dst: &(Cli, String)) -> Vec<Vec<String
         src_cli.command(&strings(&["cp", src_spec, "-"])),
         dst_cli.command(&strings(&["cp", "-", dst_spec])),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir;
+    use serde_json::json;
+
+    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
+
+    /// A bottle, `b`, made in process (no stand-in engine) on the stand-in bottle-cli, folio serve
+    /// as the unit tests have it.
+    fn with_a_bottle() -> (tempdir::Isolated, tempdir::Dir) {
+        let env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+        tempdir::set(
+            &env,
+            "FAKE_CLI_STATE",
+            tmp.path().join("state.json").to_str().unwrap(),
+        );
+        crate::daemon::fake::reset();
+        let owner = env.home().join("repo-0").join("thread");
+        new(
+            &owner,
+            "b",
+            &json!({"features": [], "memory": "1G"}),
+            &[],
+            "",
+            None,
+            &[],
+        )
+        .unwrap();
+        (env, tmp)
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    fn execs(tmp: &tempdir::Dir) -> Vec<Value> {
+        let state: Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("state.json")).unwrap())
+                .unwrap();
+        state["execs"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn a_command_runs_as_the_bottles_exec_never_with_this_terminal_for_stdin() {
+        let (_env, tmp) = with_a_bottle();
+        // An exec hands stdin to the bottle, which would eat what's typed at folio's prompts.
+        assert_eq!(run("b", &argv(&["cat"]), None, true).unwrap().stdout, "");
+        assert_eq!(
+            run("b", &argv(&["cat"]), Some("data"), true)
+                .unwrap()
+                .stdout,
+            "data"
+        );
+        let last = execs(&tmp).last().unwrap().clone();
+        assert_eq!(
+            (last["user"].as_str(), last["workdir"].as_str()),
+            (Some("genie"), Some("/home/genie"))
+        );
+        assert_eq!(last["argv"], json!(["cat"]));
+    }
+
+    #[test]
+    fn a_bottles_failures_are_folios_saying_what_it_said() {
+        let (_env, _tmp) = with_a_bottle();
+        assert_eq!(
+            run("b", &argv(&["sh", "-c", "exit 1"]), None, true).unwrap_err(),
+            "`sh` in b failed (exit 1)"
+        );
+        // A failure the caller expects says nothing, and is the caller's to read.
+        assert_eq!(
+            run(
+                "b",
+                &argv(&["sh", "-c", "echo said >&2; exit 3"]),
+                None,
+                false
+            )
+            .unwrap()
+            .code,
+            3
+        );
+        assert!(
+            validate_spec(&json!({"features": "tools"}))
+                .unwrap_err()
+                .contains("features is a list")
+        );
+        assert_eq!(
+            status(&["gone".to_string()]).unwrap()["gone"],
+            json!({"name": "gone", "state": "missing"})
+        );
+    }
+
+    #[test]
+    fn a_bottles_record_is_where_its_owner_says_on_this_machine_its_remotes_its_default() {
+        let (env, tmp) = with_a_bottle();
+        assert!(env.home().join("repo-0/thread/bottles/b.json").exists());
+        let repo = tempdir::repo(&tmp.path().join("r"));
+        let owner = env.home().join("repo-0").join("other");
+        let mount = Mount {
+            path: "/workspace".into(),
+            repo,
+            checkout: None,
+            remotes: vec![],
+        };
+        new(
+            &owner,
+            "c",
+            &json!({"features": [], "memory": "1G"}),
+            &[mount],
+            "",
+            None,
+            &[],
+        )
+        .unwrap();
+        let row = status(&["c".to_string()]).unwrap().remove("c").unwrap();
+        assert_eq!(row["runner"], "local");
+        assert_eq!(
+            row["mounts"][0]["remotes"],
+            json!(["origin:fetch=upstream", "host:fetch=heads"])
+        );
+    }
+
+    #[test]
+    fn the_stand_in_is_asked_as_folios_tests_have_it() {
+        let env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        let log = tmp.path().join("log");
+        let script = tmp.path().join("bottle");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> {}\ncat\n[ \"$1\" != exec ] || [ \"$4\" != fail ] || exit 4\n", log.display())).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        tempdir::set(&env, "FOLIO_BOTTLE", script.to_str().unwrap());
+        assert_eq!(
+            run("b", &argv(&["cat"]), Some("in"), true).unwrap().stdout,
+            "in"
+        );
+        assert_eq!(
+            run("b", &argv(&["fail"]), None, true).unwrap_err(),
+            "`bottle exec b` failed (exit 4)"
+        );
+        touch("b").unwrap();
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(said, "exec b -- cat\nexec b -- fail\ntouch b\n");
+        tempdir::set(&env, "FOLIO_BOTTLE", "");
+    }
 }
