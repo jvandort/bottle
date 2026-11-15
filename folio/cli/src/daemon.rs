@@ -171,15 +171,27 @@ pub fn start() -> Result<bool, String> {
             start_daemon()?;
             Ok(true)
         }
-        _ => ensure_current(),
+        // On its way out: this one starts once it's gone. (Python's folio said nothing, and failed.)
+        Err(Failure::Closed) => {
+            wait_gone();
+            start_daemon()?;
+            Ok(true)
+        }
+        Err(Failure::Other(e)) => Err(e),
+        Ok(_) => ensure_current(),
     }
 }
 
-/// Stop folio serve and every egress it serves. False if it wasn't running.
+/// Stop folio serve and every egress it serves, and wait for it to be gone, so a command after
+/// finds none (Python's folio returned as it wound up). False if it wasn't running.
 pub fn stop() -> Result<bool, String> {
     let reply = match send(&json!({"op": "shutdown"}), DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => return Ok(false),
-        Err(Failure::Closed) => Value::Null,
+        // On its way out already.
+        Err(Failure::Closed) => {
+            wait_gone();
+            return Ok(true);
+        }
         Err(Failure::Other(e)) => return Err(e),
         Ok(reply) => reply,
     };
@@ -190,6 +202,7 @@ pub fn stop() -> Result<bool, String> {
             .unwrap_or("shutdown failed");
         return Err(format!("folio serve: {error}"));
     }
+    wait_gone();
     Ok(true)
 }
 
@@ -567,6 +580,21 @@ mod tests {
         run(None);
         assert!(start().unwrap()); // started: the one that was running is gone
         assert_eq!(calls(), ["ping", "ping", "shutdown", "start"]);
+    }
+
+    #[test]
+    fn starting_one_on_its_way_out_waits_it_out_and_starts_this_and_stopping_waits_till_its_gone() {
+        let _env = fresh(2);
+        run(Some(code_hash()));
+        STATE.lock().unwrap().code = None; // told to shut down by someone else: winding up
+        assert!(start().unwrap());
+        assert_eq!(calls(), ["closed", "closed", "start"]);
+        drop(_env);
+        let _env = fresh(2);
+        run(Some(code_hash()));
+        assert!(stop().unwrap());
+        assert_eq!(calls(), ["shutdown", "closed", "closed"]);
+        assert!(!control().exists());
     }
 
     #[test]

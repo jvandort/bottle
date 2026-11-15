@@ -281,10 +281,9 @@ class AuthTest(MachineTestCase):
         self.assertEqual(self.machine()["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "the-egress-proxy-holds-the-real-one")
 
 
-class RemoteRunnerTest(MachineTestCase):
-    """A thread on a runner: its repo mirrored there, its images built there, its machine made there, all through
-    ssh to it (a stand-in, running "there" here, in a home of its own) and the bottle-cli folio copies there (the
-    stand-in, with a state of its own)."""
+class RunnerTestCase(MachineTestCase):
+    """Runner box: ssh to it a stand-in (tests/fake_ssh), running "there" here, in a home of its own, and the
+    bottle-cli folio copies there the stand-in, with a state of its own."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -301,11 +300,21 @@ class RemoteRunnerTest(MachineTestCase):
         manifest(dist)
         self.env |= {"FOLIO_SSH": str(short / "ssh"), "FOLIO_RUNNER_DISTS": str(short / "dists"),
                      "FAKE_SSH_LOG": str(short / "ssh.log"), "FAKE_REMOTES": str(self.remotes),
-                     "FAKE_KVM": str(short / "kvm")}
+                     "FAKE_KVM": str(short / "kvm"), "FAKE_SSH_OFF": str(short / "off")}
+        self.off = short / "off"
         self.ok("runner", "add", "box", "--ssh", "box")
 
     def there(self) -> dict:
         return json.loads(self.there_state.read_text())
+
+    def set_there(self, name: str, **fields) -> None:
+        state = self.there()
+        state["machines"][f"{self.key}-{name}"].update(fields)
+        self.there_state.write_text(json.dumps(state))
+
+
+class RemoteRunnerTest(RunnerTestCase):
+    """A thread on a runner: its repo mirrored there, its images built there, its machine made there."""
 
     def test_a_thread_on_a_runner_is_made_there(self) -> None:
         result = self.folio("new", "t", "--runner", "box")

@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # ssh, as far as folio-cli uses it: options up to -- (logged, a line a time, in $FAKE_SSH_LOG.options), the
-# destination, and a command for its shell, run here as if at the destination, in a home of its own. "down" can't be
-# reached. The destination is Linux, on what this
+# destination, and a command for its shell, run here as if at the destination, in a home of its own; a forward (-R),
+# a symlink there to the socket here, held while it runs. "down" can't be reached; nor can anything, while
+# $FAKE_SSH_OFF names a file that's there (the runner's off). The destination is Linux, on what this
 # machine is, and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether it has KVM.
-options=()
-while [ "$1" != "--" ]; do options+=("$1"); shift; done
+options=() forwards=()
+while [ "$1" != "--" ]; do options+=("$1"); [ "$1" = -R ] && forwards+=("$2"); shift; done
 echo "${options[*]}" >> "$FAKE_SSH_LOG.options"
 shift
 destination=$1; shift
 echo "$destination $*" >> "$FAKE_SSH_LOG"
-if [ "$destination" = down ]; then
+if [ "$destination" = down ] || { [ -n "${FAKE_SSH_OFF:-}" ] && [ -e "$FAKE_SSH_OFF" ]; }; then
   echo "ssh: connect to host down port 22: Connection refused" >&2
   exit 255
+fi
+if [ ${#forwards[@]} -gt 0 ]; then
+  # A forward: a symlink there to the socket here, held while this runs.
+  for f in "${forwards[@]}"; do ln -sfn "${f#*:}" "${f%%:*}"; done
+  exec sleep 3600
 fi
 script="$*"; script=${script//\/dev\/kvm/$FAKE_KVM}
 home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
