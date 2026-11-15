@@ -34,10 +34,6 @@ class MachineTestCase(FolioTestCase):
         self.env |= {"PATH": f"{bin_}:{self.env['PATH']}", "FAKE_KEYCHAIN": str(self.tmp / "keychain")}
         self.addCleanup(lambda: self.folio("serve", "stop"))
 
-    def folio(self, *args: str, cwd: Path | None = None, input: str | None = None, **env: str):
-        return subprocess.run([str(FOLIO), *args], cwd=cwd or self.repo, env={**self.env, **env},
-                              capture_output=True, text=True, input=input or "")
-
     def cli(self) -> dict:
         if not self.cli_state.exists():
             return {"machines": {}, "images": [], "calls": [], "execs": [], "builds": []}

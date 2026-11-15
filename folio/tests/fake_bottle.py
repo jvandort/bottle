@@ -7,7 +7,8 @@ there. Each --mount is a real clone of its repo, beside the state file, and
 mount's is the bottle's "workspace") and $HOME a home of the bottle's own, which starts with the settings.json an image
 would give it; shpool is pretended, by keeping each bottle's sessions in the
 state. Failures look like
-bottle's: `bottle: error: ...` on stderr, exit 1.
+bottle's: `bottle: error: ...` on stderr, exit 1. An exec whose command has $FAKE_BOTTLE_GARBLE in it writes
+"not a tarball" instead; one with $FAKE_BOTTLE_FAIL_EXEC in it exits 3.
 """
 
 import json
@@ -123,6 +124,12 @@ def main(argv: list[str]) -> int:
                 fail(f"couldn't fully delete {name}")
             shutil.rmtree(Path(bottles.pop(name)["home"]).parent)
             save(state)
+        case ["exec", name, "--", *command] if os.environ.get("FAKE_BOTTLE_GARBLE") and \
+                os.environ["FAKE_BOTTLE_GARBLE"] in " ".join(command):
+            print("not a tarball", end="")
+        case ["exec", name, "--", *command] if os.environ.get("FAKE_BOTTLE_FAIL_EXEC") and \
+                os.environ["FAKE_BOTTLE_FAIL_EXEC"] in " ".join(command):
+            return 3
         case ["exec", name, "--", *command]:
             bottle = bottles[name]
             bottle["state"] = "running"  # as bottle exec does: it starts a stopped bottle

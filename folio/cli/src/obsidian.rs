@@ -17,7 +17,7 @@
 //! written, and Obsidian's vault manager is opened instead, with the path on the clipboard for "Open
 //! folder as vault".
 
-use std::io::{BufRead, IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -146,16 +146,8 @@ fn confirm(question: &str) -> bool {
     if !std::io::stdin().is_terminal() {
         return false;
     }
-    print!("{question} [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) | Err(_) => {
-            println!();
-            false
-        }
-        Ok(_) => matches!(line.trim().to_lowercase().as_str(), "y" | "yes"),
-    }
+    crate::cli::input(&format!("{question} [y/N] "))
+        .is_some_and(|answer| matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// `s`, quoted for a URL's query as Python's urllib.parse.quote has it.

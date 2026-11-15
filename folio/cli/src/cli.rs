@@ -514,18 +514,49 @@ fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// A line typed after `prompt`; None at the end of input.
-fn input(prompt: &str) -> Option<String> {
+/// A line typed after `prompt`; None at the end of input, or if Ctrl-C ends it (as Python's folio had
+/// it: a prompt interrupted is a prompt not answered).
+pub fn input(prompt: &str) -> Option<String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn interrupted(_: libc::c_int) {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    }
     print!("{prompt}");
     let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) | Err(_) => {
-            println!();
-            None
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    // SAFETY: sigaction with a handler that only sets an atomic; restored before this returns. No
+    // SA_RESTART, so a read it interrupts returns.
+    let previous = unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = interrupted as *const () as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        let mut previous: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGINT, &action, &mut previous);
+        previous
+    };
+    let mut line = Vec::new();
+    let answered = loop {
+        let mut byte = 0u8;
+        // SAFETY: reads one byte into `byte`.
+        let n = unsafe { libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) };
+        match n {
+            1 if byte == b'\n' => break true,
+            1 => line.push(byte),
+            0 => break false,
+            _ if INTERRUPTED.load(Ordering::Relaxed) => break false,
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+            _ => break false,
         }
-        Ok(_) => Some(line.trim_end_matches(['\n', '\r']).to_string()),
+    };
+    // SAFETY: putting back what was there.
+    unsafe { libc::sigaction(libc::SIGINT, &previous, std::ptr::null_mut()) };
+    if !answered {
+        println!();
+        return None;
     }
+    let line = String::from_utf8_lossy(&line).into_owned();
+    Some(line.trim_end_matches('\r').to_string())
 }
 
 /// The thread the command names (started, if it's new and the command may start one), else the

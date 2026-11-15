@@ -1,12 +1,8 @@
-import io
 import json
 import subprocess
-from contextlib import redirect_stdout
 from pathlib import Path
-from unittest import mock
 
-from folio import cli, repos, snapshots, store, threads
-from folio.errors import FolioError
+from tests import state as kept
 from tests.support import FolioTestCase, git
 
 
@@ -14,7 +10,7 @@ class PauseTestCase(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ok("new", "fix-it")
-        self.repo_ = repos.current(self.repo)
+        self.repo_ = kept.repo(self.repo)
         self.bottle = f"{self.repo_.key}-fix-it"
 
     @property
@@ -29,13 +25,10 @@ class PauseTestCase(FolioTestCase):
         return git("-C", str(self.workspace), *args)
 
     def slot(self) -> Path:
-        return store.current_slot(self.repo_.directory / "fix-it")
-
-    def thread(self) -> threads.Thread:
-        return threads.load(self.repo_, "fix-it")
+        return kept.current_slot(self.repo_.directory / "fix-it")
 
     def thread_state(self) -> str:
-        return threads.states(self.repo_, [self.thread()])["fix-it"]["state"]
+        return {line.split()[0]: line.split()[1] for line in self.ok("list").splitlines()[1:]}["fix-it"]
 
 
 class PauseAndResumeTest(PauseTestCase):
@@ -92,7 +85,7 @@ class PauseAndResumeTest(PauseTestCase):
 
     def test_a_resumed_thread_has_no_snapshot_left_to_go_stale(self) -> None:
         self.ok("pause", "fix-it")
-        self.assertTrue((self.slot() / snapshots.WORKSPACE_ARCHIVE).exists())
+        self.assertTrue((self.slot() / kept.WORKSPACE_ARCHIVE).exists())
         self.ok("shell", "fix-it")
         self.assertEqual(sorted(p.name for p in self.slot().iterdir()), ["thread.json"])
         self.assertEqual([p.name for p in self.slot().parent.iterdir() if p.name.startswith(".")], [])
@@ -102,7 +95,7 @@ class PauseAndResumeTest(PauseTestCase):
         self.ok("pause", "fix-it")
         execs = self.calls("exec")
         kill = next(i for i, c in enumerate(execs) if c[3:5] == ["kill", "-HUP"])
-        archive = next(i for i, c in enumerate(execs) if c[-1] == snapshots.workspace_out("/workspace"))
+        archive = next(i for i, c in enumerate(execs) if c[-1] == kept.workspace_out("/workspace"))
         self.assertLess(kill, archive)
 
     def test_a_resume_gets_the_repos_spec_as_it_is_now(self) -> None:
@@ -114,20 +107,19 @@ class PauseAndResumeTest(PauseTestCase):
     def test_a_resume_gets_the_advice_as_it_is_now(self) -> None:
         """Written afresh for the new bottle, not carried over from the old one."""
         self.ok("pause", "fix-it")
-        with mock.patch.object(threads, "advice", return_value="# Advice, as it is now\n"), \
-                mock.patch.object(threads.engine, "attach"):
-            threads.attach(self.repo_, self.thread(), threads.CLAUDE)
-        self.assertEqual(self.fake()["bottles"][self.bottle]["context"], "# Advice, as it is now\n")
+        # What it's told of the sidecar it's given meanwhile, say.
+        self.ok("sidecar", "configure", "fix-it", "--runner", "box")
+        self.ok("claude", "fix-it")
+        self.assertIn("## Your sidecar", self.fake()["bottles"][self.bottle]["context"])
 
     def test_list_shows_what_a_paused_thread_takes_up(self) -> None:
         self.ok("new", "other")
         (self.workspace / "big.bin").write_bytes(b"x" * 300_000)  # untracked: in the snapshot
         self.ok("pause", "fix-it")
-        size = sum((self.slot() / name).stat().st_size for name in threads.SNAPSHOT)
+        size = sum((self.slot() / name).stat().st_size for name in kept.SNAPSHOT)
         rows = {line.split()[0]: line.split() for line in self.ok("list").splitlines()[1:]}
-        self.assertEqual(rows["fix-it"][1:5], ["paused", "local", "-", cli._size(size)])
+        self.assertEqual(rows["fix-it"][1:5], ["paused", "local", "-", f"{size / 1024:.1f}K"])
         self.assertEqual(rows["other"][1:5], ["running", "local", "-", "-"])
-        self.assertEqual((cli._size(512), cli._size(2048), cli._size(5 << 20)), ("512B", "2.0K", "5.0M"))
 
     def test_pausing_twice_or_with_no_bottle(self) -> None:
         self.ok("pause", "fix-it")
@@ -151,16 +143,17 @@ class PauseAndResumeTest(PauseTestCase):
         bottle["mounts"] = [m for m in bottle["mounts"] if m["path"] != "/notes"]
         self.state.write_text(json.dumps(state))
         self.ok("pause", "fix-it")
-        self.assertFalse((self.slot() / snapshots.NOTES_ARCHIVE).exists())
+        self.assertFalse((self.slot() / kept.NOTES_ARCHIVE).exists())
         self.ok("shell", "fix-it")
         self.assertIn("/notes", [m["path"] for m in self.fake()["bottles"][self.bottle]["mounts"]])
 
 
 class FailureTest(PauseTestCase):
     def test_a_snapshot_that_doesnt_read_back_whole_deletes_nothing(self) -> None:
-        with mock.patch.object(snapshots, "CLAUDE_OUT", "printf 'not a tarball'"), \
-                self.assertRaisesRegex(FolioError, "claude.tar.gz came back incomplete"):
-            threads.pause(self.repo_, self.thread())
+        self.env["FAKE_BOTTLE_GARBLE"] = "cd \"$HOME/.claude\" && tar -czf"
+        result = self.folio("pause", "fix-it")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("claude.tar.gz came back incomplete", result.stderr)
         self.assertIn(self.bottle, self.fake()["bottles"])
         self.assertEqual(sorted(p.name for p in self.slot().iterdir()), ["thread.json"])
         self.assertEqual(self.thread_state(), "running")
@@ -168,9 +161,9 @@ class FailureTest(PauseTestCase):
 
     def test_a_resume_that_fails_leaves_it_paused(self) -> None:
         self.ok("pause", "fix-it")
-        with mock.patch.object(snapshots, "workspace_in", return_value="exit 3"), \
-                self.assertRaisesRegex(FolioError, "failed"):
-            threads.attach(self.repo_, self.thread(), threads.CLAUDE)
+        result = self.folio("claude", "fix-it", FAKE_BOTTLE_FAIL_EXEC="find . -mindepth 1 -maxdepth 1 -exec rm -rf")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed", result.stderr)
         self.assertNotIn(self.bottle, self.fake()["bottles"])
         self.assertEqual(self.thread_state(), "paused")
         self.ok("claude", "fix-it")  # and it resumes once whatever it was is fixed
@@ -185,9 +178,7 @@ class DeletePausedTest(PauseTestCase):
         self.ws("config", "core.fsmonitor", f"touch {marker}; false")
         self.ok("pause", "fix-it")
         marker.unlink(missing_ok=True)  # the fake bottle runs on this machine; in a real one this was in the VM
-        with mock.patch("folio.repos.current", return_value=self.repo_), mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch("builtins.input", return_value="no"), redirect_stdout(io.StringIO()):
-            cli.main(["delete", "fix-it"])
+        self.on_terminal(["delete", "fix-it"], [(b"Type fix-it to delete it: ", b"no\r")])
         self.assertFalse(marker.exists())
 
 
@@ -196,11 +187,9 @@ class DeletePausedTest(PauseTestCase):
         self.ws("commit", "-q", "--allow-empty", "-m", "never pushed")
         (self.workspace / "draft.txt").write_text("draft")
         self.ok("pause", "fix-it")
-        out = io.StringIO()
-        with mock.patch("folio.repos.current", return_value=self.repo_), mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch("builtins.input", return_value="fix-it"), redirect_stdout(out):
-            self.assertEqual(cli.main(["delete", "fix-it"]), 0)
-        self.assertIn("genie/fix-it-1: in the snapshot, never pushed", out.getvalue())
-        self.assertIn("uncommitted changes in the snapshot", out.getvalue())
+        code, out = self.on_terminal(["delete", "fix-it"], [(b"Type fix-it to delete it: ", b"fix-it\r")])
+        self.assertEqual(code, 0, out)
+        self.assertIn(b"genie/fix-it-1: in the snapshot, never pushed", out)
+        self.assertIn(b"uncommitted changes in the snapshot", out)
         self.assertEqual(self.calls("delete"), [["delete", self.bottle]])  # the pause's; none for the delete
         self.assertEqual(["notes"], [p.name for p in (self.repo_.directory / "fix-it").iterdir()])

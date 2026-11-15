@@ -59,15 +59,59 @@ class FolioTestCase(unittest.TestCase):
         git("-C", str(repo), "commit", "-q", "--allow-empty", "-m", message)
         return git("-C", str(repo), "rev-parse", "HEAD")
 
-    def folio(self, *args: str, cwd: Path | None = None, input: str | None = None) -> subprocess.CompletedProcess:
+    def folio(self, *args: str, cwd: Path | None = None, input: str | None = None,
+              **env: str) -> subprocess.CompletedProcess:
+        """folio with `args`, and `env` beside the test's."""
         # Never this terminal for stdin, even with no input: folio would think it had one to ask on, and wait.
-        return subprocess.run([str(FOLIO), *args], cwd=cwd or self.repo, env=self.env,
+        return subprocess.run([str(FOLIO), *args], cwd=cwd or self.repo, env={**self.env, **env},
                               capture_output=True, text=True, input=input or "")
 
     def ok(self, *args: str, cwd: Path | None = None) -> str:
         result = self.folio(*args, cwd=cwd)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
+
+    def on_terminal(self, args: list[str], steps: list[tuple[bytes, bytes]], cwd: Path | None = None,
+                    timeout: float = 20) -> tuple[int, bytes]:
+        """folio with `args` on a pseudo-terminal, as a person runs it: for each step, once what folio has written
+        has its first part, the second typed. Its exit status, and all it wrote."""
+        import pty
+        import select
+        import time
+
+        pid, fd = pty.fork()
+        if pid == 0:  # the child: folio, on the terminal
+            try:
+                os.chdir(cwd or self.repo)
+                os.execve(str(FOLIO), [str(FOLIO), *args],
+                          {**self.env, "TERM": "xterm-256color", "LINES": "24", "COLUMNS": "80"})
+            finally:
+                os._exit(127)
+        out, deadline, steps = b"", time.monotonic() + timeout, list(steps)
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        break  # the child has gone
+                    if not chunk:
+                        break
+                    out += chunk
+                while steps and steps[0][0] in out:
+                    for key in steps.pop(0)[1]:
+                        os.write(fd, bytes([key]))
+                        time.sleep(0.02)
+            _, status = os.waitpid(pid, os.WNOHANG) if time.monotonic() >= deadline else os.waitpid(pid, 0)
+        finally:
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+            os.close(fd)
+        return os.waitstatus_to_exitcode(status) if status else 0, out
 
     def fake(self) -> dict:
         """The fake bottle's state: its bottles, and every call it got."""

@@ -1,18 +1,15 @@
-import io
 import json
 import shlex
-from contextlib import redirect_stdout
 from pathlib import Path
-from unittest import mock
 
-from folio import cli, repos, store, threads
+from tests import state as kept
 from tests.support import FolioTestCase, git
 
 
 class NewTest(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.key = repos.current(self.repo).key
+        self.key = kept.repo(self.repo).key
 
     def test_creates_the_bottle_and_lane_and_runs_nothing(self) -> None:
         out = self.ok("new", "fix-it")
@@ -20,7 +17,7 @@ class NewTest(FolioTestCase):
         self.assertIn("Work in it with: folio claude fix-it", out)
         bottle = self.fake()["bottles"][f"{self.key}-fix-it"]
         [workspace, notes] = bottle["mounts"]
-        self.assertEqual((notes["path"], notes["repo"]), ("/notes", str(repos.current(self.repo).directory / "fix-it" / "notes")))
+        self.assertEqual((notes["path"], notes["repo"]), ("/notes", str(kept.repo(self.repo).directory / "fix-it" / "notes")))
         self.assertEqual((workspace["path"], workspace["repo"]), ("/workspace", str(self.repo)))
         self.assertEqual(workspace["remotes"], ["origin:fetch=upstream", "host:fetch=heads",
                                                 "agent:fetch=ns/fix-it-out,push=ns/fix-it-out", "user:fetch=ns/fix-it-in"])
@@ -46,7 +43,7 @@ class NewTest(FolioTestCase):
 
     def test_the_repos_spec_is_checked_and_saved_first(self) -> None:
         self.ok("new", "fix-it")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+        self.assertEqual(kept.repo(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
         self.assertEqual(self.fake()["bottles"][f"{self.key}-fix-it"]["spec"], {"features": ["tools"], "memory": "2G", "labels": {"thread": "fix-it"}})
 
     def test_refuses_a_bad_name_or_a_taken_one(self) -> None:
@@ -65,7 +62,7 @@ class NewTest(FolioTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("creating failed", result.stderr)
         self.assertEqual(git("-C", str(self.repo), "remote"), "")
-        self.assertEqual(threads.all_(repos.current(self.repo)), [])
+        self.assertIsNone(kept.current_slot(kept.repo(self.repo).directory / "fix-it"))   # no thread
 
     def test_the_same_thread_name_in_two_repos_gets_two_bottles(self) -> None:
         other = self.make_repo("elsewhere/project")
@@ -78,7 +75,7 @@ class AttachTest(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ok("new", "fix-it")
-        self.bottle = f"{repos.current(self.repo).key}-fix-it"
+        self.bottle = f"{kept.repo(self.repo).key}-fix-it"
 
     def set_bottle(self, **fields) -> None:
         state = self.fake()
@@ -87,8 +84,8 @@ class AttachTest(FolioTestCase):
 
     def test_claude_starts_the_session_once_and_attaches(self) -> None:
         self.ok("claude", "fix-it")
-        self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"], {"claude": threads.SESSIONS["claude"]})
-        self.assertEqual(self.calls("exec")[-1], ["exec", self.bottle, "--", "sh", "-c", threads.ATTACH, "attach", "claude", threads.session_command("claude"), "/workspace"])
+        self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"], {"claude": kept.SESSIONS["claude"]})
+        self.assertEqual(self.calls("exec")[-1], ["exec", self.bottle, "--", "sh", "-c", kept.ATTACH, "attach", "claude", kept.session_command("claude"), "/workspace"])
         self.ok("claude", "fix-it")
         sessions = [c for c in self.calls("exec") if c[6:8] == ["attach", "--background"]]
         self.assertEqual(len(sessions), 1)  # reattached, not started again
@@ -96,7 +93,7 @@ class AttachTest(FolioTestCase):
     def test_the_attach_can_start_its_session_again(self) -> None:
         # With the command the session was started with, for a session shpool can no longer show.
         self.ok("claude", "fix-it")
-        self.assertEqual(self.calls("exec")[-1][-2], shlex.join(["sh", "-c", threads.SESSIONS["claude"]]))
+        self.assertEqual(self.calls("exec")[-1][-2], shlex.join(["sh", "-c", kept.SESSIONS["claude"]]))
         started = next(c for c in self.calls("exec") if c[6:8] == ["attach", "--background"])
         self.assertEqual(started[-3:], ["--cmd", self.calls("exec")[-1][-2], "claude"])
 
@@ -107,7 +104,7 @@ class AttachTest(FolioTestCase):
 
     def test_a_session_whose_program_exited_is_started_again(self) -> None:
         # shpool still lists it, and attaching would get a plain shell instead.
-        self.set_bottle(sessions={"claude": threads.SESSIONS["claude"]}, exited=["claude"])
+        self.set_bottle(sessions={"claude": kept.SESSIONS["claude"]}, exited=["claude"])
         self.ok("claude", "fix-it")
         self.assertIn(["exec", self.bottle, "--", "shpool", "kill", "claude"], self.calls("exec"))
         self.assertEqual(len([c for c in self.calls("exec") if c[6:8] == ["attach", "--background"]]), 1)
@@ -117,7 +114,7 @@ class AttachTest(FolioTestCase):
         self.set_bottle(state="stopped", sessions={})  # the VM stopped, and its processes with it
         self.ok("claude", "fix-it")
         self.assertEqual(self.calls("start"), [["start", self.bottle]])
-        self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"], {"claude": threads.SESSIONS["claude"]})
+        self.assertEqual(self.fake()["bottles"][self.bottle]["sessions"], {"claude": kept.SESSIONS["claude"]})
 
     def test_a_missing_bottle_says_where_the_branches_are(self) -> None:
         state = self.fake()
@@ -134,8 +131,8 @@ class AttachTest(FolioTestCase):
             with self.subTest(session):
                 name = f"new-{session}"
                 self.assertIn(f"Started thread {name}", self.ok(session, name))
-                bottle = f"{repos.current(self.repo).key}-{name}"
-                self.assertEqual(self.calls("exec")[-1], ["exec", bottle, "--", "sh", "-c", threads.ATTACH, "attach", session, threads.session_command(session), "/workspace"])
+                bottle = f"{kept.repo(self.repo).key}-{name}"
+                self.assertEqual(self.calls("exec")[-1], ["exec", bottle, "--", "sh", "-c", kept.ATTACH, "attach", session, kept.session_command(session), "/workspace"])
         self.assertIn("new-claude", git("-C", str(self.repo), "remote"))
 
     def test_an_unknown_thread_with_a_bad_name_starts_nothing(self) -> None:
@@ -151,13 +148,13 @@ class AttachTest(FolioTestCase):
 
     def test_attaching_makes_it_most_recently_active_and_leaves_its_configuration(self) -> None:
         self.ok("new", "other")
-        repo = repos.current(self.repo)
-        recent = lambda: [t.name for t in threads.recent(repo, threads.all_(repo), threads.states(repo, threads.all_(repo)))]
+        repo = kept.repo(self.repo)
+        recent = lambda: [line.split()[0] for line in self.ok("list").splitlines()[1:]]
         self.assertEqual(recent(), ["other", "fix-it"])
-        slot = store.current_slot(threads.directory(repo, "fix-it"))
+        slot = kept.current_slot(repo.directory / "fix-it")
         self.ok("claude", "fix-it")
         self.assertEqual(recent(), ["fix-it", "other"])
-        self.assertEqual(store.current_slot(threads.directory(repo, "fix-it")), slot)   # thread.json not written
+        self.assertEqual(kept.current_slot(repo.directory / "fix-it"), slot)   # thread.json not written
 
     def test_list(self) -> None:
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", "HEAD")
@@ -173,20 +170,14 @@ class DeleteTest(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ok("new", "fix-it")
-        self.repo_ = repos.current(self.repo)
+        self.repo_ = kept.repo(self.repo)
         self.bottle = f"{self.repo_.key}-fix-it"
         self.workspace = Path(self.fake()["bottles"][self.bottle]["workspace"])
 
-    def delete_typing(self, typed: str | BaseException) -> tuple[int, str]:
-        out = io.StringIO()
-        answer = {"side_effect": typed} if isinstance(typed, BaseException) else {"return_value": typed}
-        with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("builtins.input", **answer), \
-                redirect_stdout(out):
-            code = cli.main(["delete", "fix-it"])
-        return code, out.getvalue()
-
-    def in_repo(self):
-        return mock.patch("folio.repos.current", return_value=self.repo_)
+    def delete_typing(self, typed: bytes) -> tuple[int, str]:
+        """`folio delete fix-it` on a terminal, `typed` typed when it asks for the name."""
+        code, out = self.on_terminal(["delete", "fix-it"], [(b"Type fix-it to delete it: ", typed)])
+        return code, out.decode().replace("\r\n", "\n")
 
     def test_yes_deletes_the_bottle_lane_remote_and_record(self) -> None:
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", "HEAD")
@@ -211,8 +202,7 @@ class DeleteTest(FolioTestCase):
         git("-C", str(self.workspace), "switch", "-q", "-c", "genie/fix-it-2")
         self.commit(self.workspace, "never pushed")
         (self.workspace / "notes.txt").write_text("draft")
-        with self.in_repo():
-            code, out = self.delete_typing("fix-it-not")
+        code, out = self.delete_typing(b"fix-it-not\r")
         self.assertEqual(code, 1)
         self.assertIn("genie/fix-it-1: pushed, but not on your branches or origin's", out)
         self.assertIn("genie/fix-it-2: in the bottle, never pushed", out)
@@ -220,22 +210,20 @@ class DeleteTest(FolioTestCase):
         self.assertNotIn("main:", out)
         self.assertIn("Not deleted.", out)
         self.assertIn(self.bottle, self.fake()["bottles"])
-        with self.in_repo():
-            code, out = self.delete_typing("fix-it")
+        code, out = self.delete_typing(b"fix-it\r")
         self.assertEqual(code, 0)
         self.assertEqual(self.fake()["bottles"], {})
 
     def test_no_answer_deletes_nothing(self) -> None:
-        for answer in (EOFError(), KeyboardInterrupt()):
-            with self.subTest(answer), self.in_repo():
+        for answer in (b"\x04", b"\x03"):   # the end of input; Ctrl-C
+            with self.subTest(answer):
                 code, out = self.delete_typing(answer)
             self.assertEqual(code, 1)
             self.assertIn("Not deleted.", out)
             self.assertIn(self.bottle, self.fake()["bottles"])
 
     def test_nothing_to_lose(self) -> None:
-        with self.in_repo():
-            code, out = self.delete_typing("fix-it")
+        code, out = self.delete_typing(b"fix-it\r")
         self.assertEqual(code, 0)
         self.assertIn("loses nothing", out)
 
@@ -243,8 +231,7 @@ class DeleteTest(FolioTestCase):
         state = self.fake()
         state["bottles"][self.bottle]["state"] = "stopped"
         self.state.write_text(json.dumps(state))
-        with self.in_repo():
-            self.delete_typing("fix-it")
+        self.delete_typing(b"fix-it\r")
         self.assertEqual(self.calls("start"), [["start", self.bottle]])
 
     def test_a_thread_whose_bottle_is_gone(self) -> None:
@@ -264,14 +251,14 @@ class ConfigureTest(FolioTestCase):
         self.assertEqual(self.ok("configure", "--feature", "jvm:version=17", "--memory", "8G"),
                          "Set project's spec: features [jvm:version=17, tools], memory 8G\n")
         self.ok("configure", "--feature", "jvm:version=21", "--feature", "claude")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
+        self.assertEqual(kept.repo(self.repo).spec(), {"features": ["claude", "jvm:version=21", "tools"], "memory": "8G"})
         self.ok("configure", "--no-feature", "jvm", "--feature", "python")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "python", "tools"], "memory": "8G"})
+        self.assertEqual(kept.repo(self.repo).spec(), {"features": ["claude", "python", "tools"], "memory": "8G"})
         self.assertEqual(self.ok("configure", "--disk", "50G"),
                          "Set project's spec: features [claude, python, tools], memory 8G, disk 50G\n")
         self.assertEqual(self.ok("configure"), "features [claude, python, tools], memory 8G, disk 50G\n")
         self.ok("configure", "--no-disk")
-        self.assertNotIn("disk", repos.current(self.repo).spec())
+        self.assertNotIn("disk", kept.repo(self.repo).spec())
 
     def test_a_feature_taken_away_is_named_alone_and_must_be_there(self) -> None:
         for args, error in ((("--no-feature", "tools:x=1"), "takes a feature's name alone, e.g. tools"),
@@ -286,7 +273,7 @@ class ConfigureTest(FolioTestCase):
         result = self.folio("configure", "--no-feature", "jvm")
         self.assertEqual(result.returncode, 1)
         self.assertIn("there's no feature jvm to take away (features: tools)", result.stderr)
-        self.assertIsNone(repos.current(self.repo).spec())
+        self.assertIsNone(kept.repo(self.repo).spec())
 
     def test_bottle_checks_it_before_its_saved(self) -> None:
         self.ok("configure", "--memory", "2G")
@@ -294,33 +281,33 @@ class ConfigureTest(FolioTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "bottle: error: no feature named 'nope'\n"
                                         "folio: error: `bottle spec validate` failed (exit 1)\n")
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+        self.assertEqual(kept.repo(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
 
     def test_what_folio_needs_cant_be_taken_away_and_a_spec_saved_without_it_has_it(self) -> None:
         result = self.folio("configure", "--no-feature", "tools")
         self.assertEqual(result.returncode, 1)
         self.assertIn("folio's threads need the tools feature: shpool, which every thread's sessions run in",
                       result.stderr)
-        self.assertIsNone(repos.current(self.repo).spec())
-        repos.current(self.repo).save_spec({"features": ["claude"], "memory": "4G"})
-        self.assertEqual(repos.current(self.repo).spec(), {"features": ["claude", "tools"], "memory": "4G"})
+        self.assertIsNone(kept.repo(self.repo).spec())
+        kept.repo(self.repo).save_spec({"features": ["claude"], "memory": "4G"})
+        self.assertEqual(kept.repo(self.repo).spec(), {"features": ["claude", "tools"], "memory": "4G"})
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
         self.assertEqual(bottle["spec"]["features"], ["claude", "tools"])
 
     def test_a_spec_saved_before_memory_was_needed_gets_the_default(self) -> None:
-        repo = repos.current(self.repo)
+        repo = kept.repo(self.repo)
         for saved in ({"features": ["tools"], "memory": "all"}, {"features": ["tools"]}):
             with self.subTest(saved):
                 repo.save_spec(saved)
-                self.assertEqual(repos.current(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
+                self.assertEqual(kept.repo(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
 
     def test_a_new_thread_gets_the_spec_and_its_name(self) -> None:
         self.ok("configure", "--feature", "claude")
         self.ok("new", "fix-it")
         [bottle] = self.fake()["bottles"].values()
         self.assertEqual(bottle["spec"], {"features": ["claude", "tools"], "memory": "2G", "labels": {"thread": "fix-it"}})
-        self.assertNotIn("labels", repos.current(self.repo).spec())
+        self.assertNotIn("labels", kept.repo(self.repo).spec())
 
     def test_a_threads_context_says_what_a_pause_keeps(self) -> None:
         self.ok("new", "fix-it")
@@ -334,7 +321,7 @@ class ConfigureTest(FolioTestCase):
     def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
         for key, value in (("permissions", ["message-any"]), ("labels", {"thread": "other"}), ("thread", "other")):
             with self.subTest(key):
-                repos.current(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
+                kept.repo(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
                 for args in (("new", f"t-{key}"), ("configure", "--memory", "4G")):
                     result = self.folio(*args)
                     self.assertNotEqual(result.returncode, 0)
@@ -356,7 +343,7 @@ class RunnerTest(FolioTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.key = repos.current(self.repo).key
+        self.key = kept.repo(self.repo).key
 
     def runner(self, thread: str) -> str:
         return self.fake()["bottles"][f"{self.key}-{thread}"]["runner"]
@@ -372,7 +359,7 @@ class RunnerTest(FolioTestCase):
         self.assertIn("desktop", self.ok("list").splitlines()[1].split())
 
     def test_the_repos_runner_is_its_threads_unless_one_has_its_own(self) -> None:
-        self.assertEqual(self.ok("configure", "--runner", "desktop"), f"Set {repos.current(self.repo).name}'s runner: desktop\n")
+        self.assertEqual(self.ok("configure", "--runner", "desktop"), f"Set {kept.repo(self.repo).name}'s runner: desktop\n")
         self.assertIn("runner desktop", self.ok("configure"))
         self.ok("new", "one")
         self.ok("new", "two", "--runner", "local")
@@ -380,7 +367,7 @@ class RunnerTest(FolioTestCase):
 
     def test_no_runner_is_this_machine_again(self) -> None:
         self.ok("configure", "--runner", "desktop")
-        self.assertEqual(self.ok("configure", "--no-runner"), f"Set {repos.current(self.repo).name}'s runner: this machine\n")
+        self.assertEqual(self.ok("configure", "--no-runner"), f"Set {kept.repo(self.repo).name}'s runner: this machine\n")
         self.assertNotIn("runner", self.ok("configure"))
         self.assertEqual(self.folio("configure", "--runner", "desktop", "--no-runner").returncode, 2)
 
