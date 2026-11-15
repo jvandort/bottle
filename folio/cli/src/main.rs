@@ -11,7 +11,7 @@
 //!     folio-cli runner attach NAME
 //!     folio-cli runner home NAME
 //!     folio-cli runner forward NAME THERE=HERE...
-//!     folio-cli on NAME COMMAND [ARG]...
+//!     folio-cli on [--connect-timeout SECONDS] NAME COMMAND [ARG]...
 //!     folio-cli features list|show|canonical|resolve|image|cached ...
 //!     folio-cli serve --control PATH --service NAME=PATH... [--restore]
 //!     folio-cli hook pre-receive|post-receive   (git's, for a push folio serve takes)
@@ -35,7 +35,7 @@ use std::process::ExitCode;
 const FAILED: u8 = 255;
 
 const USAGE: &str = "usage: folio-cli runner add|ls|rm|ssh|check|detach|attach|home|forward ... \
-                     | folio-cli on NAME COMMAND [ARG]... \
+                     | folio-cli on [--connect-timeout SECONDS] NAME COMMAND [ARG]... \
                      | folio-cli features list|show|canonical|resolve|image|cached ... \
                      | folio-cli serve --control PATH --service NAME=PATH... [--restore]";
 

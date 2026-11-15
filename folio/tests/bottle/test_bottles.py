@@ -66,6 +66,9 @@ class FakeSmolvm:
     def state(self, name, cli=None):
         return self.machines.get(name)
 
+    def states(self, cli=None):
+        return dict(self.machines)
+
     contract_output = ""
     standins: dict = {}
     intercepted: list = ["ci.test"]
@@ -117,7 +120,7 @@ class FakeSmolvm:
 
     def patch(self, test: unittest.TestCase) -> None:
         for module, names in (
-            (bottles.runners.krun, ("create", "configure", "start", "stop", "rename", "delete", "state", "exec_",
+            (bottles.runners.krun, ("create", "configure", "start", "stop", "rename", "delete", "state", "states", "exec_",
                                     "exec_command")),
             (daemon, ("bind", "release_egress")),
         ):
@@ -631,11 +634,11 @@ class UnreachableRunnerTest(BottleTestCase):
         self.asked = []
         off = mock.Mock()
 
-        def state(machine):
-            self.asked.append(machine)
+        def states():
+            self.asked.append("box")
             raise BottleError("runner box is unreachable (ssh: connect to host box port 22: Operation timed out)")
 
-        off.state.side_effect = state
+        off.states.side_effect = states
         real = bottles.runners.get
         patcher = mock.patch.object(bottles.runners, "get", side_effect=lambda name="local": off if name == "box" else real(name))
         patcher.start()
@@ -645,6 +648,14 @@ class UnreachableRunnerTest(BottleTestCase):
         self.assertEqual([(b.name, state) for b, state in bottles.list_all()],
                          [("here", "running"), ("there", "unreachable"), ("also-there", "unreachable")])
         self.assertEqual(len(self.asked), 1)
+
+    def test_a_bottle_here_is_told_of_without_asking_the_runner(self) -> None:
+        self.assertEqual([row["state"] for row in bottles.status(["here"])], ["running"])
+        self.assertEqual(self.asked, [])
+
+    def test_one_there_is_told_of_as_unreachable(self) -> None:
+        self.assertEqual([row["state"] for row in bottles.status(["there", "here"])], ["unreachable", "running"])
+        self.assertEqual(self.asked, ["box"])
 
 
 class ExecTest(BottleTestCase):

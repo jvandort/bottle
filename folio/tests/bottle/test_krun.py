@@ -91,6 +91,10 @@ class CommandTest(unittest.TestCase):
                                             {"name": "c", "state": "created"}])))
         self.assertEqual(krun.running(), ["a"])
 
+    def test_states_are_every_machines_by_name(self) -> None:
+        self.run_with(completed(json.dumps([{"name": "a", "state": "running"}, {"name": "b", "state": "stopped"}])))
+        self.assertEqual(krun.states(), {"a": "running", "b": "stopped"})
+
     def test_no_such_machine_has_no_state(self) -> None:
         self.run_with(completed(stderr="bottle-cli: no machine m\n", returncode=1))
         self.assertIsNone(krun.state("m"))
@@ -151,6 +155,7 @@ class KrunBottleTest(GitTestCase):
             (bottles.runners.krun, "create", create), (bottles.runners.krun, "start", start), (bottles.runners.krun, "stop", stop),
             (bottles.runners.krun, "delete", delete), (bottles.runners.krun, "exec_", exec_),
             (bottles.runners.krun, "state", lambda name, cli=None: self.machines.get(name)),
+            (bottles.runners.krun, "states", lambda cli=None: dict(self.machines)),
             (bottles.images, "built_labels", lambda tag, cli=None: {}),
             (daemon, "bind", bind),
             (daemon, "release_egress", lambda bottle: self.calls.append(f"release {bottle}")),

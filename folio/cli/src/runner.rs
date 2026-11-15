@@ -12,7 +12,8 @@
 //! is built for a runner when it's used.
 //!
 //! `on NAME COMMAND...` is bottle-cli's COMMAND there, its own machines by their own names: its
-//! output, exit status and (for `exec -t` and `shell`) terminal this process's. Paths in its
+//! output, exit status and (for `exec -t` and `shell`) terminal this process's; `--connect-timeout
+//! SECONDS` before NAME waits that long for it to answer, not 10 (a list asks briefly). Paths in its
 //! arguments are the runner's, but for `image build`'s recipe, what it mounts and its --network
 //! file, which are this machine's, sent with it. `runner ssh` is the shared connection, for a
 //! command there: what git's GIT_SSH_COMMAND can be, with a URL `NAME:PATH` and
@@ -58,7 +59,7 @@ const USAGE: &str = "runner add NAME --ssh DESTINATION | runner ls [--json] | ru
                      | runner ssh NAME [COMMAND]... | runner check NAME|DESTINATION [--json] \
                      | runner detach NAME [--offline] | runner attach NAME \
                      | runner home NAME | runner forward NAME THERE=HERE... \
-                     | on NAME COMMAND [ARG]...";
+                     | on [--connect-timeout SECONDS] NAME COMMAND [ARG]...";
 
 /// ssh's own failures, connecting or authenticating, exit 255.
 const SSH_FAILED: i32 = 255;
@@ -206,19 +207,26 @@ fn quote(s: &str) -> String {
 struct Runner {
     name: String,
     destination: String,
+    /// How long to wait for it to answer at all, in seconds.
+    connect_timeout: u32,
 }
 
 impl Runner {
+    fn new(name: impl Into<String>, destination: impl Into<String>) -> Runner {
+        Runner {
+            name: name.into(),
+            destination: destination.into(),
+            connect_timeout: CONNECT_TIMEOUT,
+        }
+    }
+
     /// Runner `name`, as added; refused if there's none. One detached is attached again, if it
     /// answers; refused if it doesn't.
     fn named(name: &str) -> io::Result<Runner> {
         let entry = registered()?
             .remove(name)
             .ok_or_else(|| other(format!("no runner named {name}")))?;
-        let runner = Runner {
-            name: name.to_string(),
-            destination: entry.ssh.clone(),
-        };
+        let runner = Runner::new(name, entry.ssh.clone());
         if entry.detached() {
             runner.found().map_err(|e| {
                 other(format!(
@@ -251,7 +259,7 @@ impl Runner {
         let mut ssh = Command::new(env::var_os("FOLIO_SSH").unwrap_or("ssh".into()));
         for option in [
             "BatchMode=yes".to_string(),
-            format!("ConnectTimeout={CONNECT_TIMEOUT}"),
+            format!("ConnectTimeout={}", self.connect_timeout),
         ]
         .iter()
         .chain(options)
@@ -547,10 +555,7 @@ fn add(name: &str, destination: &str) -> io::Result<()> {
             known.ssh
         )));
     }
-    let runner = Runner {
-        name: name.to_string(),
-        destination: destination.to_string(),
-    };
+    let runner = Runner::new(name, destination);
     let missing = runner.missing()?;
     if !missing.is_empty() {
         return Err(other(format!(
@@ -642,10 +647,7 @@ fn detach(name: &str, offline: bool) -> io::Result<()> {
     }
     let mut stopped = Vec::new();
     if !offline {
-        let runner = Runner {
-            name: name.to_string(),
-            destination: entry.ssh,
-        };
+        let runner = Runner::new(name, entry.ssh);
         let off = |e: io::Error| {
             other(format!(
                 "{e}; if it's off already, `folio runner detach {name} --offline`"
@@ -721,11 +723,7 @@ fn attach(name: &str) -> io::Result<()> {
         .iter()
         .filter_map(|m| m.as_str().map(String::from))
         .collect();
-    Runner {
-        name: name.to_string(),
-        destination: entry.ssh,
-    }
-    .found()?;
+    Runner::new(name, entry.ssh).found()?;
     mark(name, None)?;
     println!("Runner {name} attached");
     if !stopped.is_empty() {
@@ -739,10 +737,7 @@ fn attach(name: &str) -> io::Result<()> {
 
 /// What runner `target` (a name), or the machine at DESTINATION `target`, is and lacks.
 fn check(target: &str, json: bool) -> io::Result<()> {
-    let runner = Runner::named(target).unwrap_or_else(|_| Runner {
-        name: target.to_string(),
-        destination: target.to_string(),
-    });
+    let runner = Runner::named(target).unwrap_or_else(|_| Runner::new(target, target));
     let found = runner.found()?;
     let missing = runner.missing()?;
     let get = |k: &str| found.get(k).cloned().unwrap_or_default();
@@ -898,10 +893,19 @@ fn connect(
     }
 }
 
-/// `on NAME COMMAND [ARG]...`: bottle-cli's COMMAND on runner NAME (see the module's doc): its
-/// exit status.
+/// `on [--connect-timeout SECONDS] NAME COMMAND [ARG]...`: bottle-cli's COMMAND on runner NAME
+/// (see the module's doc): its exit status.
 pub fn on(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let Some(name) = args.next() else {
+    let mut name = args.next();
+    let mut connect_timeout = CONNECT_TIMEOUT;
+    if name.as_deref() == Some("--connect-timeout") {
+        match args.next().and_then(|s| s.parse().ok()) {
+            Some(seconds) if seconds > 0 => connect_timeout = seconds,
+            _ => return crate::usage_error(USAGE),
+        }
+        name = args.next();
+    }
+    let Some(name) = name else {
         return crate::usage_error(USAGE);
     };
     let args: Vec<String> = args.collect();
@@ -909,7 +913,8 @@ pub fn on(mut args: impl Iterator<Item = String>) -> ExitCode {
         return crate::usage_error(USAGE);
     }
     let run = || -> io::Result<ExitCode> {
-        let runner = Runner::named(&name)?;
+        let mut runner = Runner::named(&name)?;
+        runner.connect_timeout = connect_timeout;
         runner.ensure_dist()?;
         // Attached wholly, a terminal and all: this process becomes the ssh.
         let attached = args[0] == "shell" || (args[0] == "exec" && args.iter().any(|a| a == "-t"));

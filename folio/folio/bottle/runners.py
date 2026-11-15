@@ -34,6 +34,11 @@ MIRRORS = ".folio/git"
 SERVICES = ".folio/services"
 
 
+# How long a list waits for a runner to answer at all, in seconds: one that's off (turned off, but not detached)
+# doesn't refuse, it says nothing, so each one asked costs this.
+LIST_TIMEOUT = 3
+
+
 class Runner:
     """Runner `name`: its machines, by their names there, and the bottle-cli that has them (cli)."""
 
@@ -123,6 +128,12 @@ class Runner:
 
     def state(self, machine: str) -> str | None:
         return krun.state(machine, cli=self.cli)
+
+    def states(self) -> dict[str, str]:
+        """Every machine there, by name: its state. A runner is given LIST_TIMEOUT seconds to answer, not
+        the usual: a list doesn't wait long for one that's off."""
+        cli = self.cli if self.name == LOCAL else krun.RunnerCli(self.name, connect_timeout=LIST_TIMEOUT)
+        return krun.states(cli=cli)
 
     def running(self) -> list[str]:
         """Every machine running there, bottles' or not."""

@@ -9,11 +9,14 @@ from folio.bottle import images, runners
 from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, built_cli, built_folio_cli, manifest, register_runner
 
-# ssh, as far as folio-cli uses it: options up to --, the destination, and a command for its shell, run here as
-# if at the destination, in a home of its own. "down" can't be reached. The destination is Linux, on what this
+# ssh, as far as folio-cli uses it: options up to -- (logged, a line a time, in $FAKE_SSH_LOG.options), the
+# destination, and a command for its shell, run here as if at the destination, in a home of its own. "down" can't be
+# reached. The destination is Linux, on what this
 # machine is, and its shell sees $FAKE_KVM where it says /dev/kvm, so a test says whether it has KVM.
 FAKE_SSH = r"""#!/usr/bin/env bash
-while [ "$1" != "--" ]; do shift; done
+options=()
+while [ "$1" != "--" ]; do options+=("$1"); shift; done
+echo "${options[*]}" >> "$FAKE_SSH_LOG.options"
 shift
 destination=$1; shift
 echo "$destination $*" >> "$FAKE_SSH_LOG"
@@ -26,11 +29,12 @@ home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
 cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$script"
 """
 
-# bottle-cli there: every machine is running; it says where its home is; an image build says what it was sent.
+# bottle-cli there: every machine is running (and there's one, bottle-b); it says where its home is; an image build says what it was sent.
 FAKE_CLI = r"""#!/usr/bin/env bash
 case "$1 $2" in
   "info --json") printf '{"memory_mib": 4096, "cpus": 32, "home": "%s/.bottle"}' "$HOME" ;;
   "image build") echo "built from $(cat "$(dirname "$3")/context/install.sh")" >&2; exit 1 ;;
+  "ls --json") echo '[{"name": "bottle-b", "state": "running"}]' ;;
   *) echo '{"state": "running"}' ;;
 esac
 """
@@ -84,6 +88,15 @@ class RemoteRunnerTest(RemoteRunnerTestCase):
         self.assertEqual(self.box.state("bottle-b"), "running")
         self.assertIn('"$HOME/.bottle/dist/bottle-cli" status bottle-b --json', self.logged()[-1])
         self.assertEqual((self.box.memory_mib(), self.box.cpus()), (4096, 32))
+
+    def test_a_list_waits_a_little_for_it_to_answer_and_everything_else_as_usual(self) -> None:
+        self.assertEqual(self.box.states(), {"bottle-b": "running"})
+        self.assertIn("ConnectTimeout=3", self.options()[-1])
+        self.box.state("bottle-b")
+        self.assertIn("ConnectTimeout=10", self.options()[-1])
+
+    def options(self) -> list[str]:
+        return Path(f"{self.log}.options").read_text().splitlines()
 
     def test_a_build_sends_its_context_with_the_recipe_and_builds_there(self) -> None:
         context = self.tmp / "context"

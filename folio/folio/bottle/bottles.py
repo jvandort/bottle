@@ -41,6 +41,7 @@ import shlex
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, replace
 
@@ -721,27 +722,36 @@ UNREACHABLE = "unreachable"
 DETACHED = "detached"
 
 
-def list_all() -> list[tuple[Bottle, str]]:
-    """Every bottle with its current state: its machine's, unless setup never finished, or its runner can't be
-    reached or is detached."""
+def list_all(names: list[str] | None = None) -> list[tuple[Bottle, str]]:
+    """Every bottle with its current state, or just those `names`: its machine's, unless setup never finished, or
+    its runner can't be reached or is detached. Only the runners these bottles are on are asked, each once, all at
+    once: a runner that's off costs what it takes to say so (runners.LIST_TIMEOUT), however many there are."""
+    chosen = sorted((b for b in load().values() if names is None or b.name in names), key=lambda b: b.created)
+    asked = {b.runner for b in chosen if b.status == "ready"}
+    remote = runners.registered() if asked - {runners.LOCAL} else {}
+    detached = {name for name in asked if name != runners.LOCAL and remote.get(name, {}).get("detached")}
+
+    def states(name: str) -> dict[str, str] | None:
+        """The runner's machines' states; None if it can't be reached (this machine always can)."""
+        try:
+            return runners.get(name).states()
+        except BottleError:
+            if name == runners.LOCAL:
+                raise
+            return None
+
+    with ThreadPoolExecutor() as pool:
+        found = dict(zip(asked - detached, pool.map(states, asked - detached)))
     result = []
-    # A runner that couldn't be reached is asked once, not once a bottle.
-    unreachable: set[str] = set()
-    for bottle in sorted(load().values(), key=lambda b: b.created):
+    for bottle in chosen:
         if bottle.status != "ready":
             state = bottle.status
-        elif bottle.runner in unreachable:
-            state = UNREACHABLE
-        elif runners.is_detached(bottle.runner):
+        elif bottle.runner in detached:
             state = DETACHED
+        elif found[bottle.runner] is None:
+            state = UNREACHABLE
         else:
-            try:
-                state = runner_of(bottle).state(bottle.machine) or "missing"
-            except BottleError:
-                if bottle.runner == runners.LOCAL:
-                    raise
-                unreachable.add(bottle.runner)
-                state = UNREACHABLE
+            state = found[bottle.runner].get(bottle.machine, "missing")
         result.append((bottle, state))
     return result
 
@@ -752,7 +762,7 @@ def status(names: list[str] = ()) -> list[dict]:
     A name with no bottle gets a row with state "missing", so a caller can
     tell a bottle that's gone from a command that failed.
     """
-    states = {bottle.name: (bottle, state) for bottle, state in list_all()}
+    states = {bottle.name: (bottle, state) for bottle, state in list_all(list(names) or None)}
     rows = []
     for name in names or list(states):
         if name not in states:

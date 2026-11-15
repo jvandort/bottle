@@ -104,6 +104,11 @@ def running(cli: "Cli | None" = None) -> list[str]:
     return sorted(m["name"] for m in machines if m.get("state") not in ("stopped", "created"))
 
 
+def states(cli: "Cli | None" = None) -> dict[str, str]:
+    """Every machine there, whoever made them, by name: its state, as state says it."""
+    return {m["name"]: m["state"] for m in json.loads(_run("ls", "--json", cli=cli) or "[]")}
+
+
 def state(name: str, cli: "Cli | None" = None) -> str | None:
     """"running", "stopped", "created", or None if there's no such machine."""
     try:
@@ -185,11 +190,13 @@ class RunnerCli(Cli):
     names there, and the images it builds and keeps. An image build sends its recipe, what it mounts and its
     policy with it."""
 
-    def __init__(self, runner: str) -> None:
+    def __init__(self, runner: str, connect_timeout: int | None = None) -> None:
         self.runner = runner
+        self.connect_timeout = connect_timeout  # seconds; None: folio-cli's own
 
     def command(self, args: list[str], tty: bool | None = None) -> list[str]:
-        return [folio_binary(), "on", self.runner, *args]
+        timeout = ["--connect-timeout", str(self.connect_timeout)] if self.connect_timeout else []
+        return [folio_binary(), "on", *timeout, self.runner, *args]
 
     def missing(self) -> str:
         return f"no folio-cli at {folio_binary()}: install it, or set FOLIO_CLI (bin/folio does, from a checkout)"
