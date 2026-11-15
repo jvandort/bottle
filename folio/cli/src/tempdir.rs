@@ -63,7 +63,12 @@ pub fn isolated() -> Isolated {
         // SAFETY: under the lock every test that reads the environment holds.
         unsafe { std::env::set_var(key, value) };
     }
-    for key in ["FOLIO_BOTTLE", "FAKE_CLI_FAIL", "FAKE_CLI_MISSING"] {
+    for key in [
+        "FOLIO_BOTTLE",
+        "FOLIO_FEATURES",
+        "FAKE_CLI_FAIL",
+        "FAKE_CLI_MISSING",
+    ] {
         // SAFETY: as above.
         unsafe { std::env::remove_var(key) };
     }

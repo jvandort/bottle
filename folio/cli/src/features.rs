@@ -203,8 +203,19 @@ const OPTION_KEYS: [&str; 5] = ["type", "default", "description", "proposals", "
 
 type Result<T> = std::result::Result<T, String>;
 
+/// Where a unit test has its features, on its own thread (tests run in parallel; the environment
+/// is the process's).
+#[cfg(test)]
+thread_local! {
+    pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Where features are: $FOLIO_FEATURES, else this checkout's folio/features.
 pub fn dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DIR.with(|d| d.borrow().clone()) {
+        return dir;
+    }
     env::var_os("FOLIO_FEATURES")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../features")))

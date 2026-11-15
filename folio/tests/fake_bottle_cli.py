@@ -22,8 +22,10 @@ STATE = Path(os.environ["FAKE_CLI_STATE"])
 
 
 def load() -> dict:
-    return json.loads(STATE.read_text()) if STATE.exists() else {"machines": {}, "images": [], "calls": [],
-                                                                  "execs": [], "builds": []}
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    for key, empty in (("machines", {}), ("images", []), ("calls", []), ("execs", []), ("builds", [])):
+        state.setdefault(key, empty)
+    return state
 
 
 def save(state: dict) -> None:

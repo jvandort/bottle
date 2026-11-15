@@ -471,6 +471,55 @@ mod tests {
     }
 
     #[test]
+    fn images_are_named_in_full_and_base_is_the_base_feature_on_debian() {
+        assert_eq!(tag("base"), "localhost/bottle/base:latest");
+        let recipe = base().unwrap()["recipe"].clone();
+        assert_eq!(recipe["pull"], DEBIAN);
+        let steps = recipe["steps"].as_array().unwrap();
+        assert!(steps[0]["run"][2].as_str().unwrap().contains(
+            "install -y --no-install-recommends ca-certificates git openssh-server sudo tini"
+        ));
+        assert_eq!(steps[1]["run"], json!(["/bin/sh", "./install.sh"]));
+        assert_eq!(steps[2]["env"]["LANG"], "C.UTF-8");
+    }
+
+    #[test]
+    fn a_script_is_run_by_its_hash_bang_line() {
+        // A read-only mount can't be made executable.
+        let tmp = crate::tempdir::Dir::new();
+        let script = tmp.path().join("install.sh");
+        for (first, argv) in [
+            ("#!/bin/bash -e", &["/bin/bash", "-e"][..]),
+            ("#!/bin/sh", &["/bin/sh"]),
+            ("set -e", &["/bin/sh"]),
+        ] {
+            std::fs::write(&script, format!("{first}\n")).unwrap();
+            let mut expected: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
+            expected.push("./install.sh".into());
+            assert_eq!(interpreter(&script).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_trees_hash_tracks_names_contents_and_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = crate::tempdir::Dir::new();
+        let install = tmp.path().join("install.sh");
+        std::fs::write(&install, "apt-get install a\n").unwrap();
+        let before = tree_hash(tmp.path()).unwrap();
+        assert_eq!(tree_hash(tmp.path()).unwrap(), before);
+        std::fs::write(&install, "apt-get install b\n").unwrap();
+        let edited = tree_hash(tmp.path()).unwrap();
+        std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = tree_hash(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("extra"), "").unwrap();
+        let more = tree_hash(tmp.path()).unwrap();
+        let all: std::collections::BTreeSet<_> =
+            [before, edited, executable, more].into_iter().collect();
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
     fn quoted_as_pythons_shlex_quotes() {
         assert_eq!(quote("tools"), "tools");
         assert_eq!(quote(""), "''");
