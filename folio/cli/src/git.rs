@@ -17,8 +17,11 @@ pub fn git_input(args: &[&str], repo: &Path, input: &str) -> Result<String, Stri
 
 /// Whether git `args` (in `repo`) succeeds; what it says is dropped.
 pub fn succeeds(args: &[&str], repo: Option<&Path>) -> bool {
-    command(args, repo)
-        .stdin(Stdio::null())
+    let mut git = command(args, repo);
+    if crate::interrupt::guard(&mut git).is_err() {
+        return false;
+    }
+    git.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -28,11 +31,14 @@ pub fn succeeds(args: &[&str], repo: Option<&Path>) -> bool {
 /// git `args` in `repo`, its stripped stdout; its failure as bottle's modules said it: what git
 /// said, alone.
 pub fn bottle_git(args: &[&str], repo: Option<&Path>) -> Result<String, String> {
-    let output = command(args, repo)
+    let mut git = command(args, repo);
+    crate::interrupt::guard(&mut git)?;
+    let output = git
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("git: {e}"))?;
     if !output.status.success() {
+        crate::interrupt::check()?;
         let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if said.is_empty() {
             let mut line = vec!["git".to_string()];
@@ -63,7 +69,9 @@ fn run(
     input: Option<&str>,
     check: bool,
 ) -> Result<String, String> {
-    let mut child = command(args, repo)
+    let mut git = command(args, repo);
+    crate::interrupt::guard(&mut git)?;
+    let mut child = git
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -81,6 +89,7 @@ fn run(
         .wait_with_output()
         .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if check && !output.status.success() {
+        crate::interrupt::check()?;
         let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let why = if said.is_empty() {
             format!("exit {}", output.status.code().unwrap_or(-1))

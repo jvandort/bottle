@@ -135,7 +135,9 @@ impl Runner {
             home(&self.name)?,
             mirror_key(&git_dir)
         );
-        let made = Command::new(&ssh[0])
+        let mut made = Command::new(&ssh[0]);
+        crate::interrupt::guard(&mut made)?;
+        let made = made
             .args(&ssh[1..])
             .arg(format!(
                 "[ -d {q} ] || git init -q --bare {q}",
@@ -145,6 +147,7 @@ impl Runner {
             .output()
             .map_err(|e| e.to_string())?;
         if !made.status.success() {
+            crate::interrupt::check()?;
             return Err(format!(
                 "runner {}: {}",
                 self.name,
@@ -158,7 +161,9 @@ impl Runner {
             .map(|a| shell_quote(a))
             .collect::<Vec<_>>()
             .join(" ");
-        let pushed = Command::new("git")
+        let mut pushed = Command::new("git");
+        crate::interrupt::guard(&mut pushed)?;
+        let pushed = pushed
             .arg("-C")
             .arg(&git_dir)
             .args([
@@ -173,6 +178,7 @@ impl Runner {
             .output()
             .map_err(|e| e.to_string())?;
         if !pushed.status.success() {
+            crate::interrupt::check()?;
             return Err(format!(
                 "runner {}: copying {} there failed: {}",
                 self.name,

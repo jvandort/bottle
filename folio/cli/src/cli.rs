@@ -328,6 +328,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
         Ok(matches) => matches,
         Err(e) => e.exit(),
     };
+    crate::interrupt::install();
     let (name, sub) = matches.subcommand().unwrap();
     let outcome = match name {
         "new" => new(sub),
@@ -368,7 +369,8 @@ pub fn main(args: Vec<String>) -> ExitCode {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
             eprintln!("folio: error: {e}");
-            ExitCode::from(1)
+            // Interrupted, as a shell has it: 128 and the signal.
+            ExitCode::from(if crate::interrupt::happened() { 130 } else { 1 })
         }
     }
 }

@@ -105,7 +105,9 @@ impl Cli {
     /// bottle-cli with `args` there, its output read, `input` its stdin (else nothing).
     pub fn run(&self, args: &[String], input: Option<&[u8]>) -> Result<Output, String> {
         let command = self.command(args);
-        let mut child = Command::new(&command[0])
+        let mut cli = Command::new(&command[0]);
+        crate::interrupt::guard(&mut cli)?;
+        let mut child = cli
             .args(&command[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,7 +158,9 @@ impl Cli {
         .map(|s| s.to_string())
         .collect();
         let command = self.command(&args);
-        let output = Command::new(&command[0])
+        let mut cli = Command::new(&command[0]);
+        crate::interrupt::guard(&mut cli)?;
+        let output = cli
             .args(&command[1..])
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
@@ -195,6 +199,7 @@ pub fn error_of(stderr: &str) -> String {
 fn run(cli: &Cli, args: &[String], input: Option<&[u8]>) -> Result<String, Error> {
     let output = cli.run(args, input).map_err(Error::Failed)?;
     if !output.status.success() {
+        crate::interrupt::check().map_err(Error::Failed)?;
         let message = error_of(&String::from_utf8_lossy(&output.stderr));
         if message.starts_with("no machine ") {
             return Err(Error::Missing(message));

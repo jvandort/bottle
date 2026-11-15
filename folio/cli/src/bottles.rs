@@ -612,7 +612,7 @@ fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result
         Ok(bottle) => bottle,
         Err(failure) => {
             eprintln!("{}: creating failed, rolling back: {failure}", bottle.name);
-            if let Err(cleanup) = delete(&bottle.name) {
+            if let Err(cleanup) = crate::interrupt::shielded(|| delete(&bottle.name)) {
                 return Err(format!("{failure}; cleanup also failed: {cleanup}"));
             }
             return Err(failure);

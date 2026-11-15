@@ -107,6 +107,7 @@ fn strings(args: &[&str]) -> Vec<String> {
 /// `command`, its stdout read, `input` its stdin (else nothing); its stderr shown, or dropped
 /// without `check`.
 fn piped(command: &mut Command, input: Option<&str>, check: bool) -> Result<Ran, String> {
+    crate::interrupt::guard(command)?;
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -129,10 +130,25 @@ fn piped(command: &mut Command, input: Option<&str>, check: bool) -> Result<Ran,
         });
     }
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        crate::interrupt::check()?;
+    }
     Ok(Ran {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
     })
+}
+
+/// `command`, run to its end: its status. Refused if folio was interrupted, and interrupted if
+/// that's why it failed.
+fn status_of(command: &mut Command) -> Result<std::process::ExitStatus, String> {
+    crate::interrupt::guard(command)?;
+    let program = command.get_program().to_string_lossy().into_owned();
+    let status = command.status().map_err(|e| format!("{program}: {e}"))?;
+    if !status.success() {
+        crate::interrupt::check()?;
+    }
+    Ok(status)
 }
 
 /// The spec in canonical form, or the reason it isn't one.
@@ -207,10 +223,7 @@ pub fn new(
     for (host, bottle) in ssh {
         args.extend(["--ssh".into(), format!("{host}={bottle}")]);
     }
-    let status = Command::new(&program)
-        .args(&args)
-        .status()
-        .map_err(|e| format!("{program}: {e}"))?;
+    let status = status_of(Command::new(&program).args(&args))?;
     if !status.success() {
         return Err(stand_in_failed(
             &strings(&["new", name]),
@@ -246,11 +259,11 @@ pub fn start(name: &str) -> Result<(), String> {
     let Some(program) = stand_in() else {
         return bottles::start(name).map(|_| ());
     };
-    let status = Command::new(&program)
-        .args(["start", name])
-        .stdout(Stdio::null())
-        .status()
-        .map_err(|e| format!("{program}: {e}"))?;
+    let status = status_of(
+        Command::new(&program)
+            .args(["start", name])
+            .stdout(Stdio::null()),
+    )?;
     if !status.success() {
         return Err(stand_in_failed(
             &strings(&["start", name]),
@@ -316,12 +329,12 @@ pub fn run(name: &str, argv: &[String], input: Option<&str>, check: bool) -> Res
 pub fn run_to_file(name: &str, argv: &[String], path: &Path) -> Result<(), String> {
     let command = command(name, argv, false)?;
     let out = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let status = Command::new(&command[0])
-        .args(&command[1..])
-        .stdin(Stdio::null())
-        .stdout(out)
-        .status()
-        .map_err(|e| format!("{}: {e}", command[0]))?;
+    let status = status_of(
+        Command::new(&command[0])
+            .args(&command[1..])
+            .stdin(Stdio::null())
+            .stdout(out),
+    )?;
     if !status.success() {
         return Err(failed(name, argv, status.code().unwrap_or(-1)));
     }
@@ -332,12 +345,12 @@ pub fn run_to_file(name: &str, argv: &[String], path: &Path) -> Result<(), Strin
 pub fn run_from_file(name: &str, argv: &[String], path: &Path) -> Result<(), String> {
     let command = command(name, argv, false)?;
     let input = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let status = Command::new(&command[0])
-        .args(&command[1..])
-        .stdin(input)
-        .stdout(Stdio::null())
-        .status()
-        .map_err(|e| format!("{}: {e}", command[0]))?;
+    let status = status_of(
+        Command::new(&command[0])
+            .args(&command[1..])
+            .stdin(input)
+            .stdout(Stdio::null()),
+    )?;
     if !status.success() {
         return Err(failed(name, argv, status.code().unwrap_or(-1)));
     }
@@ -363,6 +376,7 @@ pub fn attach(
     // Flushed: what's buffered goes with this process.
     let _ = std::io::stdout().flush();
     let command = command(name, argv, tty)?;
+    crate::interrupt::check()?;
     let error = Command::new(&command[0]).args(&command[1..]).exec();
     Err(format!("{}: {error}", command[0]))
 }
@@ -397,14 +411,18 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
                 )?;
                 (ran.code, 0, ran.stdout)
             } else {
-                let mut sender = Command::new(&commands[0][0])
+                let mut sender = Command::new(&commands[0][0]);
+                crate::interrupt::guard(&mut sender)?;
+                let mut sender = sender
                     .args(&commands[0][1..])
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .spawn()
                     .map_err(|e| format!("{}: {e}", commands[0][0]))?;
                 let pipe = sender.stdout.take().unwrap();
-                let receiver = Command::new(&commands[1][0])
+                let mut receiver = Command::new(&commands[1][0]);
+                crate::interrupt::guard(&mut receiver)?;
+                let receiver = receiver
                     .args(&commands[1][1..])
                     .stdin(pipe)
                     .stdout(Stdio::piped())
@@ -422,6 +440,7 @@ pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<Stri
                 )
             };
             if code != 0 || sent != 0 {
+                crate::interrupt::check()?;
                 return Err("copying failed".into()); // bottle-cli has said why
             }
             stdout

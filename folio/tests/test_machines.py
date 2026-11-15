@@ -14,6 +14,7 @@ from pathlib import Path
 import unittest
 
 from tests.bottle.support import bridge, manifest
+from tests import state as kept
 from tests.support import FOLIO, FolioTestCase, git
 
 FAKE_CLI = Path(__file__).resolve().parent / "fake_bottle_cli.py"
@@ -163,6 +164,47 @@ class RollbackTest(MachineTestCase):
         result = self.folio("new", "t", FAKE_CLI_MISSING="git is installed")
         self.assertEqual(result.returncode, 1)
         self.assertIn("base+tools doesn't meet the bottle contract: git is installed", result.stderr)
+
+
+class InterruptTest(MachineTestCase):
+    """Ctrl-C is a failure like any other: what was being made is undone."""
+
+    def interrupted(self, slow: str, again_at: str | None = None) -> tuple[int, str]:
+        """`folio new t`, interrupted as a terminal does (Ctrl-C to folio and what it runs, its process group) while
+        the stand-in is busy at `slow`; and again, once it's at `again_at`. Its exit status and stderr."""
+        import signal
+        import time
+
+        folio = subprocess.Popen([str(FOLIO), "new", "t"], cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env={**self.env, "FAKE_CLI_SLOW": slow, "FAKE_CLI_SLOW_SECONDS": "3"}, text=True,
+                                 start_new_session=True)
+        for step in (slow.split(",")[0], again_at):
+            if step is None:
+                continue
+            deadline = time.monotonic() + 30
+            while not self.calls(step) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.3)   # the stand-in, asleep
+            os.killpg(folio.pid, signal.SIGINT)
+        _, err = folio.communicate(timeout=30)
+        return folio.returncode, err
+
+    def test_an_interrupted_bottle_is_rolled_back(self) -> None:
+        returncode, err = self.interrupted("start")
+        self.assertEqual(returncode, 130, err)
+        self.assertIn("creating failed, rolling back: interrupted", err)
+        self.assertTrue(err.endswith("folio: error: interrupted\n"), err)
+        self.assertEqual(self.cli()["machines"], {})
+        self.assertFalse((self.home / self.key / "t" / "bottles").exists())
+        self.assertIsNone(kept.current_slot(self.home / self.key / "t"))
+        self.assertEqual(git("-C", str(self.repo), "remote"), "")
+
+    def test_its_rollback_isnt_interrupted(self) -> None:
+        returncode, err = self.interrupted("start,delete", again_at="delete")
+        self.assertEqual(returncode, 130, err)
+        self.assertNotIn("cleanup also failed", err)
+        self.assertEqual(self.cli()["machines"], {})
+        self.assertFalse((self.home / self.key / "t" / "bottles").exists())
 
 
 class LifecycleTest(MachineTestCase):

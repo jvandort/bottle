@@ -25,6 +25,7 @@ mod engine;
 mod features;
 mod git;
 mod images;
+mod interrupt;
 mod lanes;
 mod notes;
 mod obsidian;

@@ -390,7 +390,7 @@ pub fn create(
         save(repo, &thread, Vec::new())
     })();
     if let Err(e) = registered {
-        undo(repo, &thread);
+        crate::interrupt::shielded(|| undo(repo, &thread));
         return Err(e);
     }
     Ok(thread)
@@ -487,7 +487,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
     );
     if let Err(e) = made {
         if thread.sidecar.is_some()
-            && let Err(cleanup) = delete_sidecar(thread)
+            && let Err(cleanup) = crate::interrupt::shielded(|| delete_sidecar(thread))
         {
             // What went wrong is the bottle's: this is said beside it.
             eprintln!("folio: {cleanup}");
@@ -902,8 +902,12 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
     })();
     let _ = fs::remove_dir_all(&staging);
     saved?;
-    engine::delete(&thread.bottle)?;
-    delete_sidecar(thread)?;
+    // Snapshotted: the pause is made, and what's left of it is done, interrupted or not.
+    crate::interrupt::shielded(|| -> Result<(), String> {
+        engine::delete(&thread.bottle)?;
+        delete_sidecar(thread)?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1000,8 +1004,10 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
         Ok(())
     })();
     if let Err(e) = restored {
-        let _ = engine::delete(&thread.bottle);
-        let _ = delete_sidecar(thread);
+        crate::interrupt::shielded(|| {
+            let _ = engine::delete(&thread.bottle);
+            let _ = delete_sidecar(thread);
+        });
         return Err(e);
     }
     Ok(())

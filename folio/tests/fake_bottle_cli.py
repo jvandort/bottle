@@ -8,6 +8,7 @@ name what $FAKE_CLI_MISSING says is missing), a key script says a key, and anyth
 of the machine's own, with its home there. An image build records its recipe and policy, and the image is then
 built, with the recipe's labels.
 
+$FAKE_CLI_SLOW makes steps take 30 seconds ($FAKE_CLI_SLOW_SECONDS) (a comma-separated list, as $FAKE_CLI_FAIL's), to be interrupted.
 $FAKE_CLI_FAIL makes steps fail (a comma-separated list), as bottle-cli would: create, configure, start, delete, build, or an exec's
 contract, hosts, mkdir or workspace. Failures look like bottle-cli's: `bottle-cli: ...` on stderr, exit 1.
 """
@@ -35,6 +36,13 @@ def save(state: dict) -> None:
 def fail(message: str) -> None:
     print(f"bottle-cli: {message}", file=sys.stderr)
     sys.exit(1)
+
+
+def slow(step: str) -> None:
+    """A step $FAKE_CLI_SLOW names takes its time: long enough to be interrupted."""
+    if step in os.environ.get("FAKE_CLI_SLOW", "").split(","):
+        import time
+        time.sleep(float(os.environ.get("FAKE_CLI_SLOW_SECONDS", "30")))
 
 
 def failing(step: str) -> bool:
@@ -123,6 +131,7 @@ def main(argv: list[str]) -> int:
             machines[name]["configured"] = machines[name].get("configured", 0) + 1
             save(state)
         case ["start", name]:
+            slow("start")
             if failing("start"):
                 fail("start failed")
             if name not in machines:
@@ -136,6 +145,7 @@ def main(argv: list[str]) -> int:
             machines[name]["state"] = "stopped"
             save(state)
         case ["delete", name, "-f"]:
+            slow("delete")
             if failing("delete"):
                 fail("machine busy")
             machines.pop(name, None)
