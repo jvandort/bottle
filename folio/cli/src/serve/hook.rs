@@ -72,7 +72,7 @@ fn write_hooks(dir: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     for hook in ["pre-receive", "post-receive"] {
         let script = format!(
-            "#!/bin/sh\n# folio serve's, for a push from a bottle (folio-cli's serve/hook.rs).\nexec '{}' hook {hook}\n",
+            "#!/bin/sh\n# folio serve's, for a push from a bottle (folio's serve/hook.rs).\nexec '{}' hook {hook}\n",
             me.replace('\'', r"'\''")
         );
         // Whole or not at all: a push may be running the one there.

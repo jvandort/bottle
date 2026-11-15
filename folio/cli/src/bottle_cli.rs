@@ -45,7 +45,7 @@ pub fn me() -> String {
     }
     std::env::current_exe()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "folio-cli".into())
+        .unwrap_or_else(|_| "folio".into())
 }
 
 /// A failure bottle-cli said: no such machine, or anything else.
@@ -98,10 +98,7 @@ impl Cli {
                 "no bottle-cli at {}: install it, or set BOTTLE_CLI (bin/folio does, from a checkout)",
                 binary()
             ),
-            Cli::Runner { .. } => format!(
-                "no folio-cli at {}: install it, or set FOLIO_CLI (bin/folio does, from a checkout)",
-                me()
-            ),
+            Cli::Runner { .. } => format!("no folio at {}: install it, or set FOLIO_CLI", me()),
         }
     }
 
@@ -182,11 +179,11 @@ fn tempdir() -> Result<PathBuf, String> {
 }
 
 /// bottle-cli's or this program's message, from the last line either wrote on stderr
-/// ("bottle-cli: ...", "folio-cli: "), else stderr as it is.
+/// ("bottle-cli: ...", "folio: error: ..."), else stderr as it is.
 pub fn error_of(stderr: &str) -> String {
     let stderr = stderr.trim();
     for line in stderr.lines().rev() {
-        for program in ["bottle-cli: ", "folio-cli: "] {
+        for program in ["bottle-cli: ", "folio: error: "] {
             if let Some(message) = line.strip_prefix(program) {
                 return message.to_string();
             }

@@ -25,7 +25,7 @@ impl Serve {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let log = fs::File::create(dir.join("serve.log")).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_folio-cli"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_folio"));
         command
             .arg("serve")
             .arg("--control")

@@ -1,8 +1,7 @@
 #!/bin/sh
-# The dev shim: folio from this checkout, with bottle-cli and folio-cli from it, each built first if
-# its sources have changed since it was (bin/bottle-build, with every runner's; bin/folio-build),
-# unless $BOTTLE_CLI or $FOLIO_CLI names one. folio's Python builds nothing. $FOLIO_PYTHON, if it's
-# set, is the Python it runs on.
+# The dev shim: folio from this checkout, with bottle-cli from it, each built first if its sources
+# have changed since it was (bin/folio-build; bin/bottle-build, with every runner's), unless
+# $FOLIO_CLI or $BOTTLE_CLI names one.
 set -eu
 # The checkout this script is in, through any symlinks to it (one on PATH, say).
 self=$0
@@ -15,9 +14,8 @@ if [ -z "${BOTTLE_CLI:-}" ]; then
   "$root/bin/bottle-build"
   export BOTTLE_CLI="$root/target/dist/bottle-cli"
 fi
-if [ -z "${FOLIO_CLI:-}" ]; then
-  "$root/bin/folio-build"
-  export FOLIO_CLI="$root/target/release/folio-cli"
+if [ -n "${FOLIO_CLI:-}" ]; then
+  exec "$FOLIO_CLI" "$@"
 fi
-export PYTHONPATH="$root/folio${PYTHONPATH:+:$PYTHONPATH}"
-exec "${FOLIO_PYTHON:-python3}" -m folio "$@"
+"$root/bin/folio-build"
+exec "$root/target/release/folio" "$@"

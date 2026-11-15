@@ -35,8 +35,7 @@ class EndToEndTest(unittest.TestCase):
         home.mkdir(parents=True, exist_ok=True)
         cls.env = {**os.environ, "BOTTLE_HOME": str(home), "FOLIO_HOME": str(home / "folio"),
                    "BOTTLE_CLI": str(BOTTLE_CLI)}
-        for name in ("FOLIO_ENGINE", "FOLIO_BOTTLE"):
-            cls.env.pop(name, None)
+        cls.env.pop("FOLIO_BOTTLE", None)
         cls.log = home / "folio" / "logs" / "serve.log"
         cls.work = Path(tempfile.mkdtemp(prefix="bottle-e2e-"))
         cls.addClassCleanup(shutil.rmtree, cls.work, True)

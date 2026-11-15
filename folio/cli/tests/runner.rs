@@ -84,7 +84,7 @@ impl Fixture {
             .into_iter()
             .find(|p| Path::new(p).exists())
             .unwrap_or("mke2fs");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_folio-cli"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_folio"));
         command
             .args(args)
             .env("FOLIO_HOME", self.dir.join("folio"))
@@ -150,7 +150,7 @@ fn manifest(dist: &Path) {
 
 /// A program of bottle's, built in this workspace: run, as folio runs bottle's code.
 fn built(program: &str) -> PathBuf {
-    let profile = Path::new(env!("CARGO_BIN_EXE_folio-cli"))
+    let profile = Path::new(env!("CARGO_BIN_EXE_folio"))
         .parent()
         .unwrap()
         .to_path_buf();

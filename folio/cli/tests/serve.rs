@@ -232,7 +232,7 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
             bind("good", "m-good", json!({}))
         ]),
     );
-    let program = fs::read(env!("CARGO_BIN_EXE_folio-cli")).unwrap();
+    let program = fs::read(env!("CARGO_BIN_EXE_folio")).unwrap();
     let code: String = Sha256::digest(&program)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -284,7 +284,7 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
     );
 
     // Another, on the same control socket, leaves it be.
-    let second = Command::new(env!("CARGO_BIN_EXE_folio-cli"))
+    let second = Command::new(env!("CARGO_BIN_EXE_folio"))
         .args(["serve", "--control"])
         .arg(serve.dir.join("serve.sock"))
         .env("FOLIO_HOME", serve.dir.join("home"))

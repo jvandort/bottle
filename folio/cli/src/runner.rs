@@ -245,7 +245,7 @@ impl Runner {
                 ))
             })?;
             mark(name, None)?;
-            eprintln!("folio-cli: runner {name} is back, and attached again");
+            eprintln!("folio: runner {name} is back, and attached again");
         }
         Ok(runner)
     }
@@ -417,13 +417,13 @@ impl Runner {
         let mut sent = Vec::new();
         if changed.is_empty() {
             eprintln!(
-                "folio-cli: removing {} from runner {}...",
+                "folio: removing {} from runner {}...",
                 names(&gone),
                 self.name
             );
         } else {
             eprintln!(
-                "folio-cli: copying {} to runner {}...",
+                "folio: copying {} to runner {}...",
                 names(&changed),
                 self.name
             );
@@ -524,11 +524,11 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
                     let mut ssh = runner.ssh(None);
                     ssh.args(command);
                     let e = ssh.exec();
-                    eprintln!("folio-cli: ssh: {e}");
+                    eprintln!("folio: error: ssh: {e}");
                     ExitCode::from(FAILED)
                 }
                 Err(e) => {
-                    eprintln!("folio-cli: {e}");
+                    eprintln!("folio: error: {e}");
                     ExitCode::from(FAILED)
                 }
             };
@@ -538,7 +538,7 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("folio-cli: {e}");
+            eprintln!("folio: error: {e}");
             ExitCode::from(FAILED)
         }
     }
@@ -825,8 +825,8 @@ pub fn forward_until(name: &str, forwards: &[String], gone: &dyn Fn() -> bool) -
         let since = Instant::now();
         match connect(&runner, &pairs, gone) {
             Ok(None) => return Ok(()),
-            Ok(Some(why)) => eprintln!("folio-cli: forward to {name} dropped: {why}"),
-            Err(e) => eprintln!("folio-cli: forward to {name}: {e}"),
+            Ok(Some(why)) => eprintln!("folio: forward to {name} dropped: {why}"),
+            Err(e) => eprintln!("folio: forward to {name}: {e}"),
         }
         // One that held a while starts over: a drop isn't a failure to connect.
         if since.elapsed() > MOST_BACKOFF {
@@ -882,7 +882,7 @@ fn connect(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = ssh.spawn()?;
-    eprintln!("folio-cli: forwarding to {}", runner.name);
+    eprintln!("folio: forwarding to {}", runner.name);
     loop {
         if let Some(status) = child.try_wait()? {
             let mut said = String::new();
@@ -970,7 +970,7 @@ pub fn on(mut args: impl Iterator<Item = String>) -> ExitCode {
         Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
     };
     run().unwrap_or_else(|e| {
-        eprintln!("folio-cli: {e}");
+        eprintln!("folio: error: {e}");
         ExitCode::from(FAILED)
     })
 }

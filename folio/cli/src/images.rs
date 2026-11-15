@@ -3,7 +3,7 @@
 //! a step for what the features install with apt, all at once, then each feature's install.sh, run
 //! in its own directory, the features directory mounted read-only in the build, then its
 //! containerEnv. Every image records what it was built from (its inputs, a hash), so one whose
-//! inputs have changed is rebuilt when next needed; folio/folio/bottle/images.py builds them.
+//! inputs have changed is rebuilt when next needed; builds.rs builds them.
 //!
 //! What's kept of what bottles download (the HTTP cache bottle-cli keeps): the hosts features name,
 //! and every apt repository an image has, its packages, the .deb files under its URI.

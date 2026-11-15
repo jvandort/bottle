@@ -1,5 +1,5 @@
 //! folio serve's log: a line per record on stderr, which whoever starts it points at its log file,
-//! stamped as folio's Python stamps its own (store.LOG_FORMAT): the local time to the millisecond,
+//! stamped as folio's Python stamped its own: the local time to the millisecond,
 //! the process, and the part of folio serve that says it.
 
 use std::io::Write;

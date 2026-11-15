@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const FOLIO: &str = env!("CARGO_BIN_EXE_folio-cli");
+const FOLIO: &str = env!("CARGO_BIN_EXE_folio");
 
 /// A home for folio, short (its sockets are in it), gone with the test.
 struct Home(PathBuf);

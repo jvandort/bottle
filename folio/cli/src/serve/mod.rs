@@ -164,7 +164,7 @@ pub fn exec_command(bottle: &Bottle, argv: &[&str], user: &str) -> Vec<String> {
     } else {
         let me = std::env::current_exe()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "folio-cli".into());
+            .unwrap_or_else(|_| "folio".into());
         vec![me, "on".into(), bottle.runner.clone()]
     };
     command.extend([
@@ -486,7 +486,7 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log!("bottle.daemon", "folio serve failed: {e}");
-            eprintln!("folio-cli: {e}");
+            eprintln!("folio: error: {e}");
             ExitCode::from(FAILED)
         }
     }

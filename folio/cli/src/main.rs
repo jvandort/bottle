@@ -1,25 +1,17 @@
-//! folio-cli: folio's own program, which folio's Python is becoming a front end for, as bottle's
-//! Python was for bottle-cli. What it does so far: runners (runner.rs), features (features.rs,
-//! routes.rs) and what builds an image of them (images.rs), and folio serve (serve/).
+//! folio: threads of work in bottles, each one a bottle, a lane for its commits, and Claude. What
+//! you type is cli.rs's (clap); a thread is threads.rs's, its bottle bottles.rs's (through
+//! engine.rs), what serves the bottles serve/'s.
 //!
-//!     folio-cli runner add NAME --ssh DESTINATION
-//!     folio-cli runner ls [--json]
-//!     folio-cli runner rm NAME
-//!     folio-cli runner ssh NAME [COMMAND]...
-//!     folio-cli runner check NAME|DESTINATION [--json]
-//!     folio-cli runner detach NAME [--offline]
-//!     folio-cli runner attach NAME
-//!     folio-cli runner home NAME
-//!     folio-cli runner forward NAME THERE=HERE...
-//!     folio-cli on [--connect-timeout SECONDS] NAME COMMAND [ARG]...
-//!     folio-cli features list|show|canonical|resolve|image|cached ...
-//!     folio-cli serve --control PATH --service NAME=PATH... [--restore]
-//!     folio-cli hook pre-receive|post-receive   (git's, for a push folio serve takes)
+//! Beside the commands a person types (`folio --help`), it's its own helper, as folio runs it:
+//!
+//!     folio on [--connect-timeout SECONDS] NAME COMMAND [ARG]...   (bottle-cli on a runner)
+//!     folio features list|show|canonical|resolve|image|cached|route ...
+//!     folio serve --control PATH --service NAME=PATH... [--restore]   (folio serve itself)
+//!     folio hook pre-receive|post-receive   (git's, for a push folio serve takes)
 //!
 //! It runs bottle's code only by running bottle-cli: here ($BOTTLE_CLI, else bottle-cli on PATH),
 //! for the distributions beside it, and on a runner, over ssh. Its state is in folio's home,
-//! $FOLIO_HOME, else ~/.folio. Its own failures exit FAILED, saying why on stderr, a line starting
-//! `folio-cli: `.
+//! $FOLIO_HOME, else ~/.folio. Its own failures say why on stderr, a line starting `folio: error: `.
 
 mod advice;
 mod auth;
@@ -79,7 +71,7 @@ fn main() -> ExitCode {
 }
 
 fn usage_error(usage: &str) -> ExitCode {
-    eprintln!("folio-cli: {usage}");
+    eprintln!("folio: error: usage: {usage}");
     ExitCode::from(2)
 }
 

@@ -1,9 +1,5 @@
-"""Features: installable additions to an image, in the Dev Container feature format, as folio-cli has them.
-
-folio-cli reads, checks and resolves features (`folio-cli features`; its features.rs says what the format
-supports, and what each of customizations.bottle's parts means), and works out what builds their image
-(images.rs). This module is its front end: what folio-cli says, as the dataclasses the rest of folio reads. What
-builds images, with bottle-cli, is still images.py's (ensure_built, remove_stale).
+"""Features, as folio's `features` command says them (folio-cli's features.rs and images.rs): for tests of the
+feature format, which read folio's JSON as these dataclasses, as folio's Python once did.
 
 Features are requested as specs: an id, optionally with option values, e.g.
 `jvm:version=17` or `name:a=1,b=true`. Unset options take their defaults.
@@ -13,15 +9,34 @@ import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from folio.bottle import apt as apt_module, cache as cache_module, images, krun
-from folio.bottle.errors import BottleError
+from tests.support import FOLIO
+
+
+class BottleError(Exception):
+    """What folio's features command refused, and why."""
+
+
+@dataclass(frozen=True)
+class Repository:
+    uri: str
+    suite: str = ""
+    components: tuple[str, ...] = ()
+    key: str = ""
+
+
+@dataclass(frozen=True)
+class Cached:
+    host: str
+    exclude: tuple[str, ...] = ()
+    include: tuple[str, ...] = ()
+    ports: tuple[int, ...] = (443,)
+    immutable: bool = False
 
 FEATURES = Path(__file__).resolve().parents[2] / "features"
-BASE = images.BASE
+BASE = "base"
 # What a bottle gets in place of a credential, where it needs one to believe it's logged in (folio-cli's
 # serve/credentials.rs puts the real one in its place).
 STANDIN = "the-egress-proxy-holds-the-real-one"
@@ -80,7 +95,7 @@ class Cache:
 
 @dataclass(frozen=True)
 class Apt:
-    repositories: tuple[apt_module.Repository, ...] = ()
+    repositories: tuple[Repository, ...] = ()
     packages: tuple[str, ...] = ()  # names, with ${option} where an option's value goes
 
 
@@ -142,13 +157,11 @@ class Feature:
 def _folio_cli(*args: str):
     """folio-cli's features command's JSON, for this folio's features (FEATURES); BottleError, saying why, if it
     fails."""
-    try:
-        done = subprocess.run([krun.folio_binary(), "features", *args], capture_output=True, text=True,
-                              env={**os.environ, "FOLIO_FEATURES": str(FEATURES)})
-    except FileNotFoundError:
-        raise BottleError(krun.RunnerCli("").missing()) from None
+    done = subprocess.run([str(FOLIO), "features", *args], capture_output=True, text=True,
+                          env={**os.environ, "FOLIO_FEATURES": str(FEATURES)})
     if done.returncode != 0:
-        raise BottleError(krun._error(done.stderr) or f"folio-cli features {' '.join(args)} failed")
+        said = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else ""
+        raise BottleError(said.removeprefix("folio: error: ") or f"folio features {' '.join(args)} failed")
     return json.loads(done.stdout)
 
 
@@ -172,7 +185,7 @@ def _feature(f: dict) -> Feature:
         installs_after=tuple(f["installs_after"]),
         credentials=tuple(_credential(c) for c in f["credentials"]),
         cache=Cache(tuple(f["cache"]["hosts"]), tuple(f["cache"]["exclude"])) if f["cache"] else None,
-        apt=Apt(tuple(apt_module.Repository(r["uri"], r["suite"], tuple(r["components"]), r["key"])
+        apt=Apt(tuple(Repository(r["uri"], r["suite"], tuple(r["components"]), r["key"])
                       for r in f["apt"]["repositories"]), tuple(f["apt"]["packages"])),
         required_options=tuple(f["required_options"]), context=f["context"],
         overrides=tuple(sorted(f["overrides"].items())), spec=f["spec"], derived=f,
@@ -203,7 +216,7 @@ def resolve(requested: list[str]) -> list[Feature]:
 
 def image_tag(features: list[Feature]) -> str:
     """The tag for the base image with features: the same features and options always get the same tag."""
-    return _folio_cli("image", *(f.spec for f in features))["tag"] if features else images.tag(images.BASE)
+    return _folio_cli("image", *(f.spec for f in features))["tag"] if features else "localhost/bottle/base:latest"
 
 
 def base_inputs() -> str:
@@ -225,73 +238,22 @@ def recipe(features: list[Feature]) -> dict:
     return _folio_cli("image", *(f.spec for f in features))["recipe"]
 
 
-def build_cached() -> list[cache_module.Cached]:
+def build_cached() -> list[Cached]:
     """What a build keeps of what it downloads: every apt repository, Debian's and every feature's."""
     return [_cached(c) for c in _folio_cli("cached", "--build")]
 
 
-def cached_for(specs: list[str]) -> list[cache_module.Cached]:
+def cached_for(specs: list[str]) -> list[Cached]:
     """The hosts a bottle with these features has its downloads kept for."""
     return [_cached(c) for c in _folio_cli("cached", *specs)]
 
 
-def _cached(c: dict) -> cache_module.Cached:
-    return cache_module.Cached(c["host"], tuple(c["exclude"]), tuple(c["include"]), tuple(c["ports"]),
-                               c["immutable"])
+def _cached(c: dict) -> Cached:
+    return Cached(c["host"], tuple(c["exclude"]), tuple(c["include"]), tuple(c["ports"]), c["immutable"])
 
 
-def ensure_built(specs: list[str], runner) -> str:
-    """Build the base image with the features in `specs` on `runner`, and the base image under it, if missing or
-    stale there; return its tag."""
-    features = resolve(specs)
-    tag = image_tag(features)
-    built = _ensure_base(runner)
-    if features and not images.is_current(tag, inputs_hash(features), runner.cli):
-        print(f"Building {tag}{_where(runner)}...", file=sys.stderr)
-        images.build_recipe(FEATURES, tag, inputs_hash(features), recipe(features), cli=runner.cli)
-        built = True
-    if built:
-        for name in remove_stale(runner):
-            print(f"Removed stale image {name}", file=sys.stderr)
-    return tag
+class images:
+    """What features' images are built with, as folio's images.rs has it."""
 
-
-def _where(runner) -> str:
-    return "" if runner.name == "local" else f" on runner {runner.name}"
-
-
-def _ensure_base(runner) -> bool:
-    """The base image built on `runner` if it's missing or stale there; whether it was."""
-    tag = images.tag(images.BASE)
-    if images.is_current(tag, base_inputs(), runner.cli):
-        return False
-    print(f"Building {tag}{_where(runner)}...", file=sys.stderr)
-    images.build_recipe(FEATURES, tag, base_inputs(), base_recipe(), cli=runner.cli)
-    return True
-
-
-def remove_stale(runner) -> list[str]:
-    """Forget bottle's images on `runner` whose inputs have changed since they were built; delete stages nothing
-    there uses."""
-    removed = []
-    for tag, labels in images.built(runner.cli).items():
-        if labels.get(images.INPUTS_LABEL) != _expected_inputs(tag, labels):
-            images.forget(tag, runner.cli)
-            removed.append(tag)
-    images.remove_unused(runner.cli)
-    return removed
-
-
-def _expected_inputs(tag: str, labels: dict[str, str]) -> str | None:
-    """The inputs hash an image with this tag and labels should have now; None if it can't be built any more."""
-    if not tag.startswith(f"{images.REPOSITORY}/{images.BASE}:"):
-        return None
-    try:
-        if FEATURES_LABEL not in labels:
-            return base_inputs() if tag == images.tag(images.BASE) else None
-        return inputs_hash(resolve(labels[FEATURES_LABEL].split()))
-    except BottleError:
-        return None
-
-
-FEATURES_LABEL = "bottle.features"
+    MOUNT = "/run/bottle-build"
+    BUILD_CA = "BOTTLE_BUILD_CA"

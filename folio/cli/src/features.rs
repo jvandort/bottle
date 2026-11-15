@@ -22,9 +22,8 @@
 //! to set, and what to tell the agent.
 //!
 //! A credential is a secret bottle keeps on the controller and a bottle's tools need
-//! (folio/folio/bottle/auth.py). It never enters a bottle: a credential says which hosts
-//! it belongs to, and folio serve attaches it to the bottle's requests to
-//! those hosts (folio/folio/bottle/egress.py).
+//! (auth.rs). It never enters a bottle: a credential says which hosts it belongs to, and
+//! folio serve attaches it to the bottle's requests to those hosts (serve/credentials.rs).
 //!
 //!   "customizations": {"bottle": {"credentials": {"teamcity": {
 //!       "description": "TeamCity access token",
@@ -1760,7 +1759,7 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("folio-cli: {e}");
+            eprintln!("folio: error: {e}");
             ExitCode::from(FAILED)
         }
     }

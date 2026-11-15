@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from folio.bottle import features, runners
-from folio.bottle.errors import BottleError
+from tests.bottle import features_front as features
+from tests.bottle.features_front import BottleError
 
 
 class RealFeaturesTest(unittest.TestCase):
@@ -724,7 +724,7 @@ class AptTest(FeatureTestCase):
     def test_its_repositories_are_kept_for_its_bottles_and_builds(self) -> None:
         self.apt_feature("claude", {"repositories": [self.repository()], "packages": ["claude-code"]})
         self.feature("base")
-        for kept in (features.cache_module.cached_for(["claude"]), features.build_cached()):
+        for kept in (features.cached_for(["claude"]), features.build_cached()):
             kept = {c.host: c for c in kept}
             self.assertEqual(kept["apt.example"].include, ("/stable/*.deb",))
             self.assertIn("deb.debian.org", kept)
@@ -732,105 +732,6 @@ class AptTest(FeatureTestCase):
     def test_the_recipe_says_its_features_for_the_build(self) -> None:
         self.feature("tools")
         self.assertEqual(features.recipe(features.resolve(["tools"]))["features"], ["tools"])
-
-
-class BuildTest(FeatureTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.feature("base", containerEnv={"LANG": "C.UTF-8"})
-        self.feature("tools")
-        self.feature("jvm", dependsOn={"tools": {}})
-        self.built: list[str] = []
-        self.runner = mock.Mock()
-        self.runner.name = "local"
-        self.build = mock.Mock(side_effect=lambda context, tag, inputs, recipe, cli=None: self.built.append(tag))
-        for patcher in (
-            mock.patch.object(features.images, "build_recipe", self.build),
-            mock.patch.object(features, "remove_stale", side_effect=lambda runner: self.built.append("remove stale") or []),
-            mock.patch("sys.stderr"),
-        ):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def current(self, *tags: str):
-        return mock.patch.object(features.images, "is_current", side_effect=lambda tag, inputs, cli=None: tag in tags)
-
-    def test_ensure_built_builds_base_then_the_combination_then_cleans_up(self) -> None:
-        with self.current():
-            self.assertEqual(features.ensure_built(["jvm"], self.runner), "localhost/bottle/base:with-jvm.tools")
-        self.assertEqual(self.built, ["localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools",
-                                      "remove stale"])
-
-    def test_ensure_built_skips_whats_current(self) -> None:
-        with self.current("localhost/bottle/base:latest", "localhost/bottle/base:with-jvm.tools"):
-            features.ensure_built(["jvm"], self.runner)
-        self.assertEqual(self.built, [])
-        with self.current("localhost/bottle/base:latest"):
-            features.ensure_built(["jvm"], self.runner)
-        self.assertEqual(self.built, ["localhost/bottle/base:with-jvm.tools", "remove stale"])
-
-    def test_base_is_the_base_feature_on_debian_running_bottles_entrypoint(self) -> None:
-        with self.current():
-            features.ensure_built([], self.runner)
-        [(context, tag, inputs, recipe)] = [c.args for c in self.build.call_args_list]
-        self.assertEqual((context, tag, inputs), (self.root, "localhost/bottle/base:latest", features.base_inputs()))
-        self.assertEqual((recipe["pull"], recipe["entrypoint"], recipe["cmd"]),
-                         (features.images.DEBIAN, features.images.ENTRYPOINT, features.images.CMD))
-        self.assertEqual(recipe["steps"][0]["cwd"], f"{features.images.MOUNT}/base")
-        self.assertEqual(recipe["steps"][1], {"env": {"LANG": "C.UTF-8"}})
-
-    def test_feature_changes_make_the_combination_stale(self) -> None:
-        [jvm, tools] = features.resolve(["jvm"])[::-1]
-        before = features.inputs_hash([tools, jvm])
-        (self.root / "jvm" / "install.sh").write_text("#!/bin/sh\necho changed\n")
-        self.assertNotEqual(features.inputs_hash([tools, jvm]), before)
-
-    def test_base_changes_make_everything_stale(self) -> None:
-        [tools] = features.resolve(["tools"])
-        before = (features.base_inputs(), features.inputs_hash([tools]))
-        (self.root / "base" / "install.sh").write_text("#!/bin/sh\necho changed\n")
-        after = (features.base_inputs(), features.inputs_hash([tools]))
-        self.assertTrue(before[0] != after[0] and before[1] != after[1])
-
-    def test_no_features_is_just_base(self) -> None:
-        with self.current("localhost/bottle/base:latest"):
-            self.assertEqual(features.ensure_built([], self.runner), "localhost/bottle/base:latest")
-        self.assertEqual(self.built, [])
-
-    def test_base_isnt_a_feature_to_ask_for(self) -> None:
-        self.assertNotIn("base", features.available())
-        with self.assertRaisesRegex(BottleError, "base is in every bottle"):
-            features.resolve(["base"])
-        self.feature("needy", dependsOn={"base": {}})
-        with self.assertRaisesRegex(BottleError, "installed on base already"):
-            features.load("needy")
-
-
-class RemoveStaleTest(FeatureTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.feature("tools")
-        [tools] = features.resolve(["tools"])
-        self.current = features.inputs_hash([tools])
-        self.deleted: list[str] = []
-
-    def run_with(self, images: dict[str, dict]) -> list[str]:
-        with mock.patch.object(features.images, "built", return_value=images), \
-                mock.patch.object(features.images, "forget", side_effect=lambda tag, cli=None: self.deleted.append(tag)), \
-                mock.patch.object(features.images, "remove_unused") as self.remove_unused:
-            return features.remove_stale(runners.Runner())
-
-    def test_forgets_stale_images_and_has_bottle_cli_delete_what_nothing_uses(self) -> None:
-        removed = self.run_with({
-            "localhost/bottle/base:with-tools": {"bottle.features": "tools", "bottle.inputs": self.current},
-            "localhost/bottle/base:with-old": {"bottle.features": "tools", "bottle.inputs": "outdated"},
-            "localhost/bottle/base:with-gone": {"bottle.features": "no-such-feature", "bottle.inputs": "x"},
-            "localhost/bottle/base:with-unlabeled": {"bottle.features": "tools"},
-        })
-        self.assertEqual(removed, ["localhost/bottle/base:with-old", "localhost/bottle/base:with-gone",
-                                   "localhost/bottle/base:with-unlabeled"])
-        self.assertEqual(self.deleted, removed)
-        self.remove_unused.assert_called_once()
 
 
 if __name__ == "__main__":

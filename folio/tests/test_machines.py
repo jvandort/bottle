@@ -11,7 +11,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tests.bottle.support import manifest
+import unittest
+
+from tests.bottle.support import bridge, manifest
 from tests.support import FOLIO, FolioTestCase, git
 
 FAKE_CLI = Path(__file__).resolve().parent / "fake_bottle_cli.py"
@@ -22,8 +24,7 @@ class MachineTestCase(FolioTestCase):
         super().setUp()
         self.cli_state = self.tmp / "fake-cli" / "state.json"
         self.cli_state.parent.mkdir()
-        for name in ("FOLIO_ENGINE", "FOLIO_BOTTLE"):
-            self.env.pop(name)
+        self.env.pop("FOLIO_BOTTLE")
         self.env |= {"BOTTLE_CLI": str(FAKE_CLI), "FAKE_CLI_STATE": str(self.cli_state),
                      "BOTTLE_HOME": str(self.tmp / "bottle-home")}
         self.key = f"project-{__import__('hashlib').sha256(str(self.repo).encode()).hexdigest()[:8]}"
@@ -341,3 +342,69 @@ class RemoteRunnerTest(RunnerTestCase):
         self.ok("delete", "t", "--yes")
         self.assertEqual(self.there()["machines"], {})
         self.ok("runner", "rm", "box")
+
+
+class WorkspaceTest(MachineTestCase, unittest.IsolatedAsyncioTestCase):
+    """A thread's bottle's setup script, run for real (here, its paths its own) against folio serve answering its
+    machine at bottle.host, as bottle-cli would carry its connections there."""
+
+    async def asyncSetUp(self) -> None:
+        self.ok("new", "t")
+        [step] = [e for e in self.execs() if e["step"] == "workspace"]
+        script = step["argv"][-1]
+        self.workspace, self.notes, self.genie = self.tmp / "workspace", self.tmp / "notes-there", self.tmp / "genie"
+        self.genie.mkdir()
+        mounts = {m["path"]: m for m in self.record()["mounts"]}
+        repos = {"/workspace": self.repo, "/notes": self.home / self.key / "t" / "notes"}
+        # Each mount where it's a path here, not where it's in a remote's URL (bottle.host/git/workspace/...).
+        objects = {f"\1{i}\1": (mount["objects"], str(repos[path] / ".git" / "objects"))
+                   for i, (path, mount) in enumerate(mounts.items())}
+        for placeholder, (there, _) in objects.items():
+            script = script.replace(there, placeholder)
+        for path, here in (("/workspace", self.workspace), ("/notes", self.notes)):
+            script = script.replace(f"/git{path}/", "\0").replace(path, str(here)).replace("\0", f"/git{path}/")
+        for placeholder, (_, here) in objects.items():
+            script = script.replace(placeholder, here)
+        server, port = await bridge(self.home / "services" / "host.sock", "192.0.2.1", 80, f"{self.key}-t", "bottle.host")
+        self.addAsyncCleanup(self.close, server)
+        self.git_env = {**self.env, "HOME": str(self.genie), "GIT_CONFIG_GLOBAL": str(self.genie / ".gitconfig"),
+                        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.http://127.0.0.1:{port}/.insteadOf",
+                        "GIT_CONFIG_VALUE_0": "http://bottle.host/"}
+        result = await self.run_(["sh", "-c", script])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @staticmethod
+    async def close(server) -> None:
+        server.close()
+        await server.wait_closed()
+
+    async def run_(self, argv: list[str]) -> subprocess.CompletedProcess:
+        import asyncio
+        return await asyncio.to_thread(subprocess.run, argv, cwd=self.tmp, env=self.git_env, capture_output=True,
+                                       text=True)
+
+    async def test_it_checks_out_the_branch_borrowing_the_repos_objects(self) -> None:
+        head = git("-C", str(self.repo), "rev-parse", "HEAD")
+        self.assertEqual(git("-C", str(self.workspace), "symbolic-ref", "--short", "HEAD"), "main")
+        self.assertEqual(git("-C", str(self.workspace), "rev-parse", "HEAD"), head)
+        self.assertEqual(git("-C", str(self.workspace), "count-objects"), "0 objects, 0 kilobytes")
+        self.assertEqual(git("-C", str(self.workspace), "status", "--porcelain"), "")
+
+    async def test_it_fetched_its_remotes(self) -> None:
+        self.assertEqual(git("-C", str(self.workspace), "remote").split(), ["agent", "host", "origin", "user"])
+        self.assertIn("host/main", git("-C", str(self.workspace), "branch", "-r", "--format=%(refname:short)").split())
+        self.assertEqual(git("-C", str(self.notes), "remote").split(), ["agent", "host", "user"])
+
+    async def test_it_writes_what_the_agent_is_told(self) -> None:
+        told = (self.genie / "BOTTLE.md").read_text()
+        self.assertIn(f"You're `genie`, running in bottle `{self.key}-t`", told)
+        self.assertIn("# Thread `t`", told)
+
+    async def test_a_push_to_agent_lands_in_the_threads_lane(self) -> None:
+        self.commit(self.workspace, "agent work")
+        commit = git("-C", str(self.workspace), "rev-parse", "HEAD")
+        result = await self.run_(["git", "-C", str(self.workspace), "push", "-q", "agent", "main:genie/t-1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git("-C", str(self.repo), "rev-parse", "refs/namespaces/t-out/refs/heads/genie/t-1"), commit)
+        git("-C", str(self.repo), "fetch", "-q", "bottle/t")
+        self.assertEqual(git("-C", str(self.repo), "rev-parse", "bottle/t/genie/t-1"), commit)
