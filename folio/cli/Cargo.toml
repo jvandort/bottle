@@ -9,6 +9,7 @@ publish.workspace = true
 # (bottle-cli, bottle-disk, bottle-agent*) is a dependency here (tests/boundary.rs checks).
 [dependencies]
 flate2.workspace = true
+tar.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 libc.workspace = true

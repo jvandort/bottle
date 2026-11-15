@@ -21,14 +21,19 @@
 //! $FOLIO_HOME, else ~/.folio. Its own failures exit FAILED, saying why on stderr, a line starting
 //! `folio-cli: `.
 
+mod advice;
+mod broker;
 mod features;
 mod git;
+mod lanes;
+mod notes;
 mod images;
 mod pyjson;
 mod repos;
 mod routes;
 mod runner;
 mod serve;
+mod snapshots;
 mod specs;
 mod store;
 #[cfg(test)]
