@@ -175,3 +175,12 @@ def write_slot(directory: Path, files: dict[str, bytes | None]) -> Path:
 def thread(repo_: Repo, name: str) -> dict:
     """A thread's record."""
     return json.loads((current_slot(repo_.directory / name) / RECORD).read_text())
+
+
+def broker_repo() -> Repo:
+    """The broker's identity, for where folio keeps its state: the path its vault used to be."""
+    return Repo("broker", folio_home() / "repos" / "broker")
+
+
+def broker_notes() -> Path:
+    return broker_repo().directory / "broker" / "notes"

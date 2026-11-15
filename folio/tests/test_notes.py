@@ -2,7 +2,7 @@ import shlex
 import stat
 from pathlib import Path
 
-from folio import notes, repos, snapshots, store
+from tests import state as kept
 from tests.support import FolioTestCase, git
 
 
@@ -12,7 +12,7 @@ class NotesTest(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ok("new", "fix-it")
-        self.repo_ = repos.current(self.repo)
+        self.repo_ = kept.repo(self.repo)
         self.bottle = f"{self.repo_.key}-fix-it"
 
     def notes(self, thread: str = "fix-it") -> Path:
@@ -24,10 +24,10 @@ class NotesTest(FolioTestCase):
 
     def test_a_thread_starts_with_notes_of_its_own(self) -> None:
         self.assertEqual("main", git("-C", str(self.notes()), "symbolic-ref", "--short", "HEAD"))
-        self.assertEqual(notes.GITIGNORE, (self.notes() / ".gitignore").read_text())
+        self.assertEqual(kept.GITIGNORE, (self.notes() / ".gitignore").read_text())
         self.assertTrue((self.notes() / ".obsidian").is_dir())
         mount = self.fake()["bottles"][self.bottle]["mounts"][1]
-        self.assertEqual((mount["path"], mount["repo"], mount["remotes"]), ("/notes", str(self.notes()), notes.REMOTES))
+        self.assertEqual((mount["path"], mount["repo"], mount["remotes"]), ("/notes", str(self.notes()), kept.NOTES_REMOTES))
 
     def test_your_copy_follows_the_agents_main(self) -> None:
         # The agent pushes main to the notes repo's lane; your main tracks it, so bottle's follow moves it.
@@ -39,8 +39,8 @@ class NotesTest(FolioTestCase):
     def test_a_pause_keeps_whats_not_pushed_and_the_resume_brings_it_back(self) -> None:
         (self.in_bottle() / "Lead.md").write_text("look at the cache\n")
         self.ok("pause", "fix-it")
-        slot = store.current_slot(self.repo_.directory / "fix-it")
-        self.assertTrue((slot / snapshots.NOTES_ARCHIVE).exists())
+        slot = kept.current_slot(self.repo_.directory / "fix-it")
+        self.assertTrue((slot / kept.NOTES_ARCHIVE).exists())
         self.ok("shell", "fix-it")
         self.assertEqual("look at the cache\n", (self.in_bottle() / "Lead.md").read_text())
         # Pointed at the new bottle's objects and remotes, wherever the old one had them.
@@ -49,7 +49,7 @@ class NotesTest(FolioTestCase):
 
     def test_a_resume_of_a_snapshot_from_before_notes(self) -> None:
         self.ok("pause", "fix-it")
-        (store.current_slot(self.repo_.directory / "fix-it") / snapshots.NOTES_ARCHIVE).unlink()
+        (kept.current_slot(self.repo_.directory / "fix-it") / kept.NOTES_ARCHIVE).unlink()
         self.ok("shell", "fix-it")
         self.assertTrue((self.in_bottle() / ".gitignore").exists())   # checked out afresh
 

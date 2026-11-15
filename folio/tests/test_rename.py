@@ -1,4 +1,4 @@
-from folio import repos
+from tests import state as kept
 from tests.support import FolioTestCase, git
 
 
@@ -8,7 +8,7 @@ class RenameTest(FolioTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ok("new", "fix-it")
-        self.key = repos.current(self.repo).key
+        self.key = kept.repo(self.repo).key
         tree = git("-C", str(self.repo), "rev-parse", "HEAD^{tree}")
         self.pushed = git("-C", str(self.repo), "commit-tree", tree, "-p", "HEAD", "-m", "agent work")
         git("-C", str(self.repo), "update-ref", "refs/namespaces/fix-it-out/refs/heads/genie/fix-it-1", self.pushed)

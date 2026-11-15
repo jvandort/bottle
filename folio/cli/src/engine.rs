@@ -626,3 +626,40 @@ mod tests {
         tempdir::set(&env, "FOLIO_BOTTLE", "");
     }
 }
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use crate::tempdir;
+
+    #[test]
+    fn one_cp_on_one_bottle_cli_else_a_pipe_of_two() {
+        let env = tempdir::isolated();
+        tempdir::set(&env, "BOTTLE_CLI", "/opt/bottle-cli");
+        tempdir::set(&env, "FOLIO_CLI", "/opt/folio");
+        let side = |cli: &Cli, path: &str| (cli.clone(), path.to_string());
+        let (here, boxed, other) = (Cli::Local, Cli::runner("box"), Cli::runner("other"));
+        assert_eq!(
+            copy_commands(&side(&here, "./a"), &side(&here, "m:b")),
+            [["/opt/bottle-cli", "cp", "./a", "m:b"]]
+        );
+        assert_eq!(
+            copy_commands(&side(&boxed, "m:a"), &side(&boxed, "n:b")),
+            [["/opt/folio", "on", "box", "cp", "m:a", "n:b"]]
+        );
+        assert_eq!(
+            copy_commands(&side(&boxed, "m:a"), &side(&here, "b")),
+            [
+                vec!["/opt/folio", "on", "box", "cp", "m:a", "-"],
+                vec!["/opt/bottle-cli", "cp", "-", "b"]
+            ]
+        );
+        assert_eq!(
+            copy_commands(&side(&boxed, "m:a"), &side(&other, "n:b"))[1],
+            ["/opt/folio", "on", "other", "cp", "-", "n:b"]
+        );
+        tempdir::set(&env, "FOLIO_CLI", "");
+        assert_eq!(local_side("a:b"), "./a:b");
+        assert_eq!(local_side("/a:b"), "/a:b");
+    }
+}

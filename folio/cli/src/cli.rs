@@ -545,7 +545,9 @@ pub fn input(prompt: &str) -> Option<String> {
             1 => line.push(byte),
             0 => break false,
             _ if INTERRUPTED.load(Ordering::Relaxed) => break false,
-            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
             _ => break false,
         }
     };

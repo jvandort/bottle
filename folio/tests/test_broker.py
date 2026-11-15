@@ -4,25 +4,25 @@ import shutil
 import stat
 from pathlib import Path
 
-from folio import broker, notes, repos, snapshots, store
+from tests import state as kept
 from tests.support import FolioTestCase, git
 
 
 class BrokerTest(FolioTestCase):
     def vault(self) -> Path:
-        return broker.notes_path(broker.repo())
+        return kept.broker_notes()
 
     def bottle(self) -> dict:
         return self.fake()["bottles"]["broker"]
 
     def test_the_broker_is_a_thread_that_mounts_only_its_notes(self) -> None:
         self.ok("broker")
-        self.assertEqual(self.home / f"broker-{repos.path_hash(self.home / 'repos' / 'broker')}" / "broker" / "notes",
+        self.assertEqual(self.home / f"broker-{kept.path_hash(self.home / 'repos' / 'broker')}" / "broker" / "notes",
                          self.vault())
         self.assertEqual("main", git("-C", str(self.vault()), "symbolic-ref", "--short", "HEAD"))
-        self.assertEqual(notes.GITIGNORE, (self.vault() / ".gitignore").read_text())
+        self.assertEqual(kept.GITIGNORE, (self.vault() / ".gitignore").read_text())
         self.assertEqual("", git("-C", str(self.vault()), "status", "--porcelain"))
-        self.assertEqual([(notes.MOUNT, str(self.vault()))], [(m["path"], m["repo"]) for m in self.bottle()["mounts"]])
+        self.assertEqual([(kept.NOTES_MOUNT, str(self.vault()))], [(m["path"], m["repo"]) for m in self.bottle()["mounts"]])
         self.assertFalse((self.home / "repos" / "broker").exists())
         self.assertEqual(self.calls("exec")[-1][-4:-2], ["attach", "claude"])
 
@@ -33,7 +33,7 @@ class BrokerTest(FolioTestCase):
 
     def test_the_vaults_main_tracks_its_lane_as_any_threads_notes(self) -> None:
         self.ok("broker")
-        self.assertEqual(notes.REMOTES, self.bottle()["mounts"][0]["remotes"])
+        self.assertEqual(kept.NOTES_REMOTES, self.bottle()["mounts"][0]["remotes"])
         # So bottle's follow moves it as the broker pushes main.
         self.assertEqual("refs/remotes/bottle/main",
                          git("-C", str(self.vault()), "for-each-ref", "--format=%(upstream)", "refs/heads/main"))
@@ -152,12 +152,11 @@ class BrokerTest(FolioTestCase):
         self.assertEqual([], self.opened(log))
 
     def test_a_running_obsidian_is_quit_first_when_the_user_says_so(self) -> None:
-        from unittest import mock
-        from folio import obsidian
+        self.ok("broker", "notes")  # makes the vault
         log = self.obsidian({}, running=True)
-        with mock.patch.dict("os.environ", self.env), mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch("builtins.input", return_value="y"):
-            out = obsidian.open_vault(notes.ensure(self.vault()))
+        code, said = self.on_terminal(["broker", "notes"], [(b"Quit and reopen it? [y/N] ", b"y\r")])
+        self.assertEqual(code, 0, said)
+        out = said.decode()
         commands = log.read_text().splitlines()
         quit_at = next(i for i, c in enumerate(commands) if c.startswith("osascript"))
         open_at = next(i for i, c in enumerate(commands) if c.startswith("open obsidian:"))
@@ -196,7 +195,7 @@ class MigrationTest(FolioTestCase):
         git("-C", str(self.old), "remote", "add", "bottle/broker", str(self.old))
 
     def new(self) -> Path:
-        return broker.notes_path(broker.repo())
+        return kept.broker_notes()
 
     def assert_moved(self) -> None:
         self.assertFalse(self.old.exists())
@@ -235,8 +234,8 @@ class MigrationTest(FolioTestCase):
         (home / ".claude" / "projects" / "-workspace" / "s.jsonl").write_text("talk\n")
         (Path(self.fake()["bottles"]["broker"]["mounts"][0]["dir"]) / "mine.md").write_text("unpushed\n")
         self.ok("broker", "pause")
-        slot = store.current_slot(broker.repo().directory / broker.NAME)
-        (slot / snapshots.NOTES_ARCHIVE).rename(slot / snapshots.WORKSPACE_ARCHIVE)
+        slot = kept.current_slot(kept.broker_repo().directory / "broker")
+        (slot / kept.NOTES_ARCHIVE).rename(slot / kept.WORKSPACE_ARCHIVE)
         self.ok("broker", "shell")
         home = Path(self.fake()["bottles"]["broker"]["home"])
         self.assertEqual("talk\n", (home / ".claude" / "projects" / "-notes" / "s.jsonl").read_text())
