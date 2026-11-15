@@ -66,24 +66,7 @@ pub fn services_sockets() -> BTreeMap<String, PathBuf> {
 
 /// folio serve's log.
 pub fn log_path() -> PathBuf {
-    crate::home().join("logs").join(format!("{LOG}.log"))
-}
-
-/// The log, opened for appending; only its owner can read it, or list the home it's in. The logs
-/// name every host the bottles reached, and the home their repos.
-fn open_log() -> io::Result<std::fs::File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    for dir in [crate::home(), log_path().parent().unwrap().to_path_buf()] {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(log_path())?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    Ok(file)
+    crate::log::path(LOG)
 }
 
 /// This program, by a hash of it: what folio serve says it's running when asked (ping).
@@ -185,6 +168,7 @@ pub fn start() -> Result<bool, String> {
 /// Stop folio serve and every egress it serves, and wait for it to be gone, so a command after
 /// finds none (Python's folio returned as it wound up). False if it wasn't running.
 pub fn stop() -> Result<bool, String> {
+    crate::log::log!("daemon", "asking folio serve to stop");
     let reply = match send(&json!({"op": "shutdown"}), DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => return Ok(false),
         // On its way out already.
@@ -229,7 +213,10 @@ fn ensure_current() -> Result<bool, String> {
     if reply.get("code").and_then(Value::as_str) == Some(code_hash().as_str()) {
         return Ok(false);
     }
-    eprintln!("bottle: folio serve was running other code; restarting it");
+    crate::log::say!(
+        "daemon",
+        "bottle: folio serve was running other code; restarting it"
+    );
     stop()?;
     wait_gone();
     start_daemon()?;
@@ -343,7 +330,7 @@ fn launch(background: bool) -> Result<Child, String> {
         .env("BOTTLE_CLI", crate::bottle_cli::binary())
         .stdin(Stdio::piped());
     if background {
-        let log = open_log().map_err(|e| format!("{}: {e}", log_path().display()))?;
+        let log = crate::log::open(LOG).map_err(|e| format!("{}: {e}", log_path().display()))?;
         command
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log)
@@ -364,6 +351,7 @@ fn launch(background: bool) -> Result<Child, String> {
 }
 
 fn start_daemon() -> Result<(), String> {
+    crate::log::log!("daemon", "starting folio serve");
     #[cfg(test)]
     if let Some(start) = *fake::STARTS.lock().unwrap() {
         start();

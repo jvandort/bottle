@@ -8,8 +8,8 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use super::log::log;
 use super::{Bottle, Server, exec_command, relay};
+use crate::log::log;
 
 const SSHD: &str = "mkdir -p /run/sshd && exec /usr/sbin/sshd -i -e";
 

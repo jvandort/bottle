@@ -30,7 +30,10 @@ def load() -> dict:
 
 
 def save(state: dict) -> None:
-    STATE.write_text(json.dumps(state, indent=2))
+    # Whole or not at all: a test reads it as it's written.
+    staging = STATE.with_name(f".{STATE.name}.{os.getpid()}")
+    staging.write_text(json.dumps(state, indent=2))
+    staging.replace(STATE)
 
 
 def fail(message: str) -> None:

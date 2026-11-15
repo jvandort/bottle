@@ -207,6 +207,35 @@ class InterruptTest(MachineTestCase):
         self.assertFalse((self.home / self.key / "t" / "bottles").exists())
 
 
+class LogTest(MachineTestCase):
+    """A command's log, folio.log in its home's logs/: what it was asked, what it made and deleted, what it said, and
+    how it ended."""
+
+    def log(self) -> list[str]:
+        """Its records, without when and which process."""
+        return [line.split(" ", 3)[3] for line in (self.home / "logs" / "folio.log").read_text().splitlines()]
+
+    def test_what_a_command_did_and_how_it_ended(self) -> None:
+        self.ok("new", "t")
+        self.ok("delete", "t", "--yes")
+        log = self.log()
+        self.assertEqual(log[0], "command folio new t")
+        self.assertIn(f"bottles Creating bottle {self.key}-t...", log)
+        self.assertTrue(any(line.startswith(f"bottles {self.key}-t: created on local, {self.repo} at main on /workspace")
+                            for line in log), log)
+        self.assertRegex(log[log.index("command folio delete t --yes") - 1], r"^command exited 0 in \d+\.\ds$")
+        self.assertIn(f"bottles {self.key}-t: deleted", log)
+        self.assertIn("threads t: deleted", log)
+        mode = (self.home / "logs" / "folio.log").stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_a_failure_is_recorded_with_what_was_said(self) -> None:
+        self.folio("new", "t", FAKE_CLI_FAIL="start")
+        log = self.log()
+        self.assertIn(f"bottles {self.key}-t: creating failed, rolling back: start failed", log)
+        self.assertRegex(log[-1], r"^command failed in \d+\.\ds: start failed$")
+
+
 class LifecycleTest(MachineTestCase):
     def setUp(self) -> None:
         super().setUp()

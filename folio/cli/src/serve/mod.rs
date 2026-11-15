@@ -28,7 +28,6 @@ mod git;
 pub mod hook;
 pub(crate) mod host;
 mod http;
-pub mod log;
 mod messages;
 mod proxy;
 mod ssh;
@@ -49,7 +48,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use log::log;
+use crate::log::log;
 
 use crate::FAILED;
 

@@ -480,7 +480,36 @@ pub fn create(
         last_active: now,
     };
     let repos: Vec<Repo> = planned.into_iter().map(|(_, r)| r).collect();
-    bring_up(bottle, &repos, &tag, owner)
+    let bottle = bring_up(bottle, &repos, &tag, owner)?;
+    let mounts: Vec<String> = bottle
+        .mounts
+        .iter()
+        .map(|m| {
+            format!(
+                "{} at {} on {}",
+                m.repo,
+                m.branch.clone().unwrap_or_else(|| m.commit.clone()),
+                m.path
+            )
+        })
+        .collect();
+    crate::log::log!(
+        "bottles",
+        "{}: created on {}, {}, features {}",
+        bottle.name,
+        bottle.runner,
+        if mounts.is_empty() {
+            "no repo".to_string()
+        } else {
+            mounts.join(", ")
+        },
+        if bottle.features.is_empty() {
+            "none".to_string()
+        } else {
+            bottle.features.join(", ")
+        }
+    );
+    Ok(bottle)
 }
 
 fn uuid() -> String {
@@ -611,7 +640,11 @@ fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result
     let mut bottle = match run_machine(bottle.clone(), mounted, tag) {
         Ok(bottle) => bottle,
         Err(failure) => {
-            eprintln!("{}: creating failed, rolling back: {failure}", bottle.name);
+            crate::log::say!(
+                "bottles",
+                "{}: creating failed, rolling back: {failure}",
+                bottle.name
+            );
             if let Err(cleanup) = crate::interrupt::shielded(|| delete(&bottle.name)) {
                 return Err(format!("{failure}; cleanup also failed: {cleanup}"));
             }
@@ -958,7 +991,11 @@ pub fn bind_messages() -> Result<Vec<Value>, String> {
         }
         match daemon::bind_message(&binding(bottle)) {
             Ok(message) => messages.push(message),
-            Err(e) => eprintln!("{}: folio serve won't answer it: {e}", bottle.name),
+            Err(e) => crate::log::say!(
+                "bottles",
+                "{}: folio serve won't answer it: {e}",
+                bottle.name
+            ),
         }
     }
     Ok(messages)
@@ -1206,6 +1243,7 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
             save(&bottle, None)?;
         }
         start_machine(&bottle)?;
+        crate::log::log!("bottles", "{}: started", bottle.name);
         if given {
             // What's set up in it for its policy, again; one made with this policy has all it needs
             // on its disk, as bottle-cli's start alone would find it.
@@ -1400,7 +1438,8 @@ pub fn delete(name: &str) -> Result<(), String> {
         failures.push(format!("machine: {e}"));
     }
     if !failures.is_empty() {
-        eprintln!(
+        crate::log::say!(
+            "bottles",
             "{name}: deleting left parts behind: {}",
             failures.join("; ")
         );
@@ -1412,11 +1451,12 @@ pub fn delete(name: &str) -> Result<(), String> {
         ));
     }
     forget(name);
+    crate::log::log!("bottles", "{name}: deleted");
     // Images whose features or base have changed since they were built, if no bottle uses one. An
     // image that's still current is kept, even with nothing using it: it's a cache, and the next
     // bottle with those features starts without a build. Best effort: the bottle is already gone.
     if let Err(e) = builds::remove_stale(&runner) {
-        eprintln!("bottle: couldn't remove stale images: {e}");
+        crate::log::say!("bottles", "bottle: couldn't remove stale images: {e}");
     }
     Ok(())
 }

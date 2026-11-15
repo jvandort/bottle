@@ -54,7 +54,7 @@ pub fn ensure_built(specs: &[String], runner: &Runner) -> Result<String, String>
     if !features.is_empty() {
         let inputs = inputs_of(&features)?;
         if !is_current(&tag, &inputs, &runner.cli)? {
-            eprintln!("Building {tag}{}...", place(runner));
+            crate::log::say!("images", "Building {tag}{}...", place(runner));
             let recipe = images::image(&features)?["recipe"].clone();
             build_recipe(&features::dir(), &tag, &inputs, &recipe, &runner.cli)?;
             built = true;
@@ -62,7 +62,7 @@ pub fn ensure_built(specs: &[String], runner: &Runner) -> Result<String, String>
     }
     if built {
         for name in remove_stale(runner)? {
-            eprintln!("Removed stale image {name}");
+            crate::log::say!("images", "Removed stale image {name}");
         }
     }
     Ok(tag)
@@ -83,7 +83,7 @@ fn ensure_base(runner: &Runner) -> Result<bool, String> {
     if is_current(&tag, &inputs, &runner.cli)? {
         return Ok(false);
     }
-    eprintln!("Building {tag}{}...", place(runner));
+    crate::log::say!("images", "Building {tag}{}...", place(runner));
     let recipe = images::base()?["recipe"].clone();
     build_recipe(&features::dir(), &tag, &inputs, &recipe, &runner.cli)?;
     Ok(true)
@@ -142,7 +142,7 @@ fn build_recipe(
     cli: &Cli,
 ) -> Result<PathBuf, String> {
     if let Some(pull) = recipe.get("pull").and_then(Value::as_str) {
-        eprintln!("Pulling {pull}...");
+        crate::log::say!("images", "Pulling {pull}...");
     } else if built_labels(recipe["from"].as_str().unwrap_or_default(), cli)?.is_none() {
         return Err(format!(
             "{} isn't built",

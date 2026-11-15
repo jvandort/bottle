@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use super::log::log;
 use super::{Bottle, Server, exec_command};
+use crate::log::log;
 
 const MARK: char = '~';
 const KEY_BYTES: usize = 32;

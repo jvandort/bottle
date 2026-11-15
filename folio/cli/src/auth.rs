@@ -121,6 +121,7 @@ fn put(name: &str, value: &str) -> Result<(), String> {
             stderr
         }));
     }
+    crate::log::log!("auth", "credential {name} stored");
     Ok(())
 }
 
@@ -155,7 +156,11 @@ pub fn set_value(name: &str, value: &str) -> Result<(), String> {
 
 pub fn remove(name: &str) -> Result<bool, String> {
     get_declared(name)?;
-    Ok(delete(name))
+    let removed = delete(name);
+    if removed {
+        crate::log::log!("auth", "credential {name} removed");
+    }
+    Ok(removed)
 }
 
 // --- injection ------------------------------------------------------------------
@@ -209,9 +214,12 @@ pub fn warn_unset(specs: &[String]) -> Result<(), String> {
         if all || get(&credential.name).is_some() {
             continue;
         }
-        eprintln!(
+        crate::log::say!(
+            "auth",
             "bottle: {} ({}) isn't set: `folio auth set {}`",
-            credential.name, credential.description, credential.name
+            credential.name,
+            credential.description,
+            credential.name
         );
     }
     Ok(())

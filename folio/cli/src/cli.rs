@@ -324,11 +324,18 @@ fn command() -> Command {
 
 /// folio's commands, with `args` (the program's name first).
 pub fn main(args: Vec<String>) -> ExitCode {
+    let asked = shell_words(&args);
     let matches = match command().try_get_matches_from(args) {
         Ok(matches) => matches,
         Err(e) => e.exit(),
     };
-    crate::interrupt::install();
+    // Runners' commands are runner.rs's, and so are their signals: a forward ends on SIGTERM.
+    if matches.subcommand_name() != Some("runner") {
+        crate::interrupt::install();
+    }
+    crate::log::to_file("folio");
+    crate::log::write("command", &asked);
+    let began = std::time::Instant::now();
     let (name, sub) = matches.subcommand().unwrap();
     let outcome = match name {
         "new" => new(sub),
@@ -365,14 +372,26 @@ pub fn main(args: Vec<String>) -> ExitCode {
         },
         _ => return runner_command(sub),
     };
+    let took = began.elapsed().as_secs_f64();
     match outcome {
-        Ok(code) => ExitCode::from(code as u8),
+        Ok(code) => {
+            crate::log::write("command", &format!("exited {code} in {took:.1}s"));
+            ExitCode::from(code as u8)
+        }
         Err(e) => {
+            crate::log::write("command", &format!("failed in {took:.1}s: {e}"));
             eprintln!("folio: error: {e}");
             // Interrupted, as a shell has it: 128 and the signal.
             ExitCode::from(if crate::interrupt::happened() { 130 } else { 1 })
         }
     }
+}
+
+/// A command line, as a shell would take it back.
+fn shell_words(args: &[String]) -> String {
+    let mut words = vec!["folio".to_string()];
+    words.extend(args.iter().skip(1).map(|a| crate::lanes::shell_quote(a)));
+    words.join(" ")
 }
 
 fn arg<'a>(matches: &'a ArgMatches, name: &str) -> Option<&'a str> {
@@ -500,7 +519,11 @@ fn start(
     base: Option<&str>,
     runner: Option<&str>,
 ) -> Result<Thread, String> {
-    eprintln!("Starting thread {name} in {}...", repo.path.display());
+    crate::log::say!(
+        "threads",
+        "Starting thread {name} in {}...",
+        repo.path.display()
+    );
     let thread = threads::create(repo, name, base, false, runner)?;
     println!(
         "Started thread {name} in bottle {}. Its branches: git fetch bottle/{name}",
@@ -650,7 +673,7 @@ fn pause(matches: &ArgMatches) -> Outcome {
     let Some(thread) = thread_of(matches, &repo, "pause", false)? else {
         return Ok(0);
     };
-    eprintln!("Pausing thread {}...", thread.name);
+    crate::log::say!("threads", "Pausing thread {}...", thread.name);
     threads::pause(&repo, &thread)?;
     println!(
         "Paused thread {name}. Resume it with: folio claude {name}",
@@ -676,9 +699,14 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
     };
     let notes_path = broker::notes_path(&identity);
     if matches!(state.as_str(), "new" | "missing" | "paused") && broker::migrate(&identity)? {
-        eprintln!("Moved the broker's notes to {}", notes_path.display());
+        crate::log::say!(
+            "threads",
+            "Moved the broker's notes to {}",
+            notes_path.display()
+        );
     } else if broker::old_vault().is_some() && command != "pause" {
-        eprintln!(
+        crate::log::say!(
+            "threads",
             "The broker's notes move to {} when it's next paused (`folio broker pause`) and resumed",
             notes_path.display()
         );
@@ -694,17 +722,21 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
         return Err("there's no broker to pause; `folio broker` starts it".into());
     }
     if thread.is_none() {
-        eprintln!("Starting the broker...");
+        crate::log::say!("threads", "Starting the broker...");
         thread = Some(threads::create(&identity, broker::NAME, None, true, None)?);
         println!("Started the broker. Its notes: {}", notes_path.display());
         let _ = std::io::stdout().flush();
     }
     let thread = thread.unwrap();
     if command == "pause" {
-        eprintln!("Pausing the broker...");
+        crate::log::say!("threads", "Pausing the broker...");
         threads::pause(&identity, &thread)?;
         if broker::migrate(&identity)? {
-            eprintln!("Moved the broker's notes to {}", notes_path.display());
+            crate::log::say!(
+                "threads",
+                "Moved the broker's notes to {}",
+                notes_path.display()
+            );
         }
         println!("Paused the broker. Resume it with: folio broker");
         return Ok(0);

@@ -10,9 +10,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::log::log;
 use super::proxy::Header;
 use super::{Bottle, Server, credentials, host, ssh};
+use crate::log::log;
 
 /// Where a bottle reaches bottle.host (TEST-NET-1's first address), and the bottles it may ssh to:
 /// the rest of TEST-NET-1, an address for each.

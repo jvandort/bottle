@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use super::host::{Remote, Served, UPSTREAM};
 use super::http::{self, Head};
-use super::log::log;
+use crate::log::log;
 
 /// How long the hub's fetch of origin may take before a fetch goes on without it.
 const PULL_THROUGH_TIMEOUT: Duration = Duration::from_secs(120);

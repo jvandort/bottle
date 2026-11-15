@@ -34,9 +34,9 @@ use sha2::{Digest, Sha256};
 
 use super::Bottle;
 use super::http::{self, Refused};
-use super::log::log;
 use super::proxy::Header;
 use crate::features::{self, Credential, Rewrite};
+use crate::log::log;
 use crate::routes::Route;
 
 /// What a bottle gets in place of a credential, where it needs one to believe it's logged in.

@@ -461,7 +461,8 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
         }
         Some(sidecar) => match make_sidecar(repo, thread, &repos_) {
             // The thread is what's wanted: it goes on without, as when its sidecar doesn't start.
-            Err(e) => eprintln!(
+            Err(e) => crate::log::say!(
+                "threads",
                 "folio: thread {name} goes on without its sidecar ({e}); it comes with the thread's next bottle: \
                  pause and resume it (`folio pause {name}`, then `folio claude {name}`)",
                 name = thread.name
@@ -490,7 +491,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             && let Err(cleanup) = crate::interrupt::shielded(|| delete_sidecar(thread))
         {
             // What went wrong is the bottle's: this is said beside it.
-            eprintln!("folio: {cleanup}");
+            crate::log::say!("threads", "folio: {cleanup}");
         }
         return Err(e);
     }
@@ -530,7 +531,8 @@ fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
     let row = &engine::status(std::slice::from_ref(&name))?[&name];
     let state = row["state"].as_str().unwrap_or_default();
     if RUNNER_OFF.contains(&state) {
-        eprintln!(
+        crate::log::say!(
+            "threads",
             "folio: thread {t}'s sidecar, {name}, is left on runner {r}, which is off: it's deleted, its record \
              with it, when the runner's on again and the thread next gets a bottle (or `folio delete {t}`)",
             t = thread.name,
@@ -570,7 +572,8 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
     // One the thread's bottle wasn't made with (it went on without) is no use to it, if it's there
     // at all.
     if state == "missing" || !granted {
-        eprintln!(
+        crate::log::say!(
+            "threads",
             "folio: thread {name}'s sidecar comes with its next bottle: pause and resume it \
              (`folio pause {name}`, then `folio claude {name}`)",
             name = thread.name
@@ -578,7 +581,8 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
     } else if state != "running"
         && let Err(e) = engine::start(&thread.sidecar_bottle())
     {
-        eprintln!(
+        crate::log::say!(
+            "threads",
             "folio: thread {}'s sidecar didn't start ({e}); the thread goes on without it",
             thread.name
         );
@@ -824,7 +828,7 @@ fn ensure_running(repo: &Repo, thread: &Thread) -> Result<(), String> {
     let state = state_of(repo, thread)?;
     match state.as_str() {
         "paused" => {
-            eprintln!("Resuming thread {}...", thread.name);
+            crate::log::say!("threads", "Resuming thread {}...", thread.name);
             resume(repo, thread)?;
         }
         "missing" => {
@@ -908,6 +912,7 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
         delete_sidecar(thread)?;
         Ok(())
     })?;
+    crate::log::log!("threads", "{}: paused", thread.name);
     Ok(())
 }
 
@@ -1010,6 +1015,7 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
         });
         return Err(e);
     }
+    crate::log::log!("threads", "{}: resumed", thread.name);
     Ok(())
 }
 
@@ -1165,6 +1171,7 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
         ..thread.clone()
     };
     save(repo, &renamed, Vec::new())?;
+    crate::log::log!("threads", "{}: renamed {new}", thread.name);
     Ok(renamed)
 }
 
@@ -1199,6 +1206,7 @@ pub fn delete(repo: &Repo, thread: &Thread) -> Result<(), String> {
     if !kept.exists() {
         fs::remove_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    crate::log::log!("threads", "{}: deleted", thread.name);
     Ok(())
 }
 

@@ -179,7 +179,7 @@ pub fn new(
     ssh: &[(String, String)],
 ) -> Result<(), String> {
     let Some(program) = stand_in() else {
-        eprintln!("Creating bottle {name}...");
+        crate::log::say!("bottles", "Creating bottle {name}...");
         let requests: Vec<MountRequest> = mounts
             .iter()
             .map(|m| MountRequest {
@@ -377,6 +377,15 @@ pub fn attach(
     let _ = std::io::stdout().flush();
     let command = command(name, argv, tty)?;
     crate::interrupt::check()?;
+    crate::log::log!(
+        "command",
+        "becomes {}",
+        command
+            .iter()
+            .map(|w| crate::lanes::shell_quote(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let error = Command::new(&command[0]).args(&command[1..]).exec();
     Err(format!("{}: {error}", command[0]))
 }
