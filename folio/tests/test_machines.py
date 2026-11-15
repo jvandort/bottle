@@ -23,12 +23,11 @@ class MachineTestCase(FolioTestCase):
         self.env |= {"BOTTLE_CLI": str(FAKE_CLI), "FAKE_CLI_STATE": str(self.cli_state),
                      "BOTTLE_HOME": str(self.tmp / "bottle-home")}
         self.key = f"project-{__import__('hashlib').sha256(str(self.repo).encode()).hexdigest()[:8]}"
-        # The Keychain, as a Mac without the credential has it: `security` finds nothing.
+        # The Keychain, as tests/fake_security keeps it: empty to begin with.
         bin_ = self.tmp / "bin"
         bin_.mkdir()
-        (bin_ / "security").write_text("#!/bin/sh\nexit 44\n")
-        (bin_ / "security").chmod(0o755)
-        self.env["PATH"] = f"{bin_}:{self.env['PATH']}"
+        (bin_ / "security").symlink_to(Path(__file__).resolve().parent / "fake_security")
+        self.env |= {"PATH": f"{bin_}:{self.env['PATH']}", "FAKE_KEYCHAIN": str(self.tmp / "keychain")}
         self.addCleanup(lambda: self.folio("serve", "stop"))
 
     def folio(self, *args: str, cwd: Path | None = None, input: str | None = None, **env: str):
@@ -233,3 +232,46 @@ class CredentialTest(MachineTestCase):
         self.assertIn("isn't set: `folio auth set github`", result.stderr)
         hosts = [r.get("host") for r in self.machine()["network"]["routes"]]
         self.assertIn("api.github.com", hosts)
+
+
+class AuthTest(MachineTestCase):
+    """`folio auth`: credentials set once, in the Keychain; what bottles get is theirs to say."""
+
+    def rows(self) -> dict[str, list[str]]:
+        lines = self.ok("auth", "list").splitlines()
+        self.assertEqual(lines[0].split(), ["CREDENTIAL", "FEATURE", "STATUS", "ATTACHED", "TO", "DESCRIPTION"])
+        return {line.split()[0]: line for line in lines[1:]}
+
+    def test_listed_with_where_each_goes_and_whether_its_set(self) -> None:
+        rows = self.rows()
+        self.assertEqual(sorted(rows), ["claude", "develocity", "github", "teamcity"])
+        self.assertRegex(rows["claude"], r"^claude +claude +not set +api\.anthropic\.com +")
+        self.assertIn("~/.gradle/develocity/keys.properties, else not set", rows["develocity"])
+
+    def test_set_from_stdin_listed_then_removed(self) -> None:
+        result = self.folio("auth", "set", "claude", input="tok-123\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "Stored claude. Bottles with it get it when they next start.\n")
+        self.assertRegex(self.rows()["claude"], r"^claude +claude +set +")
+        self.assertNotIn("tok-123", (self.tmp / "keychain" / "argv").read_text())  # never on a command line
+        self.assertEqual(self.ok("auth", "rm", "claude"), "Removed claude\n")
+        self.assertEqual(self.ok("auth", "remove", "claude"), "claude wasn't set\n")
+
+    def test_only_a_credential_a_feature_declares(self) -> None:
+        result = self.folio("auth", "set", "nope", input="x")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "folio: error: no feature declares a credential named 'nope' "
+                                        "(known: claude, develocity, github, teamcity)\n")
+
+    def test_a_value_it_cant_store_is_refused(self) -> None:
+        result = self.folio("auth", "set", "claude", input='a"b')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the value is empty or has characters bottle can't store", result.stderr)
+
+    def test_a_bottle_whose_credential_is_set_is_told_nothing_of_it(self) -> None:
+        self.ok("configure", "--feature", "claude")
+        self.folio("auth", "set", "claude", input="tok")
+        result = self.folio("new", "t")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("isn't set", result.stderr)
+        self.assertEqual(self.machine()["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "the-egress-proxy-holds-the-real-one")

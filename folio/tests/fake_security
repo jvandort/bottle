@@ -1,0 +1,30 @@
+#!/bin/sh
+# A stand-in for macOS's `security`, for tests: generic passwords kept as files in $FAKE_KEYCHAIN, a file a
+# service and account; every command line logged in $FAKE_KEYCHAIN/argv, and what `-i` read, in .../stdin.
+store=${FAKE_KEYCHAIN:?}
+mkdir -p "$store"
+printf '%s\n' "$*" >> "$store/argv"
+option() { # the value after option $1 in the rest of the arguments
+    want=$1; shift
+    while [ $# -gt 1 ]; do [ "$1" = "$want" ] && { printf '%s' "$2"; return; }; shift; done
+}
+case $1 in
+    -i)
+        IFS= read -r line
+        printf '%s\n' "$line" >> "$store/stdin"
+        service=$(printf '%s' "$line" | cut -d'"' -f2)
+        account=$(printf '%s' "$line" | cut -d'"' -f4)
+        printf '%s' "$line" | cut -d'"' -f6 | tr -d '\n' > "$store/$service@$account"
+        ;;
+    find-generic-password)
+        file="$store/$(option -s "$@")@$(option -a "$@")"
+        [ -f "$file" ] || exit 44
+        cat "$file"; echo
+        ;;
+    delete-generic-password)
+        file="$store/$(option -s "$@")@$(option -a "$@")"
+        [ -f "$file" ] || exit 44
+        rm "$file"
+        ;;
+    *) echo "security: the fake doesn't know $*" >&2; exit 1 ;;
+esac

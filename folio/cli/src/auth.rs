@@ -241,3 +241,146 @@ pub fn standins_for(specs: &[String]) -> Result<BTreeMap<String, String>, String
         .filter_map(|c| c.inject.standin.map(|s| (s, STANDIN.to_string())))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir;
+
+    const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_security");
+
+    /// The Keychain, as tests/fake_security keeps it, first on PATH as `security`.
+    struct Keychain {
+        _env: tempdir::Isolated,
+        tmp: tempdir::Dir,
+    }
+
+    impl Keychain {
+        fn new() -> Keychain {
+            let env = tempdir::isolated();
+            let tmp = tempdir::Dir::new();
+            let bin = tmp.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            std::os::unix::fs::symlink(FAKE, bin.join("security")).unwrap();
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+            tempdir::set(&env, "PATH", &path);
+            tempdir::set(&env, "FAKE_KEYCHAIN", tmp.path().join("keychain").to_str().unwrap());
+            let home = std::env::var("HOME").unwrap_or_default();
+            tempdir::set(&env, "BOTTLE_HOME", &format!("{home}/.bottle"));
+            Keychain { _env: env, tmp }
+        }
+
+        fn argv(&self) -> String {
+            std::fs::read_to_string(self.tmp.path().join("keychain/argv")).unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn put_get_delete() {
+        let _keychain = Keychain::new();
+        assert_eq!(get("claude"), None);
+        put("claude", "tok-123").unwrap();
+        assert_eq!(get("claude").as_deref(), Some("tok-123"));
+        assert!(delete("claude"));
+        assert!(!delete("claude"));
+        assert_eq!(get("claude"), None);
+    }
+
+    #[test]
+    fn values_never_go_on_a_command_line() {
+        let keychain = Keychain::new();
+        put("claude", "tok-secret").unwrap();
+        assert!(!keychain.argv().contains("tok-secret"));
+    }
+
+    #[test]
+    fn rejects_values_it_cant_store_safely() {
+        let keychain = Keychain::new();
+        for value in ["", "a\"b", "a\\b", "a\nb", "a\tb"] {
+            assert!(put("claude", value).is_err(), "{value:?}");
+        }
+        assert_eq!(keychain.argv(), "");
+    }
+
+    #[test]
+    fn the_default_home_has_the_plain_service_and_others_their_own() {
+        let keychain = Keychain::new();
+        assert_eq!(service(), "bottle");
+        tempdir::set(&keychain._env, "BOTTLE_HOME", "/tmp/elsewhere");
+        let other = service();
+        assert!(other.starts_with("bottle:") && other.len() == "bottle:".len() + 12, "{other}");
+    }
+
+    #[test]
+    fn set_and_remove_are_for_declared_credentials_only() {
+        let _keychain = Keychain::new();
+        set_value("claude", "  tok \n").unwrap();
+        assert_eq!(get("claude").as_deref(), Some("tok"));
+        assert!(remove("claude").unwrap());
+        assert!(!remove("claude").unwrap());
+        assert_eq!(
+            set_value("nope", "x").unwrap_err(),
+            "no feature declares a credential named 'nope' (known: claude, develocity, github, teamcity)"
+        );
+        let status: Vec<(String, String, bool)> =
+            status().unwrap().into_iter().map(|(d, set)| (d.credential.name, d.feature, set)).collect();
+        assert_eq!(status[0], ("claude".to_string(), "claude".to_string(), false));
+    }
+
+    #[test]
+    fn a_feature_names_the_variable_its_tool_reads_for_its_stand_in() {
+        let _env = tempdir::isolated();
+        let specs = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            standins_for(&specs(&["claude", "tools"])).unwrap(),
+            BTreeMap::from([("CLAUDE_CODE_OAUTH_TOKEN".to_string(), STANDIN.to_string())])
+        );
+        // teamcity writes its stand-in into the CLI's config file, in install.sh: the one the
+        // proxy replaces.
+        assert!(standins_for(&specs(&["teamcity:server=ci.example.com"])).unwrap().is_empty());
+        let install = std::fs::read_to_string(crate::features::dir().join("teamcity/install.sh")).unwrap();
+        assert!(install.contains(&format!("token: {STANDIN}")));
+        assert_eq!(
+            credential_destinations(&specs(&["teamcity:server=https://ci.corp.example.com", "tools"])).unwrap(),
+            [("ci.corp.example.com".to_string(), 443)]
+        );
+    }
+
+    #[test]
+    fn credentials_from_a_file_a_tool_keeps_them_in() {
+        let _env = tempdir::isolated();
+        let tmp = tempdir::Dir::new();
+        let keys = tmp.path().join("keys.properties");
+        std::fs::write(
+            &keys,
+            "# written by provisionDevelocityAccessKey\nge.example.com=ge-key\nhttps://dv.corp.example.com/ = dv-key\n\
+             other.example.com\\:8443:port-key\n\n! another comment\nempty.example.com=\n",
+        )
+        .unwrap();
+        let keys = keys.display();
+        let one = |spec: String| credentials_for(&[spec]).unwrap().remove(0);
+        let both = format!("develocity:server=https://ge.example.com,https://dv.corp.example.com,keyFile={keys}");
+        assert_eq!(
+            credential_destinations(&[both]).unwrap(),
+            [("dv.corp.example.com".to_string(), 443), ("ge.example.com".to_string(), 443)]
+        );
+        let credential = one(format!("develocity:server=empty.example.com,keyFile={keys}"));
+        assert_eq!(from_properties(&credential, "empty.example.com").unwrap(), None);
+        let credential = one(format!("develocity:server=other.example.com:8443,keyFile={keys}"));
+        assert_eq!(from_properties(&credential, "other.example.com:8443").unwrap().as_deref(), Some("port-key"));
+        let credential = one(format!("develocity:server=https://dv.corp.example.com,keyFile={keys}"));
+        assert_eq!(from_properties(&credential, "dv.corp.example.com").unwrap().as_deref(), Some("dv-key"));
+        let credential = one("develocity:server=dv.corp.example.com".into());
+        assert_eq!(credential.properties.as_deref(), Some("~/.gradle/develocity/keys.properties"));
+    }
+
+    #[test]
+    fn a_credential_goes_over_https_to_a_host_or_a_host_and_port() {
+        assert_eq!(destination("ci.example.com").unwrap(), ("ci.example.com".to_string(), 443));
+        assert_eq!(destination("*.example.com").unwrap(), ("*.example.com".to_string(), 443));
+        assert_eq!(destination("ci.example.com:8111").unwrap(), ("ci.example.com".to_string(), 8111));
+        for host in ["ci.example.com:https", "ci.example.com:0", "ci.example.com:99999"] {
+            assert!(destination(host).unwrap_err().contains("isn't a host for a credential"), "{host}");
+        }
+    }
+}
