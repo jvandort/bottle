@@ -72,6 +72,8 @@ pub fn isolated() -> Isolated {
         // SAFETY: as above.
         unsafe { std::env::remove_var(key) };
     }
+    crate::engine::forget_all();
+    crate::bottles::forget_running();
     Isolated { _held: held, home }
 }
 

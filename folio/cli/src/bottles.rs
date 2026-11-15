@@ -1218,9 +1218,28 @@ pub fn start(name: &str) -> Result<Bottle, String> {
     ensure_running(name)
 }
 
+/// The bottles this command has found running (a list said so), or started: their machines not
+/// asked again (a command runs several things in one).
+static RUNNING: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// None found running: a new test's.
+#[cfg(test)]
+pub fn forget_running() {
+    RUNNING.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
 /// Start the bottle's machine if it isn't running, folio serve answering it.
 pub fn ensure_running(name: &str) -> Result<Bottle, String> {
     let mut bottle = get(name)?;
+    if RUNNING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(name)
+    {
+        // Running: folio serve, if it had stopped, binds it again as it starts.
+        daemon::start()?;
+        return Ok(bottle);
+    }
     if bottle.status != "ready" {
         return Err(format!(
             "{name} is {}; delete its thread to remove it (`folio delete`)",
@@ -1254,6 +1273,10 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
         // Running: folio serve, if it had stopped, binds it again as it starts.
         daemon::start()?;
     }
+    RUNNING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(name.to_string());
     Ok(bottle)
 }
 
@@ -1368,6 +1391,12 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
                         .unwrap_or_else(|| "missing".into()),
                 }
             };
+            if state == "running" {
+                RUNNING
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(bottle.name.clone());
+            }
             (bottle, state)
         })
         .collect())
@@ -1427,6 +1456,10 @@ pub fn status(names: &[String]) -> Result<Vec<Value>, String> {
 /// Each step tolerates its part being absent, so this also finishes off a bottle left half-made or
 /// half-deleted. If a step fails, the record stays (marked broken) so the next delete can retry.
 pub fn delete(name: &str) -> Result<(), String> {
+    RUNNING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(name);
     let mut bottle = get(name)?;
     // The registry says the machine is the bottle's: a machine has no labels to ask.
     let runner = runner_of(&bottle)?;

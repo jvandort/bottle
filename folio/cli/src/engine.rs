@@ -178,6 +178,7 @@ pub fn new(
     runner: Option<&str>,
     ssh: &[(String, String)],
 ) -> Result<(), String> {
+    forget(name);
     let Some(program) = stand_in() else {
         crate::log::say!("bottles", "Creating bottle {name}...");
         let requests: Vec<MountRequest> = mounts
@@ -233,29 +234,68 @@ pub fn new(
     Ok(())
 }
 
-/// Each named bottle's status row (bottles::status); state "missing" if there's no such bottle.
-pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
-    if names.is_empty() {
-        return Ok(BTreeMap::new());
+/// What this command has been told of each bottle it asked about, by name: asked once a command,
+/// not once a step (each asks every runner the bottles are on), and changed as the command changes
+/// the bottle: gone when it makes or deletes one, running when it starts one or runs something in
+/// it (which starts it).
+static KNOWN: std::sync::Mutex<BTreeMap<String, Value>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn known() -> std::sync::MutexGuard<'static, BTreeMap<String, Value>> {
+    KNOWN.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Nothing known: a new test's.
+#[cfg(test)]
+pub fn forget_all() {
+    known().clear();
+}
+
+/// What this command knows of `name` is out of date.
+fn forget(name: &str) {
+    known().remove(name);
+}
+
+/// `name` is running now (what's known of it, if anything is, says so).
+fn running(name: &str) {
+    if let Some(row) = known().get_mut(name) {
+        row["state"] = "running".into();
     }
-    let rows = match stand_in() {
-        None => bottles::status(names)?,
-        Some(program) => {
-            let mut args = strings(&["status", "--json"]);
-            args.extend(names.iter().cloned());
-            let ran = stand_in_run(&program, &args, None, true)?;
-            serde_json::from_str::<Vec<Value>>(&ran.stdout)
-                .map_err(|e| format!("bottle status: {e}"))?
+}
+
+/// Each named bottle's status row (bottles::status); state "missing" if there's no such bottle.
+/// Asked once a command (KNOWN).
+pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
+    let unknown: Vec<String> = names
+        .iter()
+        .filter(|n| !known().contains_key(*n))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        let rows = match stand_in() {
+            None => bottles::status(&unknown)?,
+            Some(program) => {
+                let mut args = strings(&["status", "--json"]);
+                args.extend(unknown.iter().cloned());
+                let ran = stand_in_run(&program, &args, None, true)?;
+                serde_json::from_str::<Vec<Value>>(&ran.stdout)
+                    .map_err(|e| format!("bottle status: {e}"))?
+            }
+        };
+        let mut known = known();
+        for row in rows {
+            known.insert(row["name"].as_str().unwrap_or_default().to_string(), row);
         }
-    };
-    Ok(rows
-        .into_iter()
-        .map(|row| (row["name"].as_str().unwrap_or_default().to_string(), row))
+    }
+    let known = known();
+    Ok(names
+        .iter()
+        .filter_map(|n| known.get(n).map(|row| (n.clone(), row.clone())))
         .collect())
 }
 
 /// Start a stopped bottle. On this terminal, as `new` is: starting can need a login.
 pub fn start(name: &str) -> Result<(), String> {
+    forget(name);
     let Some(program) = stand_in() else {
         return bottles::start(name).map(|_| ());
     };
@@ -274,6 +314,7 @@ pub fn start(name: &str) -> Result<(), String> {
 }
 
 pub fn delete(name: &str) -> Result<(), String> {
+    forget(name);
     match stand_in() {
         None => bottles::delete(name),
         Some(program) => {
@@ -290,8 +331,9 @@ pub fn touch(name: &str) -> Result<(), String> {
     }
 }
 
-/// The command line that runs `argv` in the bottle.
+/// The command line that runs `argv` in the bottle (which starts it, if it's stopped).
 fn command(name: &str, argv: &[String], tty: bool) -> Result<Vec<String>, String> {
+    running(name);
     match stand_in() {
         None => bottles::exec_command(name, argv, tty),
         Some(program) => {
