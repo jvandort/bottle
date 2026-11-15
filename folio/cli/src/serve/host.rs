@@ -349,6 +349,55 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_parses_from_its_spec_and_refuses_what_isnt_one() {
+        let remote = |name: &str, fetch: &str, push: Option<&str>| Remote {
+            name: name.into(),
+            fetch: fetch.into(),
+            push: push.map(String::from),
+        };
+        for (spec, expected) in [
+            ("origin:fetch=upstream", remote("origin", UPSTREAM, None)),
+            ("host:fetch=heads", remote("host", HEADS, None)),
+            (
+                "work:fetch=ns/t-in,push=ns/t-out",
+                remote("work", "ns/t-in", Some("ns/t-out")),
+            ),
+            (
+                "mine:push=ns/x,fetch=ns/x",
+                remote("mine", "ns/x", Some("ns/x")),
+            ),
+            (
+                "up:fetch=upstream,push=ns/x",
+                remote("up", UPSTREAM, Some("ns/x")),
+            ),
+        ] {
+            assert_eq!(Remote::parse(spec).unwrap(), expected, "{spec}");
+        }
+        let origin = Remote::parse("origin:fetch=upstream").unwrap();
+        assert_eq!(
+            (origin.fetch_namespace(), origin.push_namespace()),
+            (None, None)
+        );
+        for spec in [
+            "origin",
+            "origin:",
+            ":fetch=heads",
+            "a/b:fetch=heads",
+            "x:push=ns/y",
+            "x:fetch=everything",
+            "x:fetch=ns/",
+            "x:fetch=ns/a/b",
+            "x:fetch=heads,push=heads",
+            "x:fetch=heads,fetch=heads",
+            "x:fetch=heads,pull=ns/y",
+            "x:fetch=heads,push=ns/-y",
+            "a:fetch=ns/x,push=ns/x,advance=main",
+        ] {
+            assert!(Remote::parse(spec).is_err(), "{spec}");
+        }
+    }
+
+    #[test]
     fn a_request_is_routed_to_the_longest_mount_it_names() {
         let served = |at: &str| Served {
             git_dir: Some("/r".into()),

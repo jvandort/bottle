@@ -7,7 +7,7 @@ from unittest import mock
 from folio.bottle import bottles, daemon, features as features_, host, repos
 from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, run, stop_bottle, thread_dir, write_bottles
-from tests.bottle.test_host import serve_bottle_host
+from tests.bottle.test_host import Served, serve_bottle_host
 
 
 class FakeSmolvm:
@@ -1030,7 +1030,8 @@ class SpecWorkspaceTest(BottleTestCase, unittest.IsolatedAsyncioTestCase):
             context="Extra.\n",
         )
         [mount] = self.bottle.mounts
-        server, env = await serve_bottle_host(host.Served(bottles.git_dir(mount), mount.remotes, mount.at or ""))
+        server, env = await serve_bottle_host(Served(bottles.git_dir(mount), tuple(r.spec for r in mount.remotes),
+                                                     mount.at or ""))
         self.addAsyncCleanup(self._close, server)
         self.workspace, self.home = self.tmp / "workspace", self.tmp / "home"
         self.home.mkdir()

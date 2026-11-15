@@ -1,13 +1,55 @@
 import asyncio
-from pathlib import Path
+import json
+import os
+import socket
 import subprocess
+import time
 import unittest
+from dataclasses import dataclass
+from pathlib import Path
 
-from folio.bottle import daemon, host
-from folio.bottle.errors import BottleError
 from tests.bottle.support import GitTestCase, bridge, run
+from tests.support import FOLIO
 
 MACHINE = "t-m"
+HOST, HOST_ADDRESS = "bottle.host", "192.0.2.1"
+
+
+@dataclass(frozen=True)
+class Served:
+    """One repo a bottle is served, as folio serve is told of it: its git dir, its remotes' specs, and where under
+    bottle.host/git they are."""
+
+    git_dir: Path | None
+    remotes: tuple[str, ...] = ()
+    at: str = ""
+
+
+def folio_home() -> Path:
+    return Path(os.environ["FOLIO_HOME"])
+
+
+def serve(*args: str) -> str:
+    """`folio serve ARGS`, its output; folio as the tests run it, on bottle-cli that isn't there."""
+    done = subprocess.run([str(FOLIO), "serve", *args], capture_output=True, text=True,
+                          env={**os.environ, "BOTTLE_CLI": "/no/bottle-cli"})
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+def control(message: dict) -> dict:
+    """One request to folio serve, on its control socket, as folio makes one: its answer."""
+    with socket.socket(socket.AF_UNIX) as s:
+        s.connect(str(folio_home() / "serve.sock"))
+        s.sendall(json.dumps(message).encode() + b"\n")
+        return json.loads(s.makefile().readline())
+
+
+def bind_message(repos: tuple[Served, ...]) -> dict:
+    return {"op": "bind", "bottle": "t", "machine": MACHINE, "runner": "local", "id": "", "features": [],
+            "permissions": [], "labels": {}, "repo": None, "ssh": [], "forwards": [],
+            "repos": [{"git_dir": str(r.git_dir) if r.git_dir else None, "at": r.at, "remotes": list(r.remotes)}
+                      for r in repos]}
 
 
 class BottleHost:
@@ -19,8 +61,11 @@ class BottleHost:
 
     def close(self) -> None:
         self.server.close()
-        daemon.stop()
-        daemon._wait_gone()
+        serve("stop")
+        # Gone: what's stopping takes connections and closes them, until it isn't there.
+        deadline = time.monotonic() + 5
+        while (folio_home() / "serve.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
 
     async def wait_closed(self) -> None:
         await self.server.wait_closed()
@@ -28,25 +73,21 @@ class BottleHost:
 
 def served_log() -> str:
     """What folio serve has logged."""
-    from folio.bottle.store import log_path
-
-    return log_path(daemon.LOG, daemon.home()).read_text()
+    return (folio_home() / "logs" / "serve.log").read_text()
 
 
-# daemon.bind as it is, for tests that stand in for it (test_bottles') and serve bottle.host too.
-_bind = daemon.bind
+def bind(*repos: Served) -> None:
+    serve("start")
+    reply = control(bind_message(repos))
+    assert reply.get("ok"), reply
 
 
-def bind(*repos: host.Served) -> None:
-    _bind("t", MACHINE, repos)
-
-
-async def serve_bottle_host(*repos: host.Served) -> tuple[BottleHost, dict[str, str]]:
+async def serve_bottle_host(*repos: Served) -> tuple[BottleHost, dict[str, str]]:
     """bottle.host as a bottle reaches it: folio serve, given a bottle with `repos`, and git's http://bottle.host/
     pointed at a stand-in for its machine. Returns what to close, and the environment."""
     bind(*repos)
-    server, port = await bridge(daemon.services_sockets()["host"], host.ADDRESS, 80, MACHINE, host.HOST)
-    env = {**__import__("os").environ, "GIT_CONFIG_COUNT": "1",
+    server, port = await bridge(folio_home() / "services" / "host.sock", HOST_ADDRESS, 80, MACHINE, HOST)
+    env = {**os.environ, "GIT_CONFIG_COUNT": "1",
            "GIT_CONFIG_KEY_0": f"url.http://127.0.0.1:{port}/.insteadOf", "GIT_CONFIG_VALUE_0": "http://bottle.host/",
            "BOTTLE_HOST_PORT": str(port)}
     return BottleHost(server), env
@@ -70,10 +111,8 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         run("git", "clone", "-q", self.upstream, self.repo)
         run("git", "-C", self.repo, "branch", "mine")
         # What a bottle made from a registered repo is served (see bottles.default_remotes).
-        remotes = tuple(host.Remote.parse(spec) for spec in (
-            "origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out",
-        ))
-        self.served = host.Served(self.repo / ".git", remotes)
+        remotes = ("origin:fetch=upstream", "host:fetch=heads", "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out")
+        self.served = Served(self.repo / ".git", remotes)
         server, self.env = await serve_bottle_host(self.served)
         self.addAsyncCleanup(self._close, server)
         # The same setup as a bottle's /workspace.
@@ -239,10 +278,10 @@ class RemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         # folio serve takes remotes only as specs, and refuses one that would push to no namespace: what
         # hooks/pre-receive would catch is never served.
         await self.work()
-        with self.assertRaisesRegex(BottleError, "invalid remote"):
-            daemon._request({**daemon.bind_message("t", MACHINE, (self.served,)),
-                             "repos": [{"git_dir": str(self.repo / ".git"), "at": "",
-                                        "remotes": ["work:fetch=heads,push=ns/"]}]}, start=False)
+        reply = control({**bind_message((self.served,)),
+                         "repos": [{"git_dir": str(self.repo / ".git"), "at": "", "remotes": ["work:fetch=heads,push=ns/"]}]})
+        self.assertFalse(reply["ok"])
+        self.assertIn("invalid remote", reply["error"])
         self.assertNotIn("refs/heads/work", self.host_refs())
 
     async def test_the_repos_own_hooks_never_run(self) -> None:
@@ -282,8 +321,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.repo = self.make_repo("app")
-        remotes = (host.Remote.parse("agent:fetch=ns/t-out,push=ns/t-out"),)
-        server, self.env = await serve_bottle_host(host.Served(self.repo / ".git", remotes))
+        server, self.env = await serve_bottle_host(Served(self.repo / ".git", ("agent:fetch=ns/t-out,push=ns/t-out",)))
         self.addAsyncCleanup(RemotesTest._close, server)
         for key, value in (("url", str(self.repo)), ("fetch", "+refs/heads/*:refs/remotes/bottle/t/*"),
                            ("uploadpack", "git --namespace=t-out upload-pack")):
@@ -414,40 +452,6 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         await self.push()
         self.assertEqual(pushed, self.users())
 
-    def test_a_remote_has_no_advance_any_more(self) -> None:
-        with self.assertRaises(BottleError):
-            host.Remote.parse("a:fetch=ns/x,push=ns/x,advance=main")
-
-
-class RemoteParseTest(unittest.TestCase):
-    def test_parses(self) -> None:
-        for spec, remote in (
-            ("origin:fetch=upstream", host.Remote("origin", host.UPSTREAM)),
-            ("host:fetch=heads", host.Remote("host", host.HEADS)),
-            ("work:fetch=ns/t-in,push=ns/t-out", host.Remote("work", "ns/t-in", "ns/t-out")),
-            ("mine:push=ns/x,fetch=ns/x", host.Remote("mine", "ns/x", "ns/x")),
-            ("up:fetch=upstream,push=ns/x", host.Remote("up", host.UPSTREAM, "ns/x")),
-        ):
-            with self.subTest(spec):
-                self.assertEqual(host.Remote.parse(spec), remote)
-
-    def test_round_trips(self) -> None:
-        for spec in ("origin:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"):
-            self.assertEqual(host.Remote.parse(spec).spec, spec)
-
-    def test_namespaces(self) -> None:
-        remote = host.Remote.parse("work:fetch=ns/t-in,push=ns/t-out")
-        self.assertEqual((remote.fetch_namespace, remote.push_namespace), ("t-in", "t-out"))
-        self.assertEqual((host.Remote("o", host.UPSTREAM).fetch_namespace, host.Remote("o", host.UPSTREAM).push_namespace), (None, None))
-
-    def test_refuses(self) -> None:
-        for spec in (
-            "origin", "origin:", ":fetch=heads", "a/b:fetch=heads", "x:push=ns/y", "x:fetch=everything",
-            "x:fetch=ns/", "x:fetch=ns/a/b", "x:fetch=heads,push=heads", "x:fetch=heads,fetch=heads",
-            "x:fetch=heads,pull=ns/y", "x:fetch=heads,push=ns/-y",
-        ):
-            with self.subTest(spec), self.assertRaises(host.BottleError):
-                host.Remote.parse(spec)
 
 
 class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
@@ -459,10 +463,8 @@ class ServedRemotesTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.repo = self.tmp / "repo"
         run("git", "clone", "-q", self.upstream, self.repo)
         run("git", "-C", self.repo, "branch", "mine")
-        remotes = tuple(host.Remote.parse(spec) for spec in (
-            "up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",
-        ))
-        server, self.env = await serve_bottle_host(host.Served(self.repo / ".git", remotes))
+        remotes = ("up:fetch=upstream", "theirs:fetch=heads", "lane:fetch=ns/t-in,push=ns/t-out", "own:fetch=ns/o,push=ns/o",)
+        server, self.env = await serve_bottle_host(Served(self.repo / ".git", remotes))
         self.addAsyncCleanup(RemotesTest._close, server)
         self.workspace = self.tmp / "workspace"
         run("git", "init", "-q", "-b", "main", self.workspace)
