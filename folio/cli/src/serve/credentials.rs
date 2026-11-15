@@ -174,7 +174,7 @@ fn encoded(rewrite: &Rewrite, value: &str) -> String {
 // --- reading credentials ----------------------------------------------------------
 
 /// The Keychain service for this BOTTLE_HOME, so separate homes keep separate credentials.
-fn service() -> String {
+pub(crate) fn service() -> String {
     let home_dir = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let home = std::env::var_os("BOTTLE_HOME")
         .filter(|h| !h.is_empty())
@@ -194,7 +194,7 @@ fn service() -> String {
 
 /// The credential `name`, from the Keychain; $FOLIO_CREDENTIALS, a JSON object of name: value, in
 /// its place (the tests', and a machine without a Keychain's).
-fn keychain(name: &str) -> Option<String> {
+pub(crate) fn keychain(name: &str) -> Option<String> {
     if let Some(file) = std::env::var_os("FOLIO_CREDENTIALS") {
         let given: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
         return given.get(name).and_then(Value::as_str).map(String::from);
@@ -214,7 +214,7 @@ fn keychain(name: &str) -> Option<String> {
 /// file. Comments (# and !) and blank lines are skipped, and a backslash escapes the character
 /// after it; a key ends at the first `=`, and only at a `:` on a line with no `=`, so a URL is a key
 /// as written.
-fn read_properties(path: &str) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn read_properties(path: &str) -> Result<BTreeMap<String, String>, String> {
     let path = match path.strip_prefix("~/") {
         Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
         None => PathBuf::from(path),
@@ -252,7 +252,7 @@ fn read_properties(path: &str) -> Result<BTreeMap<String, String>, String> {
 }
 
 /// One of inject.hosts as a host pattern and a port: always https, so 443 unless it says another.
-fn destination(host: &str) -> Result<(String, u16), String> {
+pub(crate) fn destination(host: &str) -> Result<(String, u16), String> {
     match host.rsplit_once(':') {
         None => Ok((host.to_string(), 443)),
         Some((pattern, port)) => match port.parse::<u16>() {

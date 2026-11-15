@@ -147,6 +147,17 @@ fn registered() -> io::Result<BTreeMap<String, Entry>> {
     Ok(registry()?.runners)
 }
 
+/// Every runner added, by name: whether it's detached.
+pub fn detached() -> io::Result<BTreeMap<String, bool>> {
+    Ok(registered()?
+        .into_iter()
+        .map(|(name, entry)| {
+            let detached = entry.detached();
+            (name, detached)
+        })
+        .collect())
+}
+
 fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
@@ -757,7 +768,7 @@ fn check(target: &str, json: bool) -> io::Result<()> {
 }
 
 /// Runner `name`'s user's home there, asked once and kept in its entry.
-fn home(name: &str) -> io::Result<String> {
+pub fn home(name: &str) -> io::Result<String> {
     let entry = registered()?
         .remove(name)
         .ok_or_else(|| other(format!("no runner named {name}")))?;

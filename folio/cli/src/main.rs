@@ -22,7 +22,12 @@
 //! `folio-cli: `.
 
 mod advice;
+mod auth;
+mod bottle_cli;
+mod bottles;
+mod builds;
 mod broker;
+mod daemon;
 mod features;
 mod git;
 mod lanes;
@@ -32,7 +37,9 @@ mod pyjson;
 mod repos;
 mod routes;
 mod runner;
+mod runners;
 mod serve;
+mod services;
 mod snapshots;
 mod specs;
 mod store;

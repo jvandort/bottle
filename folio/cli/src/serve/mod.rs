@@ -22,11 +22,11 @@
 //! up while still taking connections, closing them unanswered (what says it's on its way out), and
 //! only then is it gone: what's routed here stops first, then its forwards.
 
-mod credentials;
+pub(crate) mod credentials;
 mod gateway;
 mod git;
 pub mod hook;
-mod host;
+pub(crate) mod host;
 mod http;
 pub mod log;
 mod messages;
@@ -448,7 +448,7 @@ fn raised(soft: u64, hard: Option<u64>, mut set: impl FnMut(u64) -> bool) -> u64
 }
 
 /// This program's code, as ping says it: a hash of the program itself.
-fn code() -> String {
+pub fn code() -> String {
     let exe = std::env::current_exe()
         .and_then(fs::read)
         .unwrap_or_default();
