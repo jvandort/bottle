@@ -22,10 +22,17 @@
 //! `folio-cli: `.
 
 mod features;
+mod git;
 mod images;
+mod pyjson;
+mod repos;
 mod routes;
 mod runner;
 mod serve;
+mod specs;
+mod store;
+#[cfg(test)]
+mod tempdir;
 
 use std::env;
 use std::path::PathBuf;
