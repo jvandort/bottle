@@ -252,6 +252,18 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     // One that isn't there at all says so, as status does.
     let out = f.cli(&["exec", "none", "--", "true"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("no machine none"));
+    // A pid file its VM left (a crash, a reboot), naming a pid something else has now: it isn't
+    // running, and nothing kills that something else.
+    let mut other = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid_file = f.dir.join("home/krun/machines/m1/pid");
+    fs::write(&pid_file, other.id().to_string()).unwrap();
+    assert_eq!(f.ok(&["status", "m1"]), "stopped\n");
+    f.ok(&["stop", "m1"]);
+    assert!(
+        other.try_wait().unwrap().is_none(),
+        "stop killed what the pid file named"
+    );
+    fs::write(&pid_file, other.id().to_string()).unwrap();
     // Stopped, it can be renamed, all of it; running, it can't.
     f.ok(&["rename", "m1", "m2"]);
     assert!(!f.cli(&["status", "m1"]).status.success());
@@ -289,7 +301,15 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     assert!(store.join("host.ext4").exists() && store.join("named.ext4").exists());
     assert!(!store.join("unused.ext4").exists() && !store.join("unused.json").exists());
 
-    f.ok(&["delete", "m1"]);
+    // Forced, it kills only its own VM: not what a pid file it left names.
+    fs::write(&pid_file, other.id().to_string()).unwrap();
+    f.ok(&["delete", "m1", "-f"]);
+    assert!(
+        other.try_wait().unwrap().is_none(),
+        "delete -f killed what the pid file named"
+    );
+    let _ = other.kill();
+    let _ = other.wait();
     assert!(!f.dir.join("home/krun/machines/m1").exists());
     assert!(!f.cli(&["status", "m1"]).status.success());
     assert_eq!(f.ok(&["ls", "--json"]), "[]\n");

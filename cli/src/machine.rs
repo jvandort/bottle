@@ -35,7 +35,8 @@
 
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -237,10 +238,16 @@ impl Machine {
             .ok()
     }
 
+    /// Whether its VM runs: its process holds the lock on its pid file (start gives it the lock,
+    /// which goes with it however it ends), so a pid file it left, naming a pid since reused by
+    /// something else, says nothing runs.
     fn running(&self) -> bool {
-        // SAFETY: kill with signal 0 only asks whether the process is there.
-        self.pid()
-            .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+        let Ok(file) = fs::File::open(self.dir.join("pid")) else {
+            return false;
+        };
+        // SAFETY: flock on a descriptor this owns; a lock this takes goes as the file closes.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        !taken
     }
 
     /// "created", "running" or "stopped"; None if there's no such machine.
@@ -287,6 +294,17 @@ impl Machine {
             let _ = fs::rename(self.dir.join(name), self.dir.join(format!("{name}.1")));
         }
         let log = fs::File::create(self.dir.join("boot.log"))?;
+        // Its lock, taken here and handed to its process (see running).
+        let mut pid_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("pid"))?;
+        // SAFETY: flock on a descriptor this owns.
+        if unsafe { libc::flock(pid_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(other(format!("{} is running already", self.name)));
+        }
+        let held = pid_file.as_raw_fd();
         let mut boot = match env::var_os("BOTTLE_BOOT") {
             Some(program) => Command::new(program),
             None => {
@@ -338,16 +356,22 @@ impl Machine {
             .stdout(log.try_clone()?)
             .stderr(log)
             .current_dir("/");
-        // SAFETY: setsid between fork and exec: a session of its own, out of reach of this
-        // terminal's signals, and outliving this process.
+        // SAFETY: setsid and fcntl between fork and exec: a session of its own, out of reach of this
+        // terminal's signals, and outliving this process; and the lock's descriptor kept open
+        // across exec, so its process holds the lock for as long as it runs.
         unsafe {
-            boot.pre_exec(|| {
+            boot.pre_exec(move || {
                 libc::setsid();
+                if libc::fcntl(held, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
         let mut child = boot.spawn()?;
-        fs::write(self.dir.join("pid"), child.id().to_string())?;
+        pid_file.set_len(0)?;
+        pid_file.write_all(child.id().to_string().as_bytes())?;
+        drop(pid_file);
         let answered = wait_for_agent(&socket, || matches!(child.try_wait(), Ok(None)));
         if let Err(e) = answered {
             let _ = child.kill();
@@ -384,27 +408,33 @@ impl Machine {
             return Ok(());
         };
         let asked = bottle_agent_client::stop(&self.socket());
-        if !self.ends(pid, STOP_TIMEOUT) {
-            // SAFETY: kill with a pid.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            self.ends(pid, Duration::from_secs(5));
+        if !self.ends(STOP_TIMEOUT) {
+            self.kill(pid);
         }
         let _ = fs::remove_file(self.dir.join("pid"));
         let _ = fs::remove_file(self.socket());
         asked.map_err(|e| other(format!("stopping {}: {e}; killed", self.name)))
     }
 
-    /// Whether process `pid` ends within `timeout`.
-    fn ends(&self, pid: libc::pid_t, timeout: Duration) -> bool {
+    /// Whether its VM ends within `timeout`.
+    fn ends(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        // SAFETY: kill with signal 0 only asks whether the process is there.
-        while unsafe { libc::kill(pid, 0) } == 0 {
+        while self.running() {
             if Instant::now() > deadline {
                 return false;
             }
             thread::sleep(Duration::from_millis(20));
         }
         true
+    }
+
+    /// Its VM's process, `pid`, killed, if it's still its (running says so), and waited for.
+    fn kill(&self, pid: libc::pid_t) {
+        if self.running() {
+            // SAFETY: kill with a pid, its VM's while the lock's held.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            self.ends(Duration::from_secs(5));
+        }
     }
 }
 
@@ -597,10 +627,8 @@ fn delete(machine: &Machine, args: &[String]) -> io::Result<()> {
         return Err(other(format!("unknown option {arg}")));
     }
     if args.iter().any(|a| a == "-f") {
-        if let Some(pid) = machine.pid().filter(|_| machine.running()) {
-            // SAFETY: kill with a pid.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            machine.ends(pid, Duration::from_secs(5));
+        if let Some(pid) = machine.pid() {
+            machine.kill(pid);
         }
     } else {
         machine.stop()?;
