@@ -1030,6 +1030,18 @@ mod tests {
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
     }
 
+    /// What's kept at `path`, once it is: a file's kept after the bottle has had all of it.
+    fn kept(path: &std::path::Path) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match fs::read(path) {
+                Ok(data) => return data,
+                Err(e) if std::time::Instant::now() > deadline => panic!("{}: {e}", path.display()),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
     /// Sends a request on `bottle`: the response's status, its headers and its body.
     fn get(
         bottle: &mut BufReader<Box<dyn Duplex>>,
@@ -1101,10 +1113,7 @@ mod tests {
             assert_eq!((status, data.len()), (200, 0));
             assert_eq!(headers.get("content-length").map(String::as_str), Some("3"));
             assert_eq!(asked.lock().unwrap().clone(), ["GET /a.jar"]);
-            assert_eq!(
-                fs::read(home.join("cache/http/files.example/a.jar")).unwrap(),
-                b"jar"
-            );
+            assert_eq!(kept(&home.join("cache/http/files.example/a.jar")), b"jar");
 
             // A query's is passed on, and not kept; nor is what the host says not to keep, nor
             // what the rule excludes.
@@ -1127,10 +1136,7 @@ mod tests {
                 &format!("GET /moved HTTP/1.1\r\nHost: {HOST}\r\n\r\n"),
             );
             assert_eq!((status, &data[..]), (200, &b"jar"[..]));
-            assert_eq!(
-                fs::read(home.join("cache/http/files.example/moved")).unwrap(),
-                b"jar"
-            );
+            assert_eq!(kept(&home.join("cache/http/files.example/moved")), b"jar");
             let (status, headers, data) = get(
                 &mut bottle,
                 &format!("GET /chunked HTTP/1.1\r\nHost: {HOST}\r\n\r\n"),
@@ -1141,7 +1147,7 @@ mod tests {
                 Some("chunked")
             );
             assert_eq!(
-                fs::read(home.join("cache/http/files.example/chunked")).unwrap(),
+                kept(&home.join("cache/http/files.example/chunked")),
                 b"abcde"
             );
 
