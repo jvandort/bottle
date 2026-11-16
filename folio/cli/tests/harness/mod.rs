@@ -804,3 +804,66 @@ pub fn workspace_out(workspace: &str) -> String {
         r#"cd {workspace} && {{ printf '.git\0'; git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh; }} | tar -czf - --null -T -"#
     )
 }
+
+impl Folio {
+    /// A bottle's record, kept with its thread's.
+    pub fn bottle_record(&self, thread: &str, bottle: &str) -> Value {
+        read_json(
+            &self
+                .thread_dir(thread)
+                .join("bottles")
+                .join(format!("{bottle}.json")),
+        )
+        .unwrap()
+    }
+}
+
+impl Runner {
+    /// Its stand-in bottle-cli's calls of `command`, each its arguments.
+    pub fn calls(&self, command: &str) -> Vec<Vec<String>> {
+        self.cli()["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c[0] == command)
+            .map(|c| {
+                c.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The argv of each command that ran in machine `name` there.
+    pub fn ran(&self, name: &str) -> Vec<Vec<String>> {
+        self.cli()["execs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["machine"] == name)
+            .map(|e| {
+                e["argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Machine `name` there, whatever its thread.
+    pub fn machine_named(&self, name: &str) -> Value {
+        self.cli()["machines"][name].clone()
+    }
+
+    pub fn set_machine_named(&self, name: &str, fields: Value) {
+        let mut state = self.cli();
+        for (k, v) in fields.as_object().unwrap() {
+            state["machines"][name][k] = v.clone();
+        }
+        write_json(&self.state_path(), &state);
+    }
+}

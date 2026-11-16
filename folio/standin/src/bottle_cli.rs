@@ -16,7 +16,8 @@
 //! then built, with the recipe's labels.
 //!
 //! $FAKE_CLI_FAIL makes steps fail (a comma-separated list), as bottle-cli would: create,
-//! configure, start, delete, build, or an exec's contract, hosts, mkdir or workspace; failures
+//! configure, start, delete, build, or an exec's contract, hosts, mkdir or workspace (create and
+//! delete for one machine alone as create:NAME, delete:NAME); failures
 //! look like bottle-cli's, `bottle-cli: ...` on stderr, exit 1. $FAKE_CLI_SLOW makes them take
 //! $FAKE_CLI_SLOW_SECONDS (default 30), to be interrupted. An exec whose command has
 //! $FAKE_CLI_GARBLE in it writes "not a tarball" instead; one with $FAKE_CLI_FAIL_EXEC in it exits
@@ -109,6 +110,11 @@ fn listed(variable: &str, step: &str) -> bool {
 
 fn failing(step: &str) -> bool {
     listed("FAKE_CLI_FAIL", step)
+}
+
+/// Whether `step` fails for machine `name`: as every machine's does, or as STEP:NAME says.
+fn failing_for(step: &str, name: &str) -> bool {
+    failing(step) || listed("FAKE_CLI_FAIL", &format!("{step}:{name}"))
 }
 
 /// A step $FAKE_CLI_SLOW names takes its time: long enough to be interrupted.
@@ -266,7 +272,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
         }
         ["delete", name, "-f"] => {
             slow("delete");
-            if failing("delete") {
+            if failing_for("delete", name) {
                 return fail("machine busy");
             }
             let mut state = State::open();
@@ -309,7 +315,7 @@ fn directory(name: &str) -> PathBuf {
 }
 
 fn create(name: &str, rest: &[String]) -> ExitCode {
-    if failing("create") {
+    if failing_for("create", name) {
         return fail("create failed");
     }
     let (given, _) = options(
