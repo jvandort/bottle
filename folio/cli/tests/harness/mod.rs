@@ -270,7 +270,6 @@ impl Folio {
         command
             .args(args)
             .current_dir(cwd.unwrap_or(&self.repo))
-            .env_remove("FOLIO_BOTTLE")
             .env_remove("FOLIO_CLI")
             .envs(self.env.iter().cloned())
             .envs(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));

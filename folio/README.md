@@ -627,7 +627,6 @@ folio configure fix-it                 # shows it
 
 ```sh
 cargo test -p folio
-cd folio && python3 -m unittest discover -s tests -t .
 ```
 
 folio is a Rust program (`cli/`, in bottle's Cargo workspace; `bin/folio` builds and runs it from a
@@ -635,25 +634,27 @@ checkout). It runs bottle's code only by running bottle-cli, never by linking bo
 (`cli/tests/boundary.rs` checks). What a thread is, is `cli/src/threads.rs`'s; its bottle,
 `cli/src/bottles.rs`'s, through `cli/src/engine.rs`; what you type, `cli/src/cli.rs`'s; folio
 serve, `cli/src/serve/`'s; features, `cli/src/features.rs`'s (which says what a feature's
-`devcontainer-feature.json` may hold) and `images.rs`'s (what builds their images).
+`devcontainer-feature.json` may hold; `features_tests.rs` checks it) and `images.rs`'s (what builds
+their images).
 
-`cargo test -p folio` has the unit tests, and folio's own commands driven from outside
-(`cli/tests/`): runners over a stand-in ssh, folio serve as folio starts it, its credentials. The
-Python suite (`tests/`) drives folio as a person does, from outside, `$FOLIO_UNDER_TEST` (else this
-checkout's debug build): a thread's commands against `tests/fake_bottle.py`, a stand-in for its
-bottle (`$FOLIO_BOTTLE`) that keeps its bottles in a JSON file and runs commands in a real clone of
-the repo, so they need no VM; folio's own bottles against `tests/fake_bottle_cli.py`, a stand-in
-for bottle-cli (`test_machines.py`, `test_drone.py`); and the feature format, through `folio
-features` (`tests/bottle/test_features.py`). `tests/state.py` reads what folio keeps from its files.
+`cargo test -p folio` has the unit tests, and folio driven as a person drives it, from outside
+(`cli/tests/`, sharing `cli/tests/harness/`): each test runs `folio` in a directory of its own,
+with a repo to work in and a folio home of its own (so a folio serve of its own), against
+stand-ins for what folio runs, in `standin/` (folio-standin, one program that's each by the name
+it's run as):
 
-On a Mac with bottle-cli built (`cargo xtask dist`, or `BOTTLE_CLI` naming one), that includes two
-suites that run real machines, and take minutes the first time, while they pull and build images:
+- **bottle-cli**: its machines are directories, where what runs in a machine runs, its repos,
+  home and mounts that directory's, so a thread's workspace is a real checkout, and a pause and
+  resume real snapshots of it; what bottle-cli did is in a JSON file a test reads.
+- **ssh**: a runner is a home on this machine, each command run there, a forward a symlink, so a
+  thread's bottle on a runner is tested end to end (`drone.rs`).
+- **security**: the Keychain, as files.
 
-- `tests/test_krun_contract.py`: what folio relies on bottle-cli for, asked as folio asks it.
+On a Mac, `FOLIO_VM_TESTS=1` adds two that run real machines, on this checkout's bottle-cli (built
+first if it's changed, by `bin/bottle-build`, unless `BOTTLE_CLI` names one), and take minutes the
+first time, while they pull and build images:
+
+- `cli/tests/krun_contract.rs`: what folio relies on bottle-cli for, asked as folio asks it.
   Run it after changing bottle-cli, the agent or libkrun.
-- `tests/test_end_to_end.py`: a real thread, made and used through folio and `bin/bottle`, in its
+- `cli/tests/end_to_end.rs`: a real thread, made and used through folio and `bin/bottle`, in its
   own `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).
-
-Elsewhere they're skipped. Runners are tested here with a stand-in ssh (`tests/fake_ssh`), which
-runs each command on this machine, in a home of its own, and makes a forward a symlink:
-`tests/test_drone.py` is a drone end to end, with only ssh and bottle-cli stood in for.

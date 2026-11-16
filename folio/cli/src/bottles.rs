@@ -1360,8 +1360,6 @@ mod tests {
     /// The remotes a repo's mount is often given: its upstream and its own branches, read-only.
     const READ_ONLY: &[&str] = &["origin:fetch=upstream", "host:fetch=heads"];
 
-    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
-
     /// A bottle test: folio's home and the stand-in bottle-cli's state fresh, folio serve as the
     /// tests have it (daemon::fake), and a repo, `example`, to mount.
     struct Fake {
@@ -1375,7 +1373,7 @@ mod tests {
         fn new() -> Fake {
             let env = tempdir::isolated();
             let tmp = tempdir::Dir::new();
-            tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+            tempdir::set(&env, "BOTTLE_CLI", &tempdir::standin_cli());
             tempdir::set(
                 &env,
                 "FAKE_CLI_STATE",

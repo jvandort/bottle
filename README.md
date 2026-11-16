@@ -61,7 +61,7 @@ one. A runner's are its own bottle-cli's, which folio runs there.
 ## Prerequisites
 
 - macOS on Apple silicon
-- Python 3.11+, for folio's tests and curate (folio itself is Rust)
+- Python 3.11+, for curate (folio and its tests are Rust)
 - [Rust](https://rustup.rs), with the musl target for the VMs' agent
   (`rustup target add aarch64-unknown-linux-musl`), and Xcode's command line
   tools

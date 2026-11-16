@@ -63,12 +63,7 @@ pub fn isolated() -> Isolated {
         // SAFETY: under the lock every test that reads the environment holds.
         unsafe { std::env::set_var(key, value) };
     }
-    for key in [
-        "FOLIO_BOTTLE",
-        "FOLIO_FEATURES",
-        "FAKE_CLI_FAIL",
-        "FAKE_CLI_MISSING",
-    ] {
+    for key in ["FOLIO_FEATURES", "FAKE_CLI_FAIL", "FAKE_CLI_MISSING"] {
         // SAFETY: as above.
         unsafe { std::env::remove_var(key) };
     }
@@ -99,6 +94,37 @@ pub fn folio() -> PathBuf {
         assert!(status.success(), "building folio");
     });
     built
+}
+
+/// folio-standin, built: the stand-ins for what folio runs, each by the name it's run as (a
+/// link to it named bottle-cli, ssh or security).
+pub fn standin() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")));
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-q", "-p", "folio-standin"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "building folio-standin");
+    });
+    target.join("debug").join("folio-standin")
+}
+
+/// The stand-in bottle-cli: what a test runs where folio runs bottle-cli. Its state is
+/// $FAKE_CLI_STATE.
+pub fn standin_cli() -> String {
+    let standin = standin();
+    let link = standin.parent().unwrap().join("standin").join("bottle-cli");
+    static LINKED: std::sync::Once = std::sync::Once::new();
+    LINKED.call_once(|| {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&standin, &link).unwrap();
+    });
+    link.display().to_string()
 }
 
 /// git `args`, which must succeed; its stdout, trimmed.

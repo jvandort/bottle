@@ -342,9 +342,7 @@ mod tests {
     use super::*;
     use crate::tempdir;
 
-    const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_security");
-
-    /// The Keychain, as tests/fake_security keeps it, first on PATH as `security`.
+    /// The Keychain, as folio-standin's `security` keeps it, first on PATH.
     struct Keychain {
         _env: tempdir::Isolated,
         tmp: tempdir::Dir,
@@ -356,7 +354,7 @@ mod tests {
             let tmp = tempdir::Dir::new();
             let bin = tmp.path().join("bin");
             std::fs::create_dir(&bin).unwrap();
-            std::os::unix::fs::symlink(FAKE, bin.join("security")).unwrap();
+            std::os::unix::fs::symlink(tempdir::standin(), bin.join("security")).unwrap();
             let path = format!(
                 "{}:{}",
                 bin.display(),

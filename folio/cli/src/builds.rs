@@ -227,8 +227,6 @@ mod tests {
     use crate::tempdir;
     use std::fs;
 
-    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
-
     /// A build test: features of its own (base, tools, and jvm on tools), and the stand-in
     /// bottle-cli.
     struct Builds {
@@ -246,7 +244,7 @@ mod tests {
         fn new() -> Builds {
             let env = tempdir::isolated();
             let tmp = tempdir::Dir::new();
-            tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+            tempdir::set(&env, "BOTTLE_CLI", &tempdir::standin_cli());
             tempdir::set(
                 &env,
                 "FAKE_CLI_STATE",

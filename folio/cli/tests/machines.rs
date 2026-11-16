@@ -301,7 +301,6 @@ fn interrupted(f: &Folio, slow: &str, again_at: Option<&str>) -> (i32, String) {
     command
         .args(["new", "t"])
         .current_dir(&f.repo)
-        .env_remove("FOLIO_BOTTLE")
         .envs(f.env.iter().cloned())
         .env("FAKE_CLI_SLOW", slow)
         .env("FAKE_CLI_SLOW_SECONDS", "3")

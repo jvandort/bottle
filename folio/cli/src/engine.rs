@@ -3,11 +3,6 @@
 //! What they need is small -- validate a spec, create a bottle, read its state, start and delete
 //! it, run commands in it with pipes or a terminal. A command runs as bottle-cli's exec, on the
 //! machine the bottle is; the rest is bottles.rs's.
-//!
-//! $FOLIO_BOTTLE, if it's set, is a bottle CLI that stands in for bottles.rs (folio's tests' does:
-//! tests/fake_bottle.py): `spec validate --json FILE`, `new ...`, `status --json NAME...`,
-//! `start|touch|delete NAME`, `exec [-t] NAME -- ARGV`, and `cp SRC DST`. Its errors are its own:
-//! its stderr reaches the user as it wrote it, and folio adds only which command failed.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -21,11 +16,6 @@ use serde_json::Value;
 use crate::bottle_cli::Cli;
 use crate::bottles::{self, MountRequest};
 use crate::runners;
-
-/// The bottle CLI standing in for bottles.rs, if one is.
-fn stand_in() -> Option<String> {
-    std::env::var("FOLIO_BOTTLE").ok().filter(|b| !b.is_empty())
-}
 
 /// A repo for a bottle: checked out at `path`, from `checkout` (None: bottle's default), served
 /// `remotes`.
@@ -41,61 +31,6 @@ pub struct Mount {
 pub struct Ran {
     pub code: i32,
     pub stdout: String,
-}
-
-// --- the stand-in -----------------------------------------------------------------
-
-/// That a stand-in's command failed; it has already said why, on stderr.
-fn stand_in_failed(args: &[String], code: i32) -> String {
-    let words: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .take_while(|a| !a.starts_with('-') && !a.contains('/'))
-        .collect();
-    format!("`bottle {}` failed (exit {code})", words.join(" "))
-}
-
-/// The stand-in, reading its stdout. Without `check`, a failure is the caller's to expect, so its
-/// stderr is dropped rather than shown as if something went wrong.
-fn stand_in_run(
-    program: &str,
-    args: &[String],
-    input: Option<&str>,
-    check: bool,
-) -> Result<Ran, String> {
-    // Never this terminal for stdin: an exec passes it through to the bottle, which would read what's
-    // typed at folio's own prompts.
-    let ran = piped(Command::new(program).args(args), input, check)?;
-    if check && ran.code != 0 {
-        return Err(stand_in_failed(args, ran.code));
-    }
-    Ok(ran)
-}
-
-/// A temporary file holding `content`, for as long as the stand-in needs to read it.
-struct TempFile(PathBuf);
-
-impl TempFile {
-    fn new(content: &str) -> Result<TempFile, String> {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "folio-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::write(&path, content).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(TempFile(path))
-    }
-
-    fn path(&self) -> String {
-        self.0.display().to_string()
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 
 fn strings(args: &[&str]) -> Vec<String> {
@@ -153,17 +88,7 @@ fn status_of(command: &mut Command) -> Result<std::process::ExitStatus, String> 
 
 /// The spec in canonical form, or the reason it isn't one.
 pub fn validate_spec(spec: &Value) -> Result<Value, String> {
-    let Some(program) = stand_in() else {
-        return crate::specs::canonical(spec, None, "this machine");
-    };
-    let file = TempFile::new(&spec.to_string())?;
-    let ran = stand_in_run(
-        &program,
-        &strings(&["spec", "validate", "--json", &file.path()]),
-        None,
-        true,
-    )?;
-    serde_json::from_str(&ran.stdout).map_err(|e| format!("bottle spec validate: {e}"))
+    crate::specs::canonical(spec, None, "this machine")
 }
 
 /// Create a bottle for the thread whose directory is `owner`, where its record is kept, on
@@ -179,54 +104,25 @@ pub fn new(
     sidecar: Option<&str>,
 ) -> Result<(), String> {
     forget(name);
-    let Some(program) = stand_in() else {
-        crate::log::say!("bottles", "Creating bottle {name}...");
-        let requests: Vec<MountRequest> = mounts
-            .iter()
-            .map(|m| MountRequest {
-                path: m.path.clone(),
-                repo: m.repo.clone(),
-                checkout: m.checkout.clone(),
-                remotes: m.remotes.clone(),
-            })
-            .collect();
-        bottles::create(
-            owner,
-            spec,
-            name,
-            &requests,
-            context,
-            runner.unwrap_or(runners::LOCAL),
-            sidecar,
-        )?;
-        return Ok(());
-    };
-    let spec_file = TempFile::new(&spec.to_string())?;
-    let context_file = TempFile::new(context)?;
-    let mut args = strings(&["new", "--spec", &spec_file.path(), "--name", name]);
-    if let Some(runner) = runner {
-        args.extend(strings(&["--runner", runner]));
-    }
-    for m in mounts {
-        args.extend(["--mount".into(), format!("{}={}", m.path, m.repo.display())]);
-        if let Some(checkout) = &m.checkout {
-            args.extend(["--checkout".into(), format!("{}={checkout}", m.path)]);
-        }
-        for remote in &m.remotes {
-            args.extend(["--git-remote".into(), format!("{}:{remote}", m.path)]);
-        }
-    }
-    args.extend(["--context".into(), context_file.path()]);
-    if let Some(bottle) = sidecar {
-        args.extend(["--ssh".into(), format!("{}={bottle}", bottles::SIDECAR)]);
-    }
-    let status = status_of(Command::new(&program).args(&args))?;
-    if !status.success() {
-        return Err(stand_in_failed(
-            &strings(&["new", name]),
-            status.code().unwrap_or(-1),
-        ));
-    }
+    crate::log::say!("bottles", "Creating bottle {name}...");
+    let requests: Vec<MountRequest> = mounts
+        .iter()
+        .map(|m| MountRequest {
+            path: m.path.clone(),
+            repo: m.repo.clone(),
+            checkout: m.checkout.clone(),
+            remotes: m.remotes.clone(),
+        })
+        .collect();
+    bottles::create(
+        owner,
+        spec,
+        name,
+        &requests,
+        context,
+        runner.unwrap_or(runners::LOCAL),
+        sidecar,
+    )?;
     Ok(())
 }
 
@@ -267,16 +163,7 @@ pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
         .cloned()
         .collect();
     if !unknown.is_empty() {
-        let rows = match stand_in() {
-            None => bottles::status(&unknown)?,
-            Some(program) => {
-                let mut args = strings(&["status", "--json"]);
-                args.extend(unknown.iter().cloned());
-                let ran = stand_in_run(&program, &args, None, true)?;
-                serde_json::from_str::<Vec<Value>>(&ran.stdout)
-                    .map_err(|e| format!("bottle status: {e}"))?
-            }
-        };
+        let rows = bottles::status(&unknown)?;
         let mut known = known();
         for row in rows {
             known.insert(row["name"].as_str().unwrap_or_default().to_string(), row);
@@ -292,64 +179,28 @@ pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
 /// Start a stopped bottle. On this terminal, as `new` is: starting can need a login.
 pub fn start(name: &str) -> Result<(), String> {
     forget(name);
-    let Some(program) = stand_in() else {
-        return bottles::start(name).map(|_| ());
-    };
-    let status = status_of(
-        Command::new(&program)
-            .args(["start", name])
-            .stdout(Stdio::null()),
-    )?;
-    if !status.success() {
-        return Err(stand_in_failed(
-            &strings(&["start", name]),
-            status.code().unwrap_or(-1),
-        ));
-    }
-    Ok(())
+    bottles::start(name).map(|_| ())
 }
 
 pub fn delete(name: &str) -> Result<(), String> {
     forget(name);
-    match stand_in() {
-        None => bottles::delete(name),
-        Some(program) => {
-            stand_in_run(&program, &strings(&["delete", name]), None, true).map(|_| ())
-        }
-    }
+    bottles::delete(name)
 }
 
 /// Record that the bottle is being used now.
 pub fn touch(name: &str) -> Result<(), String> {
-    match stand_in() {
-        None => bottles::touch(name),
-        Some(program) => stand_in_run(&program, &strings(&["touch", name]), None, true).map(|_| ()),
-    }
+    bottles::touch(name)
 }
 
 /// The command line that runs `argv` in the bottle (which starts it, if it's stopped).
 fn command(name: &str, argv: &[String], tty: bool) -> Result<Vec<String>, String> {
     running(name);
-    match stand_in() {
-        None => bottles::exec_command(name, argv, tty),
-        Some(program) => {
-            let mut command = vec![program, "exec".into()];
-            if tty {
-                command.push("-t".into());
-            }
-            command.extend([name.to_string(), "--".into()]);
-            command.extend(argv.iter().cloned());
-            Ok(command)
-        }
-    }
+    bottles::exec_command(name, argv, tty)
 }
 
 /// That a command in a bottle failed; what it said, it said on stderr.
 fn failed(name: &str, argv: &[String], code: i32) -> String {
-    match stand_in() {
-        None => format!("`{}` in {name} failed (exit {code})", argv[0]),
-        Some(_) => stand_in_failed(&[String::from("exec"), name.to_string()], code),
-    }
+    format!("`{}` in {name} failed (exit {code})", argv[0])
 }
 
 /// Run a command in the bottle, with pipes. Without `check`, a failure is the caller's to expect,
@@ -402,15 +253,8 @@ pub fn attach(
     argv: &[String],
     tty: Option<bool>,
 ) -> Result<std::convert::Infallible, String> {
-    // The stand-in is given one only when it's asked for: it never looks for this one.
-    let tty = match tty {
-        Some(tty) => tty,
-        None => {
-            stand_in().is_none()
-                && std::io::stdin().is_terminal()
-                && std::io::stdout().is_terminal()
-        }
-    };
+    let tty =
+        tty.unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
     // Flushed: what's buffered goes with this process.
     let _ = std::io::stdout().flush();
     let command = command(name, argv, tty)?;
@@ -431,69 +275,49 @@ pub fn attach(
 /// Copy a file or a directory, as `cp -r` would, between here and bottles: each side (a bottle's
 /// name, a path in it; or None, a path here). Where it went: a path here, or in `dst`'s bottle.
 pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<String, String> {
-    let went = match stand_in() {
-        Some(program) => {
-            let side = |(name, path): (Option<&str>, &str)| match name {
-                None => local_side(path),
-                Some(name) => format!("{name}:{}", if path.is_empty() { "." } else { path }),
-            };
-            let ran = piped(
-                Command::new(&program).args(["cp", &side(src), &side(dst)]),
-                None,
-                true,
-            )?;
-            if ran.code != 0 {
-                return Err("copying failed".into());
-            }
-            ran.stdout
-        }
-        None => {
-            let sides = [cp_side(src)?, cp_side(dst)?];
-            let commands = copy_commands(&sides[0], &sides[1]);
-            let (code, sent, stdout) = if commands.len() == 1 {
-                let ran = piped(
-                    Command::new(&commands[0][0]).args(&commands[0][1..]),
-                    None,
-                    true,
-                )?;
-                (ran.code, 0, ran.stdout)
-            } else {
-                let mut sender = Command::new(&commands[0][0]);
-                crate::interrupt::guard(&mut sender)?;
-                let mut sender = sender
-                    .args(&commands[0][1..])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("{}: {e}", commands[0][0]))?;
-                let pipe = sender.stdout.take().unwrap();
-                let mut receiver = Command::new(&commands[1][0]);
-                crate::interrupt::guard(&mut receiver)?;
-                let receiver = receiver
-                    .args(&commands[1][1..])
-                    .stdin(pipe)
-                    .stdout(Stdio::piped())
-                    .output()
-                    .map_err(|e| format!("{}: {e}", commands[1][0]))?;
-                let sent = sender
-                    .wait()
-                    .map_err(|e| e.to_string())?
-                    .code()
-                    .unwrap_or(-1);
-                (
-                    receiver.status.code().unwrap_or(-1),
-                    sent,
-                    String::from_utf8_lossy(&receiver.stdout).into_owned(),
-                )
-            };
-            if code != 0 || sent != 0 {
-                crate::interrupt::check()?;
-                return Err("copying failed".into()); // bottle-cli has said why
-            }
-            stdout
-        }
+    let sides = [cp_side(src)?, cp_side(dst)?];
+    let commands = copy_commands(&sides[0], &sides[1]);
+    let (code, sent, stdout) = if commands.len() == 1 {
+        let ran = piped(
+            Command::new(&commands[0][0]).args(&commands[0][1..]),
+            None,
+            true,
+        )?;
+        (ran.code, 0, ran.stdout)
+    } else {
+        let mut sender = Command::new(&commands[0][0]);
+        crate::interrupt::guard(&mut sender)?;
+        let mut sender = sender
+            .args(&commands[0][1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{}: {e}", commands[0][0]))?;
+        let pipe = sender.stdout.take().unwrap();
+        let mut receiver = Command::new(&commands[1][0]);
+        crate::interrupt::guard(&mut receiver)?;
+        let receiver = receiver
+            .args(&commands[1][1..])
+            .stdin(pipe)
+            .stdout(Stdio::piped())
+            .output()
+            .map_err(|e| format!("{}: {e}", commands[1][0]))?;
+        let sent = sender
+            .wait()
+            .map_err(|e| e.to_string())?
+            .code()
+            .unwrap_or(-1);
+        (
+            receiver.status.code().unwrap_or(-1),
+            sent,
+            String::from_utf8_lossy(&receiver.stdout).into_owned(),
+        )
     };
-    let went = went.trim();
+    if code != 0 || sent != 0 {
+        crate::interrupt::check()?;
+        return Err("copying failed".into()); // bottle-cli has said why
+    }
+    let went = stdout.trim();
     Ok(match dst.0 {
         Some(_) => went
             .split_once(':')
@@ -550,14 +374,12 @@ mod tests {
     use crate::tempdir;
     use serde_json::json;
 
-    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
-
-    /// A bottle, `b`, made in process (no stand-in engine) on the stand-in bottle-cli, folio serve
+    /// A bottle, `b`, made in process on the stand-in bottle-cli, folio serve
     /// as the unit tests have it.
     fn with_a_bottle() -> (tempdir::Isolated, tempdir::Dir) {
         let env = tempdir::isolated();
         let tmp = tempdir::Dir::new();
-        tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+        tempdir::set(&env, "BOTTLE_CLI", &tempdir::standin_cli());
         tempdir::set(
             &env,
             "FAKE_CLI_STATE",
@@ -666,30 +488,6 @@ mod tests {
             row["mounts"][0]["remotes"],
             json!(["origin:fetch=upstream", "host:fetch=heads"])
         );
-    }
-
-    #[test]
-    fn the_stand_in_is_asked_as_folios_tests_have_it() {
-        let env = tempdir::isolated();
-        let tmp = tempdir::Dir::new();
-        let log = tmp.path().join("log");
-        let script = tmp.path().join("bottle");
-        std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> {}\ncat\n[ \"$1\" != exec ] || [ \"$4\" != fail ] || exit 4\n", log.display())).unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        tempdir::set(&env, "FOLIO_BOTTLE", script.to_str().unwrap());
-        assert_eq!(
-            run("b", &argv(&["cat"]), Some("in"), true).unwrap().stdout,
-            "in"
-        );
-        assert_eq!(
-            run("b", &argv(&["fail"]), None, true).unwrap_err(),
-            "`bottle exec b` failed (exit 4)"
-        );
-        touch("b").unwrap();
-        let said = std::fs::read_to_string(&log).unwrap();
-        assert_eq!(said, "exec b -- cat\nexec b -- fail\ntouch b\n");
-        tempdir::set(&env, "FOLIO_BOTTLE", "");
     }
 }
 

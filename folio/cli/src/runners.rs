@@ -321,8 +321,6 @@ mod tests {
     use crate::tempdir;
     use serde_json::json;
 
-    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
-
     fn machine<'a>(network: Option<Value>) -> Create<'a> {
         Create {
             name: "m",
@@ -357,7 +355,7 @@ mod tests {
     fn a_machine_here_routes_to_folio_serves_sockets_here_mounts_the_repo_and_has_every_core() {
         let env = tempdir::isolated();
         let tmp = tempdir::Dir::new();
-        tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+        tempdir::set(&env, "BOTTLE_CLI", &tempdir::standin_cli());
         tempdir::set(
             &env,
             "FAKE_CLI_STATE",

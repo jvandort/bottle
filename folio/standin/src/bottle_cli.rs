@@ -35,6 +35,8 @@ use serde_json::{Value, json};
 /// Where a thread's machine has its repos, and its user's home.
 const GUEST_REPOS: [&str; 2] = ["/workspace", "/notes"];
 const GUEST_HOME: &str = "/home/genie";
+/// Where a bottle's repos' objects are mounted: /mnt/objects/PATH for the repo at PATH.
+const OBJECTS: &str = "/mnt/objects";
 /// Where a bottle's remotes are, in it.
 const REMOTES: &str = "http://bottle.host/git/";
 /// A pretended session's pid: above Linux's highest, so no process has it. One whose program has
@@ -396,8 +398,19 @@ impl Paths {
                     .map(|(source, target)| (target.to_string(), source.to_string()))
             })
             .collect();
-        for repo in GUEST_REPOS {
-            mounts.push((repo.into(), format!("{}{repo}", here.display())));
+        // Its repos: a thread's, and wherever else a mount's objects say one is (/mnt/objects/PATH
+        // is the repo at PATH).
+        let mut repos: Vec<String> = GUEST_REPOS.iter().map(|r| r.to_string()).collect();
+        for (target, _) in &mounts {
+            if let Some(path) = target.strip_prefix(OBJECTS)
+                && path.starts_with('/')
+                && !repos.iter().any(|r| r == path)
+            {
+                repos.push(path.to_string());
+            }
+        }
+        for repo in repos {
+            mounts.push((repo.clone(), format!("{}{repo}", here.display())));
         }
         mounts.push((GUEST_HOME.into(), here.join("home").display().to_string()));
         mounts.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));

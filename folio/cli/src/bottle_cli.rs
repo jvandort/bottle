@@ -422,9 +422,7 @@ mod tests {
     use crate::tempdir;
     use serde_json::json;
 
-    const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
-
-    /// bottle-cli, as tests/fake_bottle_cli.py stands in for it, and what it was asked, word for
+    /// bottle-cli, as folio-standin's bottle-cli stands in for it, and what it was asked, word for
     /// word.
     struct Fake {
         _env: tempdir::Isolated,
@@ -435,7 +433,7 @@ mod tests {
         fn new() -> Fake {
             let env = tempdir::isolated();
             let tmp = tempdir::Dir::new();
-            tempdir::set(&env, "BOTTLE_CLI", FAKE_CLI);
+            tempdir::set(&env, "BOTTLE_CLI", &tempdir::standin_cli());
             tempdir::set(
                 &env,
                 "FAKE_CLI_STATE",

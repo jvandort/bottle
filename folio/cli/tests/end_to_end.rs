@@ -32,7 +32,6 @@ impl EndToEnd {
         Command::new(harness::FOLIO)
             .args(args)
             .current_dir(&self.repo)
-            .env_remove("FOLIO_BOTTLE")
             .envs(self.env.iter().cloned())
             .stdin(Stdio::null())
             .output()
@@ -65,7 +64,6 @@ impl EndToEnd {
         let mut child = Command::new(harness::FOLIO)
             .args(&all)
             .current_dir(&self.repo)
-            .env_remove("FOLIO_BOTTLE")
             .envs(self.env.iter().cloned())
             .stdin(if input.is_some() {
                 Stdio::piped()
