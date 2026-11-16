@@ -6,39 +6,16 @@
 //! Linux only: the stand-in runner runs bottle-agent here, and bottle-agent is Linux's.
 #![cfg(target_os = "linux")]
 
+mod harness;
+
+use harness::{eventually, manifest};
+
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
-
-/// ssh, as far as folio-cli uses it: options up to --, the destination, and a command, run here
-/// as if there, in its own home. A forward is a symlink there to the socket here, held while this
-/// runs. /dev/kvm is what $FAKE_KVM names. "down" can't be reached. A shared connection's control
-/// socket is a file, made by the first ssh that'd be its master.
-const FAKE_SSH: &str = r#"#!/usr/bin/env bash
-forwards=() control= master=
-while [ "$1" != "--" ]; do
-  case "$1" in -R) forwards+=("$2") ;; ControlPath=*) control=${1#ControlPath=} ;; ControlMaster=auto) master=1 ;; esac
-  shift
-done
-# A shared connection's master: its control socket, a file here, made if it isn't there.
-[ -n "$master" ] && [ -n "$control" ] && [ ! -e "$control" ] && : > "$control"
-shift; destination=$1; shift
-echo "$destination $*" >> "$FAKE_LOG"
-if [ "$destination" = down ]; then
-  echo "ssh: connect to host down port 22: Connection refused" >&2; exit 255
-fi
-home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
-if [ ${#forwards[@]} -gt 0 ]; then
-  for f in "${forwards[@]}"; do ln -sfn "${f#*:}" "${f%%:*}"; done
-  exec sleep 3600
-fi
-script="$*"; script=${script//\/dev\/kvm/$FAKE_KVM}
-cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$script"
-"#;
 
 /// boot's arguments taken, bottle-agent serving its socket in the VM's place.
 const FAKE_BOOT: &str = r#"#!/usr/bin/env bash
@@ -61,14 +38,15 @@ impl Fixture {
         let dir = PathBuf::from(format!("/tmp/fc{tag}{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("remotes")).unwrap();
-        for (name, script) in [("ssh", FAKE_SSH), ("boot", FAKE_BOOT)] {
-            fs::write(dir.join(name), script).unwrap();
-            Command::new("chmod")
-                .arg("+x")
-                .arg(dir.join(name))
-                .status()
-                .unwrap();
-        }
+        // ssh: folio-standin's, which runs each command here, as if there, in a home of its
+        // own, and makes a forward a symlink.
+        std::os::unix::fs::symlink(harness::standin(), dir.join("ssh")).unwrap();
+        fs::write(dir.join("boot"), FAKE_BOOT).unwrap();
+        Command::new("chmod")
+            .arg("+x")
+            .arg(dir.join("boot"))
+            .status()
+            .unwrap();
         fs::write(dir.join("kvm"), "").unwrap();
         // The runner's distribution, for its architecture: this workspace's bottle-cli.
         let arch =
@@ -105,7 +83,7 @@ impl Fixture {
             .env("BOTTLE_MKE2FS", mke2fs)
             .env("FAKE_REMOTES", self.dir.join("remotes"))
             .env("FAKE_KVM", self.dir.join("kvm"))
-            .env("FAKE_LOG", self.dir.join("ssh.log"));
+            .env("FAKE_SSH_LOG", self.dir.join("ssh.log"));
         command
     }
 
@@ -145,18 +123,6 @@ impl Drop for Fixture {
     }
 }
 
-/// A distribution's manifest, as bottle's build writes it: sha256sum's, of its files.
-fn manifest(dist: &Path) {
-    let listed = Command::new("sh")
-        .arg("-c")
-        .arg("sha256sum -- *")
-        .current_dir(dist)
-        .output()
-        .unwrap();
-    assert!(listed.status.success());
-    fs::write(dist.join(".files"), listed.stdout).unwrap();
-}
-
 /// A program of bottle's, built in this workspace: run, as folio runs bottle's code.
 fn built(program: &str) -> PathBuf {
     let profile = Path::new(env!("CARGO_BIN_EXE_folio"))
@@ -175,14 +141,6 @@ fn built(program: &str) -> PathBuf {
     }
     assert!(build.status().unwrap().success(), "building {package}");
     profile.join(program)
-}
-
-fn eventually(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !done() {
-        assert!(Instant::now() < deadline, "{what}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 #[test]

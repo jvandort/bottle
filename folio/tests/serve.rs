@@ -9,8 +9,8 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-mod common;
-use common::{Serve, bind};
+mod harness;
+use harness::{Serve, bind};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")

@@ -1,6 +1,5 @@
-//! What folio-cli serve's tests share: folio-cli serve started as folio starts it, and driven as
-//! bottle-cli and folio drive it.
-#![allow(dead_code)]
+//! folio serve started as folio starts it, and driven as bottle-cli and folio drive it: what
+//! serve.rs and credentials.rs test it with.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,8 +9,6 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-
-pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
 
 pub struct Serve {
     pub dir: PathBuf,

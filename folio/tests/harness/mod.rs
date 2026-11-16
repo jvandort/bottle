@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod serve;
+// Each test binary uses what it does of these.
+#[allow(unused_imports)]
+pub use serve::{Serve, bind, header};
+
 pub const FOLIO: &str = env!("CARGO_BIN_EXE_folio");
 pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
 
@@ -938,21 +943,7 @@ fn carry(client: std::net::TcpStream, socket: &Path, machine: &str) {
 
 /// A PROXY protocol v2 header, as bottle-cli writes one: to bottle.host, from `machine`.
 pub fn proxy_header(machine: &str) -> Vec<u8> {
-    let mut body = vec![0, 0, 0, 0, 192, 0, 2, 1, 0, 0];
-    body.extend(80u16.to_be_bytes());
-    for (kind, value) in [
-        (0x02u8, b"bottle.host".as_slice()),
-        (0xE0, machine.as_bytes()),
-    ] {
-        body.push(kind);
-        body.extend((value.len() as u16).to_be_bytes());
-        body.extend(value);
-    }
-    let mut out = b"\r\n\r\n\x00\r\nQUIT\n".to_vec();
-    out.extend([0x21, 0x11]);
-    out.extend((body.len() as u16).to_be_bytes());
-    out.extend(body);
-    out
+    header([192, 0, 2, 1], 80, Some("bottle.host"), false, machine)
 }
 
 /// The bottle-cli the tests with real VMs run: $BOTTLE_CLI, else this checkout's, built first if

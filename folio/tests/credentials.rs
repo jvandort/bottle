@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-mod common;
-use common::{STANDIN, Serve, bind};
+mod harness;
+use harness::{STANDIN, Serve, bind};
 
 const REAL: &str = "real-token";
 /// Where the bottle thought it was connecting: an address anywhere.
