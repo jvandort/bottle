@@ -253,9 +253,19 @@ impl Runner {
     /// its own choice (None); the command to run there, if any, to follow.
     fn ssh(&self, tty: Option<bool>) -> Command {
         let control = self.control_path();
-        if let Some(dir) = control.parent() {
-            let _ = fs::create_dir_all(dir);
-            let _ = fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        // A shared connection's socket only in a directory that's this user's alone: else, one
+        // of its own (slower, but nobody else's to hold).
+        let shared = control.parent().map_or(Ok(()), crate::store::private_dir);
+        if let Err(e) = shared {
+            crate::log::log!("runner", "{}: no shared connection: {e}", self.name);
+            let mut ssh = self.bare_ssh(&[]);
+            match tty {
+                Some(true) => ssh.arg("-t"),
+                Some(false) => ssh.arg("-T"),
+                None => &mut ssh,
+            };
+            ssh.args(["--", &self.destination]);
+            return ssh;
         }
         let mut ssh = self.bare_ssh(&[
             "ControlMaster=auto".to_string(),

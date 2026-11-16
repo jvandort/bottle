@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -513,14 +513,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         fs::remove_file(&control)?;
     }
     if let Some(dir) = control.parent() {
-        fs::create_dir_all(dir)?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-        if fs::metadata(dir)?.uid() != unsafe { libc::getuid() } {
-            return Err(io::Error::other(format!(
-                "{} is owned by another user",
-                dir.display()
-            )));
-        }
+        crate::store::private_dir(dir)?;
     }
     let server = Arc::new(Server {
         bottles: Mutex::new(HashMap::new()),

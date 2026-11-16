@@ -36,6 +36,23 @@ pub enum Content {
     Leave,
 }
 
+/// `dir` made if it isn't there, and made only its owner's: refused unless it's a directory (not
+/// a symlink to one) that this user owns, as one in /tmp another user made first wouldn't be.
+pub fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    fs::create_dir_all(dir)?;
+    let found = fs::symlink_metadata(dir)?;
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    if !found.is_dir() || found.uid() != uid {
+        return Err(io::Error::other(format!(
+            "{} isn't a directory of this user's: another user's, or a link",
+            dir.display()
+        )));
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
 /// The JSON at `path`; None if there's no file. One that isn't JSON is an error.
 pub fn read_json(path: &Path) -> Result<Option<Value>, String> {
     match fs::read_to_string(path) {
@@ -196,6 +213,26 @@ pub fn staging(directory: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn a_private_dir_is_this_users_alone_and_never_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = crate::tempdir::Dir::new();
+        let dir = tmp.path().join("sockets");
+        private_dir(&dir).unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(
+            private_dir(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("another user's, or a link")
+        );
+    }
 
     fn dir() -> (crate::tempdir::Dir, PathBuf) {
         let tmp = crate::tempdir::Dir::new();
