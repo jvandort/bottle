@@ -336,7 +336,7 @@ impl Folio {
         env: &[(&str, &str)],
     ) -> (i32, String) {
         let (mut master, slave) = (0, 0);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 24,
             ws_col: 80,
             ws_xpixel: 0,
@@ -349,8 +349,8 @@ impl Folio {
                 &mut master,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                &raw mut size,
             )
         };
         assert_eq!(opened, 0, "openpty");
@@ -953,4 +953,27 @@ pub fn proxy_header(machine: &str) -> Vec<u8> {
     out.extend((body.len() as u16).to_be_bytes());
     out.extend(body);
     out
+}
+
+/// The bottle-cli the tests with real VMs run: $BOTTLE_CLI, else this checkout's, built first if
+/// its sources have changed (bin/bottle-build), so they never run an old one. None, said why, unless
+/// asked for, with FOLIO_VM_TESTS=1, on a Mac: they boot VMs, and the first build takes minutes.
+pub fn real_bottle_cli() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        eprintln!("skipped: boots VMs, which a Mac's bottle-cli does");
+        return None;
+    }
+    if std::env::var("FOLIO_VM_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipped: boots VMs; run with FOLIO_VM_TESTS=1");
+        return None;
+    }
+    if let Some(cli) = std::env::var_os("BOTTLE_CLI").filter(|c| !c.is_empty()) {
+        return Some(PathBuf::from(cli));
+    }
+    let repo = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let status = Command::new(repo.join("bin/bottle-build"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "bin/bottle-build");
+    Some(target().join("dist").join("bottle-cli"))
 }
