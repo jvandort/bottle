@@ -273,11 +273,13 @@ class ConfigureTest(FolioTestCase):
                             (("--no-feature", "tools", "--feature", "tools"), "both name tools"),
                             # A usage error names what's wrong, in the argument parser's own words.
                             (("--disk", "50G", "--no-disk"), "--no-disk"),
-                            (("--no-disk", "50G"), "50G")):
+                            (("--no-disk", "fix-it", "50G"), "50G")):
             with self.subTest(args):
                 result = self.folio("configure", *args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(error, result.stderr)
+        # One word more is a thread's name.
+        self.assertIn("no thread named '50G'", self.folio("configure", "--no-disk", "50G").stderr)
         result = self.folio("configure", "--no-feature", "jvm")
         self.assertEqual(result.returncode, 1)
         self.assertIn("there's no feature jvm to take away (features: tools)", result.stderr)
@@ -337,6 +339,87 @@ class RepoListTest(FolioTestCase):
         self.ok("configure", "--memory", "2G", cwd=other)
         lines = self.ok("repo", "list", cwd=self.tmp).splitlines()
         self.assertEqual(sorted(line.split()[1:] for line in lines[1:]), [[str(other), "0"], [str(self.repo), "1"]])
+
+
+class ThreadConfigureTest(FolioTestCase):
+    """`folio configure THREAD`: one thread's runner and spec, as a sidecar has its own; the repo's until it's given
+    its own, applied as its next bottle is made."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.key = kept.repo(self.repo).key
+        self.ok("new", "fix-it")
+
+    def bottle(self, thread: str = "fix-it") -> dict:
+        return self.fake()["bottles"][f"{self.key}-{thread}"]
+
+    def test_without_options_it_shows_what_its_next_bottle_gets_and_whose_that_is(self) -> None:
+        self.assertEqual(self.ok("configure", "fix-it"), "features [tools], memory 2G (the repo's), "
+                                                         "runner this machine (the repo's); thread fix-it, running\n")
+        self.ok("configure", "--runner", "desktop")
+        self.assertIn("runner desktop (the repo's)", self.ok("configure", "fix-it"))
+
+    def test_one_threads_memory_its_own_and_the_rest_the_repos(self) -> None:
+        self.ok("new", "other")
+        self.ok("pause", "fix-it")
+        self.assertEqual(self.ok("configure", "fix-it", "--memory", "8G"),
+                         "Set thread fix-it: features [tools], memory 8G, runner this machine (the repo's)\n")
+        self.assertEqual(kept.thread(kept.repo(self.repo), "fix-it")["spec"], {"features": ["tools"], "memory": "8G"})
+        self.assertEqual(kept.repo(self.repo).spec()["memory"], "2G")   # the repo's is as it was
+        self.ok("claude", "fix-it")
+        self.assertEqual(self.bottle()["spec"]["memory"], "8G")
+        self.assertEqual(self.bottle("other")["spec"]["memory"], "2G")
+        # The repo's changes no longer reach it, until it follows the repo's again.
+        self.ok("configure", "--feature", "python")
+        self.assertEqual(self.ok("configure", "fix-it").split(";")[0],
+                         "features [tools], memory 8G, runner this machine (the repo's)")
+        self.ok("configure", "fix-it", "--no-spec")
+        self.assertIn("features [python, tools], memory 2G (the repo's)", self.ok("configure", "fix-it"))
+        self.assertNotIn("spec", kept.thread(kept.repo(self.repo), "fix-it"))
+
+    def test_a_change_to_a_thread_with_a_bottle_comes_with_its_next(self) -> None:
+        self.assertIn("It comes with the thread's next bottle: `folio pause fix-it`, then `folio claude fix-it`",
+                      self.ok("configure", "fix-it", "--memory", "8G"))
+        self.assertEqual(self.bottle()["spec"]["memory"], "2G")
+        self.assertEqual(self.calls("new"), [self.calls("new")[0]])   # nothing made
+
+    def test_its_spec_is_checked_as_the_repos_is(self) -> None:
+        result = self.folio("configure", "fix-it", "--no-feature", "tools")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("folio's threads need the tools feature", result.stderr)
+        self.assertNotIn("spec", kept.thread(kept.repo(self.repo), "fix-it"))
+
+    def test_a_paused_threads_runner_is_set_without_starting_it(self) -> None:
+        self.ok("pause", "fix-it")
+        self.assertEqual(self.ok("configure", "fix-it", "--runner", "desktop"),
+                         "Set thread fix-it: features [tools], memory 2G (the repo's), runner desktop\n")
+        self.assertNotIn(f"{self.key}-fix-it", self.fake()["bottles"])
+        self.assertEqual(self.ok("list").splitlines()[1].split()[:3], ["fix-it", "paused", "desktop"])
+        self.ok("claude", "fix-it")
+        self.assertEqual(self.bottle()["runner"], "desktop")
+        # --no-runner: the repo's again; `local`: this machine, whatever the repo's.
+        self.ok("pause", "fix-it")
+        self.ok("configure", "--runner", "desktop")
+        self.ok("configure", "fix-it", "--runner", "local")
+        self.assertIn("runner this machine;", self.ok("configure", "fix-it"))
+        self.ok("configure", "fix-it", "--no-runner")
+        self.assertIn("runner desktop (the repo's)", self.ok("configure", "fix-it"))
+
+    def test_a_thread_with_a_bottle_elsewhere_is_paused_to_move(self) -> None:
+        result = self.folio("configure", "fix-it", "--runner", "desktop")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("thread fix-it's bottle is on local; pause it first (`folio pause fix-it`)", result.stderr)
+        self.assertNotIn("runner", kept.thread(kept.repo(self.repo), "fix-it"))
+        # Following the repo's, which is elsewhere, is a move too.
+        self.ok("configure", "fix-it", "--runner", "local")
+        self.ok("configure", "--runner", "desktop")
+        self.assertIn("pause it first", self.folio("configure", "fix-it", "--no-runner").stderr)
+
+    def test_no_spec_is_a_threads_or_a_sidecars(self) -> None:
+        result = self.folio("configure", "--no-spec")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--no-spec is for a thread's spec", result.stderr)
+        self.assertEqual(self.folio("configure", "fix-it", "--no-spec", "--memory", "8G").returncode, 2)
 
 
 class RunnerTest(FolioTestCase):

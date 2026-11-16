@@ -86,6 +86,20 @@ class SidecarTest(FolioTestCase):
         self.assertIsNone(kept.thread(self.repo_, "fix-it")["sidecar"])
         self.assertEqual(self.ok("sidecar", "configure", "fix-it").strip(), "Thread fix-it has no sidecar")
 
+    def test_its_spec_can_be_the_repos_as_a_threads_can(self) -> None:
+        self.give_it_one()
+        self.ok("configure", "--memory", "4G")
+        self.assertEqual(self.ok("sidecar", "configure", "fix-it", "--no-spec").splitlines()[0],
+                         "Set thread fix-it's sidecar: features [tools], memory 4G (the repo's), runner desktop. "
+                         "It comes with the thread's next bottle: `folio pause fix-it`, then `folio claude fix-it`")
+        self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"], {"runner": "desktop"})
+        self.ok("pause", "fix-it")
+        self.ok("claude", "fix-it")
+        self.assertEqual(self.bottles()[self.sidecar]["spec"]["memory"], "4G")
+        # Changed, it's the repo's copied.
+        self.ok("sidecar", "configure", "fix-it", "--memory", "16G")
+        self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"]["spec"], {"features": ["tools"], "memory": "16G"})
+
     def test_a_new_one_needs_a_runner_and_a_spec_bottle_takes(self) -> None:
         result = self.folio("sidecar", "configure", "fix-it", "--memory", "8G")
         self.assertIn("give it one with `folio sidecar configure fix-it --runner RUNNER ...`", result.stderr)

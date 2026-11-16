@@ -41,7 +41,7 @@ use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::engine::{self, Mount};
 use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::store::{self, Content};
-use crate::{broker, lanes, notes, snapshots};
+use crate::{broker, lanes, notes, runners, snapshots};
 
 const RECORD: &str = "thread.json";
 pub const WORKSPACE: &str = "/workspace";
@@ -128,11 +128,32 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
     )
 }
 
-/// A thread's sidecar: a runner of its own, and a spec.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Sidecar {
-    pub runner: String,
-    pub spec: Value,
+/// Where a bottle is made, and from what: a thread's, or its sidecar's. What's None is the repo's,
+/// as it is when the bottle's made; a spec of its own is a whole one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Value>,
+}
+
+impl Config {
+    /// The runner: its own, else the repo's; None: this machine.
+    pub fn runner(&self, repo: &Repo) -> Result<Option<String>, String> {
+        match &self.runner {
+            Some(runner) if !runner.is_empty() => Ok(Some(runner.clone())),
+            _ => repo.runner(),
+        }
+    }
+
+    /// The spec: its own, else the repo's (else what a new repo's is).
+    pub fn spec(&self, repo: &Repo) -> Result<Value, String> {
+        match &self.spec {
+            Some(spec) => Ok(spec.clone()),
+            None => Ok(repo.spec()?.unwrap_or_else(default_spec)),
+        }
+    }
 }
 
 /// A thread's configuration: written only by what changes it (new, configure, rename, a runner
@@ -149,12 +170,12 @@ pub struct Thread {
     /// The broker (see broker.rs), whose bottle is made folio's way, not the repo's.
     #[serde(default)]
     pub broker: bool,
-    /// The runner its bottles are made on, if it was given one; None: the repo's.
+    /// Where its bottles are made, and from what, as a sidecar's is: in the record beside the rest.
+    #[serde(flatten)]
+    pub config: Config,
+    /// Its sidecar, if it has one: a runner of its own, always.
     #[serde(default)]
-    pub runner: Option<String>,
-    /// Its sidecar, if it has one.
-    #[serde(default)]
-    pub sidecar: Option<Sidecar>,
+    pub sidecar: Option<Config>,
 }
 
 impl Thread {
@@ -366,7 +387,10 @@ pub fn create(
         created: now(),
         base: base.map(String::from),
         broker: is_broker,
-        runner: runner.map(String::from),
+        config: Config {
+            runner: runner.map(String::from),
+            spec: None,
+        },
         sidecar: None,
     };
     make_bottle(repo, &thread)?;
@@ -404,14 +428,11 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             None,
         );
     }
-    // Checked again each time: a feature can have changed since the spec was saved. Checked as
-    // saved: validating drops what bottle doesn't know.
-    let spec = engine::validate_spec(&check_repo_spec(
-        repo.spec()?.unwrap_or_else(default_spec),
-        false,
-    )?)?;
+    // Checked again each time: a feature can have changed since the spec was saved. The repo's,
+    // checked, is saved as checked: validating drops what bottle doesn't know.
+    let spec = engine::validate_spec(&check_repo_spec(thread.config.spec(repo)?, false)?)?;
     repo.remember()?;
-    if repo.spec()?.as_ref() != Some(&spec) {
+    if thread.config.spec.is_none() && repo.spec()?.as_ref() != Some(&spec) {
         repo.save_spec(&spec)?;
     }
     let notes_path = notes::ensure(
@@ -455,7 +476,10 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
                 name = thread.name
             ),
             Ok(()) => {
-                told = sidecar_advice(&sidecar.runner, &sidecar.spec);
+                told = sidecar_advice(
+                    &sidecar.runner(repo)?.unwrap_or_default(),
+                    &sidecar.spec(repo)?,
+                );
                 sidecar_bottle = Some(thread.sidecar_bottle());
             }
         },
@@ -507,20 +531,21 @@ fn elsewhere(thread: &Thread, runner: Option<&str>, e: String) -> String {
 fn make_sidecar(repo: &Repo, thread: &Thread, repos_: &[Mount]) -> Result<(), String> {
     let sidecar = thread.sidecar.as_ref().unwrap();
     // Scratch: whatever's left of one is no use.
+    let runner = sidecar.runner(repo)?;
     if !delete_sidecar(thread)? {
         return Err(format!(
             "its old one is on runner {}, which is off",
-            sidecar.runner
+            runner.unwrap_or_default()
         ));
     }
-    let spec = check_repo_spec(engine::validate_spec(&sidecar.spec)?, true)?;
+    let spec = check_repo_spec(engine::validate_spec(&sidecar.spec(repo)?)?, true)?;
     engine::new(
         &directory(repo, &thread.name),
         &thread.sidecar_bottle(),
         &spec,
         repos_,
         &sidecar_itself(&thread.name, &repo.name),
-        Some(&sidecar.runner),
+        runner.as_deref(),
         None,
     )
 }
@@ -675,24 +700,26 @@ pub fn copy(
     )
 }
 
+/// `config`, a spec of its own checked as a thread's (or, with `sidecar`, a sidecar's) is.
+fn checked(config: Config, sidecar: bool) -> Result<Config, String> {
+    let spec = match config.spec {
+        Some(spec) => Some(check_repo_spec(engine::validate_spec(&spec)?, sidecar)?),
+        None => None,
+    };
+    Ok(Config { spec, ..config })
+}
+
 /// The thread, with `sidecar` (None: none) from its next bottle on; its spec checked first.
 pub fn set_sidecar(
     repo: &Repo,
     thread: &Thread,
-    sidecar: Option<Sidecar>,
+    sidecar: Option<Config>,
 ) -> Result<Thread, String> {
     if thread.broker {
         return Err("the broker has no sidecar".into());
     }
-    let sidecar = match sidecar {
-        Some(s) => Some(Sidecar {
-            spec: check_repo_spec(engine::validate_spec(&s.spec)?, true)?,
-            runner: s.runner,
-        }),
-        None => None,
-    };
     let changed = Thread {
-        sidecar,
+        sidecar: sidecar.map(|s| checked(s, true)).transpose()?,
         ..thread.clone()
     };
     save(repo, &changed, Vec::new())?;
@@ -705,24 +732,29 @@ pub fn runner_of(repo: &Repo, thread: &Thread) -> Result<Option<String>, String>
     if thread.broker {
         return Ok(None);
     }
-    match &thread.runner {
-        Some(runner) if !runner.is_empty() => Ok(Some(runner.clone())),
-        _ => repo.runner(),
-    }
+    thread.config.runner(repo)
 }
 
-/// The thread, its bottles made on `runner` from now on.
+/// The thread, with `config` from its next bottle on; its spec checked first.
 ///
-/// A paused thread resumes there. One with a bottle elsewhere is refused: its work is in that
-/// bottle, and pausing it is what brings it back here, to go on.
-pub fn place(repo: &Repo, thread: &Thread, runner: &str) -> Result<Thread, String> {
+/// A paused thread resumes on the runner it says. One with a bottle elsewhere is refused: its
+/// work is in that bottle, and pausing it is what brings it back here, to go on.
+pub fn set_config(repo: &Repo, thread: &Thread, config: Config) -> Result<Thread, String> {
     if thread.broker {
-        return Err("the broker runs on this machine".into());
+        return Err(
+            "the broker's bottle is folio's: it runs on this machine, from folio's spec".into(),
+        );
     }
+    let config = checked(config, false)?;
+    let runner = config.runner(repo)?;
+    let runner = runner.as_deref().unwrap_or(runners::LOCAL);
     let row = states(repo, std::slice::from_ref(thread))?
         .remove(&thread.name)
         .unwrap();
-    let place = row.get("runner").and_then(Value::as_str).unwrap_or("local");
+    let place = row
+        .get("runner")
+        .and_then(Value::as_str)
+        .unwrap_or(runners::LOCAL);
     let state = row["state"].as_str().unwrap_or_default();
     if !matches!(state, "paused" | "missing") && place != runner {
         return Err(format!(
@@ -730,15 +762,15 @@ pub fn place(repo: &Repo, thread: &Thread, runner: &str) -> Result<Thread, Strin
             name = thread.name
         ));
     }
-    if thread.runner.as_deref() == Some(runner) {
+    if thread.config == config {
         return Ok(thread.clone());
     }
-    let placed = Thread {
-        runner: Some(runner.into()),
+    let changed = Thread {
+        config,
         ..thread.clone()
     };
-    save(repo, &placed, Vec::new())?;
-    Ok(placed)
+    save(repo, &changed, Vec::new())?;
+    Ok(changed)
 }
 
 /// What create did, undone, as far as it got.
@@ -1260,10 +1292,13 @@ mod tests {
             created: 1.5,
             base: None,
             broker: false,
-            runner: None,
-            sidecar: Some(Sidecar {
-                runner: "box".into(),
-                spec: json!({"memory": "2G", "features": []}),
+            config: Config {
+                runner: None,
+                spec: Some(json!({"memory": "8G", "features": ["tools"]})),
+            },
+            sidecar: Some(Config {
+                runner: Some("box".into()),
+                spec: Some(json!({"memory": "2G", "features": []})),
             }),
         };
         assert_eq!(
@@ -1275,5 +1310,19 @@ mod tests {
             serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#)
                 .unwrap();
         assert_eq!((read.broker, read.sidecar), (false, None));
+        assert_eq!(read.config, Config::default());
+        // A thread's runner, and its sidecar, as they were before a thread had a config: the same.
+        let read: Thread = serde_json::from_str(
+            r#"{"name": "t", "bottle": "b", "created": 1, "runner": "desktop",
+                "sidecar": {"runner": "box", "spec": {"memory": "2G"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read.config.runner.as_deref(), Some("desktop"));
+        assert_eq!(read.config.spec, None);
+        let sidecar = read.sidecar.unwrap();
+        assert_eq!(
+            (sidecar.runner.as_deref(), sidecar.spec),
+            (Some("box"), Some(json!({"memory": "2G"})))
+        );
     }
 }
