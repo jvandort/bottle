@@ -281,14 +281,19 @@ fn a_failed_cleanup_keeps_a_broken_record() {
 #[test]
 fn one_that_doesnt_meet_the_contract_is_refused() {
     let f = Folio::new();
-    let out = f.with(&["new", "t"], &[("FAKE_CLI_MISSING", "git is installed")]);
+    let out = f.with(
+        &["new", "t"],
+        &[("FAKE_CLI_MISSING", "git is installed\n/workspace exists")],
+    );
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr
-            .contains("base+tools doesn't meet the bottle contract: git is installed"),
+        out.stderr.contains(
+            "base+tools doesn't meet the bottle contract: git is installed; /workspace exists"
+        ),
         "{}",
         out.stderr
     );
+    assert_eq!(f.cli()["machines"], json!({}));
 }
 
 // --- interrupted: Ctrl-C is a failure like any other, what was being made undone --------
@@ -950,5 +955,326 @@ fn a_push_to_agent_lands_in_the_threads_lane() {
     assert_eq!(
         git_in(&w.f.repo, &["rev-parse", "bottle/t/genie/t-1"]),
         commit
+    );
+}
+
+// --- what was bottles.rs's to test in-process, from outside --------------------------
+
+/// What a thread's bottle is told (~/BOTTLE.md), as its workspace script writes it.
+fn told(f: &Folio, thread: &str) -> String {
+    let script = workspace_script(f, thread)["argv"][2]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let start = script.find("printf '%s' ").unwrap() + "printf '%s' ".len();
+    let end = script.rfind(" > \"$HOME/BOTTLE.md\"").unwrap();
+    let quoted = &script[start..end];
+    quoted.trim_matches('\'').replace("'\\''", "'")
+}
+
+#[test]
+fn a_thread_from_a_commit_is_checked_out_detached() {
+    let f = Folio::new();
+    let head = git_in(&f.repo, &["rev-parse", "HEAD"]);
+    f.ok(&["new", "t", "--from", &head[..10]]);
+    let mount = f.record("t")["mounts"][0].clone();
+    assert_eq!(
+        (&mount["branch"], mount["commit"].as_str().unwrap()),
+        (&Value::Null, head.as_str())
+    );
+    let script = workspace_script(&f, "t")["argv"][2]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        script.contains(&format!("update-ref --no-deref HEAD {head}")),
+        "{script}"
+    );
+    // Tracking is its creator's to set.
+    assert!(!script.contains("branch.main.remote"));
+    let told = told(&f, "t");
+    assert!(
+        told.contains("checkout of `project`, at a detached commit."),
+        "{told}"
+    );
+}
+
+#[test]
+fn a_threads_context_says_where_it_is_and_never_a_commit() {
+    let f = Folio::new();
+    f.ok(&["new", "t"]);
+    let head = git_in(&f.repo, &["rev-parse", "HEAD"]);
+    let context = told(&f, "t");
+    assert!(
+        context.contains("- `/workspace` is a checkout of `project`, on the `main` branch."),
+        "{context}"
+    );
+    assert!(
+        context.contains("- `/notes` is a checkout of `notes`"),
+        "{context}"
+    );
+    // No commits: it never goes stale.
+    assert!(!context.contains(&head[..12]));
+}
+
+#[test]
+fn a_machine_by_its_name_that_isnt_ours_is_left_alone() {
+    let f = Folio::new();
+    let mut state = f.cli();
+    state["machines"][f.bottle("t")] = json!({"state": "running", "started": 1});
+    f.set_cli(&state);
+    let out = f.folio(&["new", "t"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr
+            .contains(&format!("a machine named {} already exists", f.bottle("t"))),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(f.machine("t"), json!({"state": "running", "started": 1}));
+    assert!(f.calls("delete").is_empty() && f.calls("create").is_empty());
+}
+
+#[test]
+fn deleting_runs_nothing_in_it() {
+    let f = made();
+    let before = f.execs("t").len();
+    f.ok(&["delete", "t", "--yes"]);
+    assert_eq!(f.execs("t").len(), before);
+    assert_eq!(f.cli()["machines"], json!({}));
+}
+
+#[test]
+fn a_runner_there_isnt_is_refused_before_anything_is_made() {
+    let f = Folio::new();
+    let out = f.folio(&["new", "t", "--runner", "box"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(
+            "no runner named \"box\"; add one with `folio runner add box --ssh DESTINATION`"
+        ),
+        "{}",
+        out.stderr
+    );
+    assert!(f.calls("create").is_empty());
+}
+
+#[test]
+fn a_stopped_bottle_started_again_isnt_set_up_again() {
+    let f = made();
+    let steps = f.steps("t").len();
+    f.set_machine("t", json!({"state": "stopped"}));
+    f.ok(&["exec", "t", "--", "true"]);
+    // Its CA, bottle.host and what the contract checked are on its disk, from when it was made.
+    assert_eq!(f.steps("t").len(), steps);
+}
+
+#[test]
+fn a_running_bottle_only_needs_folio_serve_up() {
+    let f = made();
+    f.ok(&["serve", "stop"]);
+    let starts = f.calls("start").len();
+    f.ok(&["exec", "t", "--", "true"]);
+    assert_eq!(f.calls("start").len(), starts);
+    assert!(f.home.join("serve.sock").exists());
+}
+
+#[test]
+fn a_bottle_unfinished_cant_be_started() {
+    let f = made();
+    let path = f
+        .thread_dir("t")
+        .join("bottles")
+        .join(format!("{}.json", f.bottle("t")));
+    let mut record = read_json(&path).unwrap();
+    record["status"] = json!("broken");
+    write_json(&path, &record);
+    let out = f.folio(&["exec", "t", "--", "true"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "{} is broken; delete its thread to remove it (`folio delete`)",
+            f.bottle("t")
+        )),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_command_folio_runs_in_a_bottle_that_fails_says_where() {
+    let f = made();
+    let out = f.with(&["pause", "t"], &[("FAKE_CLI_FAIL_EXEC", "git ls-files")]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr
+            .contains(&format!("`sh` in {} failed (exit 3)", f.bottle("t"))),
+        "{}",
+        out.stderr
+    );
+}
+
+// --- images ----------------------------------------------------------------------------
+
+/// The builds of images, here: each one's tag, recipe and network.
+fn builds(f: &Folio) -> Vec<Value> {
+    f.cli()["builds"].as_array().unwrap().clone()
+}
+
+#[test]
+fn base_is_the_base_feature_on_debian_running_bottles_entrypoint() {
+    let f = made();
+    let base = builds(&f)[0].clone();
+    let recipe = &base["recipe"];
+    assert_eq!(recipe["pull"], "debian:trixie-slim");
+    assert!(
+        recipe["entrypoint"].is_array() && recipe["cmd"].is_array(),
+        "{recipe}"
+    );
+    assert!(
+        recipe["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["cwd"] == "/run/bottle-build/base"),
+        "{recipe}"
+    );
+    let features = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/features"))
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        recipe["mount"],
+        json!({"source": features, "target": "/run/bottle-build"})
+    );
+    assert!(recipe["labels"]["bottle.inputs"].is_string());
+    // The public network, its apt repositories kept, and nothing routed.
+    let network = base["network"].as_object().unwrap();
+    assert_eq!(network.keys().collect::<Vec<_>>(), ["cache"]);
+    assert!(
+        network["cache"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["host"] == "deb.debian.org")
+    );
+    // Cleaned up after.
+    assert!(!f.calls("gc").is_empty());
+}
+
+#[test]
+fn a_combination_is_on_base_by_its_tag_and_says_its_features() {
+    let f = made();
+    let recipe = builds(&f)[1]["recipe"].clone();
+    assert_eq!(recipe["from"], "localhost/bottle/base:latest");
+    assert_eq!(recipe["labels"]["bottle.features"], "tools");
+    // Not bottle-cli's, and what it's built on runs, then.
+    assert!(recipe.get("features").is_none() && recipe.get("entrypoint").is_none());
+}
+
+#[test]
+fn a_change_to_a_feature_rebuilds_its_images() {
+    let mut f = Folio::new();
+    // folio's features, a copy of them to change.
+    let features = f.tmp.join("features");
+    copy_tree(
+        &PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/features")),
+        &features,
+    );
+    f.set("FOLIO_FEATURES", features.display().to_string());
+    f.ok(&["new", "t"]);
+    assert_eq!(builds(&f).len(), 2);
+    let install = features.join("tools/install.sh");
+    let mut script = fs::read_to_string(&install).unwrap();
+    script.push_str("\necho changed\n");
+    fs::write(&install, script).unwrap();
+    f.ok(&["new", "u"]);
+    let tags: Vec<Value> = builds(&f).iter().map(|b| b["tag"].clone()).collect();
+    assert_eq!(tags[2..], [json!("localhost/bottle/base:with-tools")]);
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn base_isnt_a_feature_to_ask_for() {
+    let f = Folio::new();
+    let out = f.folio(&["configure", "--feature", "base"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains("base is in every bottle"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_build_that_fails_makes_nothing() {
+    let f = Folio::new();
+    let out = f.with(&["new", "t"], &[("FAKE_CLI_FAIL", "build")]);
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("image build failed"), "{}", out.stderr);
+    assert!(f.calls("create").is_empty());
+}
+
+#[test]
+fn stale_images_are_forgotten_and_whats_current_or_someone_elses_kept() {
+    let f = made();
+    let current = f.cli()["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["tag"] == "localhost/bottle/base:with-tools")
+        .unwrap()["labels"]["bottle.inputs"]
+        .clone();
+    let mut state = f.cli();
+    let images = state["images"].as_array_mut().unwrap();
+    for (tag, labels) in [
+        (
+            "localhost/bottle/base:with-old",
+            json!({"bottle.features": "tools", "bottle.inputs": "outdated"}),
+        ),
+        (
+            "localhost/bottle/base:with-gone",
+            json!({"bottle.features": "no-such-feature", "bottle.inputs": "x"}),
+        ),
+        (
+            "localhost/bottle/base:with-unlabeled",
+            json!({"bottle.features": "tools"}),
+        ),
+        // Someone else's: nothing says what it's made from, and folio can't build it.
+        ("elsewhere/image:latest", json!({})),
+    ] {
+        images.push(json!({"tag": tag, "stage": "s", "disks": ["s.ext4"], "labels": labels}));
+    }
+    f.set_cli(&state);
+    f.ok(&["delete", "t", "--yes"]);
+    let left: Vec<String> = f.cli()["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["tag"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        left,
+        [
+            "localhost/bottle/base:latest",
+            "localhost/bottle/base:with-tools",
+            "elsewhere/image:latest"
+        ]
+    );
+    assert_eq!(f.cli()["images"][1]["labels"]["bottle.inputs"], current);
+    assert_eq!(
+        f.cli()["calls"].as_array().unwrap().last().unwrap(),
+        &json!(["gc"])
     );
 }

@@ -67,8 +67,6 @@ pub fn isolated() -> Isolated {
         // SAFETY: as above.
         unsafe { std::env::remove_var(key) };
     }
-    crate::engine::forget_all();
-    crate::bottles::forget_running();
     Isolated { _held: held, home }
 }
 
@@ -111,20 +109,6 @@ pub fn standin() -> PathBuf {
         assert!(status.success(), "building folio-standin");
     });
     target.join("debug").join("folio-standin")
-}
-
-/// The stand-in bottle-cli: what a test runs where folio runs bottle-cli. Its state is
-/// $FAKE_CLI_STATE.
-pub fn standin_cli() -> String {
-    let standin = standin();
-    let link = standin.parent().unwrap().join("standin").join("bottle-cli");
-    static LINKED: std::sync::Once = std::sync::Once::new();
-    LINKED.call_once(|| {
-        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&standin, &link).unwrap();
-    });
-    link.display().to_string()
 }
 
 /// git `args`, which must succeed; its stdout, trimmed.

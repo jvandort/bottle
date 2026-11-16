@@ -126,29 +126,16 @@ pub fn bind_message(binding: &Binding) -> Result<Value, String> {
 /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
 /// folio serve is.
 pub fn bind(binding: &Binding) -> Result<(), String> {
-    #[cfg(test)]
-    if fake::on() {
-        return fake::bind(bind_message(binding)?);
-    }
     request(&bind_message(binding)?, true).map(|_| ())
 }
 
 /// Stop answering `bottle`'s machine, if folio serve is running at all.
 pub fn release(bottle: &str) -> Result<(), String> {
-    #[cfg(test)]
-    if fake::on() {
-        return fake::release(bottle);
-    }
     request(&json!({"op": "release", "bottle": bottle}), false).map(|_| ())
 }
 
 /// Start folio serve in the background. False if it was already running this program.
 pub fn start() -> Result<bool, String> {
-    #[cfg(test)]
-    if fake::on() {
-        fake::CALLS.lock().unwrap().push("start".into());
-        return Ok(false);
-    }
     match send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => {
             start_daemon()?;
@@ -352,11 +339,6 @@ fn launch(background: bool) -> Result<Child, String> {
 
 fn start_daemon() -> Result<(), String> {
     crate::log::log!("daemon", "starting folio serve");
-    #[cfg(test)]
-    if let Some(start) = *fake::STARTS.lock().unwrap() {
-        start();
-        return Ok(());
-    }
     launch(true)?;
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
@@ -379,151 +361,13 @@ pub fn run() -> Result<i32, String> {
 
 /// folio serve, as folio's unit tests have it: what it was told, and nothing started.
 #[cfg(test)]
-pub mod fake {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use serde_json::Value;
-
-    /// What's bound, by bottle: its bind message.
-    pub static BOUND: Mutex<Vec<Value>> = Mutex::new(Vec::new());
-    /// Each bind, release and start, in order.
-    pub static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    /// What starting folio serve does, in a test that says.
-    pub static STARTS: Mutex<Option<fn()>> = Mutex::new(None);
-
-    /// Whether a test has folio serve faked: from reset() on, until off().
-    static ON: AtomicBool = AtomicBool::new(false);
-
-    pub fn on() -> bool {
-        ON.load(Ordering::Relaxed)
-    }
-
-    pub fn off() {
-        ON.store(false, Ordering::Relaxed);
-    }
-
-    pub fn reset() {
-        BOUND.lock().unwrap().clear();
-        CALLS.lock().unwrap().clear();
-        ON.store(true, Ordering::Relaxed);
-    }
-
-    pub fn bind(message: Value) -> Result<(), String> {
-        let bottle = message["bottle"].as_str().unwrap_or_default().to_string();
-        CALLS.lock().unwrap().push(format!("bind {bottle}"));
-        let mut bound = BOUND.lock().unwrap();
-        bound.retain(|m| m["bottle"] != bottle.as_str());
-        bound.push(message);
-        Ok(())
-    }
-
-    pub fn release(bottle: &str) -> Result<(), String> {
-        CALLS.lock().unwrap().push(format!("release {bottle}"));
-        BOUND.lock().unwrap().retain(|m| m["bottle"] != bottle);
-        Ok(())
-    }
-
-    pub fn bound() -> Vec<String> {
-        BOUND
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|m| m["bottle"].as_str().unwrap_or_default().to_string())
-            .collect()
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tempdir;
-    use std::os::unix::net::UnixListener;
-    use std::sync::Mutex;
-
-    /// folio serve's control socket, as the tests have it: answering with `code` while it runs, and
-    /// once it's told to shut down, taking `closing` more connections and closing them unanswered
-    /// (what one winding up does) before it's gone.
-    struct State {
-        code: Option<String>,
-        closing: usize,
-        calls: Vec<String>,
-    }
-
-    static STATE: Mutex<State> = Mutex::new(State {
-        code: None,
-        closing: 0,
-        calls: Vec::new(),
-    });
-
-    fn calls() -> Vec<String> {
-        STATE.lock().unwrap().calls.clone()
-    }
-
-    /// A folio serve running `code` (None: one from before it said), on the control socket.
-    fn run(code: Option<String>) {
-        let listener = UnixListener::bind(control()).unwrap();
-        STATE.lock().unwrap().code = Some(code.unwrap_or_default());
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut line = String::new();
-                let mut state = STATE.lock().unwrap();
-                if state.code.is_none() {
-                    // Winding up: closed unanswered, until it's gone.
-                    state.closing = state.closing.saturating_sub(1);
-                    state.calls.push("closed".into());
-                    if state.closing == 0 {
-                        let _ = std::fs::remove_file(control());
-                        return;
-                    }
-                    continue;
-                }
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let message: Value = serde_json::from_str(&line).unwrap();
-                let op = message["op"].as_str().unwrap().to_string();
-                state.calls.push(op.clone());
-                let reply = match op.as_str() {
-                    "ping" if state.code.as_deref() == Some("") => json!({"ok": true}),
-                    "ping" => json!({"ok": true, "code": state.code}),
-                    "shutdown" => {
-                        state.code = None;
-                        if state.closing == 0 {
-                            let _ = std::fs::remove_file(control());
-                            let _ = writeln!(stream, "{}", json!({"ok": true}));
-                            return;
-                        }
-                        json!({"ok": true})
-                    }
-                    _ => json!({"ok": true}),
-                };
-                writeln!(stream, "{reply}").unwrap();
-            }
-        });
-    }
-
-    fn start_this() {
-        STATE.lock().unwrap().calls.push("start".into());
-        run(Some(code_hash()));
-    }
-
-    /// A test of folio serve's client: a fresh home, nothing running, and starting it starts this.
-    fn fresh(closing: usize) -> tempdir::Isolated {
-        let env = tempdir::isolated();
-        *STATE.lock().unwrap() = State {
-            code: None,
-            closing,
-            calls: Vec::new(),
-        };
-        CURRENT.store(false, Ordering::Relaxed);
-        fake::off();
-        *fake::STARTS.lock().unwrap() = Some(start_this);
-        env
-    }
 
     #[test]
     fn its_sockets_are_in_folios_home_or_short_for_a_deep_one() {
-        let env = fresh(0);
+        let env = tempdir::isolated();
         assert_eq!(control(), env.home().join("serve.sock"));
         assert_eq!(
             services_sockets()["ssh"],
@@ -538,68 +382,5 @@ mod tests {
             path.len() <= MAX_SOCKET_PATH && path.starts_with(&format!("/tmp/bottle-{uid}/")),
             "{path}"
         );
-    }
-
-    #[test]
-    fn one_on_other_code_is_restarted_before_its_asked_anything_once_a_command() {
-        let _env = fresh(0);
-        run(Some("old".into()));
-        request(&json!({"op": "bind", "bottle": "b"}), true).unwrap();
-        assert_eq!(calls(), ["ping", "shutdown", "start", "bind"]);
-        request(&json!({"op": "release", "bottle": "b"}), false).unwrap();
-        assert_eq!(calls().last().unwrap(), "release");
-        assert_eq!(calls().len(), 5);
-    }
-
-    #[test]
-    fn one_that_closes_connections_as_it_stops_is_waited_out() {
-        let _env = fresh(2);
-        run(Some("old".into()));
-        request(&json!({"op": "bind", "bottle": "b"}), true).unwrap();
-        assert_eq!(
-            calls(),
-            ["ping", "shutdown", "closed", "closed", "start", "bind"]
-        );
-    }
-
-    #[test]
-    fn one_from_before_it_said_its_code_is_restarted() {
-        let _env = fresh(0);
-        run(None);
-        assert!(start().unwrap()); // started: the one that was running is gone
-        assert_eq!(calls(), ["ping", "ping", "shutdown", "start"]);
-    }
-
-    #[test]
-    fn starting_one_on_its_way_out_waits_it_out_and_starts_this_and_stopping_waits_till_its_gone() {
-        let _env = fresh(2);
-        run(Some(code_hash()));
-        STATE.lock().unwrap().code = None; // told to shut down by someone else: winding up
-        assert!(start().unwrap());
-        assert_eq!(calls(), ["closed", "closed", "start"]);
-        drop(_env);
-        let _env = fresh(2);
-        run(Some(code_hash()));
-        assert!(stop().unwrap());
-        assert_eq!(calls(), ["shutdown", "closed", "closed"]);
-        assert!(!control().exists());
-    }
-
-    #[test]
-    fn one_on_this_code_is_left_alone_and_none_is_started_by_what_needs_it() {
-        let _env = fresh(0);
-        run(Some(code_hash()));
-        request(&json!({"op": "bind", "bottle": "b"}), true).unwrap();
-        assert_eq!(calls(), ["ping", "bind"]);
-        drop(_env);
-        let _env = fresh(0);
-        request(&json!({"op": "bind", "bottle": "b"}), true).unwrap();
-        assert_eq!(calls(), ["start", "bind"]);
-        // Releasing from one that isn't running starts nothing; stopping it says it wasn't.
-        drop(_env);
-        let _env = fresh(0);
-        request(&json!({"op": "release", "bottle": "b"}), false).unwrap();
-        assert!(!stop().unwrap());
-        assert!(calls().is_empty());
     }
 }

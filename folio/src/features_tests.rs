@@ -1606,3 +1606,13 @@ fn the_recipe_says_its_features_for_the_build() {
     f.feature("tools", json!({}));
     assert_eq!(image(&["tools"])["recipe"]["features"], json!(["tools"]));
 }
+
+#[test]
+fn base_isnt_a_feature_to_depend_on() {
+    let f = Features::empty();
+    f.feature("base", json!({}));
+    assert!(!available().contains(&"base".to_string()));
+    fails(resolve_json(&["base"]), "base is in every bottle");
+    f.feature("needy", json!({"dependsOn": {"base": {}}}));
+    fails(load_json("needy"), "installed on base already");
+}

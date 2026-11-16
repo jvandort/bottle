@@ -478,3 +478,56 @@ fn shell_only_while_the_thread_runs() {
         &argv(&["bash", "-l"])
     );
 }
+
+#[test]
+fn its_name_is_at_an_address_of_its_own_and_its_keys_are_exchanged() {
+    let s = Sidecar::with_one();
+    let execs = |cli: Value, machine: &str| -> Vec<Value> {
+        cli["execs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["machine"] == machine)
+            .cloned()
+            .collect()
+    };
+    let here = execs(s.f.cli(), &s.bottle);
+    let there = execs(s.desktop.cli(), &s.sidecar);
+    let hosts = here.iter().rfind(|e| e["step"] == "hosts").unwrap();
+    assert!(
+        hosts["argv"][2]
+            .as_str()
+            .unwrap()
+            .contains("192.0.2.2 sidecar"),
+        "{hosts}"
+    );
+    let script = |e: &Value| e["argv"][2].as_str().unwrap_or_default().to_string();
+    // The thread's bottle makes its key, as genie; the sidecar says its host key, as root.
+    let made = here
+        .iter()
+        .rfind(|e| script(e).contains("id_ed25519"))
+        .unwrap();
+    assert_eq!(made["user"], "genie");
+    let host = there
+        .iter()
+        .rfind(|e| script(e).contains("ssh_host_ed25519_key"))
+        .unwrap();
+    assert_eq!(host["user"], "root");
+    // That key let in there; that host key known here, by the name it's reached as.
+    let let_in = there
+        .iter()
+        .rfind(|e| script(e).contains("authorized_keys"))
+        .unwrap();
+    assert_eq!(
+        let_in["stdin"],
+        format!("ssh-ed25519 KEY-OF-{}\n", s.bottle)
+    );
+    let known = here
+        .iter()
+        .rfind(|e| script(e).contains("known_hosts"))
+        .unwrap();
+    assert_eq!(
+        known["stdin"],
+        format!("sidecar ssh-ed25519 HOSTKEY-OF-{}\n", s.sidecar)
+    );
+}
