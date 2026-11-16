@@ -5,7 +5,7 @@ Its machines, images and every call are in $FAKE_CLI_STATE, a JSON file. A machi
 made with (its arguments, environment, mounts, labels and network policy) and its state. An exec is recorded, with
 what it was given on stdin, and answered as a machine that meets the bottle contract would: the checks pass (or
 name what $FAKE_CLI_MISSING says is missing), a key script says a key, and anything else runs here, in a directory
-of the machine's own, with its home there. An image build records its recipe and policy, and the image is then
+of the machine's own, with its home there, and its /workspace and /notes (empty repos, made at its workspace step). An image build records its recipe and policy, and the image is then
 built, with the recipe's labels.
 
 $FAKE_CLI_SLOW makes steps take 30 seconds ($FAKE_CLI_SLOW_SECONDS) (a comma-separated list, as $FAKE_CLI_FAIL's), to be interrupted.
@@ -15,11 +15,14 @@ contract, hosts, mkdir or workspace. Failures look like bottle-cli's: `bottle-cl
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 STATE = Path(os.environ["FAKE_CLI_STATE"])
+# Where a thread's machine has its repos.
+GUEST_REPOS = ("/workspace", "/notes")
 
 
 def load() -> dict:
@@ -175,11 +178,15 @@ def main(argv: list[str]) -> int:
             save(state)
             if step and failing(step):
                 fail(f"{step} failed")
+            here = STATE.parent / "machines" / name
             if step == "contract":
                 missing = os.environ.get("FAKE_CLI_MISSING")
                 if missing:
                     print(missing)
                 return 0
+            if step == "workspace":   # its repos, empty: what's in them is no test's here
+                for mount in GUEST_REPOS:
+                    subprocess.run(["git", "init", "-q", str(here / mount.strip("/"))], check=True)
             if step:
                 return 0
             script = command[-1] if command[:2] == ["sh", "-c"] else ""
@@ -191,8 +198,10 @@ def main(argv: list[str]) -> int:
                 return 0
             if "authorized_keys" in script or "known_hosts" in script:
                 return 0
-            here = STATE.parent / "machines" / name
             (here / "home").mkdir(parents=True, exist_ok=True)
+            # Its repos are its own, in its directory, not whatever this machine has at those paths.
+            command = [re.sub(r"(?<![\w/.])(" + "|".join(GUEST_REPOS) + r")\b", lambda m: f"{here}{m[1]}", a)
+                       for a in command]
             return subprocess.run(command, cwd=here, input=stdin,
                                   env={**os.environ, "HOME": str(here / "home")}).returncode
         case ["cp", src, dst]:
