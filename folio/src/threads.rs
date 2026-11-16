@@ -43,7 +43,7 @@ use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::store::{self, Content};
 use crate::{broker, lanes, notes, repos, runners, snapshots};
 
-const RECORD: &str = "thread.json";
+pub const RECORD: &str = "thread.json";
 pub const WORKSPACE: &str = "/workspace";
 pub const CLAUDE: &str = "claude";
 pub const SHELL: &str = "shell";
@@ -133,7 +133,6 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
 /// own memory, disk and runner. What it doesn't say, it has as its base has it, as that is when a
 /// bottle's made.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(from = "SettingsRecord")]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
@@ -143,35 +142,6 @@ pub struct Settings {
     pub disk: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
-}
-
-/// Settings as a record has them: a sidecar's from before settings were overlays had a whole spec
-/// of its own, which is the same as its keys over the base.
-#[derive(Deserialize)]
-struct SettingsRecord {
-    #[serde(default)]
-    features: Vec<String>,
-    #[serde(default)]
-    memory: Option<String>,
-    #[serde(default)]
-    disk: Option<String>,
-    #[serde(default)]
-    runner: Option<String>,
-    #[serde(default)]
-    spec: Option<Value>,
-}
-
-impl From<SettingsRecord> for Settings {
-    fn from(r: SettingsRecord) -> Settings {
-        let spec = r.spec.unwrap_or_default();
-        let get = |key: &str| spec.get(key).and_then(Value::as_str).map(String::from);
-        Settings {
-            features: repos::merge_features(&repos::features_of(&spec), &r.features),
-            memory: r.memory.or_else(|| get("memory")),
-            disk: r.disk.or_else(|| get("disk")),
-            runner: r.runner.filter(|r| !r.is_empty()),
-        }
-    }
 }
 
 impl Settings {
@@ -219,57 +189,18 @@ pub fn sidecar_base() -> Value {
 /// given), never by using it. What its bottle is, and when it was last used, is the bottle's
 /// record's (bottles.rs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "ThreadRecord")]
 pub struct Thread {
     pub name: String,
     pub bottle: String,
     pub created: f64,
     /// The branch it started from, if one was asked for; None: the repo's default.
-    #[serde(default)]
     pub base: Option<String>,
     /// The broker (see broker.rs), whose bottle is made folio's way, not the repo's.
-    #[serde(default)]
     pub broker: bool,
     /// What it has that the repo's settings don't, as a sidecar's are kept.
     pub settings: Settings,
     /// Its sidecar, if it has one: a runner of its own, always.
     pub sidecar: Option<Settings>,
-}
-
-/// A thread as its record has it: one from before settings had a runner alone, at the top.
-#[derive(Deserialize)]
-struct ThreadRecord {
-    name: String,
-    bottle: String,
-    created: f64,
-    #[serde(default)]
-    base: Option<String>,
-    #[serde(default)]
-    broker: bool,
-    #[serde(default)]
-    settings: Option<Settings>,
-    #[serde(default)]
-    runner: Option<String>,
-    #[serde(default)]
-    sidecar: Option<Settings>,
-}
-
-impl From<ThreadRecord> for Thread {
-    fn from(r: ThreadRecord) -> Thread {
-        let mut settings = r.settings.unwrap_or_default();
-        if settings.runner.is_none() {
-            settings.runner = r.runner.filter(|r| !r.is_empty());
-        }
-        Thread {
-            name: r.name,
-            bottle: r.bottle,
-            created: r.created,
-            base: r.base,
-            broker: r.broker,
-            settings,
-            sidecar: r.sidecar,
-        }
-    }
 }
 
 impl Thread {
@@ -299,7 +230,6 @@ pub fn exists(repo: &Repo, name: &str) -> bool {
 fn read(slot: &Path) -> Result<Thread, String> {
     let path = slot.join(RECORD);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // Keys a record from an older folio has (last_active, now its bottle's) are left out.
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -1086,12 +1016,9 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
     make_bottle(repo, thread)?;
     let restored = (|| -> Result<(), String> {
         for path in mounts(thread) {
-            let mut archive = slot.join(archive_of(path).unwrap());
-            // A broker from before notes had its vault at /workspace.
-            if thread.broker && !archive.exists() {
-                archive = slot.join(snapshots::WORKSPACE_ARCHIVE);
-            }
-            // A snapshot from before notes has none of them.
+            let archive = slot.join(archive_of(path).unwrap());
+            // A snapshot of a bottle that hadn't the mount (one from before notes) has nothing of
+            // it to restore: it's checked out afresh.
             if archive.exists() {
                 engine::run_from_file(
                     &thread.bottle,
@@ -1129,17 +1056,6 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
             &sh(snapshots::CLAUDE_IN),
             &slot.join(snapshots::CLAUDE_ARCHIVE),
         )?;
-        // Its conversation, too, was kept under the directory its vault was in.
-        if thread.broker {
-            engine::run(
-                &thread.bottle,
-                &sh(
-                    "cd \"$HOME/.claude/projects\" 2>/dev/null && [ -d -workspace ] && [ ! -e -notes ] && mv -- -workspace -notes || true",
-                ),
-                None,
-                true,
-            )?;
-        }
         Ok(())
     })();
     if let Err(e) = restored {
@@ -1383,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_reads_back_and_one_from_an_older_folio_reads() {
+    fn a_record_reads_back() {
         let thread = Thread {
             name: "t".into(),
             bottle: "r-t".into(),
@@ -1404,30 +1320,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Thread>(&store::json(&thread)).unwrap(),
             thread
-        );
-        // Keys it no longer has (last_active, now its bottle's) are left out.
-        let read: Thread =
-            serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#)
-                .unwrap();
-        assert_eq!((read.broker, read.sidecar), (false, None));
-        assert_eq!(read.settings, Settings::default());
-        // A thread's runner, alone at the top, and a sidecar's whole spec, as they were before
-        // settings: the same, as settings.
-        let read: Thread = serde_json::from_str(
-            r#"{"name": "t", "bottle": "b", "created": 1, "runner": "desktop",
-                "sidecar": {"runner": "box", "spec": {"features": ["jvm"], "memory": "32G", "disk": "9G"}}}"#,
-        )
-        .unwrap();
-        assert_eq!(read.settings.runner.as_deref(), Some("desktop"));
-        assert!(!read.settings.changes_spec());
-        assert_eq!(
-            read.sidecar.unwrap(),
-            Settings {
-                features: vec!["jvm".into()],
-                memory: Some("32G".into()),
-                disk: Some("9G".into()),
-                runner: Some("box".into()),
-            }
         );
     }
 

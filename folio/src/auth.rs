@@ -95,7 +95,7 @@ pub fn service() -> String {
 }
 
 /// The service bottle kept credentials under, for its home ($BOTTLE_HOME, else ~/.bottle): what
-/// keychain moves them from.
+/// move_from_bottles moves them from.
 fn bottles_service() -> String {
     let default = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bottle");
     let home = std::env::var_os("BOTTLE_HOME")
@@ -174,27 +174,39 @@ fn removed(service: &str, name: &str) -> bool {
 }
 
 /// The credential `name`, from the Keychain; $FOLIO_CREDENTIALS, a JSON object of name: value, in
-/// its place (the tests', and a machine without a Keychain's). One kept under bottle's service, from
-/// before folio had its own, is moved to folio's as it's found.
+/// its place (the tests', and a machine without a Keychain's).
 pub fn keychain(name: &str) -> Option<String> {
     if let Some(file) = std::env::var_os("FOLIO_CREDENTIALS") {
         let given: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
         return given.get(name).and_then(Value::as_str).map(String::from);
     }
-    let service = service();
-    if let Some(value) = found(&service, name) {
-        return Some(value);
+    found(&service(), name)
+}
+
+/// Every declared credential kept under bottle's service, from before folio had its own, moved to
+/// folio's (migrate.rs). One folio has already stays as it is.
+pub fn move_from_bottles() {
+    if std::env::var_os("FOLIO_CREDENTIALS").is_some() {
+        return;
     }
-    let old = bottles_service();
-    let value = found(&old, name)?;
-    if stored(&service, name, &value).is_ok() {
-        removed(&old, name);
-        crate::log::log!(
-            "auth",
-            "credential {name} moved from the Keychain's {old} to {service}"
-        );
+    let Ok(declared) = declared() else {
+        return;
+    };
+    let (service, old) = (service(), bottles_service());
+    for name in declared.keys() {
+        if found(&service, name).is_some() {
+            continue;
+        }
+        if let Some(value) = found(&old, name)
+            && stored(&service, name, &value).is_ok()
+        {
+            removed(&old, name);
+            crate::log::log!(
+                "auth",
+                "credential {name} moved from the Keychain's {old} to {service}"
+            );
+        }
     }
-    Some(value)
 }
 
 pub fn get(name: &str) -> Option<String> {
@@ -216,11 +228,9 @@ fn put(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the credential (from bottle's service too, where one from before may be). False if it
-/// wasn't stored.
+/// Remove the credential. False if it wasn't stored.
 fn delete(name: &str) -> bool {
-    let here = removed(&service(), name);
-    removed(&bottles_service(), name) || here
+    removed(&service(), name)
 }
 
 // --- commands -------------------------------------------------------------------
@@ -418,17 +428,17 @@ mod tests {
     }
 
     #[test]
-    fn one_kept_under_bottles_service_is_moved_to_folios_as_its_found() {
+    fn those_kept_under_bottles_service_are_moved_to_folios() {
         let keychain = Keychain::new();
         stored("bottle", "claude", "tok-old").unwrap();
-        assert_eq!(get("claude").as_deref(), Some("tok-old"));
-        assert_eq!(found(&service(), "claude").as_deref(), Some("tok-old"));
-        assert_eq!(found("bottle", "claude"), None);
-        assert!(!keychain.argv().contains("tok-old"));
-        // Removing it takes it from both.
         stored("bottle", "github", "gh-old").unwrap();
-        assert!(remove("github").unwrap());
-        assert_eq!(found("bottle", "github"), None);
+        stored(&service(), "github", "gh-new").unwrap();
+        move_from_bottles();
+        assert_eq!(get("claude").as_deref(), Some("tok-old"));
+        assert_eq!(found("bottle", "claude"), None);
+        // One folio has already stays as it is.
+        assert_eq!(get("github").as_deref(), Some("gh-new"));
+        assert!(!keychain.argv().contains("tok-old"));
     }
 
     #[test]

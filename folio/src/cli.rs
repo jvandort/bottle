@@ -355,6 +355,12 @@ pub fn main(args: Vec<String>) -> ExitCode {
     crate::log::to_file("folio");
     crate::log::write("command", &asked);
     let began = std::time::Instant::now();
+    // What folio keeps, in the format it reads, before it reads any.
+    if let Err(e) = crate::migrate::ensure() {
+        crate::log::write("command", &format!("failed converting folio's home: {e}"));
+        eprintln!("folio: error: {e}");
+        return ExitCode::from(crate::FAILED);
+    }
     let (name, sub) = matches.subcommand().unwrap();
     let outcome = match name {
         "new" => new(sub),

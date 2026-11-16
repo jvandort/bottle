@@ -37,9 +37,7 @@
 //!
 //! Runners are listed in folio's home, runners.json, `{"version": 1, "runners": {NAME: {"ssh":
 //! DESTINATION, "home": PATH, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an
-//! entry says
-//! is kept as it is. With none there yet, bottle-cli's ($BOTTLE_HOME/runners.json, from when
-//! runners were bottle-cli's) is taken as it is.
+//! entry says is kept as it is.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -79,14 +77,8 @@ const MOST_BACKOFF: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
-    #[serde(default = "version")]
     version: u32,
-    #[serde(default)]
     runners: BTreeMap<String, Entry>,
-}
-
-fn version() -> u32 {
-    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,28 +99,16 @@ fn registry_path() -> PathBuf {
     crate::home().join("runners.json")
 }
 
-/// bottle-cli's list of runners, from when they were its: $BOTTLE_HOME's, else ~/.bottle's.
-fn bottles_registry() -> PathBuf {
-    env::var_os("BOTTLE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".bottle"))
-        .join("runners.json")
-}
-
 fn registry() -> io::Result<Registry> {
     let path = registry_path();
     let json = match fs::read(&path) {
         Ok(json) => json,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::read(bottles_registry()) {
-            Ok(json) => json,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Registry {
-                    version: 1,
-                    ..Default::default()
-                });
-            }
-            Err(e) => return Err(e),
-        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(Registry {
+                version: 1,
+                ..Default::default()
+            });
+        }
         Err(e) => return Err(e),
     };
     serde_json::from_slice(&json).map_err(|e| other(format!("{}: {e}", path.display())))

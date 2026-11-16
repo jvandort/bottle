@@ -27,6 +27,7 @@ mod images;
 mod interrupt;
 mod lanes;
 mod log;
+mod migrate;
 mod notes;
 mod obsidian;
 mod picker;

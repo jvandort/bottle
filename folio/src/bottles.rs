@@ -93,7 +93,7 @@ fn now() -> f64 {
         .as_secs_f64()
 }
 
-/// A remote, as a record keeps it: {name, fetch, push}, options since removed dropped.
+/// A remote, as a record keeps it: {name, fetch, push}.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RemoteRecord {
     name: String,
@@ -145,18 +145,12 @@ pub struct Mount {
     /// None: a detached commit.
     pub branch: Option<String>,
     pub commit: String,
-    #[serde(
-        default,
-        deserialize_with = "remotes_from",
-        serialize_with = "remotes_to"
-    )]
+    #[serde(deserialize_with = "remotes_from", serialize_with = "remotes_to")]
     pub remotes: Vec<Remote>,
-    /// Where its objects are mounted in the bottle (default: under OBJECTS_ROOT).
-    #[serde(default)]
+    /// Where its objects are mounted in the bottle: under OBJECTS_ROOT, at its path.
     pub objects: String,
-    /// Where its remotes are under bottle.host/git (default: its path, less the /).
-    #[serde(default)]
-    pub at: Option<String>,
+    /// Where its remotes are under bottle.host/git: its path, less the /.
+    pub at: String,
 }
 
 impl Mount {
@@ -167,35 +161,19 @@ impl Mount {
         commit: String,
         remotes: Vec<Remote>,
     ) -> Mount {
-        let mut mount = Mount {
+        Mount {
             path: path.into(),
             repo: repo.into(),
             branch,
             commit,
             remotes,
-            objects: String::new(),
-            at: None,
-        };
-        mount.fill();
-        mount
-    }
-
-    /// Its defaults, where a record left them out.
-    fn fill(&mut self) {
-        if self.objects.is_empty() {
-            self.objects = format!("{OBJECTS_ROOT}{}", self.path);
+            objects: format!("{OBJECTS_ROOT}{path}"),
+            at: path.trim_start_matches('/').into(),
         }
-        if self.at.is_none() {
-            self.at = Some(self.path.trim_start_matches('/').to_string());
-        }
-    }
-
-    fn at(&self) -> &str {
-        self.at.as_deref().unwrap_or_default()
     }
 
     pub fn url(&self, remote: &str) -> String {
-        format!("http://{HOST}{}/{}/{remote}", services::GIT_PATH, self.at())
+        format!("http://{HOST}{}/{}/{remote}", services::GIT_PATH, self.at)
     }
 }
 
@@ -223,10 +201,6 @@ fn default_status() -> String {
     "creating".into()
 }
 
-fn local() -> String {
-    runners::LOCAL.into()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bottle {
     pub name: String,
@@ -234,45 +208,25 @@ pub struct Bottle {
     pub image: String,
     pub created: f64,
     /// "creating" until setup finishes, "ready" after; "broken" if cleanup failed.
-    #[serde(default = "default_status")]
     pub status: String,
     /// Features installed on top of the image, as specs (e.g. jvm:version=17), including
     /// dependencies.
-    #[serde(default)]
     pub features: Vec<String>,
-    /// The VM's memory, a size in M or G (e.g. 8G), from its spec. None only in records from before
-    /// specs had to say.
-    #[serde(default)]
-    pub memory: Option<String>,
-    /// The spec it was made from, canonical.
-    #[serde(default = "empty_object")]
+    /// The spec it was made from, canonical: its memory, say.
     pub spec: Value,
     /// Its repos, each checked out at its path; the first is where a shell starts.
-    #[serde(default)]
     pub mounts: Vec<Mount>,
     /// Its creator's addition to ~/BOTTLE.md.
-    #[serde(default)]
     pub context: String,
-    /// The runner its machine is on; records from before runners were the local one's.
-    #[serde(default = "local")]
+    /// The runner its machine is on.
     pub runner: String,
     /// The bottles it may ssh to.
-    #[serde(default)]
     pub ssh: Vec<SshGrant>,
-    /// Its machine's name, as bottle-cli where it is has it.
-    #[serde(default)]
-    pub machine_name: String,
-    /// Which of network()'s policies its machine has (NETWORK the current one); 0 for one from
-    /// before this was recorded. One behind is given the current one as it's next started.
-    #[serde(default)]
+    /// Which of network()'s policies its machine has (NETWORK the current one). One behind is
+    /// given the current one as it's next started.
     pub network_version: u32,
     /// When it was last used (touch): made, or attached to.
-    #[serde(default)]
     pub last_active: f64,
-}
-
-fn empty_object() -> Value {
-    json!({})
 }
 
 impl Bottle {
@@ -293,7 +247,12 @@ impl Bottle {
 
     /// Its machine's name, as bottle-cli there lists it: the bottle's own.
     pub fn machine(&self) -> &str {
-        &self.machine_name
+        &self.name
+    }
+
+    /// Its memory, as its spec says.
+    fn memory(&self) -> Option<&str> {
+        self.spec.get("memory").and_then(Value::as_str)
     }
 
     /// Its machine and where it is, as folio shows it: RUNNER/NAME for one on a runner.
@@ -345,13 +304,9 @@ fn records() -> BTreeMap<String, PathBuf> {
 pub fn load() -> Result<BTreeMap<String, Bottle>, String> {
     let mut bottles = BTreeMap::new();
     for (name, path) in records() {
-        // Keys a record from an older bottle may have (its driver, say) are left out.
         if let Some(entry) = store::read_json(&path)? {
-            let mut bottle: Bottle =
+            let bottle: Bottle =
                 serde_json::from_value(entry).map_err(|e| format!("{}: {e}", path.display()))?;
-            for mount in &mut bottle.mounts {
-                mount.fill();
-            }
             bottles.insert(name, bottle);
         }
     }
@@ -450,13 +405,11 @@ pub fn create(
         created: now,
         status: default_status(),
         features: installed,
-        memory: spec.get("memory").and_then(Value::as_str).map(String::from),
         spec,
         mounts: planned.iter().map(|(m, _)| m.clone()).collect(),
         context: context.into(),
         runner: runner.into(),
         ssh: grants,
-        machine_name: name.into(),
         network_version: 0,
         last_active: now,
     };
@@ -631,7 +584,7 @@ fn run_machine(mut bottle: Bottle, mounted: &[Repo], tag: &str) -> Result<Bottle
         image: tag,
         mounts,
         env: machine_env(&bottle.features, &bottle.permissions(), bottle.workdir())?,
-        memory_mib: Some(memory_mib(bottle.memory.as_deref())?),
+        memory_mib: Some(memory_mib(bottle.memory())?),
         cpus: 0,
         disk_gib: specs::disk_gib(&bottle.spec),
         // What bottle-cli's exec and shell use unless told, and what its ls shows.
@@ -813,7 +766,7 @@ fn binding(bottle: &Bottle) -> Binding<'_> {
             .map(|m| Served {
                 git_dir: git_dir(m),
                 remotes: m.remotes.iter().map(remote_spec).collect(),
-                at: m.at().to_string(),
+                at: m.at.clone(),
             })
             .collect(),
         features: bottle.features.clone(),
@@ -1299,7 +1252,7 @@ pub fn status(names: &[String]) -> Result<Vec<Value>, String> {
                 "runner": bottle.runner,
                 // Its machine, as bottle-cli here names it (`bottle shell MACHINE`).
                 "machine": bottle.qualified(),
-                "features": features, "memory": bottle.memory, "spec": bottle.spec,
+                "features": features, "memory": bottle.memory(), "spec": bottle.spec,
                 "ssh": ssh,
                 // Where its objects and remotes are, as a checkout restored into it has to point.
                 "mounts": mounts,
@@ -1590,7 +1543,7 @@ mod tests {
         let spec = json!({"features": ["tools"], "memory": "1G"});
         let bottle = create(&f.owner(), &spec, "t", &[], "", runners::LOCAL, None).unwrap();
         assert_eq!(
-            (bottle.features.clone(), bottle.memory.as_deref()),
+            (bottle.features.clone(), bottle.memory()),
             (vec!["tools".to_string()], Some("1G"))
         );
         assert_eq!(f.machine("t")["mem"], "1024");
@@ -2080,13 +2033,11 @@ mod tests {
             created: 0.0,
             status: "ready".into(),
             features: features.iter().map(|f| f.to_string()).collect(),
-            memory: None,
             spec,
             mounts: vec![],
             context: String::new(),
             runner: "local".into(),
             ssh: vec![],
-            machine_name: "b".into(),
             network_version: 0,
             last_active: 0.0,
         };
@@ -2131,31 +2082,6 @@ mod tests {
             memory_mib(None).unwrap_err(),
             "a bottle needs its memory, a size in M or G, e.g. \"8G\" (not None)"
         );
-    }
-
-    #[test]
-    fn a_record_from_an_older_folio_reads() {
-        let record = json!({"name": "b", "id": "i", "image": "base", "created": 1.5, "driver": "smolvm",
-                            "mounts": [{"path": "/workspace", "repo": "/r", "branch": null, "commit": "c",
-                                        "remotes": [{"name": "origin", "fetch": "upstream", "gone": 1}]}]});
-        let mut bottle: Bottle = serde_json::from_value(record).unwrap();
-        for m in &mut bottle.mounts {
-            m.fill();
-        }
-        assert_eq!(
-            (
-                bottle.status.as_str(),
-                bottle.runner.as_str(),
-                bottle.network_version
-            ),
-            ("creating", "local", 0)
-        );
-        assert_eq!(bottle.mounts[0].objects, "/mnt/objects/workspace");
-        assert_eq!(
-            bottle.mounts[0].url("origin"),
-            "http://bottle.host/git/workspace/origin"
-        );
-        assert!(bottle.features.is_empty());
     }
 
     #[test]
