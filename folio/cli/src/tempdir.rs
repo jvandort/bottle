@@ -83,6 +83,24 @@ pub fn set(_: &Isolated, key: &str, value: &str) {
     unsafe { std::env::set_var(key, value) };
 }
 
+/// This crate's folio, built: what a test runs where folio runs itself (a hook, say), the test
+/// being another program.
+pub fn folio() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")));
+    let built = target.join("debug").join("folio");
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-q", "-p", "folio"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "building folio");
+    });
+    built
+}
+
 /// git `args`, which must succeed; its stdout, trimmed.
 pub fn git(args: &[&str]) -> String {
     let out = std::process::Command::new("git")

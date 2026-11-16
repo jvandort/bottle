@@ -278,44 +278,10 @@ pub fn create(machine: &Create, cli: &Cli) -> Result<(), String> {
     }
     let input = machine.network.as_ref().map(|n| {
         args.extend(["--network".into(), "-".into()]);
-        python_dumps(n)
+        n.to_string()
     });
     run(cli, &args, input.as_deref().map(str::as_bytes))?;
     Ok(())
-}
-
-/// JSON as Python's json.dumps wrote it on one line: ", " and ": " between items.
-pub fn python_dumps(value: &Value) -> String {
-    fn write(value: &Value, out: &mut String) {
-        match value {
-            Value::Array(items) => {
-                out.push('[');
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write(item, out);
-                }
-                out.push(']');
-            }
-            Value::Object(map) => {
-                out.push('{');
-                for (i, (key, item)) in map.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(&Value::String(key.clone()).to_string());
-                    out.push_str(": ");
-                    write(item, out);
-                }
-                out.push('}');
-            }
-            other => out.push_str(&other.to_string()),
-        }
-    }
-    let mut out = String::new();
-    write(value, &mut out);
-    crate::pyjson::ascii(&out)
 }
 
 /// Give a stopped machine the policy its connections are decided by (one made before it had one,
@@ -324,7 +290,7 @@ pub fn configure(machine: &str, network: &Value, cli: &Cli) -> Result<(), String
     run(
         cli,
         &strings(&["configure", machine, "--network", "-"]),
-        Some(python_dumps(network).as_bytes()),
+        Some(network.to_string().as_bytes()),
     )?;
     Ok(())
 }
@@ -682,14 +648,6 @@ mod tests {
             ["/opt/folio", "on", "--connect-timeout", "3", "box"]
         );
         tempdir::set(&env, "FOLIO_CLI", "");
-    }
-
-    #[test]
-    fn json_as_pythons_dumps_wrote_it() {
-        assert_eq!(
-            python_dumps(&json!({"a": [1, "\u{e9}"], "b": {}})),
-            "{\"a\": [1, \"\\u00e9\"], \"b\": {}}"
-        );
     }
 
     #[test]

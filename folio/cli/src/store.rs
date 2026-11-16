@@ -26,8 +26,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::pyjson;
-
 pub const CURRENT: &str = "current";
 
 /// What goes in a slot under a name: its content, a file to move in (from the same filesystem: an
@@ -49,9 +47,17 @@ pub fn read_json(path: &Path) -> Result<Option<Value>, String> {
     }
 }
 
-/// Replace `path` atomically with `data`, as JSON (its keys in its own order).
+/// Replace `path` atomically with `data`, as JSON.
 pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
-    write_bytes(path, format!("{}\n", pyjson::dumps(data, false)).as_bytes())
+    write_bytes(path, json(data).as_bytes())
+}
+
+/// `data` as folio writes JSON: indented, a line at the end.
+pub fn json(data: &impl Serialize) -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(data).expect("folio's records are JSON")
+    )
 }
 
 /// Replace `path` atomically with `content`.
@@ -59,18 +65,6 @@ pub fn write_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let staging = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     replace_with(path, &staging, content)
-}
-
-/// Replace `path` atomically with `data`, as JSON, its keys sorted: how bottle's records have always
-/// been written.
-pub fn write_json_sorted(path: &Path, data: &impl Serialize) -> Result<(), String> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let staging = path.with_file_name(format!(".{name}.tmp"));
-    replace_with(
-        path,
-        &staging,
-        format!("{}\n", pyjson::dumps(data, true)).as_bytes(),
-    )
 }
 
 fn replace_with(path: &Path, staging: &Path, content: &[u8]) -> Result<(), String> {

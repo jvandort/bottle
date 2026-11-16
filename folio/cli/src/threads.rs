@@ -40,7 +40,6 @@ use serde_json::{Value, json};
 use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::engine::{self, Mount};
 use crate::repos::{Repo, check_repo_spec, default_spec};
-use crate::specs::SpecJson;
 use crate::store::{self, Content};
 use crate::{broker, lanes, notes, snapshots};
 
@@ -132,20 +131,10 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
 }
 
 /// A thread's sidecar: a runner of its own, and a spec.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sidecar {
     pub runner: String,
     pub spec: Value,
-}
-
-impl Serialize for Sidecar {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry("runner", &self.runner)?;
-        map.serialize_entry("spec", &SpecJson(&self.spec))?;
-        map.end()
-    }
 }
 
 /// A thread's configuration: written only by what changes it (new, configure, rename, a runner
@@ -287,7 +276,7 @@ pub fn recent(
 }
 
 fn save(repo: &Repo, thread: &Thread, files: Vec<(&str, Content)>) -> Result<(), String> {
-    let record = format!("{}\n", crate::pyjson::dumps(thread, false)).into_bytes();
+    let record = store::json(thread).into_bytes();
     let mut all = vec![(RECORD, Content::Bytes(record))];
     all.extend(files);
     store::write_slot(&directory(repo, &thread.name), all).map(|_| ())
@@ -1234,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_is_written_as_python_wrote_it() {
+    fn a_record_reads_back_and_one_from_an_older_folio_reads() {
         let thread = Thread {
             name: "t".into(),
             bottle: "r-t".into(),
@@ -1248,11 +1237,10 @@ mod tests {
             }),
         };
         assert_eq!(
-            crate::pyjson::dumps(&thread, false),
-            "{\n  \"name\": \"t\",\n  \"bottle\": \"r-t\",\n  \"created\": 1.5,\n  \"base\": null,\n  \"broker\": false,\n  \
-             \"runner\": null,\n  \"sidecar\": {\n    \"runner\": \"box\",\n    \"spec\": {\n      \"features\": [],\n      \
-             \"memory\": \"2G\"\n    }\n  }\n}"
+            serde_json::from_str::<Thread>(&store::json(&thread)).unwrap(),
+            thread
         );
+        // Keys it no longer has (last_active, now its bottle's) are left out.
         let read: Thread =
             serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#)
                 .unwrap();

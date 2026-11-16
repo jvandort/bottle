@@ -584,9 +584,11 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // As every folio command fails (but `runner ssh`, which is ssh, and `on`, which is
+        // bottle-cli: theirs).
         Err(e) => {
             eprintln!("folio: error: {e}");
-            ExitCode::from(FAILED)
+            ExitCode::from(1)
         }
     }
 }
@@ -841,7 +843,22 @@ pub fn home(name: &str) -> io::Result<String> {
 
 /// Forgets runner `name`. Nothing there is touched: what's there of folio's bottles is folio's to
 /// have deleted first.
+/// `runner rm NAME`: forgotten, but not while folio has bottles there (their threads are deleted
+/// first).
 fn rm(name: &str) -> io::Result<()> {
+    let mut there: Vec<String> = crate::bottles::load()
+        .map_err(other)?
+        .into_values()
+        .filter(|b| b.runner == name)
+        .map(|b| b.name)
+        .collect();
+    there.sort();
+    if !there.is_empty() {
+        return Err(other(format!(
+            "runner {name} has bottles: {}; delete their threads first",
+            there.join(", ")
+        )));
+    }
     let mut registry = registry()?;
     if registry.runners.remove(name).is_none() {
         return Err(other(format!("no runner named {name}")));

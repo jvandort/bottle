@@ -21,7 +21,6 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::features;
@@ -42,30 +41,6 @@ pub const PERMISSIONS: [(&str, &str); 2] = [
     ),
 ];
 const LABEL_VALUE_MAX: usize = 200;
-
-/// A spec, written as folio's Python wrote one: its keys in KEYS' order, then any others.
-pub struct SpecJson<'a>(pub &'a Value);
-
-impl Serialize for SpecJson<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let Some(map) = self.0.as_object() else {
-            return self.0.serialize(serializer);
-        };
-        let mut out = serializer.serialize_map(Some(map.len()))?;
-        for key in KEYS {
-            if let Some(value) = map.get(key) {
-                out.serialize_entry(key, value)?;
-            }
-        }
-        for (key, value) in map {
-            if !KEYS.contains(&key.as_str()) {
-                out.serialize_entry(key, value)?;
-            }
-        }
-        out.end()
-    }
-}
 
 fn permission_names() -> String {
     PERMISSIONS
@@ -531,15 +506,6 @@ mod tests {
                 )
             );
         }
-    }
-
-    #[test]
-    fn written_in_its_keys_order() {
-        let spec = json!({"labels": {"thread": "t"}, "memory": "2G", "features": ["tools"], "disk": "50G"});
-        assert_eq!(
-            crate::pyjson::dumps(&SpecJson(&spec), false),
-            "{\n  \"features\": [\n    \"tools\"\n  ],\n  \"memory\": \"2G\",\n  \"disk\": \"50G\",\n  \"labels\": {\n    \"thread\": \"t\"\n  }\n}"
-        );
     }
 
     #[test]

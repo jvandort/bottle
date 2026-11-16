@@ -11,11 +11,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::git::{bottle_git, git};
-use crate::specs::SpecJson;
 use crate::store;
 
 /// What folio needs in every thread's bottle, by feature, and what for: every repo's spec has them,
@@ -156,7 +155,7 @@ impl Repo {
 
     pub fn save_spec(&self, spec: &Value) -> Result<(), String> {
         self.remember()?;
-        store::write_json(&self.spec_path(), &SpecJson(spec))
+        store::write_json(&self.spec_path(), spec)
     }
 
     /// Give the repo its directory, if it hasn't one yet.
@@ -183,22 +182,12 @@ impl Repo {
 
     pub fn save_runner(&self, runner: Option<&str>) -> Result<(), String> {
         self.remember()?;
-        let mut record = match store::read_json(&self.record_path())? {
-            Some(Value::Object(map)) => map,
-            _ => Map::new(),
+        let record = Record {
+            name: &self.name,
+            path: self.path.to_string_lossy().into_owned(),
+            runner: runner.filter(|r| !r.is_empty()),
         };
-        record.remove("runner");
-        // Python's dict kept the order it was written in: name and path, then the runner.
-        let mut ordered: Vec<(String, Value)> = record.into_iter().collect();
-        ordered.sort_by_key(|(k, _)| match k.as_str() {
-            "name" => 0,
-            "path" => 1,
-            _ => 2,
-        });
-        if let Some(runner) = runner.filter(|r| !r.is_empty()) {
-            ordered.push(("runner".into(), runner.into()));
-        }
-        store::write_json(&self.record_path(), &Ordered(ordered))
+        store::write_json(&self.record_path(), &record)
     }
 }
 
@@ -208,20 +197,6 @@ struct Record<'a> {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     runner: Option<&'a str>,
-}
-
-/// A map, written in the order it's given.
-struct Ordered(Vec<(String, Value)>);
-
-impl serde::Serialize for Ordered {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        for (k, v) in &self.0 {
-            map.serialize_entry(k, v)?;
-        }
-        map.end()
-    }
 }
 
 pub fn path_hash(path: &Path) -> String {

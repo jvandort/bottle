@@ -38,10 +38,10 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::OnceLock;
 
-const USAGE: &str = "hook pre-receive|post-receive";
+const USAGE: &str = "hook pre-receive|post-receive|lane-pre-receive";
 const ZERO: &str = "0000000000000000000000000000000000000000";
 /// What a worktree may be in the middle of, by the file under its git dir that says so.
 const IN_PROGRESS: [(&str, &str); 7] = [
@@ -59,20 +59,28 @@ const IN_PROGRESS: [(&str, &str); 7] = [
 pub fn hooks_dir() -> io::Result<PathBuf> {
     static WRITTEN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     WRITTEN
-        .get_or_init(|| write_hooks(&crate::home().join("hooks")).map_err(|e| e.to_string()))
+        .get_or_init(|| {
+            write(
+                &crate::home().join("hooks"),
+                &[
+                    ("pre-receive", "pre-receive"),
+                    ("post-receive", "post-receive"),
+                ],
+            )
+            .map_err(|e| e.to_string())
+        })
         .clone()
         .map_err(io::Error::other)
 }
 
-fn write_hooks(dir: &Path) -> io::Result<PathBuf> {
-    let me = std::env::current_exe()?;
-    let me = me
-        .to_str()
-        .ok_or_else(|| io::Error::other("this program's path isn't UTF-8"))?;
+/// Git's `hooks` in `dir`, each (the hook, this program's `hook` command it is) a script that runs
+/// this program as that command.
+pub fn write(dir: &Path, hooks: &[(&str, &str)]) -> io::Result<PathBuf> {
+    let me = crate::bottle_cli::me();
     fs::create_dir_all(dir)?;
-    for hook in ["pre-receive", "post-receive"] {
+    for (hook, command) in hooks {
         let script = format!(
-            "#!/bin/sh\n# folio serve's, for a push from a bottle (folio's serve/hook.rs).\nexec '{}' hook {hook}\n",
+            "#!/bin/sh\n# folio's (serve/hook.rs).\nexec '{}' hook {command}\n",
             me.replace('\'', r"'\''")
         );
         // Whole or not at all: a push may be running the one there.
@@ -88,7 +96,70 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     match (args.next().as_deref(), args.next()) {
         (Some("pre-receive"), None) => pre_receive(),
         (Some("post-receive"), None) => post_receive(),
+        (Some("lane-pre-receive"), None) => lane_pre_receive(),
         _ => crate::usage_error(USAGE),
+    }
+}
+
+/// A push to a thread's lane remote (lanes.rs): a branch it deletes from the user's lane is
+/// deleted from the agent's too, if it's still what the user last fetched of it, in one
+/// compare-and-delete, so a push from the agent since keeps it, and the push is refused, saying so.
+/// The -c settings the remote's receive-pack runs with say which remote and lane: folio.remote and
+/// folio.out.
+fn lane_pre_receive() -> ExitCode {
+    // The rest is the repo's own refs, outside the namespace; and a delete needs no objects, so
+    // none of the quarantine a push with new ones gets.
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .args(args)
+            .env_remove("GIT_NAMESPACE")
+            .env_remove("GIT_QUARANTINE_PATH")
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let (Some(remote), Some(out)) = (
+        git(&["config", "folio.remote"]),
+        git(&["config", "folio.out"]),
+    ) else {
+        return ExitCode::FAILURE;
+    };
+    let mut kept = false;
+    for line in io::stdin().lines().map_while(Result::ok) {
+        let mut words = line.split_whitespace();
+        let (Some(_old), Some(new), Some(name)) = (words.next(), words.next(), words.next()) else {
+            continue;
+        };
+        if new.chars().any(|c| c != '0') {
+            continue;
+        }
+        let branch = name.strip_prefix("refs/heads/").unwrap_or(name);
+        let lane = format!("refs/namespaces/{out}/{name}");
+        let Some(agent) = git(&["rev-parse", "-q", "--verify", &lane]) else {
+            continue;
+        };
+        let fetched = git(&[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/remotes/{remote}/{branch}"),
+        ]);
+        if fetched.as_deref() == Some(agent.as_str())
+            && git(&["update-ref", "-d", &lane, &agent]).is_some()
+        {
+            println!("folio: deleted {branch} from the agent's lane");
+        } else {
+            println!("folio: kept {branch}: the agent has pushed to it since you fetched it");
+            kept = true;
+        }
+    }
+    if kept {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

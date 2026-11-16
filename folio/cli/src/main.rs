@@ -31,7 +31,6 @@ mod log;
 mod notes;
 mod obsidian;
 mod picker;
-mod pyjson;
 mod repos;
 mod routes;
 mod runner;

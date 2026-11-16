@@ -12,13 +12,11 @@
 //!
 //! A branch the user deletes from the remote (`git push bottle/<thread> :refs/heads/<branch>`, as
 //! `curate integrate` does, `remote.<name>.curateDelete` saying to) is deleted from the agent's lane
-//! too, by the remote's receive-pack hook (folio/hooks/pre-receive, which folio writes into its home,
-//! hooks/lane): if it's still what the user last fetched of it, and the push is refused if not.
+//! too, by the remote's receive-pack hook (this program's `hook lane-pre-receive`, serve/hook.rs):
+//! if it's still what the user last fetched of it, and the push is refused if not.
 //! Nothing else deletes from the out lane.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -27,8 +25,6 @@ use crate::git::{git, git_input, succeeds};
 pub const OUT: &str = "out";
 pub const IN: &str = "in";
 const REMOTE_PREFIX: &str = "bottle/";
-/// The lane remote's receive-pack hook.
-const PRE_RECEIVE: &str = include_str!("../../hooks/pre-receive");
 
 pub fn namespace(thread: &str, direction: &str) -> String {
     format!("{thread}-{direction}")
@@ -49,8 +45,9 @@ pub fn bottle_remotes(thread: &str) -> Vec<String> {
     ]
 }
 
-/// The lane remote's hooks: in folio's home, written once a process (folio may have moved since),
-/// and again if they've gone.
+/// The lane remote's hooks: in folio's home, scripts that run this program (`hook
+/// lane-pre-receive`), written once a process (folio may have moved since), and again if they've
+/// gone.
 fn hooks() -> Result<PathBuf, String> {
     static WRITTEN: Mutex<Option<PathBuf>> = Mutex::new(None);
     let dir = crate::home().join("hooks").join("lane");
@@ -60,13 +57,8 @@ fn hooks() -> Result<PathBuf, String> {
     if written.as_ref() == Some(&dir) && dir.join("pre-receive").exists() {
         return Ok(dir);
     }
-    let failed = |e: std::io::Error| format!("{}: {e}", dir.display());
-    fs::create_dir_all(&dir).map_err(failed)?;
-    // Whole or not at all: a push may be running the one there.
-    let partial = dir.join(format!(".pre-receive.{}", std::process::id()));
-    fs::write(&partial, PRE_RECEIVE).map_err(failed)?;
-    fs::set_permissions(&partial, fs::Permissions::from_mode(0o755)).map_err(failed)?;
-    fs::rename(&partial, dir.join("pre-receive")).map_err(failed)?;
+    crate::serve::hook::write(&dir, &[("pre-receive", "lane-pre-receive")])
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     *written = Some(dir.clone());
     Ok(dir)
 }
@@ -323,6 +315,8 @@ mod tests {
     impl Lane {
         fn new() -> Lane {
             let env = tempdir::isolated();
+            // What the lane's hook runs.
+            tempdir::set(&env, "FOLIO_CLI", tempdir::folio().to_str().unwrap());
             let tmp = tempdir::Dir::new();
             let repo = tempdir::repo(&tmp.path().join("project"));
             register(&repo, "t").unwrap();

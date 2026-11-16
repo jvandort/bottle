@@ -136,8 +136,7 @@ fn register(path: &Path) -> Result<String, String> {
         .unwrap_or_default()
         .to_string_lossy();
     let staging = config_path.with_file_name(format!(".{name}.folio"));
-    std::fs::write(&staging, crate::bottle_cli::python_dumps(&config))
-        .map_err(|e| e.to_string())?;
+    std::fs::write(&staging, config.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&staging, &config_path).map_err(|e| e.to_string())?;
     Ok(id)
 }

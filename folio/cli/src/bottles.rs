@@ -397,7 +397,7 @@ fn save(bottle: &Bottle, owner: Option<&Path>) -> Result<(), String> {
             }
         },
     };
-    store::write_json_sorted(&path, bottle)
+    store::write_json(&path, bottle)
 }
 
 fn forget(name: &str) {

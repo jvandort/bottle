@@ -471,32 +471,9 @@ fn cp(matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
     Ok(0)
 }
 
-/// folio's runner commands (runner.rs): but for removing a runner folio still has bottles on,
-/// refused here.
+/// folio's runner commands: runner.rs's.
 fn runner_command(matches: &ArgMatches) -> ExitCode {
-    let arguments = args(matches, "arguments");
-    if arguments.first().map(String::as_str) == Some("rm") && arguments.len() > 1 {
-        let name = &arguments[1];
-        let there: Vec<String> = match crate::bottles::load() {
-            Ok(bottles) => bottles
-                .into_values()
-                .filter(|b| &b.runner == name)
-                .map(|b| b.name)
-                .collect(),
-            Err(e) => {
-                eprintln!("folio: error: {e}");
-                return ExitCode::from(1);
-            }
-        };
-        if !there.is_empty() {
-            eprintln!(
-                "folio: error: runner {name} has bottles: {}; delete their threads first",
-                there.join(", ")
-            );
-            return ExitCode::from(1);
-        }
-    }
-    crate::runner::main(arguments.into_iter())
+    crate::runner::main(args(matches, "arguments").into_iter())
 }
 
 fn new(matches: &ArgMatches) -> Outcome {
