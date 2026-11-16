@@ -1,5 +1,7 @@
 //! The agent in a bottle's VM: it runs commands for the host, one per connection (see
-//! bottle-agent-proto), and, as PID 1, reaps every orphan in the VM.
+//! bottle-agent-proto), and, as PID 1, reaps every orphan in the VM. Linux only, as the VM is:
+//! elsewhere it's empty.
+#![cfg(target_os = "linux")]
 
 pub mod init;
 pub mod net;

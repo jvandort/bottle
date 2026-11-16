@@ -1,4 +1,7 @@
 //! The agent end to end: the binary, listening on a unix socket, and a client speaking bottle-agent-proto.
+//!
+//! Linux's, as the agent is.
+#![cfg(target_os = "linux")]
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;

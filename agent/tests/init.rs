@@ -9,6 +9,9 @@
 //!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-agent --test init
 //!
 //! (x86_64's variable, on x86_64.)
+//!
+//! Linux's, as the agent is.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::os::unix::net::UnixStream;

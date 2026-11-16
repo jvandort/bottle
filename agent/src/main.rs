@@ -6,13 +6,19 @@
 //! In a VM it's the init the kernel starts, as /init.krun (where libkrun's own init would be):
 //! then it mounts what an init mounts before anything, and powers the VM off when it's done,
 //! rather than exit, which would panic the kernel.
+//!
+//! Linux only, as the VM is: elsewhere (a Mac's `cargo test --workspace`) it builds, to say so.
 
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
 use bottle_agent::init;
+#[cfg(target_os = "linux")]
 use bottle_agent::reaper::Reaper;
+#[cfg(target_os = "linux")]
 use bottle_agent::socket::Listener;
 
+#[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     let booted = std::env::args()
         .next()
@@ -31,6 +37,7 @@ fn main() -> ExitCode {
     code
 }
 
+#[cfg(target_os = "linux")]
 fn run() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("unpack") {
@@ -93,6 +100,7 @@ fn run() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn usage() -> ExitCode {
     eprintln!(
         "usage: bottle-agent [init [--lower DISK]... --upper DISK [--hostname NAME] [--config FILE]]"
@@ -100,4 +108,10 @@ fn usage() -> ExitCode {
     eprintln!("                    --vsock PORT | --unix PATH");
     eprintln!("       bottle-agent unpack DIR [--oci]");
     ExitCode::from(2)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> ExitCode {
+    eprintln!("bottle-agent: runs in a bottle's VM, on Linux only");
+    ExitCode::FAILURE
 }

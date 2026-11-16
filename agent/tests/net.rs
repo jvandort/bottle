@@ -8,6 +8,9 @@
 //! built as you:
 //!
 //!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-agent --test net
+//!
+//! Linux's, as the agent is.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::io::{Read, Write};
