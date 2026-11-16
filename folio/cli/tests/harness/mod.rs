@@ -790,3 +790,17 @@ impl Folio {
 pub fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
+
+/// What a snapshot is (snapshots.rs): its files.
+pub const WORKSPACE_ARCHIVE: &str = "workspace.tar.gz";
+pub const NOTES_ARCHIVE: &str = "notes.tar.gz";
+pub const CLAUDE_ARCHIVE: &str = "claude.tar.gz";
+pub const WORK: &str = "work.txt";
+pub const SNAPSHOT: [&str; 4] = [WORKSPACE_ARCHIVE, NOTES_ARCHIVE, CLAUDE_ARCHIVE, WORK];
+
+/// The script that writes a workspace's archive (snapshots.rs).
+pub fn workspace_out(workspace: &str) -> String {
+    format!(
+        r#"cd {workspace} && {{ printf '.git\0'; git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh; }} | tar -czf - --null -T -"#
+    )
+}
