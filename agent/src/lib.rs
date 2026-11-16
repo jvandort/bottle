@@ -11,6 +11,8 @@ pub mod user;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -565,33 +567,54 @@ fn spawn(start: &Start, reaper: &Reaper) -> Result<Running, String> {
 }
 
 /// A terminal of `size`: its master side, and the side the command gets. Neither is inherited
-/// across exec, so no other command keeps this one's terminal open.
+/// across exec, from the moment it's opened: commands start from several connections at once, and
+/// one that inherited this one's terminal would keep it open after this one's command ended.
 fn openpty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
-    let size = libc::winsize {
-        ws_row: size.rows,
-        ws_col: size.cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let (mut master, mut slave) = (-1, -1);
-    // SAFETY: openpty writes the two descriptors; no name is asked for, and the size is read.
-    let ret = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
-    };
-    if ret < 0 {
+    // SAFETY: posix_openpt opens a new master side, close-on-exec as it's made.
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    if master < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: descriptors openpty just made, owned by nothing else.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    for fd in [&master, &slave] {
-        // SAFETY: on descriptors these own.
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: a descriptor posix_openpt just made, owned by nothing else.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: grantpt and unlockpt on the master this owns; ptsname_r writes at most the buffer's
+    // length, a NUL-terminated name if it succeeds.
+    unsafe {
+        if libc::grantpt(master.as_raw_fd()) < 0 || libc::unlockpt(master.as_raw_fd()) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let error = libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len());
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error));
+        }
     }
-    Ok((master, slave))
+    // SAFETY: ptsname_r wrote a NUL-terminated name into `name`.
+    let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(std::ffi::OsStr::from_bytes(path.to_bytes()))?;
+    set_size(&slave, size);
+    Ok((master, OwnedFd::from(slave)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminals_sides_are_never_inherited() {
+        let (master, slave) = openpty(WinSize { rows: 24, cols: 80 }).unwrap();
+        for fd in [&master, &slave] {
+            // SAFETY: F_GETFD on a descriptor this owns.
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: TIOCGWINSZ writes a winsize.
+        unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+        assert_eq!((size.ws_row, size.ws_col), (24, 80));
+    }
 }
