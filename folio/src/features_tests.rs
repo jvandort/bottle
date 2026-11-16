@@ -19,7 +19,7 @@ struct Features {
 impl Features {
     /// The features folio ships.
     fn shipped() -> Features {
-        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../features"));
+        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/features"));
         TEST_DIR.with(|d| *d.borrow_mut() = Some(root.clone()));
         Features { root, _tmp: None }
     }

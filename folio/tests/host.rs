@@ -641,7 +641,7 @@ fn not_when_the_branch_isnt_checked_out() {
 #[test]
 fn a_branch_youre_reading_in_curate_comes_along_by_curates_own_hook() {
     let f = Follow::new();
-    let curate = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/curate"));
+    let curate = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/curate"));
     for args in [&["start", "--from", "main"][..], &["read"]] {
         let out = Command::new(&curate)
             .args(args)

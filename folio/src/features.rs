@@ -218,7 +218,7 @@ pub fn dir() -> PathBuf {
     }
     env::var_os("FOLIO_FEATURES")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../features")))
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/features")))
 }
 
 /// An option's value: a string or a boolean.

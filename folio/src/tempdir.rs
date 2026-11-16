@@ -83,7 +83,7 @@ pub fn set(_: &Isolated, key: &str, value: &str) {
 pub fn folio() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")));
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")));
     let built = target.join("debug").join("folio");
     static BUILT: std::sync::Once = std::sync::Once::new();
     BUILT.call_once(|| {
@@ -101,7 +101,7 @@ pub fn folio() -> PathBuf {
 pub fn standin() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")));
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")));
     static BUILT: std::sync::Once = std::sync::Once::new();
     BUILT.call_once(|| {
         let status = std::process::Command::new(env!("CARGO"))

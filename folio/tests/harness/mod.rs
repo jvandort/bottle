@@ -26,7 +26,7 @@ pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
 fn target() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")))
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")))
 }
 
 /// folio-standin, built (once a test binary).
@@ -969,7 +969,7 @@ pub fn real_bottle_cli() -> Option<PathBuf> {
     if let Some(cli) = std::env::var_os("BOTTLE_CLI").filter(|c| !c.is_empty()) {
         return Some(PathBuf::from(cli));
     }
-    let repo = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let repo = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
     let status = Command::new(repo.join("bin/bottle-build"))
         .status()
         .unwrap();

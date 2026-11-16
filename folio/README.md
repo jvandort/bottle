@@ -443,7 +443,7 @@ Anything else in a definition is an error. Remote features aren't supported.
 
 ## Bottles
 
-Folio makes each bottle (`cli/src/bottles.rs`) from a
+Folio makes each bottle (`src/bottles.rs`) from a
 **spec**: its features and memory (`folio configure` sets a repo's). Its name
 is its identity, and its thread's: a name that's taken is refused. Its
 record is kept with its thread, in folio's home
@@ -543,7 +543,7 @@ are looked up by the machine it runs on, with its resolver, as they're asked;
 a bottle has no UDP or IPv6. A machine starts with nothing but its name
 (`bottle start MACHINE` works without folio serve); what it routes to folio serve is
 refused while folio serve isn't running. folio serve logs one line per connection it
-serves, in `~/.folio/logs/serve.log` (`cli/src/serve/`).
+serves, in `~/.folio/logs/serve.log` (`src/serve/`).
 
 folio serve starts automatically when a command needs it, and when it starts it
 picks up the bottles there are. It stops itself once there's no bottle left to
@@ -629,16 +629,16 @@ folio configure fix-it                 # shows it
 cargo test -p folio
 ```
 
-folio is a Rust program (`cli/`, in bottle's Cargo workspace; `bin/folio` builds and runs it from a
+folio is a Rust program (this directory, in bottle's Cargo workspace; `bin/folio` builds and runs it from a
 checkout). It runs bottle's code only by running bottle-cli, never by linking bottle's crates
-(`cli/tests/boundary.rs` checks). What a thread is, is `cli/src/threads.rs`'s; its bottle,
-`cli/src/bottles.rs`'s, through `cli/src/engine.rs`; what you type, `cli/src/cli.rs`'s; folio
-serve, `cli/src/serve/`'s; features, `cli/src/features.rs`'s (which says what a feature's
+(`tests/boundary.rs` checks). What a thread is, is `src/threads.rs`'s; its bottle,
+`src/bottles.rs`'s, through `src/engine.rs`; what you type, `src/cli.rs`'s; folio
+serve, `src/serve/`'s; features, `src/features.rs`'s (which says what a feature's
 `devcontainer-feature.json` may hold; `features_tests.rs` checks it) and `images.rs`'s (what builds
 their images).
 
 `cargo test -p folio` has the unit tests, and folio driven as a person drives it, from outside
-(`cli/tests/`, sharing `cli/tests/harness/`): each test runs `folio` in a directory of its own,
+(`tests/`, sharing `tests/harness/`): each test runs `folio` in a directory of its own,
 with a repo to work in and a folio home of its own (so a folio serve of its own), against
 stand-ins for what folio runs, in `standin/` (folio-standin, one program that's each by the name
 it's run as):
@@ -654,7 +654,7 @@ On a Mac, `FOLIO_VM_TESTS=1` adds two that run real machines, on this checkout's
 first if it's changed, by `bin/bottle-build`, unless `BOTTLE_CLI` names one), and take minutes the
 first time, while they pull and build images:
 
-- `cli/tests/krun_contract.rs`: what folio relies on bottle-cli for, asked as folio asks it.
+- `tests/krun_contract.rs`: what folio relies on bottle-cli for, asked as folio asks it.
   Run it after changing bottle-cli, the agent or libkrun.
-- `cli/tests/end_to_end.rs`: a real thread, made and used through folio and `bin/bottle`, in its
+- `tests/end_to_end.rs`: a real thread, made and used through folio and `bin/bottle`, in its
   own `BOTTLE_HOME` (`BOTTLE_E2E_HOME`, default `/tmp/bottle-e2e`).

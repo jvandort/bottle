@@ -50,7 +50,7 @@ impl EndToEnd {
 
     /// bin/bottle, for the thread's machine.
     fn bottle(&self, args: &[&str]) -> Output {
-        Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/bottle"))
+        Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/bottle"))
             .args(args)
             .envs(self.env.iter().cloned())
             .stdin(Stdio::null())
@@ -129,7 +129,7 @@ fn a_thread_end_to_end() {
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).unwrap();
     let repo = work.join("repo");
-    let checkout = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let checkout = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     harness::git(&["clone", "-q", checkout, &repo.display().to_string()]);
     let s = |p: &PathBuf| p.display().to_string();
     let env = vec![

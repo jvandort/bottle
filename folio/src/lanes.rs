@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn curate_integrating_it_deletes_it() {
         let (lane, _) = fetched();
-        let curate = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/curate");
+        let curate = concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/curate");
         let run = |args: &[&str]| {
             Command::new(curate)
                 .args(args)
