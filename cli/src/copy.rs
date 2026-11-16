@@ -24,7 +24,7 @@ pub const USAGE: &str =
 const PACK: &str = r#"p=$(realpath -e -- "$1") && exec tar -C "$(dirname -- "$p")" -cf - -- "$(basename -- "$p")""#;
 
 /// In a machine, the tar on stdin, of one thing, as cp -r would put it: into $1 if it's a
-/// directory, else as $1; unpacked beside it first. Says where it went.
+/// directory, else as $1; unpacked beside it first. Says where it went, absolute.
 const UNPACK: &str = r#"umask 022
 d=$1
 if [ -d "$d" ]; then into=$d; else into=$(dirname -- "$d"); fi
@@ -38,7 +38,9 @@ if [ -d "$t" ] && [ ! -L "$t" ]; then echo "$t is a directory already: copy into
 if [ -d "$s/$n" ] && [ ! -L "$s/$n" ] && { [ -e "$t" ] || [ -L "$t" ]; }; then
   echo "$t exists, and what's copied is a directory" >&2; exit 1
 fi
-mv -fT -- "$s/$n" "$t" && printf '%s\n' "$t"
+mv -fT -- "$s/$n" "$t" || exit 1
+case $t in /*) ;; *) t=$PWD/${t#./} ;; esac
+printf '%s\n' "$t"
 "#;
 
 /// One side of a copy.

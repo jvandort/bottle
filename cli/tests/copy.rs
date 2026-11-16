@@ -132,13 +132,21 @@ fn cp_copies_into_out_of_and_between_machines() {
 
     // In: started machines, relative to their workdir.
     fs::create_dir_all(work.join("a")).unwrap();
-    assert_eq!(f.ok(&["cp", &tree, "here:a"]), "here:a/tree\n");
+    // Where it went, absolute.
+    let work_path = work.display().to_string();
+    assert_eq!(
+        f.ok(&["cp", &tree, "here:a"]),
+        format!("here:{work_path}/a/tree\n")
+    );
     assert_eq!(
         fs::read_to_string(work.join("a/tree/sub/f")).unwrap(),
         "a file"
     );
     // Between: from one machine to another.
-    assert_eq!(f.ok(&["cp", "here:a/tree/sub", "there:b"]), "there:b\n");
+    assert_eq!(
+        f.ok(&["cp", "here:a/tree/sub", "there:b"]),
+        format!("there:{work_path}/b\n")
+    );
     assert_eq!(fs::read_to_string(work.join("b/f")).unwrap(), "a file");
     // Out: into a directory here, and as a name.
     let back = f.dir.join("back");
@@ -180,7 +188,10 @@ fn cp_copies_into_out_of_and_between_machines() {
     assert_eq!(String::from_utf8_lossy(&taken.stdout), format!("{to}/h\n"));
     assert_eq!(fs::read_to_string(back.join("h")).unwrap(), "a file");
     let taken = streamed(&tree, "here:c");
-    assert_eq!(String::from_utf8_lossy(&taken.stdout), "here:c\n");
+    assert_eq!(
+        String::from_utf8_lossy(&taken.stdout),
+        format!("here:{work_path}/c\n")
+    );
     assert_eq!(fs::read_to_string(work.join("c/sub/f")).unwrap(), "a file");
     fs::remove_file(back.join("h")).unwrap();
     let failed = f.cli(&["cp", "-", "-"]);
