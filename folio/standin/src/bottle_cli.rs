@@ -732,11 +732,15 @@ fn side(arg: &str) -> Result<(PathBuf, Option<(String, Paths)>), String> {
         if let Some(machine) = state.machine(name) {
             let machine = machine.clone();
             let paths = Paths::of(name, &machine);
-            let path = if path.is_empty() { "." } else { path };
-            let path = if path.starts_with('/') {
-                path.to_string()
-            } else {
-                format!("{}/{path}", machine["workdir"].as_str().unwrap_or("/"))
+            // Relative, from its workdir, as bottle-cli's exec runs there.
+            let workdir = machine["workdir"]
+                .as_str()
+                .unwrap_or("/")
+                .trim_end_matches('/');
+            let path = match path.trim_start_matches("./") {
+                "" | "." => workdir.to_string(),
+                path if path.starts_with('/') => path.to_string(),
+                path => format!("{workdir}/{path}"),
             };
             return Ok((
                 PathBuf::from(paths.here(&path)),
@@ -747,8 +751,8 @@ fn side(arg: &str) -> Result<(PathBuf, Option<(String, Paths)>), String> {
     Ok((PathBuf::from(arg), None))
 }
 
-/// As bottle-cli's cp: into DST if it's a directory, else as DST; where it went said, NAME:PATH if
-/// it's in a machine.
+/// As bottle-cli's cp: into DST if it's a directory, else as DST; where it went said, NAME:PATH
+/// (absolute) if it's in a machine.
 fn copy(src: &str, dst: &str) -> ExitCode {
     let result = (|| -> Result<String, String> {
         let (from, from_machine) = side(src)?;
