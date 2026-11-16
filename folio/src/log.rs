@@ -50,27 +50,19 @@ pub fn warn(name: &str, message: &str) {
     write(name, message);
 }
 
-/// "2026-11-14 09:15:02.123": now, local.
+/// "2026-11-14 09:15:02.123Z": now, UTC.
 fn now() -> String {
-    let mut tv = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: gettimeofday and localtime_r write the structures they're given.
-    unsafe {
-        libc::gettimeofday(&mut tv, std::ptr::null_mut());
-        libc::localtime_r(&tv.tv_sec, &mut tm);
-    }
+    let since = std::time::UNIX_EPOCH.elapsed().unwrap_or_default();
+    let t = time::OffsetDateTime::UNIX_EPOCH + since;
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec,
-        tv.tv_usec / 1000
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
     )
 }
 

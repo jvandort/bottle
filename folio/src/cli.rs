@@ -543,43 +543,45 @@ fn interactive() -> bool {
 
 /// A line typed after `prompt`; None at the end of input, or if Ctrl-C ends it: a prompt interrupted
 /// is a prompt not answered.
+///
+/// Ctrl-C is recorded (interrupt::install, as every command but a runner's has it), not acted on
+/// by a read: stdin's polled, a while at a time, between looks at whether it came. One that ends
+/// a prompt is forgotten after: it ended the prompt, not the command.
 pub fn input(prompt: &str) -> Option<String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-    extern "C" fn interrupted(_: libc::c_int) {
-        INTERRUPTED.store(true, Ordering::Relaxed);
-    }
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
     print!("{prompt}");
     let _ = std::io::stdout().flush();
-    INTERRUPTED.store(false, Ordering::Relaxed);
-    // SAFETY: sigaction with a handler that only sets an atomic; restored before this returns. No
-    // SA_RESTART, so a read it interrupts returns.
-    let previous = unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = interrupted as *const () as usize;
-        libc::sigemptyset(&mut action.sa_mask);
-        let mut previous: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(libc::SIGINT, &action, &mut previous);
-        previous
+    let before = crate::interrupt::happened();
+    let interrupted = || !before && crate::interrupt::happened();
+    let stdin = std::io::stdin();
+    let a_while = Timespec {
+        tv_sec: 0,
+        tv_nsec: 100_000_000,
     };
     let mut line = Vec::new();
     let answered = loop {
-        let mut byte = 0u8;
-        // SAFETY: reads one byte into `byte`.
-        let n = unsafe { libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) };
-        match n {
-            1 if byte == b'\n' => break true,
-            1 => line.push(byte),
-            0 => break false,
-            _ if INTERRUPTED.load(Ordering::Relaxed) => break false,
-            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
-                continue;
-            }
+        if interrupted() {
+            break false;
+        }
+        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+        match poll(&mut fds, Some(&a_while)) {
+            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+        // Readable: a byte, or the end, there now. One at a time, from the descriptor itself, so
+        // nothing past the line is taken from whatever reads stdin next.
+        let mut byte = [0u8];
+        match rustix::io::read(&stdin, &mut byte) {
+            Ok(1) if byte[0] == b'\n' => break true,
+            Ok(1) => line.push(byte[0]),
+            Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => {}
             _ => break false,
         }
     };
-    // SAFETY: putting back what was there.
-    unsafe { libc::sigaction(libc::SIGINT, &previous, std::ptr::null_mut()) };
+    if interrupted() {
+        crate::interrupt::forget();
+    }
     if !answered {
         println!();
         return None;
@@ -1325,23 +1327,16 @@ fn credential_status(declared: &auth::Declared, set: bool) -> Result<String, Str
 
 /// A line from the terminal, unechoed, after `prompt`.
 fn getpass(prompt: &str) -> Result<String, String> {
-    let fd = libc::STDIN_FILENO;
-    // SAFETY: tcgetattr and tcsetattr read and write the struct they're given, for stdin.
-    let saved = unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut term) != 0 {
-            return Err("can't read the terminal's settings".into());
-        }
-        let mut quiet = term;
-        quiet.c_lflag &= !libc::ECHO;
-        libc::tcsetattr(fd, libc::TCSAFLUSH, &quiet);
-        term
-    };
+    use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
+    let stdin = std::io::stdin();
+    let saved = tcgetattr(&stdin).map_err(|_| "can't read the terminal's settings".to_string())?;
+    let mut quiet = saved.clone();
+    quiet.local_modes.remove(LocalModes::ECHO);
+    let _ = tcsetattr(&stdin, OptionalActions::Flush, &quiet);
     eprint!("{prompt}");
     let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line);
-    // SAFETY: as above, putting back what was there.
-    unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &saved) };
+    let read = stdin.lock().read_line(&mut line);
+    let _ = tcsetattr(&stdin, OptionalActions::Flush, &saved);
     eprintln!();
     read.map_err(|e| e.to_string())?;
     Ok(line.trim_end_matches(['\n', '\r']).to_string())

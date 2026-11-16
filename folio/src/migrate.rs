@@ -5,7 +5,6 @@
 //! FORMAT: every home from before formats has been converted to format 1.
 
 use std::fs;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::store;
@@ -30,8 +29,9 @@ pub fn ensure() -> Result<(), String> {
     }
     let lock = fs::File::create(home.join(".format.lock"))
         .map_err(|e| format!("{}: {e}", home.display()))?;
-    // SAFETY: flock on a file this holds, released as it's closed.
-    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    // Released as it's closed.
+    lock.lock()
+        .map_err(|e| format!("{}: {e}", home.display()))?;
     match stamped(&home) {
         Some(FORMAT) => Ok(()), // another command stamped it meanwhile
         None => store::write_bytes(&home.join(STAMP), format!("{FORMAT}\n").as_bytes()),

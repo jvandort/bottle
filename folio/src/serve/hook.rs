@@ -36,7 +36,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::OnceLock;
@@ -247,8 +246,8 @@ fn follow_push(git_dir: &Path, namespace: &str, pushed: &BTreeMap<String, String
     let Ok(lock) = fs::File::create(git_dir.join("bottle-follow.lock")) else {
         return vec![];
     };
-    // SAFETY: flock locks the descriptor it's given, which outlives the lock (dropped at return).
-    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    // Released at return, as `lock` closes.
+    let _ = lock.lock();
     let main_worktree = (git_dir.file_name().is_some_and(|n| n == ".git"))
         .then(|| git_dir.parent().unwrap().to_path_buf());
     let mut said = Vec::new();

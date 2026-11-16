@@ -22,12 +22,12 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use serde_json::{Value, json};
 
 use super::Bottle;
@@ -75,6 +75,11 @@ const ROUTING_HEADERS: [&str; 17] = [
 const ECHOING_METHODS: [&str; 2] = ["TRACE", "TRACK"];
 /// How much of a response is kept, to say its status.
 const STATUS_PEEK: usize = 256;
+/// How long a carried request waits on either side before it's given up.
+const A_MINUTE: Timespec = Timespec {
+    tv_sec: 60,
+    tv_nsec: 0,
+};
 
 /// A credential folio serve attaches on a bottle's behalf, for one host.
 #[derive(Debug, Clone)]
@@ -879,28 +884,25 @@ fn relay_tls(
         // More from the bottle only once what it sent before is gone: rustls keeps at most 64 KiB
         // unsent (taking nothing more past it), and the host may take its time.
         let reading = client_open && !conn.wants_write();
-        let mut fds = [
-            libc::pollfd {
-                // A negative descriptor is ignored, its hangup too.
-                fd: if reading { client.as_raw_fd() } else { -1 },
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: tcp.as_raw_fd(),
-                events: libc::POLLIN | if conn.wants_write() { libc::POLLOUT } else { 0 },
-                revents: 0,
-            },
-        ];
-        // SAFETY: poll reads and writes the descriptors it's given, which outlive the call.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 2, 60_000) } < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
+        let host_events = if conn.wants_write() {
+            PollFlags::IN | PollFlags::OUT
+        } else {
+            PollFlags::IN
+        };
+        // The bottle's side only while reading it: its hangup too is left for then.
+        let mut fds = vec![PollFd::new(&tcp, host_events)];
+        if reading {
+            fds.push(PollFd::new(&client, PollFlags::IN));
         }
-        if reading && fds[0].revents != 0 {
+        match poll(&mut fds, Some(&A_MINUTE)) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
+        let host = fds[0].revents();
+        let bottle = fds.get(1).map_or(PollFlags::empty(), PollFd::revents);
+        drop(fds);
+        if !bottle.is_empty() {
             // No more than rustls takes at once, its buffer empty.
             match client.read(&mut buf[..16 * 1024]) {
                 Ok(0) => {
@@ -915,7 +917,7 @@ fn relay_tls(
                 Err(_) => client_open = false,
             }
         }
-        if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+        if host.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR) {
             let read = match conn.read_tls(&mut tcp) {
                 Ok(n) => n,
                 Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
@@ -975,13 +977,8 @@ fn send_whole(
             match conn.write_tls(tcp) {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    let mut fd = libc::pollfd {
-                        fd: tcp.as_raw_fd(),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    };
-                    // SAFETY: poll reads and writes the descriptor it's given, which outlives the call.
-                    if unsafe { libc::poll(&mut fd, 1, 60_000) } == 0 {
+                    let mut fds = [PollFd::new(&*tcp, PollFlags::OUT)];
+                    if poll(&mut fds, Some(&A_MINUTE)) == Ok(0) {
                         return Err(ErrorKind::TimedOut.into());
                     }
                 }

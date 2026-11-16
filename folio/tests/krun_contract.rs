@@ -10,9 +10,8 @@ mod harness;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+
 use std::os::unix::net::UnixListener;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -276,29 +275,7 @@ impl Contract {
         columns: u16,
         react: impl Fn(&[u8], &fs::File),
     ) -> (Vec<u8>, i32) {
-        let (mut master, mut slave) = (0, 0);
-        let mut size = libc::winsize {
-            ws_row: rows,
-            ws_col: columns,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: openpty fills in two descriptors this then owns.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &raw mut size,
-                )
-            },
-            0
-        );
-        // SAFETY: each just opened, and owned from here on.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let (master, slave) = harness::terminal(rows, columns);
         let args = Contract::exec_args(&self.machine, argv, None, None, &[], true);
         let mut command = Command::new(&self.cli);
         command
@@ -307,27 +284,14 @@ impl Contract {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
-        // SAFETY: setsid and the controlling terminal, between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-                Ok(())
-            });
-        }
+        harness::in_terminal(&mut command);
         let mut child = command.spawn().unwrap();
         drop(slave);
         let mut terminal = fs::File::from(master);
         let mut out = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
-            let mut poll = libc::pollfd {
-                fd: terminal.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: one pollfd, on a descriptor this holds.
-            if unsafe { libc::poll(&mut poll, 1, 1000) } > 0 {
+            if harness::readable(&terminal, 1000) {
                 let mut chunk = [0u8; 1024];
                 match terminal.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
@@ -652,14 +616,7 @@ fn tty(c: &Contract) {
         100,
         |out, terminal| {
             if !resized.get() && has(out, b"40 100") {
-                let size = libc::winsize {
-                    ws_row: 30,
-                    ws_col: 90,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                // SAFETY: the terminal's size, set on its master.
-                unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ as _, &size) };
+                harness::resize(terminal, 30, 90);
                 resized.set(true);
             }
         },

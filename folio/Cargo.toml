@@ -14,10 +14,13 @@ flate2.workspace = true
 tar.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
-libc.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+signal-hook.workspace = true
+time.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 rcgen.workspace = true

@@ -78,9 +78,8 @@ impl Runner {
 
     pub fn cpus(&self) -> Result<u64, String> {
         if self.name == LOCAL {
-            // SAFETY: sysconf has no preconditions. Every core online.
-            let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-            return Ok(if online > 0 { online as u64 } else { 1 });
+            let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+            return Ok(cpus as u64);
         }
         self.host()?
             .get("cpus")
@@ -289,12 +288,8 @@ pub fn home(name: &str) -> Result<String, String> {
 /// This machine, folio's home on it, among those folio runs on: what its sockets on a runner are
 /// named for.
 pub fn controller_key() -> String {
-    let mut name = [0u8; 256];
-    // SAFETY: gethostname writes at most the length it's given.
-    unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
-    // Up to its NUL, which one that fills the buffer hasn't.
-    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    let host = String::from_utf8_lossy(&name[..end]).into_owned();
+    let uname = rustix::system::uname();
+    let host = uname.nodename().to_string_lossy();
     let key = format!("{host}\0{}", crate::home().display());
     Sha256::digest(key.as_bytes())[..4]
         .iter()

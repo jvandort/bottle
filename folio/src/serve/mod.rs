@@ -423,20 +423,16 @@ fn listen(path: &Path) -> io::Result<UnixListener> {
 
 /// Raises this process's limit on open files towards OPEN_FILES, as far as the system lets it.
 fn raise_open_files() -> u64 {
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: getrlimit and setrlimit read and write the structure they're given.
-    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
-    let hard = (limit.rlim_max != libc::RLIM_INFINITY).then_some(limit.rlim_max);
-    raised(limit.rlim_cur, hard, |soft| {
-        let wanted = libc::rlimit {
-            rlim_cur: soft as _,
-            rlim_max: limit.rlim_max,
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    // None is unlimited.
+    let soft = limit.current.unwrap_or(u64::MAX);
+    raised(soft, limit.maximum, |soft| {
+        let wanted = Rlimit {
+            current: Some(soft),
+            ..limit
         };
-        // SAFETY: as above.
-        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &wanted) == 0 }
+        setrlimit(Resource::Nofile, wanted).is_ok()
     })
 }
 

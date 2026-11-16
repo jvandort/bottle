@@ -42,8 +42,7 @@ pub fn private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     fs::create_dir_all(dir)?;
     let found = fs::symlink_metadata(dir)?;
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
+    let uid = rustix::process::getuid().as_raw();
     if !found.is_dir() || found.uid() != uid {
         return Err(io::Error::other(format!(
             "{} isn't a directory of this user's: another user's, or a link",
@@ -136,22 +135,16 @@ pub fn write_slot(directory: &Path, files: Vec<(&str, Content)>) -> Result<PathB
 /// A slot's name: when it was written, `YYYYmmddTHHMMSS.mmmZ`.
 pub fn slot_name(time: SystemTime) -> String {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = since.as_secs() as libc::time_t;
-    // SAFETY: gmtime_r writes the struct it's given and reads the time it's given.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&seconds, &mut tm);
-        tm
-    };
+    let t = time::OffsetDateTime::UNIX_EPOCH + since;
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}.{:03}Z",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec,
-        since.subsec_millis()
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
     )
 }
 

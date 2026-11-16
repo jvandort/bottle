@@ -229,8 +229,7 @@ impl Runner {
         use sha2::Digest;
         let hash = sha2::Sha256::digest(path.as_os_str().as_encoded_bytes());
         let key: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         PathBuf::from(format!("/tmp/folio-{uid}/{key}.sock"))
     }
 
@@ -847,9 +846,8 @@ fn rm(name: &str) -> io::Result<()> {
 
 /// `runner forward NAME THERE=HERE...` (see the module's doc).
 fn forward(name: &str, forwards: &[String]) -> io::Result<()> {
-    // SAFETY: getppid has no preconditions.
-    let parent = unsafe { libc::getppid() };
-    forward_until(name, forwards, &|| unsafe { libc::getppid() } != parent)
+    let parent = rustix::process::getppid();
+    forward_until(name, forwards, &|| rustix::process::getppid() != parent)
 }
 
 /// Forwards `forwards` (THERE=HERE) to runner `name` until `gone` says to stop: `runner forward`'s

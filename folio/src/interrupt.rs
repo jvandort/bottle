@@ -16,28 +16,22 @@ static SHIELDS: AtomicUsize = AtomicUsize::new(0);
 
 pub const INTERRUPTED_MESSAGE: &str = "interrupted";
 
-extern "C" fn record(_: libc::c_int) {
-    INTERRUPTED.store(true, Ordering::Relaxed);
-}
-
 /// Ctrl-C (and SIGTERM) recorded, from now on, not dying of. A program this process runs gets them
 /// as they are: a handler isn't inherited across exec.
 pub fn install() {
-    for signal in [libc::SIGINT, libc::SIGTERM] {
-        // SAFETY: a handler that only stores an atomic.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record as *const () as usize;
-            action.sa_flags = libc::SA_RESTART;
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(signal, &action, std::ptr::null_mut());
-        }
+    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        let _ = signal_hook::flag::register(signal, &INTERRUPTED);
     }
 }
 
 /// Whether this command was interrupted.
 pub fn happened() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
+}
+
+/// An interruption forgotten: one that ended a prompt (see cli::input), not the command.
+pub fn forget() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
 }
 
 fn shielded_now() -> bool {
@@ -72,7 +66,7 @@ pub fn shielded<T>(undo: impl FnOnce() -> T) -> T {
 
 #[cfg(test)]
 pub fn reset() {
-    INTERRUPTED.store(false, Ordering::Relaxed);
+    forget();
 }
 
 #[cfg(test)]

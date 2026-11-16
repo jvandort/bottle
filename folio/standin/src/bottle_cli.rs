@@ -25,7 +25,6 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -60,8 +59,7 @@ impl State {
         let path = state_path();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let lock = fs::File::create(path.with_extension("lock")).unwrap();
-        // SAFETY: flock on a file this owns.
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+        lock.lock().unwrap();
         let mut value: Value = fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())

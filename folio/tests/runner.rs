@@ -309,8 +309,7 @@ fn a_forward_makes_sockets_here_reachable_there_until_its_stopped() {
     eventually("the forward made again", || there.exists());
 
     // Told to stop, it and its ssh end.
-    // SAFETY: kill with a process group's id, the forward's own.
-    unsafe { libc::kill(-pid, libc::SIGTERM) };
+    harness::signal_group(pid as u32, rustix::process::Signal::TERM);
     forward.wait().unwrap();
     eventually("its ssh ended", || {
         let left = Command::new("pgrep")

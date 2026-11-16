@@ -41,8 +41,7 @@ pub fn socket_path(name: &str) -> PathBuf {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
+    let uid = rustix::process::getuid().as_raw();
     PathBuf::from(format!("/tmp/bottle-{uid}/{key}.sock"))
 }
 
@@ -322,10 +321,11 @@ fn launch(background: bool) -> Result<Child, String> {
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log)
             .current_dir(Path::new("/"));
-        // SAFETY: setsid is async-signal-safe, and all the child does before it execs.
+        // SAFETY: setsid, a system call with no allocation, and all the child does before it
+        // execs.
         unsafe {
             command.pre_exec(|| {
-                libc::setsid();
+                let _ = rustix::process::setsid();
                 Ok(())
             });
         }
@@ -376,8 +376,7 @@ mod tests {
         let deep = format!("/Users/me/{}", "x".repeat(120));
         tempdir::set(&env, "FOLIO_HOME", &deep);
         let path = control().display().to_string();
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         assert!(
             path.len() <= MAX_SOCKET_PATH && path.starts_with(&format!("/tmp/bottle-{uid}/")),
             "{path}"

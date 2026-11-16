@@ -518,19 +518,21 @@ dependencies = [
  "flate2",
  "libc",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook 0.4.6",
  "tar",
+ "time",
 ]
 
 [[package]]
 name = "folio-standin"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde_json",
 ]
 

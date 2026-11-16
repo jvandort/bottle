@@ -9,7 +9,9 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -340,28 +342,7 @@ impl Folio {
         steps: &[(&[u8], &[u8])],
         env: &[(&str, &str)],
     ) -> (i32, String) {
-        let (mut master, slave) = (0, 0);
-        let mut size = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let mut slave_fd = slave;
-        // SAFETY: openpty fills in two descriptors this then owns.
-        let opened = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut size,
-            )
-        };
-        assert_eq!(opened, 0, "openpty");
-        // SAFETY: each just opened, and owned from here on.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave_fd)) };
+        let (master, slave) = terminal(24, 80);
         let mut command = self.command(args, cwd, env);
         command
             .env("TERM", "xterm-256color")
@@ -370,18 +351,10 @@ impl Folio {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
-        // SAFETY: setsid and the controlling terminal, between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-                Ok(())
-            });
-        }
+        in_terminal(&mut command);
         let mut child = command.spawn().unwrap();
         drop(slave);
         let mut terminal = fs::File::from(master);
-        let fd = terminal.as_raw_fd();
         let (mut out, mut steps) = (Vec::new(), steps.to_vec());
         let deadline = Instant::now() + Duration::from_secs(20);
         // Until it's gone, and what it wrote with it: what it started (folio serve) may keep the
@@ -394,14 +367,7 @@ impl Folio {
             if gone.is_some_and(|at| at.elapsed() > Duration::from_millis(300)) {
                 break;
             }
-            let mut poll = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: one pollfd, on a descriptor this holds.
-            let ready = unsafe { libc::poll(&mut poll, 1, 200) };
-            if ready > 0 {
+            if readable(&terminal, 200) {
                 let mut chunk = [0u8; 4096];
                 match terminal.read(&mut chunk) {
                     Ok(0) | Err(_) => break, // the child's gone
@@ -967,4 +933,61 @@ pub fn real_bottle_cli() -> Option<PathBuf> {
         .unwrap();
     assert!(status.success(), "bin/bottle-build");
     Some(target().join("dist").join("bottle-cli"))
+}
+
+/// A terminal of `rows` by `cols`, as a person would run folio in: its master side, for the test,
+/// and the side the command gets.
+pub fn terminal(rows: u16, cols: u16) -> (OwnedFd, OwnedFd) {
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let name = ptsname(&master, Vec::new()).unwrap();
+    let slave = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
+        .unwrap();
+    resize(&master, rows, cols);
+    (master, slave.into())
+}
+
+/// The terminal `master` is the master side of made `rows` by `cols`.
+pub fn resize(master: impl AsFd, rows: u16, cols: u16) {
+    let size = rustix::termios::Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    rustix::termios::tcsetwinsize(master, size).unwrap();
+}
+
+/// `command` started in a session of its own, whose controlling terminal is the one on its stdin.
+pub fn in_terminal(command: &mut Command) {
+    // SAFETY: setsid and TIOCSCTTY between fork and exec, system calls with no allocation.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()?;
+            rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
+            Ok(())
+        });
+    }
+}
+
+/// Whether `fd` has something to read (or has ended) within `ms` milliseconds.
+pub fn readable(fd: impl AsFd, ms: u32) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let timeout = Timespec {
+        tv_sec: i64::from(ms / 1000),
+        tv_nsec: i64::from(ms % 1000) * 1_000_000,
+    };
+    poll(&mut [PollFd::new(&fd, PollFlags::IN)], Some(&timeout)).is_ok_and(|n| n > 0)
+}
+
+/// `signal` sent to the process group `group` leads.
+pub fn signal_group(group: u32, signal: rustix::process::Signal) {
+    let group = rustix::process::Pid::from_raw(group as i32).unwrap();
+    rustix::process::kill_process_group(group, signal).unwrap();
 }

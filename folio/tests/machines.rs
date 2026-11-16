@@ -326,8 +326,7 @@ fn interrupted(f: &Folio, slow: &str, again_at: Option<&str>) -> (i32, String) {
             std::thread::sleep(Duration::from_millis(50));
         }
         std::thread::sleep(Duration::from_millis(300)); // the stand-in, asleep
-        // SAFETY: a signal to the process group folio leads.
-        unsafe { libc::killpg(folio.id() as i32, libc::SIGINT) };
+        harness::signal_group(folio.id(), rustix::process::Signal::INT);
     }
     let status = folio.wait().unwrap();
     (status.code().unwrap_or(-1), reader.join().unwrap())
