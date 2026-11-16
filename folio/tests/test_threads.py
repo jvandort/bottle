@@ -295,13 +295,6 @@ class ConfigureTest(FolioTestCase):
         [bottle] = self.fake()["bottles"].values()
         self.assertEqual(bottle["spec"]["features"], ["claude", "tools"])
 
-    def test_a_spec_saved_before_memory_was_needed_gets_the_default(self) -> None:
-        repo = kept.repo(self.repo)
-        for saved in ({"features": ["tools"], "memory": "all"}, {"features": ["tools"]}):
-            with self.subTest(saved):
-                repo.save_spec(saved)
-                self.assertEqual(kept.repo(self.repo).spec(), {"features": ["tools"], "memory": "2G"})
-
     def test_a_new_thread_gets_the_spec_and_its_name(self) -> None:
         self.ok("configure", "--feature", "claude")
         self.ok("new", "fix-it")
@@ -318,8 +311,8 @@ class ConfigureTest(FolioTestCase):
         self.assertIn("git -C /notes push agent main", bottle["context"])
         self.assertIn("could resume this thread from them alone", bottle["context"])
 
-    def test_a_repos_spec_cant_give_permissions_or_a_thread(self) -> None:
-        for key, value in (("permissions", ["message-any"]), ("labels", {"thread": "other"}), ("thread", "other")):
+    def test_a_repos_spec_cant_give_permissions_or_labels(self) -> None:
+        for key, value in (("permissions", ["message-any"]), ("labels", {"thread": "other"})):
             with self.subTest(key):
                 kept.repo(self.repo).save_spec({"features": ["tools"], "memory": "2G", key: value})
                 for args in (("new", f"t-{key}"), ("configure", "--memory", "4G")):

@@ -27,7 +27,7 @@ pub const DEFAULT_MEMORY: &str = "2G";
 const OWNED: &str = "repos";
 /// What a repo's spec can't say: a thread's bottle never has permissions, and folio labels each
 /// with its thread itself.
-const NOT_IN_A_REPOS_SPEC: [&str; 3] = ["permissions", "labels", "thread"];
+const NOT_IN_A_REPOS_SPEC: [&str; 2] = ["permissions", "labels"];
 
 /// What a new repo's bottles get: what folio needs, and memory, which every spec gives.
 pub fn default_spec() -> Value {
@@ -135,8 +135,7 @@ impl Repo {
         self.directory().join("repo.json")
     }
 
-    /// The repo's bottle spec, as last saved; None until it has one. One saved before every spec had
-    /// to give its memory (none, or "all") gets the default, and one saved before folio needed a
+    /// The repo's bottle spec, as last saved; None until it has one. One saved before folio needed a
     /// feature (REQUIRED_FEATURES) has it.
     pub fn spec(&self) -> Result<Option<Value>, String> {
         let Some(mut spec) = store::read_json(&self.spec_path())? else {
@@ -145,9 +144,6 @@ impl Repo {
         let Some(map) = spec.as_object_mut() else {
             return Ok(Some(spec));
         };
-        if map.get("memory").and_then(Value::as_str).unwrap_or("all") == "all" {
-            map.insert("memory".into(), DEFAULT_MEMORY.into());
-        }
         let features = with_required(features_of(&Value::Object(map.clone())));
         map.insert("features".into(), json!(features));
         Ok(Some(spec))
@@ -551,7 +547,7 @@ mod tests {
             "not in a git repo; folio works on the repo you're in"
         );
         assert!(known().is_empty());
-        repo.save_spec(&json!({"features": ["tools"], "memory": "all"}))
+        repo.save_spec(&json!({"features": [], "memory": "2G"}))
             .unwrap();
         assert_eq!(known(), std::slice::from_ref(&repo));
         assert_eq!(

@@ -219,18 +219,14 @@ pub fn python_repr(value: &Value) -> String {
     }
 }
 
-/// A spec's labels; one saved before labels, a thread's, as the label thread.
+/// A spec's labels.
 pub fn labels(spec: &Value) -> BTreeMap<String, String> {
-    if let Some(labels) = spec.get("labels").and_then(Value::as_object) {
-        return labels
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-            .collect();
-    }
-    match spec.get("thread").and_then(Value::as_str) {
-        Some(thread) if !thread.is_empty() => BTreeMap::from([("thread".into(), thread.into())]),
-        _ => BTreeMap::new(),
-    }
+    spec.get("labels")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+        .collect()
 }
 
 /// Validate feature specs and put each in canonical form, keeping their order.
@@ -423,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_its_creators_and_one_saved_before_them() {
+    fn labels_are_its_creators() {
         let spec =
             canon(json!({"memory": "2G", "labels": {"thread": "fix-it", "repo": "app"}})).unwrap();
         assert_eq!(spec["labels"], json!({"repo": "app", "thread": "fix-it"}));
@@ -441,10 +437,6 @@ mod tests {
         assert_eq!(
             labels(&spec),
             pairs(&[("repo", "app"), ("thread", "fix-it")])
-        );
-        assert_eq!(
-            labels(&json!({"memory": "2G", "thread": "old"})),
-            pairs(&[("thread", "old")])
         );
         assert_eq!(labels(&json!({"memory": "2G"})), pairs(&[]));
     }
@@ -506,14 +498,5 @@ mod tests {
                 )
             );
         }
-    }
-
-    #[test]
-    fn labels_or_a_thread_from_before_them() {
-        assert_eq!(
-            labels(&json!({"thread": "x"})),
-            BTreeMap::from([("thread".to_string(), "x".to_string())])
-        );
-        assert_eq!(labels(&json!({})), BTreeMap::new());
     }
 }

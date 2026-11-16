@@ -21,7 +21,6 @@ GITIGNORE = ".obsidian/\n.trash/\n"
 CLAUDE, SHELL = "claude", "shell"
 # The picker's entry for a new thread.
 NEW = "+ new thread"
-DEFAULT_MEMORY = "2G"
 
 # What each session runs, and the script that attaches to one (threads.rs).
 SESSIONS = {
@@ -97,13 +96,10 @@ class Repo:
         return folio_home() / self.key
 
     def spec(self) -> dict | None:
-        """The repo's spec, as folio reads it: one from before memory was given gets the default, and every one has
-        the features folio needs."""
+        """The repo's spec, as folio reads it: every one has the features folio needs."""
         spec = read_json(self.directory / "spec.json")
         if spec is None:
             return None
-        if spec.get("memory", "all") == "all":
-            spec = {**spec, "memory": DEFAULT_MEMORY}
         features = list(spec.get("features", []))
         if "tools" not in {f.split(":", 1)[0] for f in features}:
             features.append("tools")
