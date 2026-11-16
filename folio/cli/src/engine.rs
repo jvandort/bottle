@@ -167,7 +167,7 @@ pub fn validate_spec(spec: &Value) -> Result<Value, String> {
 }
 
 /// Create a bottle for the thread whose directory is `owner`, where its record is kept, on
-/// `runner` (None: this machine), that may ssh to each bottle `ssh` gives, by the name given. On
+/// `runner` (None: this machine), that may ssh to its sidecar, if it's given one. On
 /// this terminal: an image build shows, and a login can ask.
 pub fn new(
     owner: &Path,
@@ -176,7 +176,7 @@ pub fn new(
     mounts: &[Mount],
     context: &str,
     runner: Option<&str>,
-    ssh: &[(String, String)],
+    sidecar: Option<&str>,
 ) -> Result<(), String> {
     forget(name);
     let Some(program) = stand_in() else {
@@ -187,11 +187,7 @@ pub fn new(
                 path: m.path.clone(),
                 repo: m.repo.clone(),
                 checkout: m.checkout.clone(),
-                remotes: if m.remotes.is_empty() {
-                    None
-                } else {
-                    Some(m.remotes.clone())
-                },
+                remotes: m.remotes.clone(),
             })
             .collect();
         bottles::create(
@@ -201,7 +197,7 @@ pub fn new(
             &requests,
             context,
             runner.unwrap_or(runners::LOCAL),
-            ssh,
+            sidecar,
         )?;
         return Ok(());
     };
@@ -221,8 +217,8 @@ pub fn new(
         }
     }
     args.extend(["--context".into(), context_file.path()]);
-    for (host, bottle) in ssh {
-        args.extend(["--ssh".into(), format!("{host}={bottle}")]);
+    if let Some(bottle) = sidecar {
+        args.extend(["--ssh".into(), format!("{}={bottle}", bottles::SIDECAR)]);
     }
     let status = status_of(Command::new(&program).args(&args))?;
     if !status.success() {
@@ -576,7 +572,7 @@ mod tests {
             &[],
             "",
             None,
-            &[],
+            None,
         )
         .unwrap();
         (env, tmp)
@@ -643,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bottles_record_is_where_its_owner_says_on_this_machine_its_remotes_its_default() {
+    fn a_bottles_record_is_where_its_owner_says_on_this_machine_served_its_remotes() {
         let (env, tmp) = with_a_bottle();
         assert!(env.home().join("repo-0/thread/bottles/b.json").exists());
         let repo = tempdir::repo(&tmp.path().join("r"));
@@ -652,7 +648,7 @@ mod tests {
             path: "/workspace".into(),
             repo,
             checkout: None,
-            remotes: vec![],
+            remotes: vec!["origin:fetch=upstream".into(), "host:fetch=heads".into()],
         };
         new(
             &owner,
@@ -661,7 +657,7 @@ mod tests {
             &[mount],
             "",
             None,
-            &[],
+            None,
         )
         .unwrap();
         let row = status(&["c".to_string()]).unwrap().remove("c").unwrap();

@@ -47,8 +47,6 @@ const RECORD: &str = "thread.json";
 pub const WORKSPACE: &str = "/workspace";
 pub const CLAUDE: &str = "claude";
 pub const SHELL: &str = "shell";
-/// The name a thread's bottle has its sidecar by.
-const SIDECAR_HOST: &str = "sidecar";
 /// What a session's programs are told their terminal is. Not the one attached, whose TERM the
 /// bottle may have no terminfo for, and which a session outlives.
 const TERM: &str = "xterm-256color";
@@ -403,7 +401,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             &mounts_,
             &(broker::CONTEXT.to_string() + &durable(&mounts(thread))),
             None,
-            &[],
+            None,
         );
     }
     // Checked again each time: a feature can have changed since the spec was saved. Checked as
@@ -435,7 +433,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
         },
     ];
     let mut told = String::new();
-    let mut ssh = Vec::new();
+    let mut sidecar_bottle = None;
     match &thread.sidecar {
         None => {
             // One left from before it was taken away: it pushes into the thread's lane, as this
@@ -458,7 +456,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             ),
             Ok(()) => {
                 told = sidecar_advice(&sidecar.runner, &sidecar.spec);
-                ssh.push((SIDECAR_HOST.to_string(), thread.sidecar_bottle()));
+                sidecar_bottle = Some(thread.sidecar_bottle());
             }
         },
     }
@@ -473,7 +471,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
         &repos_,
         &advice(&thread.name, &repo.name, &mounts(thread), &told),
         runner_of(repo, thread)?.as_deref(),
-        &ssh,
+        sidecar_bottle.as_deref(),
     );
     if let Err(e) = made {
         if thread.sidecar.is_some()
@@ -506,7 +504,7 @@ fn make_sidecar(repo: &Repo, thread: &Thread, repos_: &[Mount]) -> Result<(), St
         repos_,
         &sidecar_itself(&thread.name, &repo.name),
         Some(&sidecar.runner),
-        &[],
+        None,
     )
 }
 

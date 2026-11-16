@@ -18,7 +18,6 @@ pub const HOST: &str = "bottle.host";
 /// TEST-NET-1, an address for each, under the name its creator gave it.
 pub const SSH_NETWORK: &str = "192.0.2.0/24";
 pub const SSH_PORT: u16 = 22;
-pub const MAX_SSH: usize = 250;
 /// Where a bottle's remotes are: http://bottle.host/git/<mount>/<remote>.
 pub const GIT_PATH: &str = "/git";
 

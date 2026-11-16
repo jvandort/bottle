@@ -44,8 +44,8 @@ use crate::git::bottle_git;
 use crate::lanes::shell_quote as q;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
-use crate::serve::host::{HEADS, NS, Remote, UPSTREAM};
-use crate::services::{self, HOST, HOST_ADDRESS, MAX_SSH};
+use crate::serve::host::{HEADS, Remote, UPSTREAM};
+use crate::services::{self, HOST, HOST_ADDRESS};
 use crate::{auth, builds, features, images, specs, store};
 
 /// A mount at /x has its objects at /mnt/objects/x.
@@ -54,9 +54,8 @@ pub const USER: &str = "genie";
 const HOME: &str = "/home/genie";
 /// In genie's home.
 const CONTEXT_FILE: &str = "BOTTLE.md";
-/// The remotes a bottle's repo is served when it's given none, read-only.
+/// The remote a checkout's branches default to (git's checkout.defaultRemote), if it has one.
 const ORIGIN: &str = "origin";
-const HOST_REMOTE: &str = "host";
 /// Where a thread's directory has its bottles' records.
 const RECORDS: &str = "bottles";
 /// The version of the policy network() makes: 1, its routes to folio serve's one socket; 2, folio
@@ -133,10 +132,6 @@ fn remote_spec(r: &Remote) -> String {
             .as_ref()
             .map(|p| format!(",push={p}"))
             .unwrap_or_default()
-}
-
-fn push_namespace(r: &Remote) -> Option<&str> {
-    r.push.as_deref().map(|p| p.strip_prefix(NS).unwrap_or(p))
 }
 
 /// A repo in the bottle: its objects mounted read-only, checked out at `path` borrowing them, and
@@ -220,8 +215,8 @@ pub struct MountRequest {
     pub repo: PathBuf,
     /// A branch or commit (default: origin's default branch, else what's checked out).
     pub checkout: Option<String>,
-    /// Remote specs (default: origin and host, read-only).
-    pub remotes: Option<Vec<String>>,
+    /// Remote specs.
+    pub remotes: Vec<String>,
 }
 
 fn default_status() -> String {
@@ -408,15 +403,13 @@ fn forget(name: &str) {
     }
 }
 
-/// Create a bottle from a spec: its features and memory, from a file its creator owns.
+/// Create a bottle from a spec: its features and memory, from the thread's (threads.rs).
 ///
-/// `name` is the creator's choice, and the bottle's identity: there's no default, so a creator
-/// never has to find out what it got, and a taken name is refused rather than numbered. Each mount
-/// is a repo whose objects are mounted and whose remotes are served, checked out at its path;
-/// without any, the bottle has no repo. Nothing is registered in a repo: the bottle's creator reads
-/// what it pushes, from the namespaces it chose. Its machine is on `runner`. It may ssh to each
-/// bottle `ssh` gives, by the name given: {name: bottle}. Its record is kept in `owner`, its
-/// thread's directory.
+/// `name` is the bottle's identity (its thread's): a taken name is refused rather than numbered.
+/// Each mount is a repo whose objects are mounted and whose remotes are served, checked out at its
+/// path (a thread's /workspace and /notes; the broker's /notes alone). Nothing is registered in a
+/// repo: the thread reads what it pushes from its lane. Its machine is on `runner`. With `sidecar`,
+/// it may ssh to that bottle, as `sidecar`. Its record is kept in `owner`, its thread's directory.
 pub fn create(
     owner: &Path,
     spec: &Value,
@@ -424,7 +417,7 @@ pub fn create(
     mounts: &[MountRequest],
     context: &str,
     runner: &str,
-    ssh: &[(String, String)],
+    sidecar: Option<&str>,
 ) -> Result<Bottle, String> {
     let on = runners::get(runner)?;
     let place = if runner == runners::LOCAL {
@@ -438,26 +431,14 @@ pub fn create(
         .map(|f| f.spec())
         .collect();
     let existing = load()?;
-    if !is_name(name) {
-        return Err(format!(
-            "invalid name {}: use letters, digits, '.', '_' or '-'",
-            crate::repr(name)
-        ));
-    }
     if existing.contains_key(name) {
         return Err(format!(
             "a bottle named {} already exists",
             crate::repr(name)
         ));
     }
-    let grants = plan_ssh(ssh, &existing)?;
-    // A bottle it may ssh to is one it works with: their lanes may be shared.
-    let granted: BTreeSet<&str> = grants.iter().map(|g| g.id.as_str()).collect();
-    let others: Vec<&Bottle> = existing
-        .values()
-        .filter(|b| !granted.contains(b.id.as_str()))
-        .collect();
-    let planned = plan_mounts(mounts, &others)?;
+    let grants = plan_sidecar(sidecar, &existing)?;
+    let planned = plan_mounts(mounts)?;
     let tag = builds::ensure_built(&installed, &on)?;
     auth::warn_unset(&installed)?;
 
@@ -523,61 +504,19 @@ fn uuid() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn is_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-}
-
-/// A mount's path: absolute, of name-like segments, so it's safe in a URL and a shell.
-fn is_mount_path(path: &str) -> bool {
-    path.starts_with('/') && path[1..].split('/').all(is_name)
-}
-
-/// A name a grant gives: a host name, lower case.
-fn is_ssh_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.split('.').all(|label| {
-            let b = label.as_bytes();
-            !b.is_empty()
-                && b.iter()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
-                && b[0] != b'-'
-                && b[b.len() - 1] != b'-'
-        })
-}
-
-/// Each requested mount, checked and worked out, with its repo; nothing written.
-fn plan_mounts(
-    requests: &[MountRequest],
-    others: &[&Bottle],
-) -> Result<Vec<(Mount, Repo)>, String> {
+/// Each requested mount worked out, with its repo; nothing written.
+fn plan_mounts(requests: &[MountRequest]) -> Result<Vec<(Mount, Repo)>, String> {
     let mut planned: Vec<(Mount, Repo)> = Vec::new();
     for request in requests {
-        let trimmed = request.path.trim_end_matches('/');
-        let path = if trimmed.is_empty() {
-            request.path.as_str()
-        } else {
-            trimmed
-        };
-        if !is_mount_path(path) {
-            return Err(format!(
-                "invalid mount path {}: an absolute path of names, e.g. /workspace",
-                crate::repr(&request.path)
-            ));
-        }
-        for (earlier, _) in &planned {
-            let e = earlier.path.as_str();
-            if path == e || path.starts_with(&format!("{e}/")) || e.starts_with(&format!("{path}/"))
-            {
-                return Err(format!("mounts {e} and {path} overlap"));
-            }
-        }
+        let path = request.path.as_str();
         let toplevel = repos::toplevel(&request.repo)?;
         let repo = Repo::new(repos::derive_name(&toplevel), toplevel);
         let start = start_at(&repo, request.checkout.as_deref())?;
-        let served = parse_remotes(request.remotes.as_deref())?;
-        refuse_a_second_writer(&repo, &served, others)?;
+        let served = request
+            .remotes
+            .iter()
+            .map(|r| Remote::parse(r))
+            .collect::<Result<Vec<_>, _>>()?;
         let mount = Mount::new(
             path,
             &repo.path.to_string_lossy(),
@@ -590,40 +529,29 @@ fn plan_mounts(
     Ok(planned)
 }
 
-/// Each bottle the new one may ssh to, checked: a bottle that exists and is ready, under a host
-/// name.
-fn plan_ssh(
-    ssh: &[(String, String)],
+/// The name a bottle has its sidecar by, in its /etc/hosts.
+pub const SIDECAR: &str = "sidecar";
+
+/// The bottle may ssh to its sidecar, if it has one: a bottle that exists and is ready.
+fn plan_sidecar(
+    sidecar: Option<&str>,
     existing: &BTreeMap<String, Bottle>,
 ) -> Result<Vec<SshGrant>, String> {
-    if ssh.len() > MAX_SSH {
-        return Err(format!("a bottle may ssh to at most {MAX_SSH} others"));
+    let Some(target) = sidecar else {
+        return Ok(Vec::new());
+    };
+    let Some(there) = existing.get(target) else {
+        return Err(format!("no sidecar named {}", crate::repr(target)));
+    };
+    if there.status != "ready" {
+        return Err(format!("its sidecar, {target}, is {}", there.status));
     }
-    let mut grants = Vec::new();
-    for (index, (name, target)) in ssh.iter().enumerate() {
-        if !is_ssh_name(name) || name == HOST {
-            return Err(format!(
-                "invalid ssh name {}: a host name, e.g. sidecar.host",
-                crate::repr(name)
-            ));
-        }
-        let Some(there) = existing.get(target) else {
-            return Err(format!(
-                "ssh {name}={target}: no bottle named {}",
-                crate::repr(target)
-            ));
-        };
-        if there.status != "ready" {
-            return Err(format!("ssh {name}={target}: {target} is {}", there.status));
-        }
-        grants.push(SshGrant {
-            name: name.clone(),
-            bottle: target.clone(),
-            id: there.id.clone(),
-            address: services::ssh_address(index),
-        });
-    }
-    Ok(grants)
+    Ok(vec![SshGrant {
+        name: SIDECAR.into(),
+        bottle: target.into(),
+        id: there.id.clone(),
+        address: services::ssh_address(0),
+    }])
 }
 
 /// Create the bottle's machine from `tag`, and set it up, its record in `owner`'s; roll it all back
@@ -687,77 +615,6 @@ fn start_at(repo: &Repo, checkout: Option<&str>) -> Result<repos::Start, String>
             crate::repr(checkout)
         )),
     }
-}
-
-/// The remotes a bottle is served: those given, or origin and host, read-only.
-fn parse_remotes(given: Option<&[String]>) -> Result<Vec<Remote>, String> {
-    let Some(given) = given else {
-        return Ok(vec![
-            Remote {
-                name: ORIGIN.into(),
-                fetch: UPSTREAM.into(),
-                push: None,
-            },
-            Remote {
-                name: HOST_REMOTE.into(),
-                fetch: HEADS.into(),
-                push: None,
-            },
-        ]);
-    };
-    let remotes = given
-        .iter()
-        .map(|s| Remote::parse(s))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut names: Vec<&str> = remotes.iter().map(|r| r.name.as_str()).collect();
-    names.sort();
-    for pair in names.windows(2) {
-        if pair[0] == pair[1] {
-            return Err(format!("remote {} given twice", pair[0]));
-        }
-    }
-    let mut pushed: Vec<&str> = remotes.iter().filter_map(push_namespace).collect();
-    pushed.sort();
-    for pair in pushed.windows(2) {
-        if pair[0] == pair[1] {
-            return Err(format!(
-                "two remotes push into namespace {}; each namespace has one writer",
-                pair[0]
-            ));
-        }
-    }
-    Ok(remotes)
-}
-
-/// Refuse a namespace another bottle already pushes into, in the same repo: each has one writer,
-/// but for the bottles a new one may ssh to, which `others` leaves out: they work together, and as
-/// pushes can't rewrite, a racing one is refused rather than lost.
-fn refuse_a_second_writer(
-    repo: &Repo,
-    remotes: &[Remote],
-    others: &[&Bottle],
-) -> Result<(), String> {
-    let ours: BTreeSet<&str> = remotes.iter().filter_map(push_namespace).collect();
-    if ours.is_empty() {
-        return Ok(());
-    }
-    let mine = repos::objects_dir(repo)?;
-    for other in others {
-        for mount in &other.mounts {
-            let theirs: BTreeSet<&str> = mount.remotes.iter().filter_map(push_namespace).collect();
-            let shared: Vec<&&str> = ours.intersection(&theirs).collect();
-            if let (Some(first), Some(directory)) = (shared.first(), git_dir(mount))
-                && directory.join("objects") == mine
-            {
-                return Err(format!(
-                    "bottle {} already pushes into namespace {first} of {}; each namespace has one writer",
-                    other.name,
-                    repo.path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Create and start a fresh machine for the bottle from image `tag`, and set it up from scratch.
@@ -1500,6 +1357,9 @@ mod tests {
     use crate::daemon::fake;
     use crate::tempdir::{self, git as g};
 
+    /// The remotes a repo's mount is often given: its upstream and its own branches, read-only.
+    const READ_ONLY: &[&str] = &["origin:fetch=upstream", "host:fetch=heads"];
+
     const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fake_bottle_cli.py");
 
     /// A bottle test: folio's home and the stand-in bottle-cli's state fresh, folio serve as the
@@ -1578,31 +1438,27 @@ mod tests {
             path: &str,
             repo: &Path,
             checkout: Option<&str>,
-            remotes: Option<&[&str]>,
+            remotes: &[&str],
         ) -> MountRequest {
             MountRequest {
                 path: path.into(),
                 repo: repo.to_path_buf(),
                 checkout: checkout.map(String::from),
-                remotes: remotes.map(|r| r.iter().map(|s| s.to_string()).collect()),
+                remotes: remotes.iter().map(|s| s.to_string()).collect(),
             }
         }
 
         fn create(&self, name: &str, mounts: &[MountRequest]) -> Result<Bottle, String> {
-            self.create_with(name, mounts, &[], "")
+            self.create_with(name, mounts, None, "")
         }
 
         fn create_with(
             &self,
             name: &str,
             mounts: &[MountRequest],
-            ssh: &[(&str, &str)],
+            sidecar: Option<&str>,
             context: &str,
         ) -> Result<Bottle, String> {
-            let ssh: Vec<(String, String)> = ssh
-                .iter()
-                .map(|(a, b)| (a.to_string(), b.to_string()))
-                .collect();
             create(
                 &self.owner(),
                 &json!({"features": [], "memory": "2G"}),
@@ -1610,17 +1466,13 @@ mod tests {
                 mounts,
                 context,
                 runners::LOCAL,
-                &ssh,
+                sidecar,
             )
         }
 
-        fn repo_bottle(&self, name: &str, remotes: Option<&[&str]>) -> Result<Bottle, String> {
+        fn repo_bottle(&self, name: &str, remotes: &[&str]) -> Result<Bottle, String> {
             self.create(name, &[self.mount("/workspace", &self.repo, None, remotes)])
         }
-    }
-
-    fn names(bottles: &BTreeMap<String, Bottle>) -> Vec<String> {
-        bottles.keys().cloned().collect()
     }
 
     #[test]
@@ -1649,7 +1501,7 @@ mod tests {
     #[test]
     fn a_repo_is_mounted_and_served_from_read_only_by_default() {
         let f = Fake::new();
-        let bottle = f.repo_bottle("t", None).unwrap();
+        let bottle = f.repo_bottle("t", READ_ONLY).unwrap();
         let mount = &bottle.mounts[0];
         assert_eq!(
             (
@@ -1685,7 +1537,7 @@ mod tests {
         let bottle = f
             .repo_bottle(
                 "t",
-                Some(&["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"]),
+                &["up:fetch=upstream", "work:fetch=ns/t-in,push=ns/t-out"],
             )
             .unwrap();
         assert_eq!(
@@ -1707,14 +1559,14 @@ mod tests {
         let a = f
             .create(
                 "a",
-                &[f.mount("/workspace", &f.repo, Some("feature"), None)],
+                &[f.mount("/workspace", &f.repo, Some("feature"), READ_ONLY)],
             )
             .unwrap();
         assert_eq!(a.mounts[0].branch.as_deref(), Some("feature"));
         let b = f
             .create(
                 "b",
-                &[f.mount("/workspace", &f.repo, Some(&f.head[..10]), None)],
+                &[f.mount("/workspace", &f.repo, Some(&f.head[..10]), READ_ONLY)],
             )
             .unwrap();
         assert_eq!(
@@ -1726,7 +1578,10 @@ mod tests {
                 .contains(&format!("update-ref --no-deref HEAD {}", f.head))
         );
         let refused = f
-            .create("c", &[f.mount("/workspace", &f.repo, Some("nope"), None)])
+            .create(
+                "c",
+                &[f.mount("/workspace", &f.repo, Some("nope"), READ_ONLY)],
+            )
             .unwrap_err();
         assert!(refused.contains("no branch or commit 'nope'"), "{refused}");
     }
@@ -1735,7 +1590,7 @@ mod tests {
     fn memory_and_features_come_from_the_spec() {
         let f = Fake::new();
         let spec = json!({"features": ["tools"], "memory": "1G"});
-        let bottle = create(&f.owner(), &spec, "t", &[], "", runners::LOCAL, &[]).unwrap();
+        let bottle = create(&f.owner(), &spec, "t", &[], "", runners::LOCAL, None).unwrap();
         assert_eq!(
             (bottle.features.clone(), bottle.memory.as_deref()),
             (vec!["tools".to_string()], Some("1G"))
@@ -1753,99 +1608,20 @@ mod tests {
         let refused = f
             .create(
                 "t",
-                &[f.mount("/workspace", &f.repo.join("sub"), None, None)],
+                &[f.mount("/workspace", &f.repo.join("sub"), None, READ_ONLY)],
             )
             .unwrap_err();
         assert!(refused.contains("inside a git repo"), "{refused}");
     }
 
     #[test]
-    fn refuses_a_remote_twice_or_a_namespace_with_two_writers() {
-        let f = Fake::new();
-        for (remotes, message) in [
-            (
-                &["a:fetch=heads", "a:fetch=upstream"][..],
-                "remote a given twice",
-            ),
-            (
-                &["a:fetch=heads,push=ns/x", "b:fetch=heads,push=ns/x"][..],
-                "two remotes push into namespace x",
-            ),
-        ] {
-            let refused = f.repo_bottle("t", Some(remotes)).unwrap_err();
-            assert!(refused.contains(message), "{refused}");
-        }
-    }
-
-    #[test]
-    fn each_namespace_has_one_writer_across_bottles() {
-        let f = Fake::new();
-        f.repo_bottle("a", Some(&["work:fetch=ns/t-in,push=ns/t-out"]))
-            .unwrap();
-        let refused = f
-            .repo_bottle("b", Some(&["mine:fetch=heads,push=ns/t-out"]))
-            .unwrap_err();
-        assert!(
-            refused.contains("bottle a already pushes into namespace t-out"),
-            "{refused}"
-        );
-        // Reading another bottle's namespace is fine; so is writing one in another repo.
-        f.repo_bottle("c", Some(&["peek:fetch=ns/t-out"])).unwrap();
-        let other = tempdir::repo(&f.tmp.path().join("other"));
-        f.create(
-            "d",
-            &[f.mount(
-                "/workspace",
-                &other,
-                None,
-                Some(&["work:fetch=ns/t-in,push=ns/t-out"]),
-            )],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn a_bottle_shares_its_namespaces_with_one_it_may_ssh_to() {
-        let f = Fake::new();
-        let lane = ["agent:fetch=ns/t-out,push=ns/t-out"];
-        f.repo_bottle("side", Some(&lane)).unwrap();
-        f.create_with(
-            "main",
-            &[f.mount("/workspace", &f.repo, None, Some(&lane))],
-            &[("sidecar", "side")],
-            "",
-        )
-        .unwrap();
-        // Only with the one it names: a third writer is refused, even one that may ssh to the other.
-        let refused = f
-            .create_with(
-                "third",
-                &[f.mount("/workspace", &f.repo, None, Some(&lane))],
-                &[("sidecar", "side")],
-                "",
-            )
-            .unwrap_err();
-        assert!(
-            refused.contains("bottle main already pushes into namespace t-out"),
-            "{refused}"
-        );
-    }
-
-    #[test]
-    fn a_taken_name_is_refused_not_numbered_and_names_are_checked() {
+    fn a_taken_name_is_refused_not_numbered() {
         let f = Fake::new();
         f.create("a", &[]).unwrap();
         assert_eq!(
             f.create("a", &[]).unwrap_err(),
             "a bottle named 'a' already exists"
         );
-        // Nor does one look like a message's address (serve/messages.rs: NAME~SIGNATURE).
-        for name in ["", "-a", "a/b", "a b", "broker~abc"] {
-            assert!(
-                f.create(name, &[]).unwrap_err().starts_with("invalid name"),
-                "{name}"
-            );
-        }
     }
 
     #[test]
@@ -1870,8 +1646,8 @@ mod tests {
         let bottle = f
             .create_with(
                 "t",
-                &[f.mount("/workspace", &f.repo, None, Some(&remotes))],
-                &[],
+                &[f.mount("/workspace", &f.repo, None, &remotes)],
+                None,
                 "# Thread\n\nWork on `t`.\n",
             )
             .unwrap();
@@ -1896,7 +1672,7 @@ mod tests {
     #[test]
     fn deleting_runs_nothing_in_it() {
         let f = Fake::new();
-        let bottle = f.repo_bottle("t", None).unwrap();
+        let bottle = f.repo_bottle("t", READ_ONLY).unwrap();
         let before = f.state()["execs"].as_array().unwrap().len();
         delete(&bottle.name).unwrap();
         assert_eq!(f.state()["execs"].as_array().unwrap().len(), before);
@@ -1912,12 +1688,12 @@ mod tests {
             .create(
                 "two",
                 &[
-                    f.mount("/work/app", &f.repo, None, None),
+                    f.mount("/work/app", &f.repo, None, READ_ONLY),
                     f.mount(
                         "/notes",
                         &notes,
                         None,
-                        Some(&["agent:fetch=ns/n-out,push=ns/n-out"]),
+                        &["agent:fetch=ns/n-out,push=ns/n-out"],
                     ),
                 ],
             )
@@ -1957,25 +1733,6 @@ mod tests {
     }
 
     #[test]
-    fn paths_that_cant_be_mounts() {
-        let f = Fake::new();
-        for (paths, why) in [
-            (&["notes"][..], "invalid mount path"),
-            (&["/a b"][..], "invalid mount path"),
-            (&["/work", "/work/app"][..], "overlap"),
-            (&["/notes", "/notes"][..], "overlap"),
-        ] {
-            let mounts: Vec<MountRequest> = paths
-                .iter()
-                .map(|p| f.mount(p, &f.repo, None, None))
-                .collect();
-            let refused = f.create("x", &mounts).unwrap_err();
-            assert!(refused.contains(why), "{paths:?}: {refused}");
-        }
-        assert!(load().unwrap().is_empty());
-    }
-
-    #[test]
     fn a_runner_there_isnt_is_refused_before_anything_is_made() {
         let f = Fake::new();
         let refused = create(
@@ -1985,7 +1742,7 @@ mod tests {
             &[],
             "",
             "box",
-            &[],
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -1998,13 +1755,10 @@ mod tests {
     }
 
     #[test]
-    fn ssh_grants_are_names_at_addresses_of_their_own() {
+    fn its_sidecar_is_sidecar_at_an_address_of_its_own_and_must_be_ready() {
         let f = Fake::new();
         let big = f.create("big", &[]).unwrap();
-        let other = f.create("other", &[]).unwrap();
-        let main = f
-            .create_with("main", &[], &[("sidecar.host", "big"), ("o", "other")], "")
-            .unwrap();
+        let main = f.create_with("main", &[], Some("big"), "").unwrap();
         let grants: Vec<(&str, &str, &str, &str)> = main
             .ssh
             .iter()
@@ -2017,30 +1771,25 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            grants,
-            [
-                ("sidecar.host", "big", big.id.as_str(), "192.0.2.2"),
-                ("o", "other", other.id.as_str(), "192.0.2.3")
-            ]
-        );
+        assert_eq!(grants, [("sidecar", "big", big.id.as_str(), "192.0.2.2")]);
         assert_eq!(get("main").unwrap().ssh, main.ssh);
         let hosts = f.execs("hosts").last().unwrap()["argv"][2]
             .as_str()
             .unwrap()
             .to_string();
-        assert!(
-            hosts.contains("192.0.2.2 sidecar.host") && hosts.contains("192.0.2.3 o"),
-            "{hosts}"
-        );
+        assert!(hosts.contains("192.0.2.2 sidecar"), "{hosts}");
         assert!(
             context(&main)
                 .unwrap()
-                .contains("- `ssh sidecar.host` reaches bottle `big`")
+                .contains("- `ssh sidecar` reaches bottle `big`")
         );
         assert_eq!(
             status(&["main".to_string()]).unwrap()[0]["ssh"],
-            json!({"sidecar.host": "big", "o": "other"})
+            json!({"sidecar": "big"})
+        );
+        assert_eq!(
+            f.create_with("other", &[], Some("nope"), "").unwrap_err(),
+            "no sidecar named 'nope'"
         );
     }
 
@@ -2048,8 +1797,7 @@ mod tests {
     fn its_key_is_let_in_there_and_that_ones_host_key_known_here() {
         let f = Fake::new();
         f.create("big", &[]).unwrap();
-        f.create_with("main", &[], &[("sidecar.host", "big")], "")
-            .unwrap();
+        f.create_with("main", &[], Some("big"), "").unwrap();
         let state = f.state();
         let keys: Vec<&Value> = state["execs"]
             .as_array()
@@ -2080,36 +1828,15 @@ mod tests {
         );
         assert_eq!(
             (known["machine"].as_str(), known["stdin"].as_str()),
-            (
-                Some("main"),
-                Some("sidecar.host ssh-ed25519 HOSTKEY-OF-big\n")
-            )
+            (Some("main"), Some("sidecar ssh-ed25519 HOSTKEY-OF-big\n"))
         );
-    }
-
-    #[test]
-    fn only_a_bottle_that_exists_under_a_host_name() {
-        let f = Fake::new();
-        f.create("big", &[]).unwrap();
-        for (name, target, why) in [
-            ("x", "nope", "no bottle named 'nope'"),
-            ("Bad Name", "big", "invalid ssh name"),
-            ("bottle.host", "big", "invalid ssh name"),
-            ("10.0.0.5:22", "big", "invalid ssh name"),
-        ] {
-            let refused = f
-                .create_with("main", &[], &[(name, target)], "")
-                .unwrap_err();
-            assert!(refused.contains(why), "{name}: {refused}");
-        }
-        assert_eq!(names(&load().unwrap()), ["big"]);
     }
 
     #[test]
     fn status_is_every_bottle_or_those_named() {
         let f = Fake::new();
-        let a = f.repo_bottle("example", None).unwrap();
-        f.repo_bottle("spec", Some(&["work:fetch=ns/t-in,push=ns/t-out"]))
+        let a = f.repo_bottle("example", READ_ONLY).unwrap();
+        f.repo_bottle("spec", &["work:fetch=ns/t-in,push=ns/t-out"])
             .unwrap();
         f.set_machine("spec", "state", json!("stopped"));
         let all: Vec<(String, String)> = status(&[])
@@ -2396,23 +2123,6 @@ mod tests {
         };
         assert!(context_of(&detached).contains("checkout of `r`, at a detached commit."));
         assert_eq!(bottle(&[], json!({})).workdir(), "/home/genie");
-    }
-
-    #[test]
-    fn names_and_paths() {
-        assert!(is_name("example-2.x_y") && !is_name("-x") && !is_name("broker~abc"));
-        assert!(
-            is_mount_path("/workspace")
-                && is_mount_path("/a/b.c")
-                && !is_mount_path("/")
-                && !is_mount_path("x")
-        );
-        assert!(
-            is_ssh_name("sidecar")
-                && is_ssh_name("a.b-c")
-                && !is_ssh_name("Sidecar")
-                && !is_ssh_name("-a")
-        );
     }
 
     #[test]
