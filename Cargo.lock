@@ -166,6 +166,7 @@ dependencies = [
  "bottle-agent-client",
  "bottle-agent-proto",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "tar",
@@ -178,6 +179,7 @@ dependencies = [
  "bottle-agent-proto",
  "libc",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -202,9 +204,11 @@ dependencies = [
  "bottle-disk",
  "libc",
  "libkrun",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook 0.4.6",
 ]
 
 [[package]]
@@ -213,7 +217,7 @@ version = "0.1.0"
 dependencies = [
  "bottle-agent-client",
  "flate2",
- "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -369,7 +373,7 @@ dependencies = [
  "mio",
  "parking_lot",
  "rustix",
- "signal-hook",
+ "signal-hook 0.3.18",
  "signal-hook-mio",
 ]
 
@@ -469,7 +473,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1349,7 +1353,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1514,6 +1518,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-mio"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1521,7 +1535,7 @@ checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
 dependencies = [
  "libc",
  "mio",
- "signal-hook",
+ "signal-hook 0.3.18",
 ]
 
 [[package]]

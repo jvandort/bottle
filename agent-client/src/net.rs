@@ -61,23 +61,22 @@ const OPEN_FILES: u64 = 1 << 20;
 /// macOS refuses more than kern.maxfilesperproc whatever the hard limit says, so it's halved until
 /// it's taken. The limit it has after.
 pub fn raise_open_files() -> u64 {
-    // SAFETY: getrlimit writes an rlimit; setrlimit reads one.
-    unsafe {
-        let mut limit: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
-            return 0;
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    // None is no limit.
+    let soft = limit.current.unwrap_or(u64::MAX);
+    let mut target = OPEN_FILES.min(limit.maximum.unwrap_or(u64::MAX));
+    while target > soft {
+        let raised = Rlimit {
+            current: Some(target),
+            ..limit
+        };
+        if setrlimit(Resource::Nofile, raised).is_ok() {
+            return target;
         }
-        let soft = limit.rlim_cur as u64;
-        let mut target = OPEN_FILES.min(limit.rlim_max as u64);
-        while target > soft {
-            limit.rlim_cur = target as libc::rlim_t;
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
-                return target;
-            }
-            target /= 2;
-        }
-        soft
+        target /= 2;
     }
+    soft
 }
 
 /// Serves the bottle's network on `listener`, each stream on a thread of its own, until accepting
@@ -769,14 +768,13 @@ mod tests {
     #[test]
     fn the_limit_on_open_files_is_raised_as_far_as_it_goes() {
         let raised = raise_open_files();
-        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
-        // SAFETY: getrlimit writes an rlimit.
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-            0
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        let (soft, hard) = (
+            limit.current.unwrap_or(u64::MAX),
+            limit.maximum.unwrap_or(u64::MAX),
         );
-        assert_eq!(limit.rlim_cur as u64, raised);
-        assert!(raised >= 1024 && raised <= OPEN_FILES.max(limit.rlim_max as u64));
+        assert_eq!(soft, raised);
+        assert!(raised >= 1024 && raised <= OPEN_FILES.max(hard));
     }
 
     #[test]

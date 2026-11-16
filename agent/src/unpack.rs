@@ -15,6 +15,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{AtFlags, CWD, FileType, Gid, Mode, Uid, XattrFlags};
+
 const OPAQUE: &[u8] = b".wh..wh..opq";
 const WHITEOUT: &[u8] = b".wh.";
 
@@ -95,8 +97,8 @@ fn write<R: Read>(
     let header = entry.header().clone();
     let old = header.as_old();
     let mode = blank_is_zero(header.mode().map(u64::from), &old.mode)? as u32 & 0o7777;
-    let uid = blank_is_zero(header.uid(), &old.uid)? as libc::uid_t;
-    let gid = blank_is_zero(header.gid(), &old.gid)? as libc::gid_t;
+    let uid = blank_is_zero(header.uid(), &old.uid)? as u32;
+    let gid = blank_is_zero(header.gid(), &old.gid)? as u32;
     let mtime = blank_is_zero(header.mtime(), &old.mtime)? as i64;
     let mut xattrs = Vec::new();
     if let Some(records) = entry.pax_extensions()? {
@@ -142,22 +144,18 @@ fn write<R: Read>(
             }
             b'3' | b'4' | b'6' => {
                 let file_type = match kind {
-                    b'3' => libc::S_IFCHR,
-                    b'4' => libc::S_IFBLK,
-                    _ => libc::S_IFIFO,
+                    b'3' => FileType::CharacterDevice,
+                    b'4' => FileType::BlockDevice,
+                    _ => FileType::Fifo,
                 };
                 let dev = match kind {
                     b'6' => 0,
-                    _ => libc::makedev(
+                    _ => rustix::fs::makedev(
                         header.device_major()?.unwrap_or(0),
                         header.device_minor()?.unwrap_or(0),
                     ),
                 };
-                let c = cstr(dst)?;
-                // SAFETY: mknod with a C string path.
-                if unsafe { libc::mknod(c.as_ptr(), file_type | mode, dev) } < 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                rustix::fs::mknodat(CWD, dst, file_type, Mode::from_raw_mode(mode), dev)?;
             }
             other => {
                 return Err(io::Error::other(format!(
@@ -167,32 +165,21 @@ fn write<R: Read>(
             }
         }
     }
-    let c = cstr(dst)?;
-    // SAFETY: lchown, then (not for a symlink) chmod, with a C string path: owner first, since
-    // changing it clears setuid and setgid.
-    unsafe {
-        if libc::lchown(c.as_ptr(), uid, gid) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if kind != b'2' && libc::chmod(c.as_ptr(), mode as libc::mode_t) < 0 {
-            return Err(io::Error::last_os_error());
-        }
+    // Owner first, since changing it clears setuid and setgid; then (not for a symlink) mode. An
+    // id of -1 is no id: the owner as it is.
+    rustix::fs::chownat(
+        CWD,
+        dst,
+        (uid != !0).then(|| Uid::from_raw(uid)),
+        (gid != !0).then(|| Gid::from_raw(gid)),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    if kind != b'2' {
+        rustix::fs::chmod(dst, Mode::from_raw_mode(mode))?;
     }
     for (name, value) in xattrs {
         let name = CString::new(name).map_err(|_| io::Error::other("an xattr name with a NUL"))?;
-        // SAFETY: lsetxattr with C strings and a value of the length given.
-        if unsafe {
-            libc::lsetxattr(
-                c.as_ptr(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-            )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        rustix::fs::lsetxattr(dst, name.as_c_str(), &value, XattrFlags::empty())?;
     }
     if kind == b'5' {
         dir_times.push((dst.to_path_buf(), mtime));
@@ -212,24 +199,20 @@ fn blank_is_zero(n: io::Result<u64>, field: &[u8]) -> io::Result<u64> {
 
 /// Sets the access and modification times of `dst`, not following a symlink.
 fn set_time(dst: &Path, mtime: i64) -> io::Result<()> {
-    let c = cstr(dst)?;
-    let t = libc::timespec {
-        tv_sec: mtime as _,
+    let t = rustix::fs::Timespec {
+        tv_sec: mtime,
         tv_nsec: 0,
     };
-    // SAFETY: utimensat with a C string path and two timespecs.
-    if unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            c.as_ptr(),
-            [t, t].as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let times = rustix::fs::Timestamps {
+        last_access: t,
+        last_modification: t,
+    };
+    Ok(rustix::fs::utimensat(
+        CWD,
+        dst,
+        &times,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)
 }
 
 /// Removes what's at `p`, a directory with everything in it; nothing there is fine.
@@ -282,8 +265,4 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 
 fn path(rel: &[u8]) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(rel))
-}
-
-fn cstr(p: &Path) -> io::Result<CString> {
-    CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::other("a path with a NUL"))
 }

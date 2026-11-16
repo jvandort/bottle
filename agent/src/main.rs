@@ -81,11 +81,8 @@ fn run() -> ExitCode {
         }
     };
     // Not PID 1 (out of a VM): orphans of the commands run are still this process's to reap.
-    // SAFETY: getpid and prctl have no preconditions.
-    unsafe {
-        if libc::getpid() != 1 {
-            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
-        }
+    if !rustix::process::getpid().is_init() {
+        let _ = rustix::process::set_child_subreaper(Some(rustix::process::getpid()));
     }
     match bottle_agent::serve(listener, Reaper::start(), upper) {
         Ok(()) => ExitCode::SUCCESS,

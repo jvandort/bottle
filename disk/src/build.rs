@@ -198,10 +198,8 @@ impl Store {
     /// same in between (builds tag concurrently).
     fn change_tags(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) -> io::Result<()> {
         let lock = fs::File::create(self.dir.join(".tags.lock"))?;
-        // SAFETY: flock on a descriptor this function owns; released when `lock` closes.
-        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // Released when `lock` closes.
+        lock.lock()?;
         let mut tags = self.tags()?;
         change(&mut tags);
         let partial = self.dir.join(".tags.json.partial");

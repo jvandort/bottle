@@ -10,7 +10,7 @@ pub mod user;
 
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -74,12 +74,12 @@ const OPEN_FILES: (u64, u64) = (65_536, 1_048_576);
 
 /// Raises the limit on open files to OPEN_FILES, as far as the kernel lets it.
 pub fn raise_open_files() {
-    let limit = libc::rlimit {
-        rlim_cur: OPEN_FILES.0,
-        rlim_max: OPEN_FILES.1,
+    use rustix::process::{Resource, Rlimit, setrlimit};
+    let limit = Rlimit {
+        current: Some(OPEN_FILES.0),
+        maximum: Some(OPEN_FILES.1),
     };
-    // SAFETY: setrlimit reads an rlimit.
-    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+    let _ = setrlimit(Resource::Nofile, limit);
 }
 
 /// What a command writes, and whether that's stderr.
@@ -171,11 +171,9 @@ pub static BOOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// through the keyboard controller (reboot=k), where a power off only halts it (no ACPI).
 pub fn end(code: i32) -> ! {
     if BOOTED.load(std::sync::atomic::Ordering::Relaxed) {
-        // SAFETY: sync, then reboot, which doesn't return when it works.
-        unsafe {
-            libc::sync();
-            libc::reboot(libc::LINUX_REBOOT_CMD_RESTART);
-        }
+        // reboot doesn't return when it works.
+        rustix::fs::sync();
+        let _ = rustix::system::reboot(rustix::system::RebootCommand::Restart);
     }
     std::process::exit(code)
 }
@@ -216,14 +214,17 @@ static STOPPING: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
 
 fn stop(upper: Option<&File>) -> io::Result<()> {
     *STOPPING.write().unwrap_or_else(|e| e.into_inner()) = true;
-    for (signal, wait) in [(libc::SIGTERM, GRACE), (libc::SIGKILL, GRACE)] {
+    use rustix::process::{Pid, Signal, kill_process};
+    for (signal, wait) in [(Signal::TERM, GRACE), (Signal::KILL, GRACE)] {
         if everything_is_mine() {
-            // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1.
-            unsafe { libc::kill(-1, signal) };
+            // SAFETY: kill(-1, ...) signals every process this one may, but itself and pid 1
+            // (rustix has no kill(-1)).
+            unsafe { libc::kill(-1, signal.as_raw()) };
         } else {
             for pid in mine() {
-                // SAFETY: kill with a pid, one of this process's descendants.
-                unsafe { libc::kill(pid as libc::pid_t, signal) };
+                if let Some(pid) = Pid::from_raw(pid as i32) {
+                    let _ = kill_process(pid, signal);
+                }
             }
         }
         let deadline = std::time::Instant::now() + wait;
@@ -232,36 +233,26 @@ fn stop(upper: Option<&File>) -> io::Result<()> {
         }
     }
     let Some(upper) = upper else {
-        // SAFETY: sync has no preconditions.
-        unsafe { libc::sync() };
+        rustix::fs::sync();
         return Ok(());
     };
     // The mount is covered, so it's reached through the descriptor.
-    let path = std::ffi::CString::new(format!("/proc/self/fd/{}", upper.as_raw_fd())).unwrap();
+    let path = format!("/proc/self/fd/{}", upper.as_raw_fd());
     // A process gone can still have files open for writing a while: those of its io_uring (Node's
     // libuv uses one) are let go by a kernel worker after it ends. Until then it's EBUSY.
     let deadline = std::time::Instant::now() + RELEASE;
     let mut tries = 0;
     loop {
         tries += 1;
-        // SAFETY: sync has no preconditions; mount with a C string path, the rest NULL.
-        let ret = unsafe {
-            libc::sync();
-            libc::mount(
-                std::ptr::null(),
-                path.as_ptr(),
-                std::ptr::null(),
-                libc::MS_REMOUNT | libc::MS_RDONLY,
-                std::ptr::null(),
-            )
-        };
-        if ret == 0 {
+        rustix::fs::sync();
+        let ret = rustix::mount::mount_remount(&path, rustix::mount::MountFlags::RDONLY, "");
+        if ret.is_ok() {
             if tries > 1 {
                 crate::say!("bottle-agent: stop: the upper disk read-only after {tries} tries");
             }
             return Ok(());
         }
-        let e = io::Error::last_os_error();
+        let e = io::Error::from(ret.unwrap_err());
         if e.raw_os_error() != Some(libc::EBUSY) || std::time::Instant::now() > deadline {
             let left = still_running();
             crate::say!(
@@ -435,28 +426,22 @@ fn feed(mut incoming: Socket, mut input: Input) {
     signal_pidfd(&input.pidfd, libc::SIGHUP);
 }
 
+/// Sends `signal` to the process `pidfd` refers to; a signal with no name (a real-time one, or
+/// none at all) isn't sent.
 fn signal_pidfd(pidfd: &OwnedFd, signal: i32) {
-    // SAFETY: pidfd_send_signal with no siginfo, on a pidfd this owns.
-    unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            pidfd.as_raw_fd(),
-            signal,
-            std::ptr::null::<()>(),
-            0,
-        )
-    };
+    if let Some(signal) = rustix::process::Signal::from_named_raw(signal) {
+        let _ = rustix::process::pidfd_send_signal(pidfd, signal);
+    }
 }
 
-fn set_size(tty: &File, size: WinSize) {
-    let size = libc::winsize {
+fn set_size(tty: impl AsFd, size: WinSize) {
+    let size = rustix::termios::Winsize {
         ws_row: size.rows,
         ws_col: size.cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: TIOCSWINSZ reads a winsize.
-    unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+    let _ = rustix::termios::tcsetwinsize(tty, size);
 }
 
 /// Starts the command `start` asks for, or says why it can't.
@@ -474,23 +459,23 @@ fn spawn(start: &Start, reaper: &Reaper) -> Result<Running, String> {
             .env("USER", &user.name)
             .env("LOGNAME", &user.name)
             .env("SHELL", &user.shell);
-        // SAFETY: geteuid has no preconditions.
-        let euid = unsafe { libc::geteuid() };
+        let euid = rustix::process::geteuid().as_raw();
         if user.uid != euid {
             if euid != 0 {
                 return Err(format!("can't run as {name}: the agent isn't root"));
             }
-            let groups: Vec<libc::gid_t> = user.groups.clone();
-            let (uid, gid) = (user.uid, user.gid);
-            // SAFETY: between fork and exec, only async-signal-safe calls, on data made before the fork.
+            use rustix::process::{Gid, Uid};
+            use rustix::thread::{set_thread_gid, set_thread_groups, set_thread_uid};
+            let groups: Vec<Gid> = user.groups.iter().map(|&g| Gid::from_raw(g)).collect();
+            let (uid, gid) = (Uid::from_raw(user.uid), Gid::from_raw(user.gid));
+            // SAFETY: between fork and exec, only system calls, on data made before the fork. The
+            // thread's ids are the process's: after the fork it's the only thread. (std's own
+            // uid and gid are set before this runs, and setgroups needs root.)
             unsafe {
                 command.pre_exec(move || {
-                    if libc::setgroups(groups.len(), groups.as_ptr()) < 0
-                        || libc::setgid(gid) < 0
-                        || libc::setuid(uid) < 0
-                    {
-                        return Err(io::Error::last_os_error());
-                    }
+                    set_thread_groups(&groups)?;
+                    set_thread_gid(gid)?;
+                    set_thread_uid(uid)?;
                     Ok(())
                 });
             }
@@ -513,13 +498,12 @@ fn spawn(start: &Start, reaper: &Reaper) -> Result<Running, String> {
                 .stdin(end(&slave)?)
                 .stdout(end(&slave)?)
                 .stderr(end(&slave)?);
-            // SAFETY: setsid and TIOCSCTTY between fork and exec: a session of its own, whose
-            // controlling terminal is the one on its stdin.
+            // SAFETY: setsid and TIOCSCTTY between fork and exec, system calls with no
+            // allocation: a session of its own, whose controlling terminal is the one on its stdin.
             unsafe {
                 command.pre_exec(|| {
-                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
+                    rustix::process::setsid()?;
+                    rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
                     Ok(())
                 });
             }
@@ -570,32 +554,16 @@ fn spawn(start: &Start, reaper: &Reaper) -> Result<Running, String> {
 /// across exec, from the moment it's opened: commands start from several connections at once, and
 /// one that inherited this one's terminal would keep it open after this one's command ended.
 fn openpty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
-    // SAFETY: posix_openpt opens a new master side, close-on-exec as it's made.
-    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-    if master < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a descriptor posix_openpt just made, owned by nothing else.
-    let master = unsafe { OwnedFd::from_raw_fd(master) };
-    let mut name = [0 as libc::c_char; 128];
-    // SAFETY: grantpt and unlockpt on the master this owns; ptsname_r writes at most the buffer's
-    // length, a NUL-terminated name if it succeeds.
-    unsafe {
-        if libc::grantpt(master.as_raw_fd()) < 0 || libc::unlockpt(master.as_raw_fd()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let error = libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len());
-        if error != 0 {
-            return Err(io::Error::from_raw_os_error(error));
-        }
-    }
-    // SAFETY: ptsname_r wrote a NUL-terminated name into `name`.
-    let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    grantpt(&master)?;
+    unlockpt(&master)?;
+    let path = ptsname(&master, Vec::new())?;
     let slave = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOCTTY)
-        .open(std::ffi::OsStr::from_bytes(path.to_bytes()))?;
+        .open(std::ffi::OsStr::from_bytes(path.as_bytes()))?;
     set_size(&slave, size);
     Ok((master, OwnedFd::from(slave)))
 }
@@ -608,13 +576,10 @@ mod tests {
     fn a_terminals_sides_are_never_inherited() {
         let (master, slave) = openpty(WinSize { rows: 24, cols: 80 }).unwrap();
         for fd in [&master, &slave] {
-            // SAFETY: F_GETFD on a descriptor this owns.
-            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
-            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+            let flags = rustix::io::fcntl_getfd(fd).unwrap();
+            assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
         }
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: TIOCGWINSZ writes a winsize.
-        unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+        let size = rustix::termios::tcgetwinsize(&slave).unwrap();
         assert_eq!((size.ws_row, size.ws_col), (24, 80));
     }
 }

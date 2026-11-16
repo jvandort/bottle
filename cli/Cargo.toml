@@ -11,5 +11,7 @@ bottle-agent-client.workspace = true
 bottle-disk.workspace = true
 libc.workspace = true
 libkrun.workspace = true
+rustix.workspace = true
+signal-hook.workspace = true
 serde.workspace = true
 serde_json.workspace = true

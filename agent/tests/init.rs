@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 use bottle_agent_proto::{Exit, Start, ToGuest, ToHost};
 
 fn root() -> bool {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
 fn run(command: &mut Command) -> String {
@@ -170,8 +169,7 @@ impl Drop for Bottle {
     fn drop(&mut self) {
         // The agent is its PID namespace's init: killing it ends everything in there.
         if self.agent_pid != 0 {
-            // SAFETY: kill with a pid.
-            unsafe { libc::kill(self.agent_pid as libc::pid_t, libc::SIGKILL) };
+            kill(self.agent_pid);
         }
         let _ = self.unshare.kill();
         let _ = self.unshare.wait();
@@ -370,4 +368,10 @@ fn stacks_unpacks_and_stops_clean() {
     assert!(st.join("y/b").exists());
     assert!(!st.join("z/old").exists());
     assert!(st.join("z/new").exists());
+}
+
+fn kill(pid: u32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
 }

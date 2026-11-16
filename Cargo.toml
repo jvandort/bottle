@@ -13,6 +13,10 @@ bottle-agent-proto = { path = "agent-proto" }
 bottle-disk = { path = "disk" }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
+# The system's calls, safe: rustix's own (on Linux, without libc), where libc's would be unsafe ours.
+rustix = { version = "1.1.6", features = ["fs", "process", "pty", "termios", "mount", "system", "net", "event", "pipe", "thread", "param", "stdio"] }
+# Signals, handled safely: a flag set, or signals read from a thread, instead of handlers of ours.
+signal-hook = "0.4.6"
 # The host side's caching: TLS with ring's crypto (no OpenSSL: macOS has none to link, and the
 # distribution is one static binary), certificates minted from bottle-cli's caching CA, and the
 # system's trust store for the hosts it fetches from.

@@ -217,8 +217,7 @@ impl Machine {
         if here.as_os_str().len() < 100 {
             return here;
         }
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         let hash: u64 = self
             .dir
             .as_os_str()
@@ -230,7 +229,7 @@ impl Machine {
         PathBuf::from(format!("/tmp/bottle-krun-{uid}/{hash:016x}.sock"))
     }
 
-    fn pid(&self) -> Option<libc::pid_t> {
+    fn pid(&self) -> Option<i32> {
         fs::read_to_string(self.dir.join("pid"))
             .ok()?
             .trim()
@@ -245,8 +244,8 @@ impl Machine {
         let Ok(file) = fs::File::open(self.dir.join("pid")) else {
             return false;
         };
-        // SAFETY: flock on a descriptor this owns; a lock this takes goes as the file closes.
-        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        // A lock this takes goes as the file closes.
+        let taken = file.try_lock().is_ok();
         !taken
     }
 
@@ -300,9 +299,12 @@ impl Machine {
             .truncate(false)
             .write(true)
             .open(self.dir.join("pid"))?;
-        // SAFETY: flock on a descriptor this owns.
-        if unsafe { libc::flock(pid_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(other(format!("{} is running already", self.name)));
+        match pid_file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(other(format!("{} is running already", self.name)));
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
         }
         let held = pid_file.as_raw_fd();
         let mut boot = match env::var_os("BOTTLE_BOOT") {
@@ -356,15 +358,15 @@ impl Machine {
             .stdout(log.try_clone()?)
             .stderr(log)
             .current_dir("/");
-        // SAFETY: setsid and fcntl between fork and exec: a session of its own, out of reach of this
-        // terminal's signals, and outliving this process; and the lock's descriptor kept open
-        // across exec, so its process holds the lock for as long as it runs.
+        // SAFETY: setsid and fcntl between fork and exec, system calls with no allocation: a
+        // session of its own, out of reach of this terminal's signals, and outliving this process;
+        // and the lock's descriptor, open until after the spawn, kept open across exec, so its
+        // process holds the lock for as long as it runs.
         unsafe {
             boot.pre_exec(move || {
-                libc::setsid();
-                if libc::fcntl(held, libc::F_SETFD, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                let _ = rustix::process::setsid();
+                let held = std::os::fd::BorrowedFd::borrow_raw(held);
+                rustix::io::fcntl_setfd(held, rustix::io::FdFlags::empty())?;
                 Ok(())
             });
         }
@@ -429,10 +431,12 @@ impl Machine {
     }
 
     /// Its VM's process, `pid`, killed, if it's still its (running says so), and waited for.
-    fn kill(&self, pid: libc::pid_t) {
-        if self.running() {
-            // SAFETY: kill with a pid, its VM's while the lock's held.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+    fn kill(&self, pid: i32) {
+        use rustix::process::{Pid, Signal, kill_process};
+        if let Some(pid) = Pid::from_raw(pid)
+            && self.running()
+        {
+            let _ = kill_process(pid, Signal::KILL);
             self.ends(Duration::from_secs(5));
         }
     }

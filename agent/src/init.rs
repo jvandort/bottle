@@ -12,11 +12,12 @@
 //! too (see Config). The upper disk's `rootfs/` is laid out as a stage disk's is: the upper of a build
 //! is a stage.
 
-use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+use rustix::mount::{MountFlags, MountPropagationFlags as Propagation};
 
 /// Where the disks are mounted, and stacked, before the move: a tmpfs of the agent's own, the root
 /// being read-only. Short paths: overlayfs takes only so many characters of lowerdir.
@@ -113,9 +114,9 @@ pub fn early() -> io::Result<()> {
         ("sysfs", "/sys", "sysfs"),
     ] {
         // Mounted already is as good: the kernel mounts devtmpfs itself (DEVTMPFS_MOUNT).
-        match mount_raw(Some(source), target, Some(fstype), 0, None) {
-            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {}
-            other => other.map_err(|e| failed(&format!("mounting {target}"), e))?,
+        match rustix::mount::mount(source, target, fstype, MountFlags::empty(), None) {
+            Err(rustix::io::Errno::BUSY) => {}
+            other => other.map_err(|e| failed(&format!("mounting {target}"), e.into()))?,
         }
     }
     crate::net::loopback_up()
@@ -124,7 +125,7 @@ pub fn early() -> io::Result<()> {
 /// Stacks the disks and moves into them: after this, `/` is the bottle's root. Returns the
 /// bottle's own disk's root, open, for a Stop to make clean: unreachable by path once moved.
 pub fn stack(stack: &Stack) -> io::Result<fs::File> {
-    mount("tmpfs", RUN, "tmpfs", 0, "mode=0755")?;
+    mount("tmpfs", RUN, "tmpfs", MountFlags::empty(), "mode=0755")?;
     let mut lowers = Vec::new();
     for (i, disk) in stack.lowers.iter().enumerate() {
         // A directory, out of a VM, is a lower as it is: a host's own root, to try this on.
@@ -134,7 +135,7 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         }
         let dir = format!("{RUN}/{i}");
         fs::create_dir(&dir)?;
-        mount(&device(disk)?, &dir, "ext4", libc::MS_RDONLY, "")?;
+        mount(&device(disk)?, &dir, "ext4", MountFlags::RDONLY, "")?;
         lowers.push(format!("{dir}/rootfs"));
     }
     if lowers.is_empty() {
@@ -145,7 +146,7 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
     }
     let rw = format!("{RUN}/rw");
     fs::create_dir(&rw)?;
-    mount(&device(&stack.upper)?, &rw, "ext4", 0, "")?;
+    mount(&device(&stack.upper)?, &rw, "ext4", MountFlags::empty(), "")?;
     for dir in ["rootfs", "work"] {
         fs::create_dir_all(format!("{rw}/{dir}"))?;
     }
@@ -157,7 +158,7 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         "overlay",
         &root,
         "overlay",
-        0,
+        MountFlags::empty(),
         &format!(
             "lowerdir={},upperdir={rw}/rootfs,workdir={rw}/work,{OVERLAY}",
             lowers.join(":")
@@ -189,10 +190,8 @@ pub fn stack(stack: &Stack) -> io::Result<fs::File> {
         crate::net::start(net).map_err(|e| failed("the network", e))?;
     }
     if let Some(name) = &stack.hostname {
-        // SAFETY: sethostname reads `len` bytes of `name`.
-        if unsafe { libc::sethostname(name.as_ptr().cast(), name.len()) } < 0 {
-            return Err(failed("sethostname", io::Error::last_os_error()));
-        }
+        rustix::system::sethostname(name.as_bytes())
+            .map_err(|e| failed("sethostname", e.into()))?;
         name_in_hosts(Path::new("/etc/hosts"), name).map_err(|e| failed("/etc/hosts", e))?;
     }
     if let Some(argv) = stack.config.run.as_deref().filter(|a| !a.is_empty()) {
@@ -243,10 +242,10 @@ fn run(argv: &[String]) {
         .args(&argv[1..])
         .current_dir("/")
         .stdin(std::process::Stdio::null());
-    // SAFETY: setsid between fork and exec.
+    // SAFETY: setsid between fork and exec, a system call with no allocation.
     unsafe {
         command.pre_exec(|| {
-            libc::setsid();
+            let _ = rustix::process::setsid();
             Ok(())
         });
     }
@@ -259,14 +258,21 @@ fn run(argv: &[String]) {
 /// a VM), bound.
 fn mount_share(m: &Mount, target: &str) -> io::Result<()> {
     fs::create_dir_all(target)?;
-    let rdonly = if m.writable { 0 } else { libc::MS_RDONLY };
+    let rdonly = if m.writable {
+        MountFlags::empty()
+    } else {
+        MountFlags::RDONLY
+    };
     if m.source.starts_with('/') {
-        mount_raw(Some(&m.source), target, None, libc::MS_BIND, None)?;
+        rustix::mount::mount_bind(m.source.as_str(), target)?;
         if m.writable {
             return Ok(());
         }
-        let ro = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
-        mount_raw(None, target, None, ro, None)
+        Ok(rustix::mount::mount_remount(
+            target,
+            MountFlags::BIND | MountFlags::RDONLY,
+            "",
+        )?)
     } else {
         mount(&m.source, target, "virtiofs", rdonly, "")
     }
@@ -278,60 +284,53 @@ fn mount_share(m: &Mount, target: &str) -> io::Result<()> {
 /// a Stop to make read-only: what's returned is it, open.
 fn move_into(root: &str, rw: &str) -> io::Result<fs::File> {
     // pivot_root refuses a shared mount, and init.krun makes / shared.
-    mount_raw(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+    rustix::mount::mount_change("/", Propagation::REC | Propagation::PRIVATE)?;
     let run = format!("{root}/run");
     fs::create_dir_all(&run)?;
-    mount_raw(Some(rw), &run, None, libc::MS_MOVE, None)
-        .map_err(|e| failed("moving the bottle's disk", e))?;
+    rustix::mount::mount_move(rw, run.as_str())
+        .map_err(|e| failed("moving the bottle's disk", e.into()))?;
     std::env::set_current_dir(root)?;
     // The old root is put on top of the new, then detached: pivot_root(".", ".").
-    let dot = c".";
-    // SAFETY: pivot_root and umount2 take paths, given as C strings.
-    unsafe {
-        if libc::syscall(libc::SYS_pivot_root, dot.as_ptr(), dot.as_ptr()) < 0 {
-            return Err(failed("pivot_root", io::Error::last_os_error()));
-        }
-        if libc::umount2(dot.as_ptr(), libc::MNT_DETACH) < 0 {
-            return Err(failed("detaching the old root", io::Error::last_os_error()));
-        }
-    }
+    rustix::process::pivot_root(".", ".").map_err(|e| failed("pivot_root", e.into()))?;
+    rustix::mount::unmount(".", rustix::mount::UnmountFlags::DETACH)
+        .map_err(|e| failed("detaching the old root", e.into()))?;
     std::env::set_current_dir("/")?;
     let upper = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
         .open("/run")?;
     // Shared again, as init.krun had it, for what runs containers in the bottle.
-    mount_raw(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
+    rustix::mount::mount_change("/", Propagation::REC | Propagation::SHARED)?;
     Ok(upper)
 }
 
 /// /proc, /sys, /dev and the rest, again, in the bottle's root.
 fn mount_system() -> io::Result<()> {
-    let quiet = libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_RELATIME;
-    let mounts: [(&str, &str, &str, libc::c_ulong, &str); 7] = [
+    let quiet = MountFlags::NODEV | MountFlags::NOEXEC | MountFlags::NOSUID | MountFlags::RELATIME;
+    let mounts: [(&str, &str, &str, MountFlags, &str); 7] = [
         ("proc", "/proc", "proc", quiet, ""),
         ("sysfs", "/sys", "sysfs", quiet, ""),
         ("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet, ""),
-        ("devtmpfs", "/dev", "devtmpfs", libc::MS_RELATIME, ""),
+        ("devtmpfs", "/dev", "devtmpfs", MountFlags::RELATIME, ""),
         (
             "devpts",
             "/dev/pts",
             "devpts",
-            libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_RELATIME,
+            MountFlags::NOEXEC | MountFlags::NOSUID | MountFlags::RELATIME,
             "gid=5,mode=620,ptmxmode=666",
         ),
         (
             "tmpfs",
             "/dev/shm",
             "tmpfs",
-            libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_RELATIME,
+            MountFlags::NOEXEC | MountFlags::NOSUID | MountFlags::RELATIME,
             "",
         ),
         (
             "tmpfs",
             "/run",
             "tmpfs",
-            libc::MS_NOSUID | libc::MS_NODEV,
+            MountFlags::NOSUID | MountFlags::NODEV,
             "mode=0755",
         ),
     ];
@@ -371,40 +370,13 @@ fn mount(
     source: &str,
     target: &str,
     fstype: &str,
-    flags: libc::c_ulong,
+    flags: MountFlags,
     data: &str,
 ) -> io::Result<()> {
-    mount_raw(Some(source), target, Some(fstype), flags, Some(data))
+    let data =
+        std::ffi::CString::new(data).map_err(|_| io::Error::other(format!("{data:?}: a NUL")))?;
+    rustix::mount::mount(source, target, fstype, flags, data.as_c_str())
         .map_err(|e| io::Error::other(format!("mounting {source} on {target} ({fstype}): {e}")))
-}
-
-fn mount_raw(
-    source: Option<&str>,
-    target: &str,
-    fstype: Option<&str>,
-    flags: libc::c_ulong,
-    data: Option<&str>,
-) -> io::Result<()> {
-    let c = |s: &str| CString::new(s).map_err(|_| io::Error::other(format!("{s:?}: a NUL")));
-    let source = source.map(c).transpose()?;
-    let target_c = c(target)?;
-    let fstype = fstype.map(c).transpose()?;
-    let data = data.map(c).transpose()?;
-    let ptr = |s: &Option<CString>| s.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
-    // SAFETY: mount reads the C strings given, or takes NULL for those not.
-    let ret = unsafe {
-        libc::mount(
-            ptr(&source),
-            target_c.as_ptr(),
-            ptr(&fstype),
-            flags,
-            ptr(&data).cast(),
-        )
-    };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 fn failed(what: &str, e: io::Error) -> io::Error {

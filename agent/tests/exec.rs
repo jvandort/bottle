@@ -282,8 +282,7 @@ fn says_why_a_command_cant_run() {
 
 #[test]
 fn runs_as_another_user_when_root() {
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } != 0 {
+    if !rustix::process::geteuid().is_root() {
         eprintln!("skipped: needs root");
         return;
     }

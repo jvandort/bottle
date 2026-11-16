@@ -9,6 +9,7 @@ publish.workspace = true
 bottle-agent-proto.workspace = true
 libc.workspace = true
 rcgen.workspace = true
+rustix.workspace = true
 rustls-native-certs.workspace = true
 rustls.workspace = true
 serde.workspace = true

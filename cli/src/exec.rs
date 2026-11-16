@@ -9,13 +9,15 @@
 //! the command.
 
 use std::io;
-use std::mem::zeroed;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
 use bottle_agent_client::{Control, Start, WinSize, run, status};
+use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGWINCH};
+use signal_hook::iterator::Signals;
 
 use crate::FAILED;
 
@@ -26,7 +28,7 @@ pub const USAGE: &str =
 const DEFAULT_SIZE: WinSize = WinSize { rows: 24, cols: 80 };
 
 /// The signals passed on to the command; SIGWINCH is this terminal's size changing.
-const FORWARDED: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+const FORWARDED: [i32; 3] = [SIGINT, SIGTERM, SIGHUP];
 
 struct Args {
     socket: PathBuf,
@@ -72,9 +74,14 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
         Ok(args) => args,
         Err(e) => return crate::own_usage_error(&e, USAGE),
     };
-    // Before any thread starts, so they all inherit it: these signals are waited for, below, and
-    // never interrupt anything.
-    let signals = block_signals();
+    // Caught from here on (a handler that only wakes the thread below), and read there.
+    let signals = match Signals::new(FORWARDED.into_iter().chain([SIGWINCH])) {
+        Ok(signals) => signals,
+        Err(e) => {
+            eprintln!("bottle-cli: catching signals: {e}");
+            return ExitCode::from(FAILED);
+        }
+    };
     let (controls, received) = channel();
     if args.tty {
         args.start.tty = Some(window_size().unwrap_or(DEFAULT_SIZE));
@@ -101,38 +108,11 @@ pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// Does nothing: SIGWINCH's handler, so that it's kept pending for sigwait. macOS discards a signal
-/// whose action is to be ignored, as SIGWINCH's default is, even while it's blocked.
-extern "C" fn nothing(_: libc::c_int) {}
-
-fn block_signals() -> libc::sigset_t {
-    // SAFETY: a handler that does nothing set for SIGWINCH; a sigset made empty, then filled in,
-    // and this thread's mask set from it.
-    unsafe {
-        libc::signal(
-            libc::SIGWINCH,
-            nothing as extern "C" fn(libc::c_int) as libc::sighandler_t,
-        );
-        let mut set: libc::sigset_t = zeroed();
-        libc::sigemptyset(&mut set);
-        for signal in FORWARDED.into_iter().chain([libc::SIGWINCH]) {
-            libc::sigaddset(&mut set, signal);
-        }
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
-    }
-}
-
-fn pass_signals_on(set: libc::sigset_t, tty: bool, controls: &Sender<Control>) {
-    loop {
-        let mut signal = 0;
-        // SAFETY: sigwait on a set of signals this process blocks.
-        if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
-            continue;
-        }
+fn pass_signals_on(mut signals: Signals, tty: bool, controls: &Sender<Control>) {
+    for signal in signals.forever() {
         let control = match signal {
-            libc::SIGWINCH if tty => Control::Resize(window_size().unwrap_or(DEFAULT_SIZE)),
-            libc::SIGWINCH => continue,
+            SIGWINCH if tty => Control::Resize(window_size().unwrap_or(DEFAULT_SIZE)),
+            SIGWINCH => continue,
             signal => Control::Signal(signal),
         };
         if controls.send(control).is_err() {
@@ -143,47 +123,34 @@ fn pass_signals_on(set: libc::sigset_t, tty: bool, controls: &Sender<Control>) {
 
 /// This terminal's size: stdout's, else stdin's.
 fn window_size() -> Option<WinSize> {
-    [libc::STDOUT_FILENO, libc::STDIN_FILENO]
+    [tcgetwinsize(io::stdout()), tcgetwinsize(io::stdin())]
         .into_iter()
-        .find_map(|fd| {
-            // SAFETY: TIOCGWINSZ writes a winsize.
-            let mut size: libc::winsize = unsafe { zeroed() };
-            let ok =
-                unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 && size.ws_row > 0;
-            ok.then_some(WinSize {
-                rows: size.ws_row,
-                cols: size.ws_col,
-            })
+        .flatten()
+        .find(|size| size.ws_row > 0)
+        .map(|size| WinSize {
+            rows: size.ws_row,
+            cols: size.ws_col,
         })
 }
 
 /// Stdin's terminal made raw, everything typed going to the command's terminal as it is, until
 /// dropped.
-struct RawMode(libc::termios);
+struct RawMode(Termios);
 
 impl RawMode {
     /// None if stdin isn't a terminal.
     fn enter() -> Option<RawMode> {
-        // SAFETY: tcgetattr writes the termios; cfmakeraw changes a copy, which tcsetattr reads.
-        unsafe {
-            let mut saved: libc::termios = zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut saved) != 0 {
-                return None;
-            }
-            let mut raw = saved;
-            libc::cfmakeraw(&mut raw);
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
-                return None;
-            }
-            Some(RawMode(saved))
-        }
+        let saved = tcgetattr(io::stdin()).ok()?;
+        let mut raw = saved.clone();
+        raw.make_raw();
+        tcsetattr(io::stdin(), OptionalActions::Now, &raw).ok()?;
+        Some(RawMode(saved))
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // SAFETY: tcsetattr reads the termios saved before.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        let _ = tcsetattr(io::stdin(), OptionalActions::Now, &self.0);
     }
 }
 

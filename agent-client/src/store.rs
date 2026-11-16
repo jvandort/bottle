@@ -6,7 +6,6 @@
 
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -67,8 +66,12 @@ impl Store {
         if !opened.metadata().ok()?.is_file() || !named(&opened, &file, &self.root) {
             return None;
         }
-        // SAFETY: futimens with a null times sets both to now, on a descriptor this owns.
-        unsafe { libc::futimens(opened.as_raw_fd(), std::ptr::null()) };
+        let now = std::time::SystemTime::now();
+        let _ = opened.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(now)
+                .set_modified(now),
+        );
         Some(opened)
     }
 
@@ -159,13 +162,10 @@ fn is_host(host: &str) -> bool {
 /// has on disk is asked for (F_GETPATH, macOS only); elsewhere, names are taken to be exact.
 #[cfg(target_os = "macos")]
 fn named(opened: &File, file: &Path, root: &Path) -> bool {
-    let mut buf = vec![0u8; libc::PATH_MAX as usize];
-    // SAFETY: F_GETPATH writes at most PATH_MAX bytes into buf.
-    if unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+    let Ok(on_disk) = rustix::fs::getpath(opened) else {
         return false;
-    }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let on_disk = String::from_utf8_lossy(&buf[..end]).into_owned();
+    };
+    let on_disk = on_disk.to_string_lossy();
     let Ok(relative) = file.strip_prefix(root) else {
         return false;
     };

@@ -2,10 +2,45 @@
 //! descriptor that reads and writes, so one type serves them.
 
 use std::io::{self, Read, Write};
-use std::mem::{size_of, zeroed};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+
+use rustix::net::addr::{SocketAddrArg, SocketAddrLen, SocketAddrOpaque};
+use rustix::net::{AddressFamily, SendFlags, SocketFlags, SocketType};
+
+/// A vsock address: rustix has none of its own.
+struct Vsock {
+    cid: u32,
+    port: u32,
+}
+
+// SAFETY: with_sockaddr hands `f` a sockaddr_vm, whole, for the duration of the call.
+unsafe impl SocketAddrArg for Vsock {
+    unsafe fn with_sockaddr<R>(
+        &self,
+        f: impl FnOnce(*const SocketAddrOpaque, SocketAddrLen) -> R,
+    ) -> R {
+        // SAFETY: an all-zero sockaddr_vm is a valid one; then filled in.
+        let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_port = self.port;
+        addr.svm_cid = self.cid;
+        f(
+            (&raw const addr).cast(),
+            size_of::<libc::sockaddr_vm>() as SocketAddrLen,
+        )
+    }
+}
+
+fn vsock_socket() -> io::Result<OwnedFd> {
+    Ok(rustix::net::socket_with(
+        AddressFamily::VSOCK,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?)
+}
 
 /// A connected stream.
 pub struct Socket(OwnedFd);
@@ -13,29 +48,9 @@ pub struct Socket(OwnedFd);
 impl Socket {
     /// A stream to vsock `port` of `cid` (the host is VMADDR_CID_HOST).
     pub fn connect_vsock(cid: u32, port: u32) -> io::Result<Socket> {
-        // SAFETY: socket and connect on a descriptor this creates; the address is zeroed, then
-        // filled in.
-        unsafe {
-            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let fd = OwnedFd::from_raw_fd(fd);
-            let mut addr: libc::sockaddr_vm = zeroed();
-            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-            addr.svm_port = port;
-            addr.svm_cid = cid;
-            let len = size_of::<libc::sockaddr_vm>() as libc::socklen_t;
-            if libc::connect(
-                fd.as_raw_fd(),
-                (&addr as *const libc::sockaddr_vm).cast(),
-                len,
-            ) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Socket(fd))
-        }
+        let fd = vsock_socket()?;
+        rustix::net::connect(&fd, &Vsock { cid, port })?;
+        Ok(Socket(fd))
     }
 
     pub fn try_clone(&self) -> io::Result<Socket> {
@@ -44,38 +59,20 @@ impl Socket {
 
     /// No more writes: the peer reads the end of the stream.
     pub fn shutdown_write(&self) {
-        // SAFETY: on a descriptor this owns.
-        unsafe { libc::shutdown(self.0.as_raw_fd(), libc::SHUT_WR) };
-    }
-}
-
-fn check(ret: isize) -> io::Result<usize> {
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(ret as usize)
+        let _ = rustix::net::shutdown(&self.0, rustix::net::Shutdown::Write);
     }
 }
 
 impl Read for Socket {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // SAFETY: reads into `buf`, at most its length.
-        check(unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) })
+        Ok(rustix::io::read(&self.0, buf)?)
     }
 }
 
 impl Write for Socket {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // SAFETY: writes from `buf`, at most its length. MSG_NOSIGNAL: a peer gone is an error,
-        // not a SIGPIPE.
-        check(unsafe {
-            libc::send(
-                self.0.as_raw_fd(),
-                buf.as_ptr().cast(),
-                buf.len(),
-                libc::MSG_NOSIGNAL,
-            )
-        })
+        // MSG_NOSIGNAL: a peer gone is an error, not a SIGPIPE.
+        Ok(rustix::net::send(&self.0, buf, SendFlags::NOSIGNAL)?)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -97,51 +94,17 @@ impl Listener {
 
     /// Listens on vsock `port`, for connections from the host.
     pub fn vsock(port: u32) -> io::Result<Listener> {
-        // SAFETY: plain socket calls on a descriptor this creates; the address is zeroed, then
-        // filled in.
-        unsafe {
-            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let fd = OwnedFd::from_raw_fd(fd);
-            let mut addr: libc::sockaddr_vm = zeroed();
-            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-            addr.svm_port = port;
-            addr.svm_cid = libc::VMADDR_CID_ANY;
-            let len = size_of::<libc::sockaddr_vm>() as libc::socklen_t;
-            if libc::bind(
-                fd.as_raw_fd(),
-                (&addr as *const libc::sockaddr_vm).cast(),
-                len,
-            ) < 0
-                || libc::listen(fd.as_raw_fd(), 128) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Listener::Vsock(fd))
-        }
+        let fd = vsock_socket()?;
+        let cid = libc::VMADDR_CID_ANY;
+        rustix::net::bind(&fd, &Vsock { cid, port })?;
+        rustix::net::listen(&fd, 128)?;
+        Ok(Listener::Vsock(fd))
     }
 
     pub fn accept(&self) -> io::Result<Socket> {
         match self {
             Listener::Unix(listener) => Ok(Socket(listener.accept()?.0.into())),
-            Listener::Vsock(fd) => {
-                // SAFETY: accept4 with no address wanted, on the listening descriptor.
-                let conn = unsafe {
-                    libc::accept4(
-                        fd.as_raw_fd(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        libc::SOCK_CLOEXEC,
-                    )
-                };
-                if conn < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // SAFETY: a descriptor accept4 just returned, owned by nothing else.
-                Ok(Socket(unsafe { OwnedFd::from_raw_fd(conn) }))
-            }
+            Listener::Vsock(fd) => Ok(Socket(rustix::net::accept_with(fd, SocketFlags::CLOEXEC)?)),
         }
     }
 }

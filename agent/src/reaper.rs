@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::process::{Child, Command};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -54,13 +54,9 @@ impl Reaper {
         // can reap it.
         let mut state = lock.lock().unwrap();
         let child = command.spawn()?;
-        // SAFETY: pidfd_open on a child that can't have been reaped yet.
-        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
-        if pidfd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a descriptor pidfd_open just returned, owned by nothing else.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
+        // The child can't have been reaped yet: the reaper reaps only with the lock.
+        let pid = rustix::process::Pid::from_child(&child);
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
         let (tx, rx) = channel();
         state.waiting.insert(child.id(), tx);
         wake.notify_all();
@@ -69,40 +65,34 @@ impl Reaper {
 }
 
 fn reap(inner: &(Mutex<State>, Condvar)) {
+    use rustix::io::Errno;
+    use rustix::process::{WaitId, WaitIdOptions, WaitOptions, wait, waitid};
     let (lock, wake) = inner;
     loop {
-        // SAFETY: waitid only writes `info`; WNOWAIT leaves the child to be reaped below.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let peeked =
-            unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if peeked == 0 {
-            // SAFETY: si_pid is set for a child's exit.
-            let pid = unsafe { info.si_pid() };
-            let mut state = lock.lock().unwrap();
-            let mut status = 0;
-            // SAFETY: waitpid only writes `status`; the child has exited, so it doesn't block.
-            if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
-                let exit = if libc::WIFSIGNALED(status) {
-                    Exit::Signal(libc::WTERMSIG(status))
-                } else {
-                    Exit::Code(libc::WEXITSTATUS(status))
-                };
-                // An orphan's status nobody's waiting for: it's reaped, and that's all.
-                if let Some(tx) = state.waiting.remove(&(pid as u32)) {
-                    let _ = tx.send(exit);
+        // Waits for a child to exit, leaving it to be reaped below, with the lock: so a child
+        // spawned is in `waiting`, its pidfd open, before it can be.
+        match waitid(WaitId::All, WaitIdOptions::EXITED | WaitIdOptions::NOWAIT) {
+            Ok(_) => {
+                let mut state = lock.lock().unwrap();
+                if let Ok(Some((pid, status))) = wait(WaitOptions::NOHANG) {
+                    let exit = match status.terminating_signal() {
+                        Some(signal) => Exit::Signal(signal),
+                        None => Exit::Code(status.exit_status().unwrap_or(0)),
+                    };
+                    // An orphan's status nobody's waiting for: it's reaped, and that's all.
+                    if let Some(tx) = state.waiting.remove(&(pid.as_raw_nonzero().get() as u32)) {
+                        let _ = tx.send(exit);
+                    }
                 }
             }
-            continue;
-        }
-        match io::Error::last_os_error().raw_os_error() {
-            Some(libc::EINTR) => {}
+            Err(Errno::INTR) => {}
             // No children: sleep until one's spawned. Orphans only come from children, but a
             // timeout costs nothing and covers whatever this misses.
-            Some(libc::ECHILD) => {
+            Err(Errno::CHILD) => {
                 let state = lock.lock().unwrap();
                 let _ = wake.wait_timeout(state, Duration::from_secs(1)).unwrap();
             }
-            _ => thread::sleep(Duration::from_millis(100)),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
         }
     }
 }

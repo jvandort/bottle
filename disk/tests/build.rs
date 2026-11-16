@@ -21,8 +21,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 fn root() -> bool {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
 fn run(command: &mut Command) -> String {
@@ -180,8 +179,8 @@ impl Vm for Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        // SAFETY: kill with a pid: the agent is its namespace's init, everything in there ends.
-        unsafe { libc::kill(self.agent_pid as libc::pid_t, libc::SIGKILL) };
+        // The agent is its namespace's init: everything in there ends.
+        kill(self.agent_pid);
         let _ = self.unshare.wait();
         for dev in &self.loops {
             let _ = Command::new("losetup").args(["-d", dev]).status();
@@ -490,4 +489,10 @@ fn pulls_an_image_from_a_registry() {
     );
     let digest = image.layers[0].digest.clone();
     assert!(digest.starts_with("sha256:"));
+}
+
+fn kill(pid: u32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
 }

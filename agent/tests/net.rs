@@ -23,8 +23,7 @@ use bottle_agent_client::net::{Network, serve};
 use bottle_agent_proto::{Exit, Start, ToGuest, ToHost};
 
 fn root() -> bool {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
 fn run(command: &mut Command) -> String {
@@ -90,8 +89,8 @@ impl Bottle {
 impl Drop for Bottle {
     fn drop(&mut self) {
         if self.agent_pid != 0 {
-            // SAFETY: kill with a pid: the agent is its namespace's init, everything in there ends.
-            unsafe { libc::kill(self.agent_pid as libc::pid_t, libc::SIGKILL) };
+            // The agent is its namespace's init: everything in there ends.
+            kill(self.agent_pid);
         }
         let _ = self.unshare.kill();
         let _ = self.unshare.wait();
@@ -240,4 +239,10 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
     let (_, exit) = bottle.exec(&["getent", "hosts", "no-such-name.invalid"]);
     assert_ne!(exit, Exit::Code(0));
     drop(bottle);
+}
+
+fn kill(pid: u32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
 }

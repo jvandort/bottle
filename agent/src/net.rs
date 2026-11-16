@@ -6,12 +6,10 @@
 //!
 //! All set up through netlink, the kernel's own interface to it: an image needs no tools for it.
 
-use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::mem::{size_of, zeroed};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::Duration;
@@ -40,14 +38,14 @@ pub struct Config {
 
 /// Brings loopback up: everything has it, network or not.
 pub fn loopback_up() -> io::Result<()> {
-    link_up(&mut Netlink::open(libc::NETLINK_ROUTE)?, index("lo")?)
+    link_up(&mut Netlink::open(None)?, index("lo")?)
 }
 
 /// Sets the network up, and serves it, on threads of its own, for as long as this process runs.
 pub fn start(config: &Config) -> io::Result<()> {
     let (address, prefix) = parse_address(&config.address)?;
     let host = config.host.clone();
-    let mut route = Netlink::open(libc::NETLINK_ROUTE)?;
+    let mut route = Netlink::open(None)?;
     link_up(&mut route, index("lo")?)?;
     create_dummy(&mut route, INTERFACE)?;
     let interface = index(INTERFACE)?;
@@ -56,7 +54,7 @@ pub fn start(config: &Config) -> io::Result<()> {
     add_default_route(&mut route, interface)?;
     let listener = TcpListener::bind(LISTEN)?;
     redirect_tcp(
-        &mut Netlink::open(libc::NETLINK_NETFILTER)?,
+        &mut Netlink::open(Some(rustix::net::netlink::NETFILTER))?,
         index("lo")?,
         LISTEN.port(),
     )?;
@@ -192,43 +190,12 @@ fn forward(conn: TcpStream, how: &str) -> io::Result<()> {
 
 /// Makes closing `conn` reset it.
 fn reset(conn: &TcpStream) {
-    let linger = libc::linger {
-        l_onoff: 1,
-        l_linger: 0,
-    };
-    // SAFETY: setsockopt with a linger struct of its size.
-    unsafe {
-        libc::setsockopt(
-            conn.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_LINGER,
-            (&linger as *const libc::linger).cast(),
-            size_of::<libc::linger>() as libc::socklen_t,
-        );
-    }
+    let _ = rustix::net::sockopt::set_socket_linger(conn, Some(std::time::Duration::ZERO));
 }
 
 /// Where a connection nftables redirected was going: conntrack remembers.
 fn original_destination(conn: &TcpStream) -> io::Result<SocketAddrV4> {
-    // SAFETY: getsockopt SO_ORIGINAL_DST writes a sockaddr_in, at most its size.
-    unsafe {
-        let mut addr: libc::sockaddr_in = zeroed();
-        let mut len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-        if libc::getsockopt(
-            conn.as_raw_fd(),
-            libc::SOL_IP,
-            libc::SO_ORIGINAL_DST,
-            (&mut addr as *mut libc::sockaddr_in).cast(),
-            &mut len,
-        ) < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(SocketAddrV4::new(
-            Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
-            u16::from_be(addr.sin_port),
-        ))
-    }
+    Ok(rustix::net::sockopt::ip_original_dst(conn)?)
 }
 
 /// The answer to the DNS query `query`, the host asked for an A record's addresses; AAAA and the
@@ -317,12 +284,15 @@ fn parse_address(cidr: &str) -> io::Result<(Ipv4Addr, u8)> {
 }
 
 fn index(name: &str) -> io::Result<u32> {
-    let c = CString::new(name).unwrap();
-    // SAFETY: if_nametoindex reads a C string.
-    match unsafe { libc::if_nametoindex(c.as_ptr()) } {
-        0 => Err(io::Error::other(format!("no interface {name}"))),
-        i => Ok(i),
-    }
+    // SIOCGIFINDEX, on a socket made for asking: what if_nametoindex does.
+    let socket = rustix::net::socket_with(
+        rustix::net::AddressFamily::INET,
+        rustix::net::SocketType::DGRAM,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )?;
+    rustix::net::netdevice::name_to_index(&socket, name)
+        .map_err(|e| io::Error::other(format!("no interface {name}: {e}")))
 }
 
 // --- netlink ------------------------------------------------------------------------------------
@@ -342,30 +312,17 @@ struct Netlink {
 }
 
 impl Netlink {
-    fn open(protocol: libc::c_int) -> io::Result<Netlink> {
-        // SAFETY: socket, then bind to the kernel's address (all zero but the family).
-        unsafe {
-            let fd = libc::socket(
-                libc::AF_NETLINK,
-                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-                protocol,
-            );
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let fd = OwnedFd::from_raw_fd(fd);
-            let mut addr: libc::sockaddr_nl = zeroed();
-            addr.nl_family = libc::AF_NETLINK as libc::sa_family_t;
-            if libc::bind(
-                fd.as_raw_fd(),
-                (&addr as *const libc::sockaddr_nl).cast(),
-                size_of::<libc::sockaddr_nl>() as libc::socklen_t,
-            ) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Netlink { fd, seq: 0 })
-        }
+    /// A netlink socket for `protocol` (None: NETLINK_ROUTE), bound to the kernel's address.
+    fn open(protocol: Option<rustix::net::Protocol>) -> io::Result<Netlink> {
+        use rustix::net::{AddressFamily, SocketFlags, SocketType, netlink};
+        let fd = rustix::net::socket_with(
+            AddressFamily::NETLINK,
+            SocketType::RAW,
+            SocketFlags::CLOEXEC,
+            protocol,
+        )?;
+        rustix::net::bind(&fd, &netlink::SocketAddrNetlink::new(0, 0))?;
+        Ok(Netlink { fd, seq: 0 })
     }
 
     /// A message of `kind`, `flags` (NLM_F_REQUEST added) and `payload`.
@@ -386,21 +343,14 @@ impl Netlink {
     /// first error, if there is one.
     fn send(&mut self, messages: &[Vec<u8>], acks: usize) -> io::Result<()> {
         let all = messages.concat();
-        // SAFETY: send of a buffer this owns.
-        if unsafe { libc::send(self.fd.as_raw_fd(), all.as_ptr().cast(), all.len(), 0) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        rustix::net::send(&self.fd, &all, rustix::net::SendFlags::empty())?;
         let mut acked = 0;
         let mut buf = vec![0u8; 16384];
         while acked < acks {
-            // SAFETY: recv into a buffer this owns, at most its length.
-            let n =
-                unsafe { libc::recv(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
-            if n < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            let (n, _) =
+                rustix::net::recv(&self.fd, &mut buf[..], rustix::net::RecvFlags::empty())?;
             let mut at = 0;
-            while at + 16 <= n as usize {
+            while at + 16 <= n {
                 let len = u32::from_ne_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
                 let kind = u16::from_ne_bytes(buf[at + 4..at + 6].try_into().unwrap());
                 if len < 16 {
