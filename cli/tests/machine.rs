@@ -59,8 +59,7 @@ sys.exit(code)
 "#;
 
 fn root() -> bool {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
 /// bottle-agent, built here: another package's binary, which cargo doesn't hand this test.

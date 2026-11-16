@@ -8,7 +8,9 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -17,6 +19,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use rustix::termios::LocalModes;
 
 fn agent_binary() -> &'static PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
@@ -82,16 +86,15 @@ impl Agent {
         let mut command = Command::new(agent_binary());
         command.arg("--unix").arg(&socket);
         if let Some(n) = open_files {
-            // SAFETY: setrlimit between fork and exec, reading an rlimit.
+            use rustix::process::{Resource, Rlimit, setrlimit};
+            // SAFETY: setrlimit between fork and exec, a system call with no allocation.
             unsafe {
                 command.pre_exec(move || {
-                    let limit = libc::rlimit {
-                        rlim_cur: n,
-                        rlim_max: n,
+                    let limit = Rlimit {
+                        current: Some(n),
+                        maximum: Some(n),
                     };
-                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
+                    setrlimit(Resource::Nofile, limit)?;
                     Ok(())
                 });
             }
@@ -243,8 +246,8 @@ fn passes_signals_on_to_a_command_without_a_terminal() {
     let mut stdout = child.stdout.take().unwrap();
     let mut seen = Vec::new();
     read_until(&mut stdout, &mut seen, "ready\n");
-    // SAFETY: kill on our own child.
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let pid = rustix::process::Pid::from_child(&child);
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
     read_until(&mut stdout, &mut seen, "got TERM\n");
     assert_eq!(child.wait().unwrap().code(), Some(0));
 }
@@ -273,40 +276,65 @@ fn read_until(r: &mut impl Read, seen: &mut Vec<u8>, wanted: &str) {
 /// A terminal, as a person would run bottle-cli in: its master side for the test, and the side
 /// bottle-cli gets.
 fn terminal(rows: u16, cols: u16) -> (OwnedFd, OwnedFd) {
-    let size = libc::winsize {
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let name = ptsname(&master, Vec::new()).unwrap();
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
+        .unwrap();
+    resize(&master, rows, cols);
+    (master, slave.into())
+}
+
+fn resize(master: &OwnedFd, rows: u16, cols: u16) {
+    let size = rustix::termios::Winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let (mut master, mut slave) = (-1, -1);
-    // SAFETY: openpty writes the two descriptors; the size is read.
-    let ret = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
-    };
-    assert_eq!(ret, 0);
-    // SAFETY: descriptors openpty just made.
-    unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+    rustix::termios::tcsetwinsize(master, size).unwrap();
 }
 
-fn termios(fd: &OwnedFd) -> libc::termios {
-    // SAFETY: tcgetattr writes the termios.
-    let mut t: libc::termios = unsafe { std::mem::zeroed() };
-    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut t) }, 0);
-    t
+/// Whether `fd`'s terminal has all of `modes` on.
+fn has(fd: &OwnedFd, modes: LocalModes) -> bool {
+    rustix::termios::tcgetattr(fd)
+        .unwrap()
+        .local_modes
+        .contains(modes)
+}
+
+/// Whether `fd`'s terminal has none of `modes` on.
+fn has_none(fd: &OwnedFd, modes: LocalModes) -> bool {
+    !rustix::termios::tcgetattr(fd)
+        .unwrap()
+        .local_modes
+        .intersects(modes)
+}
+
+/// The terminal on stdin made the controlling terminal of a session of its own, as a person's
+/// shell has it: bottle-cli's own.
+fn in_terminal(command: &mut Command) {
+    // SAFETY: setsid and TIOCSCTTY between fork and exec, system calls with no allocation.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()?;
+            rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
+            Ok(())
+        });
+    }
 }
 
 #[test]
 fn gives_the_command_this_terminal_raw_and_sized_and_sets_it_back() {
     let agent = Agent::start();
     let (master, slave) = terminal(30, 100);
-    assert_ne!(termios(&slave).c_lflag & libc::ICANON, 0);
+    assert!(has(&slave, LocalModes::ICANON));
 
     let mut command = agent.exec(&["-t", "sh", "-c", "stty size; read line; stty size"]);
     let end = |fd: &OwnedFd| Stdio::from(fd.try_clone().unwrap());
@@ -314,37 +342,22 @@ fn gives_the_command_this_terminal_raw_and_sized_and_sets_it_back() {
         .stdin(end(&slave))
         .stdout(end(&slave))
         .stderr(end(&slave));
-    // SAFETY: setsid and TIOCSCTTY between fork and exec: the terminal is bottle-cli's own.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    in_terminal(&mut command);
     let mut child = command.spawn().unwrap();
     let mut screen = File::from(master.try_clone().unwrap());
     let mut seen = Vec::new();
     read_until(&mut screen, &mut seen, "30 100");
     // Raw while the command runs: typing goes to it as it is.
-    assert_eq!(termios(&slave).c_lflag & (libc::ICANON | libc::ECHO), 0);
+    assert!(has_none(&slave, LocalModes::ICANON | LocalModes::ECHO));
 
-    let size = libc::winsize {
-        ws_row: 40,
-        ws_col: 120,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: TIOCSWINSZ reads a winsize; bottle-cli, in the foreground, gets SIGWINCH.
-    unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+    // Bottle-cli, in the foreground, gets SIGWINCH.
+    resize(&master, 40, 120);
     thread::sleep(Duration::from_millis(300));
     screen.write_all(b"go\r").unwrap();
     read_until(&mut screen, &mut seen, "40 120");
     assert_eq!(child.wait().unwrap().code(), Some(0));
-    assert_ne!(
-        termios(&slave).c_lflag & libc::ICANON,
-        0,
+    assert!(
+        has(&slave, LocalModes::ICANON),
         "the terminal wasn't set back"
     );
 }
@@ -364,15 +377,7 @@ fn ctrl_c_typed_interrupts_the_command() {
         .stdin(end(&slave))
         .stdout(end(&slave))
         .stderr(end(&slave));
-    // SAFETY: setsid and TIOCSCTTY between fork and exec: the terminal is bottle-cli's own.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    in_terminal(&mut command);
     let mut child = command.spawn().unwrap();
     let mut screen = File::from(master.try_clone().unwrap());
     let mut seen = Vec::new();

@@ -28,13 +28,14 @@
 //! (xtask/hypervisor.entitlements).
 
 use std::env;
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::FAILED;
+use crate::libkrun as krun;
 
 pub const USAGE: &str = "boot SOCKET UPPER [DISK]... [--cpus N] [--mem MIB] [--size GIB] \
                          [--hostname NAME] [--console FILE] [--env NAME=VALUE]... \
@@ -61,18 +62,6 @@ const KERNEL_FORMAT: u32 = 1;
 const FREE_PAGE_REPORTING_MODE_REPLACE: u32 = 1;
 /// The tag of the first root's virtio-fs device.
 const ROOT_TAG: &std::ffi::CStr = c"/dev/root";
-
-/// `ret`, a libkrun return value, as a result: what failed, and its errno.
-fn check(what: &str, ret: i32) -> io::Result<i32> {
-    if ret < 0 {
-        Err(io::Error::other(format!(
-            "{what}: {}",
-            io::Error::from_raw_os_error(-ret)
-        )))
-    } else {
-        Ok(ret)
-    }
-}
 
 /// The kernel the VM boots (see KERNEL_FORMAT): $BOTTLE_KERNEL, else `kernel` beside this program
 /// (see `cargo xtask dist`). Without one, libkrun loads libkrunfw, as it would anyway, if it can
@@ -348,137 +337,76 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         .map(|(i, (source, _, writable))| Ok((c(&format!("m{i}"))?, path(source)?, *writable)))
         .collect::<io::Result<Vec<_>>>()?;
     let init: Vec<CString> = init.iter().map(|a| c(a)).collect::<io::Result<_>>()?;
-    let argv = nul_terminated(&init);
-    let env = [c(PATH)?];
-    let envp = nul_terminated(&env);
+    let argv: Vec<&CStr> = init.iter().map(CString::as_c_str).collect();
+    let env = c(PATH)?;
     let console = args
         .console
         .as_deref()
         .map(|p| c(&p.to_string_lossy()))
         .transpose()?;
 
-    // SAFETY: libkrun's functions, called as libkrun.h says, with C strings and arrays that live
-    // until krun_start_enter, which doesn't return once the VM has started.
-    unsafe {
-        let level = env::var("BOTTLE_KRUN_LOG")
-            .ok()
-            .and_then(|l| l.parse().ok())
-            .unwrap_or(1);
-        krun::krun_set_log_level(level);
-        let ctx = check("creating libkrun's context", krun::krun_create_ctx())? as u32;
-        // No more than the hypervisor gives a VM (HVF's own limit on a Mac; KVM's on Linux).
-        let most = krun::krun_get_max_vcpus();
-        let cpus = match u8::try_from(most) {
-            Ok(most) if most > 0 && args.cpus > most => most,
-            _ => args.cpus,
-        };
-        check(
-            "setting cpus and memory",
-            krun::krun_set_vm_config(ctx, cpus, args.mem_mib),
+    let level = env::var("BOTTLE_KRUN_LOG")
+        .ok()
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(1);
+    krun::set_log_level(level);
+    let vm = krun::Vm::new()?;
+    // No more than the hypervisor gives a VM (HVF's own limit on a Mac; KVM's on Linux).
+    let cpus = match krun::max_vcpus() {
+        Some(most) if args.cpus > most => most,
+        _ => args.cpus,
+    };
+    vm.set_vm_config(cpus, args.mem_mib)?;
+    // Memory the guest frees goes back to the host, really, on macOS too.
+    vm.set_free_page_reporting_mode(FREE_PAGE_REPORTING_MODE_REPLACE)?;
+    // vsock for the agent alone: no TSI, which would give the guest sockets of the host's.
+    vm.disable_implicit_vsock()?;
+    vm.add_vsock(0)?;
+    vm.add_vsock_port("adding the agent's port", AGENT_PORT, &socket, true)?;
+    if let Some(net_socket) = &net_socket {
+        // The guest connects; libkrun connects here for it.
+        vm.add_vsock_port(
+            "adding the network's port",
+            bottle_agent_client::net::PORT,
+            net_socket,
+            false,
         )?;
-        // Memory the guest frees goes back to the host, really, on macOS too.
-        check(
-            "setting free page reporting",
-            krun::krun_set_balloon_free_page_reporting_mode(ctx, FREE_PAGE_REPORTING_MODE_REPLACE),
-        )?;
-        // vsock for the agent alone: no TSI, which would give the guest sockets of the host's.
-        check(
-            "disabling the implicit vsock",
-            krun::krun_disable_implicit_vsock(ctx),
-        )?;
-        check("adding vsock", krun::krun_add_vsock(ctx, 0))?;
-        check(
-            "adding the agent's port",
-            krun::krun_add_vsock_port2(ctx, AGENT_PORT, socket.as_ptr(), true),
-        )?;
-        if let Some(net_socket) = &net_socket {
-            // The guest connects; libkrun connects here for it.
-            check(
-                "adding the network's port",
-                krun::krun_add_vsock_port2(
-                    ctx,
-                    bottle_agent_client::net::PORT,
-                    net_socket.as_ptr(),
-                    false,
-                ),
-            )?;
-        }
-        // The first root: no host directory, read-only.
-        check(
-            "adding the root",
-            krun::krun_add_virtiofs3(ctx, ROOT_TAG.as_ptr(), std::ptr::null(), 0, true),
-        )?;
-        for dir in MOUNT_POINTS {
-            check(
-                &format!("adding /{}", dir.to_string_lossy()),
-                krun::krun_fs_add_overlay_dir(ctx, ROOT_TAG.as_ptr(), dir.as_ptr(), 0o040755),
-            )?;
-        }
-        check(
-            "adding the agent",
-            krun::krun_fs_add_overlay_file(
-                ctx,
-                ROOT_TAG.as_ptr(),
-                c"init.krun".as_ptr(),
-                agent.as_ptr(),
-                agent.len(),
-                0o100755,
-                false,
-            ),
-        )?;
-        check(
-            "adding the bottle's config",
-            krun::krun_fs_add_overlay_file(
-                ctx,
-                ROOT_TAG.as_ptr(),
-                CONFIG.as_ptr(),
-                config.as_ptr(),
-                config.len(),
-                0o100644,
-                false,
-            ),
-        )?;
-        for (tag, source, writable) in &mounts {
-            check(
-                "adding a mount",
-                krun::krun_add_virtiofs3(ctx, tag.as_ptr(), source.as_ptr(), 0, !writable),
-            )?;
-        }
-        for (id, disk) in ids.iter().zip(&disks) {
-            check(
-                "adding a stage disk",
-                krun::krun_add_disk2(ctx, id.as_ptr(), disk.as_ptr(), DISK_FORMAT_RAW, true),
-            )?;
-        }
-        check(
-            "adding the bottle's disk",
-            krun::krun_add_disk2(ctx, c"rw".as_ptr(), upper.as_ptr(), DISK_FORMAT_RAW, false),
-        )?;
-        check(
-            "setting what the VM runs",
-            krun::krun_set_exec(ctx, c"/init.krun".as_ptr(), argv.as_ptr(), envp.as_ptr()),
-        )?;
-        if let Some(console) = &console {
-            check(
-                "setting the console",
-                krun::krun_set_console_output(ctx, console.as_ptr()),
-            )?;
-        }
-        if let Some(kernel) = &kernel {
-            check(
-                "setting the kernel",
-                krun::krun_set_kernel(
-                    ctx,
-                    kernel.as_ptr(),
-                    KERNEL_FORMAT,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                ),
-            )?;
-        }
-        check("starting the VM", krun::krun_start_enter(ctx))?;
     }
-    Err(io::Error::other("libkrun returned from starting the VM"))
+    // The first root: no host directory, read-only.
+    vm.add_virtiofs("adding the root", ROOT_TAG, None, true)?;
+    for dir in MOUNT_POINTS {
+        let what = format!("adding /{}", dir.to_string_lossy());
+        vm.add_overlay_dir(&what, ROOT_TAG, dir, 0o040755)?;
+    }
+    vm.add_overlay_file("adding the agent", ROOT_TAG, c"init.krun", agent, 0o100755)?;
+    vm.add_overlay_file(
+        "adding the bottle's config",
+        ROOT_TAG,
+        CONFIG,
+        config,
+        0o100644,
+    )?;
+    for (tag, source, writable) in &mounts {
+        vm.add_virtiofs("adding a mount", tag, Some(source), !writable)?;
+    }
+    for (id, disk) in ids.iter().zip(&disks) {
+        vm.add_disk("adding a stage disk", id, disk, DISK_FORMAT_RAW, true)?;
+    }
+    vm.add_disk(
+        "adding the bottle's disk",
+        c"rw",
+        &upper,
+        DISK_FORMAT_RAW,
+        false,
+    )?;
+    vm.set_exec(c"/init.krun", &argv, &[&env])?;
+    if let Some(console) = &console {
+        vm.set_console_output(console)?;
+    }
+    if let Some(kernel) = &kernel {
+        vm.set_kernel(kernel, KERNEL_FORMAT)?;
+    }
+    Err(vm.start_enter())
 }
 
 /// The bottle's address, on an interface of its own with nothing behind it: what leaves it is the
@@ -514,15 +442,6 @@ pub fn policy_given(arg: &str) -> io::Result<Vec<u8>> {
 pub fn policy(path: &Path) -> io::Result<bottle_agent_client::policy::Policy> {
     let json = fs::read(path).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
     serde_json::from_slice(&json).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
-}
-
-/// Pointers to `strings`, then NULL, as C wants an array of strings.
-fn nul_terminated(strings: &[CString]) -> Vec<*const c_char> {
-    strings
-        .iter()
-        .map(|s| s.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect()
 }
 
 /// The agent bottle-cli was built with, if it was (see build.rs).

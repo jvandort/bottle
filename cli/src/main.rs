@@ -9,6 +9,7 @@ mod boot;
 mod build;
 mod copy;
 mod exec;
+mod libkrun;
 mod machine;
 mod upkeep;
 
