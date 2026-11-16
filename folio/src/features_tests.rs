@@ -628,7 +628,7 @@ fn lifecycle_hooks_are_unsupported() {
 
 #[test]
 fn its_id_must_be_its_directorys() {
-    invalid("id must be 'a'", json!({"id": "b"}));
+    invalid("id must be \"a\"", json!({"id": "b"}));
 }
 
 #[test]
@@ -676,7 +676,7 @@ fn an_options_default_is_in_its_enum() {
 #[test]
 fn unsupported_option_keys() {
     invalid(
-        "option 'x': unsupported: format",
+        "option \"x\": unsupported: format",
         json!({"options": {"x": {"type": "string", "default": "", "format": "uri"}}}),
     );
 }
@@ -692,7 +692,7 @@ fn container_env_values_are_strings() {
 #[test]
 fn container_env_names() {
     invalid(
-        "invalid variable name '1X'",
+        "invalid variable name \"1X\"",
         json!({"containerEnv": {"1X": "v"}}),
     );
 }
@@ -724,7 +724,7 @@ fn dependency_options_are_unsupported() {
 #[test]
 fn an_unknown_dependency() {
     invalid(
-        "dependsOn: no feature named 'ghost'",
+        "dependsOn: no feature named \"ghost\"",
         json!({"dependsOn": {"ghost": {}}}),
     );
 }
@@ -732,7 +732,7 @@ fn an_unknown_dependency() {
 #[test]
 fn an_unknown_installs_after() {
     invalid(
-        "installsAfter: no feature named 'ghost'",
+        "installsAfter: no feature named \"ghost\"",
         json!({"installsAfter": ["ghost"]}),
     );
 }
@@ -968,7 +968,7 @@ fn a_required_option_is_what_the_user_set_not_what_it_defaults_to() {
 #[test]
 fn required_options_must_be_options() {
     invalid(
-        "requiredOptions: no option 'ghost'",
+        "requiredOptions: no option \"ghost\"",
         json!({"customizations": {"bottle": {"requiredOptions": ["ghost"]}}}),
     );
 }
@@ -1003,7 +1003,7 @@ fn what_inject_may_say() {
         ),
         (
             json!({"hosts": ["${flag}"], "value": "Bearer ${credential}"}),
-            "option 'flag' is a boolean, not a host",
+            "option \"flag\" is a boolean, not a host",
         ),
         (
             json!({"hosts": ["x"], "value": "Bearer"}),
@@ -1027,11 +1027,11 @@ fn what_inject_may_say() {
         ),
         (
             routes(json!({"forbid": ["/x"]})),
-            "inject.forbid: '/x' isn't METHOD",
+            "inject.forbid: \"/x\" isn't METHOD",
         ),
         (
             routes(json!({"allow": ["GET x"]})),
-            "inject.allow: 'GET x' isn't METHOD",
+            "inject.allow: \"GET x\" isn't METHOD",
         ),
         (
             routes(json!({"allow": ["GET,PUT /x"]})),
@@ -1043,13 +1043,13 @@ fn what_inject_may_say() {
         ),
         (
             routes(json!({"forbid": ["* /api/auth/**"], "allow": ["GET /api/**"]})),
-            "'GET /api/**' is allowed, but reaches '* /api/auth/**', which is forbidden: narrow it",
+            "\"GET /api/**\" is allowed, but reaches \"* /api/auth/**\", which is forbidden: narrow it",
         ),
         (
             routes(
                 json!({"forbid": ["POST /api/auth/token"], "rewrite": [{"route": "POST /api/*/*", "json": "key"}]}),
             ),
-            "'POST /api/*/*' is allowed, but reaches",
+            "\"POST /api/*/*\" is allowed, but reaches",
         ),
         (
             routes(json!({"rewrite": {}})),
@@ -1165,7 +1165,7 @@ fn invalid_json() {
 fn an_unknown_feature() {
     let f = Features::empty();
     f.feature("a", json!({}));
-    fails(load_json("nope"), "no feature named 'nope'; available: a");
+    fails(load_json("nope"), "no feature named \"nope\"; available: a");
 }
 
 // --- options ------------------------------------------------------------------------------
@@ -1219,7 +1219,7 @@ fn an_unknown_option() {
     let _f = with_options();
     fails(
         resolve_json(&["f:nope=1"]),
-        "feature f has no option 'nope' (options: docs, flavor, version)",
+        "feature f has no option \"nope\" (options: docs, flavor, version)",
     );
 }
 
@@ -1228,7 +1228,7 @@ fn boolean_values() {
     let _f = with_options();
     fails(
         resolve_json(&["f:docs=yes"]),
-        "option docs is true or false, not 'yes'",
+        "option docs is true or false, not \"yes\"",
     );
 }
 
@@ -1237,7 +1237,7 @@ fn an_enum() {
     let _f = with_options();
     fails(
         resolve_json(&["f:flavor=c"]),
-        "option flavor must be one of a, b, not 'c'",
+        "option flavor must be one of a, b, not \"c\"",
     );
 }
 
@@ -1568,7 +1568,7 @@ fn a_feature_says_its_apt_as_folio_takes_it() {
         "keyless",
         json!({"customizations": {"bottle": {"apt": {"repositories": [repository(json!({}))]}}}}),
     );
-    fails(load_json("keyless"), "key 'example.asc' is missing");
+    fails(load_json("keyless"), "key \"example.asc\" is missing");
 }
 
 #[test]

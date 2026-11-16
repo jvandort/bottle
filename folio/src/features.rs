@@ -165,7 +165,7 @@ use std::path::PathBuf;
 use serde_json::json;
 use serde_json::{Map, Value};
 
-use crate::repr;
+use crate::quoted;
 use crate::routes::Route;
 
 pub const BASE: &str = "base";
@@ -461,7 +461,7 @@ impl Feature {
             Some(v) => v.to_string(),
             None => self.filled(host),
         };
-        let place = format!("{}: credential {}", self.id, repr(&credential.name));
+        let place = format!("{}: credential {}", self.id, quoted(&credential.name));
         if let Some(option) = option
             && filled.is_empty()
         {
@@ -477,7 +477,7 @@ impl Feature {
         if filled.contains('/') || filled.contains(',') || filled.chars().any(char::is_whitespace) {
             return Err(format!(
                 "{place}: {} must be a host, reached over https, with no path",
-                repr(filled)
+                quoted(filled)
             ));
         }
         Ok(filled.to_string())
@@ -520,7 +520,7 @@ impl Feature {
                     return Err(format!(
                         "{}: {}, from its options, isn't an apt package's name",
                         self.id,
-                        repr(name)
+                        quoted(name)
                     ));
                 }
             }
@@ -543,7 +543,7 @@ impl Feature {
                 return Err(format!(
                     "feature {} has no option {} (options: {})",
                     self.id,
-                    repr(name),
+                    quoted(name),
                     or_none(&known)
                 ));
             };
@@ -555,7 +555,7 @@ impl Feature {
                         return Err(format!(
                             "{}: option {name} is true or false, not {}",
                             self.id,
-                            repr(raw)
+                            quoted(raw)
                         ));
                     }
                 }
@@ -570,7 +570,7 @@ impl Feature {
                     "{}: option {name} must be one of {}, not {}",
                     self.id,
                     texts.join(", "),
-                    repr(raw)
+                    quoted(raw)
                 ));
             }
             // A required option's default is a placeholder, so what the user set is kept even
@@ -830,7 +830,7 @@ pub fn load(id: &str) -> Result<Feature> {
         let available = available();
         return Err(format!(
             "no feature named {}; available: {}",
-            repr(id),
+            quoted(id),
             if available.is_empty() {
                 "none".into()
             } else {
@@ -863,7 +863,10 @@ pub fn load(id: &str) -> Result<Feature> {
         )));
     }
     if spec.get("id").and_then(Value::as_str) != Some(id) {
-        return Err(fail(format!("id must be {}, its directory name", repr(id))));
+        return Err(fail(format!(
+            "id must be {}, its directory name",
+            quoted(id)
+        )));
     }
     let version = match spec.get("version").and_then(Value::as_str) {
         Some(v) if !v.is_empty() => v.to_string(),
@@ -899,7 +902,7 @@ pub fn load(id: &str) -> Result<Feature> {
             return Err(fail(format!(
                 "customizations.bottle.apt.repositories: {}'s key {} is missing",
                 repository.uri,
-                repr(&repository.key)
+                quoted(&repository.key)
             )));
         }
     }
@@ -913,13 +916,13 @@ fn options(options: &Value) -> Result<BTreeMap<String, FeatureOption>> {
     let mut parsed = BTreeMap::new();
     for (name, option) in options {
         let Some(option) = option.as_object() else {
-            return Err(format!("option {} must be an object", repr(name)));
+            return Err(format!("option {} must be an object", quoted(name)));
         };
         let extra = unsupported(option, &OPTION_KEYS);
         if !extra.is_empty() {
             return Err(format!(
                 "option {}: unsupported: {}",
-                repr(name),
+                quoted(name),
                 extra.join(", ")
             ));
         }
@@ -928,7 +931,7 @@ fn options(options: &Value) -> Result<BTreeMap<String, FeatureOption>> {
             _ => {
                 return Err(format!(
                     "option {}: type must be one of string, boolean",
-                    repr(name)
+                    quoted(name)
                 ));
             }
         };
@@ -942,7 +945,7 @@ fn options(options: &Value) -> Result<BTreeMap<String, FeatureOption>> {
                 )
             });
         let Some(default) = default else {
-            return Err(format!("option {}: needs a {kind} default", repr(name)));
+            return Err(format!("option {}: needs a {kind} default", quoted(name)));
         };
         let allowed = match option.get("enum") {
             None => None,
@@ -952,17 +955,25 @@ fn options(options: &Value) -> Result<BTreeMap<String, FeatureOption>> {
                     .filter_map(OptionValue::from_json)
                     .collect::<Vec<_>>(),
             ),
-            Some(_) => return Err(format!("option {}: default isn't in its enum", repr(name))),
+            Some(_) => {
+                return Err(format!(
+                    "option {}: default isn't in its enum",
+                    quoted(name)
+                ));
+            }
         };
         if let Some(allowed) = &allowed
             && !allowed.contains(&default)
         {
-            return Err(format!("option {}: default isn't in its enum", repr(name)));
+            return Err(format!(
+                "option {}: default isn't in its enum",
+                quoted(name)
+            ));
         }
         if !is_env_name(&option_env_name(name)) {
             return Err(format!(
                 "option {}: doesn't make a valid environment variable name",
-                repr(name)
+                quoted(name)
             ));
         }
         parsed.insert(
@@ -1021,7 +1032,7 @@ fn customizations(feature: &mut Feature, customizations: &Value) -> Result<()> {
         if !feature.options.contains_key(name) {
             return Err(format!(
                 "customizations.bottle.requiredOptions: no option {} (options: {})",
-                repr(name),
+                quoted(name),
                 or_none(&known)
             ));
         }
@@ -1060,7 +1071,7 @@ fn credential(
     spec: &Value,
     options: &BTreeMap<String, FeatureOption>,
 ) -> Result<Credential> {
-    let place = format!("credential {}", repr(name));
+    let place = format!("credential {}", quoted(name));
     if !is_id(name) {
         return Err(format!(
             "{place}: names use lowercase letters, digits and '-'"
@@ -1089,7 +1100,7 @@ fn credential(
                 if options.get(option).is_none_or(|o| o.kind != "string") {
                     return Err(format!(
                         "{place}: properties: {} names no string option of this feature",
-                        repr(p)
+                        quoted(p)
                     ));
                 }
             }
@@ -1149,7 +1160,7 @@ fn inject(
         if host.contains("//") {
             return Err(format!(
                 "{place}: inject.hosts: {} is a host or host:port, always reached over https",
-                repr(host)
+                quoted(host)
             ));
         }
         for option in references(host) {
@@ -1157,14 +1168,14 @@ fn inject(
                 None => {
                     return Err(format!(
                         "{place}: inject.hosts: {} names no option of this feature (options: {})",
-                        repr(host),
+                        quoted(host),
                         or_none(&known)
                     ));
                 }
                 Some(o) if o.kind != "string" => {
                     return Err(format!(
                         "{place}: inject.hosts: option {} is a {}, not a host",
-                        repr(option),
+                        quoted(option),
                         o.kind
                     ));
                 }
@@ -1217,8 +1228,8 @@ fn inject(
             if route.overlaps_forbidden(forbidden) {
                 return Err(format!(
                     "{place}: {} is allowed, but reaches {}, which is forbidden: narrow it",
-                    repr(&route.text),
-                    repr(&forbidden.text)
+                    quoted(&route.text),
+                    quoted(&forbidden.text)
                 ));
             }
         }
@@ -1280,7 +1291,7 @@ fn rewrite(rewrite: &Value, place: &str) -> Result<Rewrite> {
         return Err(format!(
             "{place}: {}: {} isn't a header name",
             route.text,
-            repr(&header)
+            quoted(&header)
         ));
     }
     let encoding = match rewrite.get("encoding") {
@@ -1343,7 +1354,7 @@ fn cache(cache: &Value) -> Result<Cache> {
         if !is_cache_host(host) {
             return Err(format!(
                 "customizations.bottle.cache.hosts: {} must be a lowercase host name, or *. and one",
-                repr(host)
+                quoted(host)
             ));
         }
     }
@@ -1413,7 +1424,7 @@ fn apt(spec: &Value, options: &BTreeMap<String, FeatureOption>) -> Result<Apt> {
             .ok_or_else(|| {
                 format!(
                     "{place}.repositories: uri {} must be an http:// or https:// URL",
-                    json_repr(&r["uri"])
+                    r["uri"]
                 )
             })?;
         let suite = r["suite"]
@@ -1422,7 +1433,7 @@ fn apt(spec: &Value, options: &BTreeMap<String, FeatureOption>) -> Result<Apt> {
             .ok_or_else(|| {
                 format!(
                     "{place}.repositories: suite {} must be a suite's name, e.g. stable",
-                    json_repr(&r["suite"])
+                    r["suite"]
                 )
             })?;
         let components: Vec<String> = match &r["components"] {
@@ -1444,7 +1455,7 @@ fn apt(spec: &Value, options: &BTreeMap<String, FeatureOption>) -> Result<Apt> {
         let key = r["key"].as_str().filter(|k| name_chars(k, "._-")).ok_or_else(|| {
             format!(
                 "{place}.repositories: key {} must be the name of a file in the feature's directory",
-                json_repr(&r["key"])
+                r["key"]
             )
         })?;
         parsed.push(Repository {
@@ -1504,13 +1515,6 @@ fn is_repository_uri(uri: &str) -> bool {
         })
 }
 
-fn json_repr(v: &Value) -> String {
-    match v {
-        Value::String(s) => repr(s),
-        other => other.to_string(),
-    }
-}
-
 fn container_env(env: &Value) -> Result<BTreeMap<String, String>> {
     let Some(env) = env.as_object().filter(|e| e.values().all(Value::is_string)) else {
         return Err("containerEnv must map names to strings".into());
@@ -1521,7 +1525,7 @@ fn container_env(env: &Value) -> Result<BTreeMap<String, String>> {
         if !is_env_name(name) {
             return Err(format!(
                 "containerEnv: invalid variable name {}",
-                repr(name)
+                quoted(name)
             ));
         }
         // Set as it is, as a build's env step sets it: there's no ${NAME} to expand.
@@ -1543,7 +1547,7 @@ fn depends_on(depends_on: &Value) -> Result<Vec<String>> {
         if options.as_object().is_none_or(|o| !o.is_empty()) {
             return Err(format!(
                 "dependsOn {}: options for dependencies aren't supported; use {{}}",
-                repr(dependency)
+                quoted(dependency)
             ));
         }
     }
@@ -1567,11 +1571,11 @@ fn id_list(ids: &Value, field: &str) -> Result<Vec<String>> {
         if !is_id(id) {
             return Err(format!(
                 "{field}: {} isn't a local feature id (remote features aren't supported)",
-                repr(id)
+                quoted(id)
             ));
         }
         if !dir().join(id).join("devcontainer-feature.json").is_file() {
-            return Err(format!("{field}: no feature named {}", repr(id)));
+            return Err(format!("{field}: no feature named {}", quoted(id)));
         }
         if id == BASE {
             return Err(format!(
@@ -1600,8 +1604,8 @@ pub fn parse_spec(spec: &str) -> Result<(String, Vec<(String, String)>)> {
                     if settings.iter().any(|(k, _)| k == key) {
                         return Err(format!(
                             "bad feature spec {}: option {} given twice",
-                            repr(spec),
-                            repr(key)
+                            quoted(spec),
+                            quoted(key)
                         ));
                     }
                     settings.push((key.to_string(), value.to_string()));
@@ -1613,7 +1617,7 @@ pub fn parse_spec(spec: &str) -> Result<(String, Vec<(String, String)>)> {
                 _ => {
                     return Err(format!(
                         "bad feature spec {}: expected FEATURE:OPTION=VALUE[,OPTION=VALUE]",
-                        repr(spec)
+                        quoted(spec)
                     ));
                 }
             }

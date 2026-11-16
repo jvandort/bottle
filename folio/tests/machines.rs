@@ -193,7 +193,7 @@ fn a_branch_it_doesnt_have_is_refused_before_anything_is_made() {
     let out = f.folio(&["new", "t", "--from", "nope"]);
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("has no branch or commit 'nope'"),
+        out.stderr.contains("has no branch or commit \"nope\""),
         "{}",
         out.stderr
     );
@@ -661,7 +661,7 @@ fn only_a_credential_a_feature_declares() {
     assert_eq!(out.code, 1);
     assert_eq!(
         out.stderr,
-        "folio: error: no feature declares a credential named 'nope' (known: claude, develocity, github, teamcity)\n"
+        "folio: error: no feature declares a credential named \"nope\" (known: claude, develocity, github, teamcity)\n"
     );
 }
 

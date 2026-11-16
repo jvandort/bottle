@@ -298,7 +298,7 @@ fn an_unknown_thread_with_a_bad_name_starts_nothing() {
     let out = f.folio(&["claude", "Nope"]);
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("invalid thread name 'Nope'"),
+        out.stderr.contains("invalid thread name \"Nope\""),
         "{}",
         out.stderr
     );
@@ -310,7 +310,7 @@ fn an_unknown_thread_elsewhere() {
     let f = started();
     let out = f.folio(&["pause", "nope"]);
     assert!(
-        out.stderr.contains("no thread named 'nope'"),
+        out.stderr.contains("no thread named \"nope\""),
         "{}",
         out.stderr
     );
@@ -626,7 +626,7 @@ fn a_spec_is_checked_before_its_saved() {
     let out = f.folio(&["configure", "--feature", "nope"]);
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("no feature named 'nope'"),
+        out.stderr.contains("no feature named \"nope\""),
         "{}",
         out.stderr
     );
@@ -860,7 +860,7 @@ fn a_threads_spec_is_checked_over_the_repos() {
     let out = f.folio(&["configure", "fix-it", "--feature", "nope"]);
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("no feature named 'nope'"),
+        out.stderr.contains("no feature named \"nope\""),
         "{}",
         out.stderr
     );

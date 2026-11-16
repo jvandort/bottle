@@ -150,7 +150,7 @@ fn confirm(question: &str) -> bool {
         .is_some_and(|answer| matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// `s`, quoted for a URL's query as Python's urllib.parse.quote has it.
+/// `s`, percent-encoded for a URL's query: all but letters, digits and _.-~/.
 fn url_quote(s: &str) -> String {
     s.bytes()
         .map(|b| {

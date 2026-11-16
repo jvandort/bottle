@@ -119,8 +119,7 @@ fn read_through(path: &Path) -> std::io::Result<()> {
         while entry.read(&mut sink)? > 0 {}
         members += 1;
     }
-    // An empty or cut-short gzip stream reads as a tar with nothing in it: Python's tarfile calls
-    // that what it is.
+    // An empty or cut-short gzip stream reads as a tar with nothing in it: it's taken as broken.
     if members == 0 {
         return Err(std::io::Error::other("empty file"));
     }

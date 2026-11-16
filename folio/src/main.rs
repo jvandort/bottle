@@ -83,33 +83,9 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".folio"))
 }
 
-/// `s` as Python's repr has a string: in single quotes, unless it holds one and no double quote;
-/// what folio's messages have always said.
-fn repr(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+/// `s` quoted, for a message: as Rust writes a string's Debug, its specials escaped.
+fn quoted(s: &str) -> String {
+    format!("{s:?}")
 }
 
 /// `tar`, to pack an archive for a Linux machine: on a Mac, bsdtar without the extended attributes

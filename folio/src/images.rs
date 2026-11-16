@@ -51,8 +51,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A hash of every file under `path`: names, contents and whether each is executable; in the
-/// order Python sorts paths, by their parts.
+/// A hash of every file under `path`: names, contents and whether each is executable, in order.
 pub fn tree_hash(path: &Path) -> Result<String> {
     fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in fs::read_dir(dir)? {
@@ -67,18 +66,10 @@ pub fn tree_hash(path: &Path) -> Result<String> {
         Ok(())
     }
     let mut files = Vec::new();
-    // None there, as for a directory with no files: what Python's rglob finds of it.
     if path.is_dir() {
         walk(path, &mut files).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    let parts = |p: &PathBuf| -> Vec<String> {
-        p.strip_prefix(path)
-            .unwrap()
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect()
-    };
-    files.sort_by_key(parts);
+    files.sort();
     let mut digest = Sha256::new();
     for file in &files {
         let mode = fs::metadata(file)
@@ -86,7 +77,8 @@ pub fn tree_hash(path: &Path) -> Result<String> {
             .permissions()
             .mode()
             & 0o111;
-        digest.update(format!("{}\0{mode:o}\0", parts(file).join("/")).as_bytes());
+        let name = file.strip_prefix(path).unwrap().to_string_lossy();
+        digest.update(format!("{name}\0{mode:o}\0").as_bytes());
         digest.update(Sha256::digest(fs::read(file).map_err(|e| e.to_string())?));
     }
     Ok(hex(&digest.finalize()))
@@ -134,13 +126,8 @@ pub fn image_tag(features: &[Feature]) -> String {
 /// What the base image is built from: Debian's reference, what it runs, and the base feature's
 /// directory.
 pub fn base_inputs() -> Result<String> {
-    // As Python's json.dumps writes it.
-    let quoted = |items: &[&str]| {
-        let quoted: Vec<String> = items.iter().map(|i| format!("\"{i}\"")).collect();
-        format!("[{}]", quoted.join(", "))
-    };
     let mut digest = Sha256::new();
-    digest.update(format!("[\"{DEBIAN}\", {}, {}]", quoted(&ENTRYPOINT), quoted(&CMD)).as_bytes());
+    digest.update(json!([DEBIAN, ENTRYPOINT, CMD]).to_string().as_bytes());
     digest.update(tree_hash(&features::dir().join(BASE))?.as_bytes());
     Ok(hex(&digest.finalize()))
 }

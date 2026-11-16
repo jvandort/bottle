@@ -78,7 +78,7 @@ impl Runner {
 
     pub fn cpus(&self) -> Result<u64, String> {
         if self.name == LOCAL {
-            // SAFETY: sysconf has no preconditions. Every core online, as Python's os.cpu_count said.
+            // SAFETY: sysconf has no preconditions. Every core online.
             let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
             return Ok(if online > 0 { online as u64 } else { 1 });
         }
@@ -309,7 +309,7 @@ pub fn get(name: &str) -> Result<Runner, String> {
     if name != LOCAL && !registered()?.contains_key(name) {
         return Err(format!(
             "no runner named {}; add one with `folio runner add {name} --ssh DESTINATION`",
-            crate::repr(name)
+            crate::quoted(name)
         ));
     }
     Ok(Runner::new(name))
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(get(LOCAL).unwrap().cli, Cli::Local);
         assert_eq!(
             get("box").unwrap_err(),
-            "no runner named 'box'; add one with `folio runner add box --ssh DESTINATION`"
+            "no runner named \"box\"; add one with `folio runner add box --ssh DESTINATION`"
         );
     }
 

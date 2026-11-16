@@ -110,7 +110,7 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
         Some(disk) => {
             return Err(format!(
                 r#"invalid disk {}: give a size in G, e.g. "50G""#,
-                python_repr(disk)
+                disk
             ));
         }
     }
@@ -161,7 +161,7 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
         if !is_label(name) {
             return Err(format!(
                 "invalid label {}: lowercase letters, digits, '.' and '-', starting with a letter",
-                crate::repr(name)
+                crate::quoted(name)
             ));
         }
         let ok = value
@@ -180,14 +180,9 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
     Ok(Value::Object(spec))
 }
 
-/// Whether Python's str.isprintable would call `c` printable: not a control, a separator but the
-/// space, or a format character. (Unassigned code points, which Python also refuses, pass here:
-/// std has no table of them.)
+/// Whether `c` is printable: not a control character.
 fn is_printable(c: char) -> bool {
-    let format = matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
-        | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}');
-    c == ' ' || !(c.is_control() || c.is_whitespace() || format)
+    !c.is_control()
 }
 
 fn is_label(name: &str) -> bool {
@@ -206,17 +201,6 @@ fn is_disk(disk: &str) -> bool {
 fn is_size(number: &str) -> bool {
     number.starts_with(|c: char| ('1'..='9').contains(&c))
         && number.chars().all(|c| c.is_ascii_digit())
-}
-
-/// A JSON value as Python's repr has it, in a message: a string quoted, others as they are.
-pub fn python_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => crate::repr(s),
-        Value::Bool(true) => "True".into(),
-        Value::Bool(false) => "False".into(),
-        Value::Null => "None".into(),
-        other => other.to_string(),
-    }
 }
 
 /// A spec's labels.
@@ -256,7 +240,7 @@ pub fn canonical_memory(
     let invalid = || {
         format!(
             "invalid memory {}: give a size in M or G, e.g. 8G",
-            crate::repr(value)
+            crate::quoted(value)
         )
     };
     let (number, unit) = value.split_at(value.len().saturating_sub(1));
@@ -363,7 +347,7 @@ mod tests {
             (json!({"feature": ["tools"]}), "unknown key feature"),
             (json!({"features": "tools"}), "features is a list"),
             (json!({"features": [1]}), "features is a list"),
-            (json!({"features": ["nope"]}), "no feature named 'nope'"),
+            (json!({"features": ["nope"]}), "no feature named \"nope\""),
             (
                 json!({"features": ["jvm:version=21", "jvm"]}),
                 "given twice with different options",
@@ -386,7 +370,7 @@ mod tests {
             ),
             (
                 json!({"memory": "2G", "labels": {"Thread": "x"}}),
-                "invalid label 'Thread'",
+                "invalid label \"Thread\"",
             ),
             (
                 json!({"memory": "2G", "labels": {"thread": 1}}),
@@ -494,7 +478,7 @@ mod tests {
                 canonical_memory(bad, None, "x").unwrap_err(),
                 format!(
                     "invalid memory {}: give a size in M or G, e.g. 8G",
-                    crate::repr(bad)
+                    crate::quoted(bad)
                 )
             );
         }

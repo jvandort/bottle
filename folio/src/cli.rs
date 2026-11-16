@@ -541,8 +541,8 @@ fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// A line typed after `prompt`; None at the end of input, or if Ctrl-C ends it (as Python's folio had
-/// it: a prompt interrupted is a prompt not answered).
+/// A line typed after `prompt`; None at the end of input, or if Ctrl-C ends it: a prompt interrupted
+/// is a prompt not answered.
 pub fn input(prompt: &str) -> Option<String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -885,7 +885,7 @@ fn changes(matches: &ArgMatches) -> bool {
     changes_spec(matches) || arg(matches, "runner").is_some() || flag(matches, "no-runner")
 }
 
-/// A usage error, as argparse said one: the command's usage, then why, and exit 2.
+/// A usage error: the command's usage, then why, and exit 2, as clap's own are.
 fn usage_error(command: &str, message: &str) -> ! {
     let mut folio = self::command();
     let sub = command

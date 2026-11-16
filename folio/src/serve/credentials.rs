@@ -220,7 +220,7 @@ pub(crate) fn destination(host: &str) -> Result<(String, u16), String> {
             Ok(port) if port > 0 && !pattern.is_empty() => Ok((pattern.to_string(), port)),
             _ => Err(format!(
                 "{} isn't a host for a credential: a host or a host:port",
-                crate::repr(host)
+                crate::quoted(host)
             )),
         },
     }
@@ -285,8 +285,8 @@ fn injections_of(
             if *owner != credential.name {
                 return Err(format!(
                     "credentials {} and {} both claim {host}",
-                    crate::repr(owner),
-                    crate::repr(&credential.name)
+                    crate::quoted(owner),
+                    crate::quoted(&credential.name)
                 ));
             }
         }
@@ -1024,7 +1024,7 @@ fn status_of(response: &[u8]) -> Option<String> {
 
 // --- small things ---------------------------------------------------------------------
 
-/// Whether `name` matches `pattern`, as Python's fnmatch: `*` anything, `?` one character.
+/// Whether `name` matches `pattern`, a shell's glob: `*` anything, `?` one character.
 fn fnmatch(name: &str, pattern: &str) -> bool {
     let (n, p): (Vec<char>, Vec<char>) = (name.chars().collect(), pattern.chars().collect());
     let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);

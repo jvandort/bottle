@@ -165,7 +165,7 @@ mod tests {
     use serde_json::json;
 
     /// As folio says it, word for word: tests/fixtures/advice*.txt are what an agent is told,
-    /// written by folio's Python and kept as they were, so a change to the wording shows in review.
+    /// kept as files, so a change to the wording shows in review.
     #[test]
     fn as_it_was() {
         let spec = json!({"features": ["tools", "jvm:version=21"], "memory": "8G"});

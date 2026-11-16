@@ -154,7 +154,7 @@ pub fn start() -> Result<bool, String> {
             start_daemon()?;
             Ok(true)
         }
-        // On its way out: this one starts once it's gone. (Python's folio said nothing, and failed.)
+        // On its way out: this one starts once it's gone.
         Err(Failure::Closed) => {
             wait_gone();
             start_daemon()?;
@@ -166,7 +166,7 @@ pub fn start() -> Result<bool, String> {
 }
 
 /// Stop folio serve and every egress it serves, and wait for it to be gone, so a command after
-/// finds none (Python's folio returned as it wound up). False if it wasn't running.
+/// finds none. False if it wasn't running.
 pub fn stop() -> Result<bool, String> {
     crate::log::log!("daemon", "asking folio serve to stop");
     let reply = match send(&json!({"op": "shutdown"}), DEFAULT_TIMEOUT) {

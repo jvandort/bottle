@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::repr;
+use crate::quoted;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
@@ -28,7 +28,7 @@ impl Route {
         if methods.is_empty() || !path.starts_with('/') || path.chars().any(char::is_whitespace) {
             return Err(format!(
                 "{} isn't METHOD[|METHOD] /path, e.g. POST /api/auth/token",
-                repr(text)
+                quoted(text)
             ));
         }
         let names: BTreeSet<String> = methods.split('|').map(str::to_uppercase).collect();
@@ -40,7 +40,7 @@ impl Route {
         {
             return Err(format!(
                 "{}: methods are names separated by |, or *",
-                repr(text)
+                quoted(text)
             ));
         }
         let paths = braces_expanded(path)?
@@ -114,7 +114,7 @@ pub fn canonical(path: &str) -> Option<String> {
     Some(format!("/{}", segments.join("/")).to_lowercase())
 }
 
-/// `s` with %XX escapes decoded, as UTF-8 (anything else as U+FFFD), as Python's unquote does.
+/// `s` with %XX escapes decoded, as UTF-8 (anything else as U+FFFD).
 fn percent_decoded(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -172,7 +172,7 @@ fn braces_expanded(path: &str) -> Result<Vec<String>, String> {
     });
     let Some((open, close)) = group else {
         if path.contains(['{', '}']) {
-            return Err(format!("{}: a brace without its pair", repr(path)));
+            return Err(format!("{}: a brace without its pair", quoted(path)));
         }
         return Ok(vec![path.to_string()]);
     };
@@ -306,7 +306,7 @@ mod tests {
         }
         assert_eq!(
             Route::parse("POST /{a").unwrap_err(),
-            "'/{a': a brace without its pair"
+            "\"/{a\": a brace without its pair"
         );
     }
 

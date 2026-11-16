@@ -243,7 +243,7 @@ pub fn load(repo: &Repo, name: &str) -> Result<Thread, String> {
         let known: Vec<String> = all(repo)?.into_iter().map(|t| t.name).collect();
         return Err(format!(
             "no thread named {} in {} (threads: {})",
-            crate::repr(name),
+            crate::quoted(name),
             repo.path.display(),
             if known.is_empty() {
                 "none".to_string()
@@ -393,7 +393,7 @@ pub fn create(
     if !is_name(name) {
         return Err(format!(
             "invalid thread name {}: use lowercase letters and digits, in words joined by '-'",
-            crate::repr(name)
+            crate::quoted(name)
         ));
     }
     if store::current_slot(&directory(repo, name)).is_some() {
@@ -1212,7 +1212,7 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
     if !is_name(new) {
         return Err(format!(
             "invalid thread name {}: use lowercase letters and digits, in words joined by '-'",
-            crate::repr(new)
+            crate::quoted(new)
         ));
     }
     if store::current_slot(&directory(repo, new)).is_some() {

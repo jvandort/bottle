@@ -319,7 +319,7 @@ pub fn get(name: &str) -> Result<Bottle, String> {
         let known: Vec<&str> = bottles.keys().map(String::as_str).collect();
         format!(
             "no bottle named {} (bottles: {})",
-            crate::repr(name),
+            crate::quoted(name),
             if known.is_empty() {
                 "none".to_string()
             } else {
@@ -389,7 +389,7 @@ pub fn create(
     if existing.contains_key(name) {
         return Err(format!(
             "a bottle named {} already exists",
-            crate::repr(name)
+            crate::quoted(name)
         ));
     }
     let grants = plan_sidecar(sidecar, &existing)?;
@@ -451,7 +451,7 @@ fn uuid() -> String {
     if let Ok(mut random) = fs::File::open("/dev/urandom") {
         let _ = std::io::Read::read_exact(&mut random, &mut bytes);
     }
-    // A version 4 UUID, as Python's uuid4 makes, as hex.
+    // A version 4 UUID, as hex.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -494,7 +494,7 @@ fn plan_sidecar(
         return Ok(Vec::new());
     };
     let Some(there) = existing.get(target) else {
-        return Err(format!("no sidecar named {}", crate::repr(target)));
+        return Err(format!("no sidecar named {}", crate::quoted(target)));
     };
     if there.status != "ready" {
         return Err(format!("its sidecar, {target}, is {}", there.status));
@@ -565,7 +565,7 @@ fn start_at(repo: &Repo, checkout: Option<&str>) -> Result<repos::Start, String>
         Err(_) => Err(format!(
             "{} has no branch or commit {}",
             repo.path.display(),
-            crate::repr(checkout)
+            crate::quoted(checkout)
         )),
     }
 }
@@ -646,27 +646,17 @@ fn let_in(bottle: &Bottle, grant: &SshGrant) -> Result<(), String> {
     )?;
     exec(
         bottle,
+        // Its line for the name, whatever it said before: the others kept, as they are.
         &sh(&format!(
-            "install -d -m 700 ~/.ssh && touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts && \
-             sed -i '/^{} /d' ~/.ssh/known_hosts && cat >> ~/.ssh/known_hosts",
-            regex_escape(&grant.name)
+            "install -d -m 700 ~/.ssh && touch ~/.ssh/known_hosts && \
+             {{ awk -v name={} '$1 != name' ~/.ssh/known_hosts; cat; }} > ~/.ssh/known_hosts.new && \
+             chmod 600 ~/.ssh/known_hosts.new && mv ~/.ssh/known_hosts.new ~/.ssh/known_hosts",
+            q(&grant.name)
         )),
         Some(USER),
         Some(&format!("{} {host_key}\n", grant.name)),
     )?;
     Ok(())
-}
-
-/// `s` as Python's re.escape has it: the characters a regular expression gives a meaning escaped.
-fn regex_escape(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Start the bottle's machine, folio serve answering what it routes there as this bottle's, its
@@ -694,7 +684,7 @@ fn memory_mib(memory: Option<&str>) -> Result<u64, String> {
     let refused = || {
         format!(
             "a bottle needs its memory, a size in M or G, e.g. \"8G\" (not {})",
-            memory.map_or("None".to_string(), crate::repr)
+            memory.map_or("none".to_string(), crate::quoted)
         )
     };
     let (number, unit) = given.split_at(given.len().saturating_sub(1));
@@ -1534,7 +1524,10 @@ mod tests {
                 &[f.mount("/workspace", &f.repo, Some("nope"), READ_ONLY)],
             )
             .unwrap_err();
-        assert!(refused.contains("no branch or commit 'nope'"), "{refused}");
+        assert!(
+            refused.contains("no branch or commit \"nope\""),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -1571,7 +1564,7 @@ mod tests {
         f.create("a", &[]).unwrap();
         assert_eq!(
             f.create("a", &[]).unwrap_err(),
-            "a bottle named 'a' already exists"
+            "a bottle named \"a\" already exists"
         );
     }
 
@@ -1698,7 +1691,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             refused,
-            "no runner named 'box'; add one with `folio runner add box --ssh DESTINATION`"
+            "no runner named \"box\"; add one with `folio runner add box --ssh DESTINATION`"
         );
         assert_eq!(f.state()["calls"], json!([]));
         f.create("here", &[]).unwrap();
@@ -1740,7 +1733,7 @@ mod tests {
         );
         assert_eq!(
             f.create_with("other", &[], Some("nope"), "").unwrap_err(),
-            "no sidecar named 'nope'"
+            "no sidecar named \"nope\""
         );
     }
 
@@ -2080,12 +2073,7 @@ mod tests {
         assert_eq!(memory_mib(Some("512m")).unwrap(), 512);
         assert_eq!(
             memory_mib(None).unwrap_err(),
-            "a bottle needs its memory, a size in M or G, e.g. \"8G\" (not None)"
+            "a bottle needs its memory, a size in M or G, e.g. \"8G\" (not none)"
         );
-    }
-
-    #[test]
-    fn re_escaped_as_python_escapes() {
-        assert_eq!(regex_escape("side-car.host"), "side\\-car\\.host");
     }
 }

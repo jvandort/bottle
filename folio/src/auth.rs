@@ -49,7 +49,7 @@ pub fn declared() -> Result<BTreeMap<String, Declared>, String> {
                     return Err(format!(
                         "features {} and {id} declare credential {} differently",
                         other.feature,
-                        crate::repr(&credential.name)
+                        crate::quoted(&credential.name)
                     ));
                 }
                 continue;
@@ -72,7 +72,7 @@ fn get_declared(name: &str) -> Result<Declared, String> {
         let names: Vec<&str> = known.keys().map(String::as_str).collect();
         format!(
             "no feature declares a credential named {} (known: {})",
-            crate::repr(name),
+            crate::quoted(name),
             if names.is_empty() {
                 "none".to_string()
             } else {
@@ -450,7 +450,7 @@ mod tests {
         assert!(!remove("claude").unwrap());
         assert_eq!(
             set_value("nope", "x").unwrap_err(),
-            "no feature declares a credential named 'nope' (known: claude, develocity, github, teamcity)"
+            "no feature declares a credential named \"nope\" (known: claude, develocity, github, teamcity)"
         );
         let status: Vec<(String, String, bool)> = status()
             .unwrap()

@@ -1,5 +1,5 @@
-//! folio's logs, in its home's logs/: a line per record, stamped as folio's Python stamped its own:
-//! the local time to the millisecond, the process, and the part of folio that says it.
+//! folio's logs, in its home's logs/: a line per record, stamped with the local time to the
+//! millisecond, the process, and the part of folio that says it.
 //!
 //! folio serve writes its records on stderr, which whoever starts it points at serve.log. A command
 //! writes its own in folio.log (to_file): what it was asked, what it made, started, stopped, rolled
@@ -50,7 +50,7 @@ pub fn warn(name: &str, message: &str) {
     write(name, message);
 }
 
-/// "2026-11-14 09:15:02,123": now, local, as Python's logging writes it.
+/// "2026-11-14 09:15:02.123": now, local.
 fn now() -> String {
     let mut tv = libc::timeval {
         tv_sec: 0,
@@ -63,7 +63,7 @@ fn now() -> String {
         libc::localtime_r(&tv.tv_sec, &mut tm);
     }
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02},{:03}",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         tm.tm_year + 1900,
         tm.tm_mon + 1,
         tm.tm_mday,

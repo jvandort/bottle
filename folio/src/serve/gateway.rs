@@ -23,8 +23,7 @@ fn in_ssh_network(ip: Ipv4Addr) -> bool {
     ip.octets()[..3] == [192, 0, 2]
 }
 
-/// Answered as decided; a line in the log for each flow, as folio's Python wrote them: who, where,
-/// to what, how it ended, the bytes each way, and how long it took.
+/// Answered as decided; a line in the log for each flow: who, where, to what, how it ended, the bytes each way, and how long it took.
 pub fn serve(server: &Arc<Server>, bottle: &Arc<Bottle>, header: &Header, stream: UnixStream) {
     let started = Instant::now();
     let target = format!(

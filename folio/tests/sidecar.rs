@@ -275,7 +275,7 @@ fn a_new_one_needs_a_runner_and_a_spec_folio_takes() {
         "nope",
     ]);
     assert!(
-        out.stderr.contains("no feature named 'nope'"),
+        out.stderr.contains("no feature named \"nope\""),
         "{}",
         out.stderr
     );

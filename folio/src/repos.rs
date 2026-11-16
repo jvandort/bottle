@@ -336,7 +336,7 @@ pub fn resolve_branch(repo: &Repo, branch: &str) -> Result<String, String> {
     Err(format!(
         "{} has no branch {}",
         repo.name,
-        crate::repr(branch)
+        crate::quoted(branch)
     ))
 }
 
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(resolve_branch(&repo, "main").unwrap(), rev(&clone, "HEAD"));
         assert_eq!(
             resolve_branch(&repo, "nope").unwrap_err(),
-            "clone has no branch 'nope'"
+            "clone has no branch \"nope\""
         );
     }
 
