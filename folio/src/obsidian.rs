@@ -34,7 +34,8 @@ fn config() -> PathBuf {
     }
 }
 
-/// macOS's `open`, `pgrep` or `osascript`; FOLIO_OPEN and so on stand in for them in tests.
+/// macOS's `open`, `pgrep`, `osascript` or `pbcopy`; FOLIO_OPEN and so on stand in for them in
+/// tests.
 fn command(name: &str) -> String {
     std::env::var(format!("FOLIO_{}", name.to_uppercase()))
         .ok()
@@ -186,8 +187,9 @@ pub fn open_vault(path: &Path) -> Result<String, String> {
             .status();
         return Ok(format!("Opened {} in Obsidian.", path.display()));
     }
-    let copied = on_path("pbcopy")
-        && Command::new("pbcopy")
+    let copier = command("pbcopy");
+    let copied = on_path(&copier)
+        && Command::new(&copier)
             .stdin(Stdio::piped())
             .spawn()
             .and_then(|mut child| {

@@ -197,10 +197,11 @@ impl Folio {
             ),
             ("FAKE_KEYCHAIN", s(&tmp.join("keychain"))),
             // Never this machine's own Obsidian (a Mac's): not there to open, not running, its
-            // vaults the test's.
+            // vaults the test's; nor its clipboard.
             ("FOLIO_OPEN", "no-such-opener".into()),
             ("FOLIO_PGREP", "false".into()),
             ("FOLIO_OSASCRIPT", "false".into()),
+            ("FOLIO_PBCOPY", "no-such-pbcopy".into()),
             ("FOLIO_OBSIDIAN_CONFIG", s(&tmp.join("obsidian.json"))),
             ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
