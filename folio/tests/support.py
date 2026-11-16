@@ -12,6 +12,22 @@ FOLIO = Path(os.environ.get("FOLIO_UNDER_TEST") or Path(__file__).resolve().pare
 FAKE_BOTTLE = Path(__file__).resolve().parent / "fake_bottle.py"
 
 
+def real_bottle_cli() -> Path:
+    """The bottle-cli the suites with real VMs run: $BOTTLE_CLI, else this checkout's, built first if its sources
+    have changed (bin/bottle-build), so they never run an old one. Skipped unless asked for, with
+    FOLIO_VM_TESTS=1, on a Mac: they boot VMs, and the first build takes minutes."""
+    import platform
+    if platform.system() != "Darwin":
+        raise unittest.SkipTest("boots VMs: a Mac's bottle-cli only")
+    if os.environ.get("FOLIO_VM_TESTS") != "1":
+        raise unittest.SkipTest("boots VMs: run with FOLIO_VM_TESTS=1")
+    if os.environ.get("BOTTLE_CLI"):
+        return Path(os.environ["BOTTLE_CLI"])
+    repo = Path(__file__).resolve().parents[2]
+    subprocess.run([str(repo / "bin" / "bottle-build")], check=True)
+    return repo / "target" / "dist" / "bottle-cli"
+
+
 class FolioTestCase(unittest.TestCase):
     """Each test in a temp dir: a repo to work in, FOLIO_HOME, the fake bottle, and git config isolated."""
 
@@ -29,6 +45,9 @@ class FolioTestCase(unittest.TestCase):
             "BOTTLE_CLI": "/no/bottle-cli",
             "FOLIO_BOTTLE": str(FAKE_BOTTLE),
             "FAKE_BOTTLE_STATE": str(self.state),
+            # Never this machine's own Obsidian (a Mac's): not there to open, not running, its vaults the test's.
+            "FOLIO_OPEN": "no-such-opener", "FOLIO_PGREP": "false", "FOLIO_OSASCRIPT": "false",
+            "FOLIO_OBSIDIAN_CONFIG": str(self.tmp / "obsidian.json"),
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",

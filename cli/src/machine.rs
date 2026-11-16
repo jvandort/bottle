@@ -772,6 +772,10 @@ fn status(machine: &Machine, args: &[String]) -> io::Result<()> {
 /// `exec NAME`: `exec --socket` on the machine's socket. -i is taken and ignored, stdin being always
 /// passed on.
 fn exec(machine: &Machine, rest: Vec<String>) -> ExitCode {
+    if machine.state().is_none() {
+        eprintln!("bottle-cli: no machine {}", machine.name);
+        return ExitCode::from(FAILED);
+    }
     if !machine.running() {
         eprintln!("bottle-cli: {} isn't running", machine.name);
         return ExitCode::from(FAILED);

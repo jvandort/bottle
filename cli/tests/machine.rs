@@ -247,6 +247,11 @@ fn machines_are_made_started_used_stopped_and_deleted() {
     let out = f.cli(&["shell", "m1"]);
     assert!(!out.status.success()); // not started for it: bottle starts bottles
     assert!(String::from_utf8_lossy(&out.stderr).contains("m1 isn't running"));
+    let out = f.cli(&["exec", "m1", "--", "true"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("m1 isn't running"));
+    // One that isn't there at all says so, as status does.
+    let out = f.cli(&["exec", "none", "--", "true"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no machine none"));
     // Stopped, it can be renamed, all of it; running, it can't.
     f.ok(&["rename", "m1", "m2"]);
     assert!(!f.cli(&["status", "m1"]).status.success());

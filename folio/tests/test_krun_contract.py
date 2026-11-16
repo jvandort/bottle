@@ -1,7 +1,7 @@
 """What folio relies on bottle-cli for (folio-cli's bottle_cli.rs says), against a real bottle-cli.
 
-Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built (`cargo xtask dist`: target/dist/bottle-cli)
-or $BOTTLE_CLI naming one. Checks it as folio drives it, word for word, with a stand-in for folio serve's services
+Runs only where bottle-cli can run VMs, a Mac, and only with FOLIO_VM_TESTS=1: this checkout's bottle-cli, built
+first if it's changed (bin/bottle-build), or $BOTTLE_CLI. Checks it as folio drives it, word for word, with a stand-in for folio serve's services
 socket, on one alpine machine made for the module and deleted after, its BOTTLE_HOME a temporary directory. Run
 it after changing bottle-cli, the agent or libkrun.
 """
@@ -27,7 +27,10 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-BOTTLE_CLI = os.environ.get("BOTTLE_CLI") or str(Path(__file__).resolve().parents[2] / "target" / "dist" / "bottle-cli")
+from tests.support import real_bottle_cli
+
+# Set by setUpModule.
+BOTTLE_CLI = ""
 # Where a bottle reaches bottle.host, and folio serve's services, as folio's policy routes them.
 HOST, HOST_ADDRESS, SERVICES = "bottle.host", "192.0.2.1", ("host", "ssh", "credentials")
 # What bottle-cli says first on a routed connection: a PROXY protocol v2 header, and the fields in it of the name
@@ -154,9 +157,8 @@ work = Path()
 
 
 def setUpModule() -> None:
-    global machine, stand_in, work
-    if platform.system() != "Darwin" or not os.path.isfile(BOTTLE_CLI):
-        raise unittest.SkipTest("needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
+    global BOTTLE_CLI, machine, stand_in, work
+    BOTTLE_CLI = str(real_bottle_cli())
     work = Path(tempfile.mkdtemp(prefix="krun-contract-"))
     unittest.addModuleCleanup(shutil.rmtree, work, True)
     # Images and machines are kept here, not in the user's own.

@@ -20,5 +20,7 @@ if [ ${#forwards[@]} -gt 0 ]; then
   exec sleep 3600
 fi
 script="$*"; script=${script//\/dev\/kvm/$FAKE_KVM}
+# Linux, as uname says, whatever this machine is: a Mac's arm64 is Linux's aarch64.
+linux='uname() { case "$1" in -s) echo Linux ;; -m) m=$(command uname -m); [ "$m" = arm64 ] && m=aarch64; echo "$m" ;; *) command uname "$@" ;; esac; }'
 home="$FAKE_REMOTES/$destination"; mkdir -p "$home"
-cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$script"
+cd "$home" && exec env -u BOTTLE_HOME HOME="$home" bash -c "$linux; $script"

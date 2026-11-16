@@ -1,8 +1,8 @@
 """A real thread, end to end: made by folio, as you make one, on bottle-cli's machines, with folio serve answering
 what its machine routes to it; run in through `folio exec`, and bin/bottle for its machine.
 
-Runs only where bottle-cli can run VMs: a Mac, with bottle-cli built (target/dist/bottle-cli) or $BOTTLE_CLI
-naming one. Makes one thread, `e2e`, from a clone of this repo, its spec `tools` and 8G, and deletes it after. Its
+Runs only where bottle-cli can run VMs, a Mac, and only with FOLIO_VM_TESTS=1: this checkout's bottle-cli, built
+first if it's changed (bin/bottle-build), or $BOTTLE_CLI. Makes one thread, `e2e`, from a clone of this repo, its spec `tools` and 8G, and deletes it after. Its
 BOTTLE_HOME is $BOTTLE_E2E_HOME (default /tmp/bottle-e2e), kept between runs so the images it builds are reused:
 the first run builds them, which takes minutes. Its folio home, and so its folio serve, is its own, in it.
 
@@ -18,23 +18,21 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.support import FOLIO
+from tests.support import FOLIO, real_bottle_cli
 
 REPO = Path(__file__).resolve().parents[2]
 BOTTLE = REPO / "bin" / "bottle"
-BOTTLE_CLI = Path(os.environ.get("BOTTLE_CLI") or REPO / "target" / "dist" / "bottle-cli")
 THREAD = "e2e"
 
 
-@unittest.skipUnless(platform.system() == "Darwin" and BOTTLE_CLI.is_file(),
-                     "needs bottle-cli on a Mac (cargo xtask dist, or $BOTTLE_CLI)")
 class EndToEndTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        bottle_cli = real_bottle_cli()
         home = Path(os.environ.get("BOTTLE_E2E_HOME") or "/tmp/bottle-e2e")
         home.mkdir(parents=True, exist_ok=True)
         cls.env = {**os.environ, "BOTTLE_HOME": str(home), "FOLIO_HOME": str(home / "folio"),
-                   "BOTTLE_CLI": str(BOTTLE_CLI)}
+                   "BOTTLE_CLI": str(bottle_cli)}
         cls.env.pop("FOLIO_BOTTLE", None)
         cls.log = home / "folio" / "logs" / "serve.log"
         cls.work = Path(tempfile.mkdtemp(prefix="bottle-e2e-"))

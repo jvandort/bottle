@@ -360,7 +360,8 @@ class RunnerTestCase(MachineTestCase):
         self.remotes, self.there_state = short / "remotes", short / "there.json"
         (short / "ssh").symlink_to(Path(__file__).resolve().parent / "fake_ssh")
         (short / "kvm").write_text("")
-        arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
+        # The stand-in runner's, as Linux names it (tests/fake_ssh): a Mac's arm64 is aarch64.
+        arch = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip().replace("arm64", "aarch64")
         dist = short / "dists" / f"dist-{arch}-unknown-linux-musl"
         dist.mkdir(parents=True)
         (dist / "bottle-cli").write_text(f"#!/bin/sh\nFAKE_CLI_STATE={self.there_state} exec {sys.executable} {FAKE_CLI} \"$@\"\n")
