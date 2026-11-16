@@ -612,7 +612,7 @@ settings but for what it's given of its own: features it adds, or gives other
 options (`--feature jvm:version=21` over the repo's `jvm`), and its own memory,
 disk and runner. It can't take away a feature the repo gives. Each `--no-...`
 takes its own away, and it has the repo's again; the repo's changes reach it,
-but for what's its own. Shown, what's its own says so. A change comes with the
+but for what's its own. Shown, what it overrides says so. A change comes with the
 thread's next bottle (`folio pause`, then `folio claude`); a thread with a
 bottle on another runner than the one it comes to is refused: pause it first.
 

@@ -369,7 +369,7 @@ class ThreadConfigureTest(FolioTestCase):
         self.ok("new", "other")
         self.ok("pause", "fix-it")
         self.assertEqual(self.ok("configure", "fix-it", "--memory", "8G", "--feature", "jvm:version=21"),
-                         "Set thread fix-it: features [tools, jvm:version=21 (its own)], memory 8G (its own), "
+                         "Set thread fix-it: features [tools, jvm:version=21 (overridden)], memory 8G (overridden), "
                          "runner this machine\n")
         self.assertEqual(self.settings(), {"features": ["jvm:version=21"], "memory": "8G"})
         self.ok("claude", "fix-it")
@@ -379,7 +379,7 @@ class ThreadConfigureTest(FolioTestCase):
         # The repo's changes reach it, but for what's its own: its jvm's options are its own.
         self.ok("configure", "--feature", "python", "--feature", "jvm:version=17", "--disk", "50G")
         self.assertEqual(self.ok("configure", "fix-it").split(";")[0],
-                         "features [jvm:version=21 (its own), python, tools], memory 8G (its own), disk 50G, "
+                         "features [jvm:version=21 (overridden), python, tools], memory 8G (overridden), disk 50G, "
                          "runner this machine")
 
     def test_no_takes_its_own_away_and_it_has_the_repos_again(self) -> None:
@@ -389,13 +389,13 @@ class ThreadConfigureTest(FolioTestCase):
         self.ok("configure", "fix-it", "--no-feature", "jvm", "--no-memory", "--no-disk", "--no-runner")
         self.assertEqual(self.settings(), {"features": ["python"]})
         self.assertEqual(self.ok("configure", "fix-it").split(";")[0],
-                         "features [jvm:version=17, tools, python (its own)], memory 2G, disk 50G, runner this machine")
+                         "features [jvm:version=17, tools, python (overridden)], memory 2G, disk 50G, runner this machine")
 
     def test_a_feature_the_repo_gives_cant_be_taken_away(self) -> None:
         result = self.folio("configure", "fix-it", "--no-feature", "tools")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("thread fix-it has no feature tools of its own to take away (its own: none); "
-                      "one the repo gives can't be", result.stderr)
+        self.assertIn("thread fix-it doesn't override feature tools (overridden: none); "
+                      "one the repo gives can't be taken away", result.stderr)
 
     def test_a_change_to_a_thread_with_a_bottle_comes_with_its_next(self) -> None:
         self.assertIn("It comes with the thread's next bottle: `folio pause fix-it`, then `folio claude fix-it`",
@@ -412,7 +412,7 @@ class ThreadConfigureTest(FolioTestCase):
     def test_a_paused_threads_runner_is_set_without_starting_it(self) -> None:
         self.ok("pause", "fix-it")
         self.assertEqual(self.ok("configure", "fix-it", "--runner", "desktop"),
-                         "Set thread fix-it: features [tools], memory 2G, runner desktop (its own)\n")
+                         "Set thread fix-it: features [tools], memory 2G, runner desktop (overridden)\n")
         self.assertNotIn(f"{self.key}-fix-it", self.fake()["bottles"])
         self.assertEqual(self.ok("list").splitlines()[1].split()[:3], ["fix-it", "paused", "desktop"])
         self.ok("claude", "fix-it")
@@ -421,7 +421,7 @@ class ThreadConfigureTest(FolioTestCase):
         self.ok("pause", "fix-it")
         self.ok("configure", "--runner", "desktop")
         self.ok("configure", "fix-it", "--runner", "local")
-        self.assertIn("runner this machine (its own);", self.ok("configure", "fix-it"))
+        self.assertIn("runner this machine (overridden);", self.ok("configure", "fix-it"))
         self.ok("configure", "fix-it", "--no-runner")
         self.assertIn("runner desktop;", self.ok("configure", "fix-it"))
 

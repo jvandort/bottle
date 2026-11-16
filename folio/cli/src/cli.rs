@@ -238,8 +238,8 @@ fn command() -> Command {
                     "The repo's spec and runner, or, given a thread, the thread's: shown without options, changed \
                      with them. Bottle checks a spec before it's saved. A thread has the repo's, but for what it's \
                      given of its own: features it adds or gives other options (it can't take away one the repo \
-                     gives), and its memory, disk and runner; each --no-... takes its own away, and it has the \
-                     repo's again. Threads get a change in their next bottle; a bottle already running keeps what \
+                     gives), and its memory, disk and runner, each shown as overridden; each --no-... takes its \
+                     override away, and it has the repo's again. Threads get a change in their next bottle; a bottle already running keeps what \
                      it has, and one on a runner is paused to move.",
                 )
                 .arg(
@@ -1060,15 +1060,17 @@ fn settings_changed(
     let own: Vec<&str> = current.features.iter().map(|f| repos::name_of(f)).collect();
     for name in &taken {
         if !own.contains(&name.as_str()) {
-            return Err(format!(
-                "{whose} has no feature {name} of its own to take away (its own: {}){}",
-                listed(&own),
-                if command == "configure" {
-                    "; one the repo gives can't be"
-                } else {
-                    ""
-                }
-            ));
+            return Err(if command == "configure" {
+                format!(
+                    "{whose} doesn't override feature {name} (overridden: {}); one the repo gives can't be taken away",
+                    listed(&own)
+                )
+            } else {
+                format!(
+                    "{whose} has no feature {name} to take away (features: {})",
+                    listed(&own)
+                )
+            });
         }
     }
     let kept: Vec<String> = current
@@ -1090,11 +1092,11 @@ fn settings_changed(
     })
 }
 
-/// A thread's settings as configure shows them: the bottle it gets next, and what of that is its
-/// own.
+/// A thread's settings as configure shows them: the bottle it gets next, and what of that it
+/// overrides of the repo's.
 fn thread_text(repo: &Repo, settings: &Settings) -> Result<String, String> {
     let spec = settings.spec(repo)?;
-    let own = |is: bool| if is { " (its own)" } else { "" };
+    let own = |is: bool| if is { " (overridden)" } else { "" };
     let features: Vec<String> = repos::features_of(&spec)
         .into_iter()
         .map(|f| {
