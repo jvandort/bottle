@@ -27,7 +27,7 @@ class SidecarTest(FolioTestCase):
         self.assertIn("`folio pause fix-it`, then `folio claude fix-it`", out)
         self.assertNotIn(self.sidecar, self.bottles())
         self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"],
-                         {"runner": "desktop", "spec": {"features": [], "memory": "32G"}})
+                         {"runner": "desktop", "memory": "32G"})
 
     def test_a_resume_makes_it_first_and_the_threads_bottle_ssh_es_to_it(self) -> None:
         self.give_it_one()
@@ -79,26 +79,12 @@ class SidecarTest(FolioTestCase):
         self.assertEqual(self.ok("list").splitlines()[1].split()[3], "desktop")
         self.ok("sidecar", "configure", "fix-it", "--no-feature", "jvm", "--no-disk", "--runner", "big")
         self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"],
-                         {"runner": "big", "spec": {"features": ["tools"], "memory": "64G"}})
+                         {"runner": "big", "features": ["tools"], "memory": "64G"})
         result = self.folio("sidecar", "configure", "fix-it", "--no-runner")
         self.assertIn("`folio sidecar remove fix-it` takes it away", result.stderr)
         self.ok("sidecar", "remove", "fix-it")
         self.assertIsNone(kept.thread(self.repo_, "fix-it")["sidecar"])
         self.assertEqual(self.ok("sidecar", "configure", "fix-it").strip(), "Thread fix-it has no sidecar")
-
-    def test_its_spec_can_be_the_repos_as_a_threads_can(self) -> None:
-        self.give_it_one()
-        self.ok("configure", "--memory", "4G")
-        self.assertEqual(self.ok("sidecar", "configure", "fix-it", "--no-spec").splitlines()[0],
-                         "Set thread fix-it's sidecar: features [tools], memory 4G (the repo's), runner desktop. "
-                         "It comes with the thread's next bottle: `folio pause fix-it`, then `folio claude fix-it`")
-        self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"], {"runner": "desktop"})
-        self.ok("pause", "fix-it")
-        self.ok("claude", "fix-it")
-        self.assertEqual(self.bottles()[self.sidecar]["spec"]["memory"], "4G")
-        # Changed, it's the repo's copied.
-        self.ok("sidecar", "configure", "fix-it", "--memory", "16G")
-        self.assertEqual(kept.thread(self.repo_, "fix-it")["sidecar"]["spec"], {"features": ["tools"], "memory": "16G"})
 
     def test_a_new_one_needs_a_runner_and_a_spec_bottle_takes(self) -> None:
         result = self.folio("sidecar", "configure", "fix-it", "--memory", "8G")

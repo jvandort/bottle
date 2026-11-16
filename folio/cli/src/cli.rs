@@ -9,7 +9,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 
 use crate::repos::{self, Repo};
-use crate::threads::{self, Config, Thread};
+use crate::threads::{self, Settings, Thread};
 use crate::{auth, broker, daemon, engine, features, notes, obsidian, picker, runners};
 
 const PICK: &str = "choose one from a list";
@@ -79,27 +79,23 @@ fn configure_arguments(command: Command, runner_help: &'static str) -> Command {
                 .long("no-feature")
                 .value_name("FEATURE")
                 .action(ArgAction::Append)
-                .help("take a feature away, by its name alone, e.g. jvm (repeatable)"),
+                .help("take a feature away, by its name alone, e.g. jvm; a thread's own only, as one the repo gives can't be (repeatable)"),
         )
-        .arg(Arg::new("memory").long("memory").value_name("MEMORY").help(format!(
+        .arg(Arg::new("memory").long("memory").value_name("MEMORY").conflicts_with("no-memory").help(format!(
             "memory for each bottle, in M or G, e.g. 8G (default: {})",
             repos::DEFAULT_MEMORY
         )))
+        .arg(Arg::new("no-memory").long("no-memory").action(ArgAction::SetTrue).help(
+            "the memory it'd have without: the default, for the repo; the repo's, for a thread",
+        ))
         .arg(Arg::new("disk").long("disk").value_name("DISK").help(DISK_HELP).conflicts_with("no-disk"))
-        .arg(Arg::new("no-disk").long("no-disk").action(ArgAction::SetTrue).help("the default disk again"))
+        .arg(Arg::new("no-disk").long("no-disk").action(ArgAction::SetTrue).help(
+            "the disk it'd have without: the default, for the repo; the repo's, for a thread",
+        ))
         .arg(Arg::new("runner").long("runner").value_name("RUNNER").help(runner_help).conflicts_with("no-runner"))
-        .arg(Arg::new("no-runner").long("no-runner").action(ArgAction::SetTrue).help("this machine again"))
-}
-
-/// --no-spec, for a thread's or a sidecar's configure: the repo's spec again.
-fn no_spec(command: Command) -> Command {
-    command.arg(
-        Arg::new("no-spec")
-            .long("no-spec")
-            .action(ArgAction::SetTrue)
-            .conflicts_with_all(["feature", "no-feature", "memory", "disk", "no-disk"])
-            .help("the repo's spec again, as it is when a bottle's made"),
-    )
+        .arg(Arg::new("no-runner").long("no-runner").action(ArgAction::SetTrue).help(
+            "the runner it'd have without: this machine, for the repo; the repo's, for a thread",
+        ))
 }
 
 fn command() -> Command {
@@ -128,18 +124,19 @@ fn command() -> Command {
              bottle when it's paused and resumed.",
         )
         .subcommand_required(true)
-        .subcommand(no_spec(configure_arguments(
+        .subcommand(configure_arguments(
             Command::new("configure")
                 .about("the thread's sidecar, as `folio configure THREAD` the thread: --runner gives it one")
                 .override_usage("folio sidecar configure [THREAD] [OPTIONS]")
                 .long_about(
                     "The thread's sidecar: shown without options, changed with them, as `folio configure THREAD` \
-                     does the thread; a thread without one is given one, which needs --runner. Bottle checks its \
-                     spec before it's saved.",
+                     does the thread, over what a new sidecar has (no features, and 2G of memory) where the thread's \
+                     are over the repo's; a thread without one is given one, which needs --runner. Bottle checks \
+                     its spec before it's saved.",
                 )
                 .arg(thread_arg(true)),
             "the runner it's made on (`folio runner ls` lists them)",
-        )))
+        ))
         .subcommand(Command::new("remove").about("take the thread's sidecar away").arg(thread_arg(true)))
         .subcommand(
             Command::new("shell")
@@ -233,16 +230,17 @@ fn command() -> Command {
                         .help("don't ask (needed without a terminal)"),
                 ),
         )
-        .subcommand(no_spec(configure_arguments(
+        .subcommand(configure_arguments(
             Command::new("configure")
                 .about("the repo's spec and runner, or a thread's: features, memory and disk, and where it runs")
                 .override_usage("folio configure [THREAD] [OPTIONS]")
                 .long_about(
                     "The repo's spec and runner, or, given a thread, the thread's: shown without options, changed \
-                     with them. Bottle checks a spec before it's saved. A thread follows the repo's until it's \
-                     given its own: a spec of its own is the repo's copied, then changed, and the repo's changes no \
-                     longer reach it (--no-spec: the repo's again). Threads get a change in their next bottle; a \
-                     bottle already running keeps what it has, and one on a runner is paused to move.",
+                     with them. Bottle checks a spec before it's saved. A thread has the repo's, but for what it's \
+                     given of its own: features it adds or gives other options (it can't take away one the repo \
+                     gives), and its memory, disk and runner; each --no-... takes its own away, and it has the \
+                     repo's again. Threads get a change in their next bottle; a bottle already running keeps what \
+                     it has, and one on a runner is paused to move.",
                 )
                 .arg(
                     Arg::new("thread")
@@ -251,7 +249,7 @@ fn command() -> Command {
                 ),
             "the runner bottles are made on (`folio runner ls` lists them; `local`: this machine; default: the \
              repo's, else this machine)",
-        )))
+        ))
         .subcommand(sidecar)
         .subcommand(
             Command::new("broker")
@@ -661,11 +659,11 @@ fn attach(matches: &ArgMatches, session: &str, command: &str) -> Outcome {
         return Ok(0);
     };
     if let Some(runner) = arg(matches, "runner") {
-        let config = Config {
+        let settings = Settings {
             runner: Some(runner.into()),
-            ..thread.config.clone()
+            ..thread.settings.clone()
         };
-        thread = threads::set_config(&repo, &thread, config)?;
+        thread = threads::set_settings(&repo, &thread, settings)?;
     }
     match threads::attach(&repo, &thread, session)? {}
 }
@@ -799,7 +797,7 @@ fn list() -> Outcome {
         let sidecar = match &thread.sidecar {
             None => "-".to_string(),
             Some(s) => {
-                let runner = s.runner(&repo)?.unwrap_or_else(|| runners::LOCAL.into());
+                let runner = s.runner.clone().unwrap_or_default();
                 match row["sidecar"].as_str() {
                     Some("missing") | None => runner,
                     Some(state) => format!("{runner} ({state})"),
@@ -871,6 +869,7 @@ fn changes_spec(matches: &ArgMatches) -> bool {
     !args(matches, "feature").is_empty()
         || !args(matches, "no-feature").is_empty()
         || arg(matches, "memory").is_some()
+        || flag(matches, "no-memory")
         || arg(matches, "disk").is_some()
         || flag(matches, "no-disk")
 }
@@ -895,6 +894,52 @@ fn usage_error(command: &str, message: &str) -> ! {
 /// given) or taken away, memory or disk set, or the disk the default again.
 fn changed(spec: &Value, matches: &ArgMatches, command: &str) -> Result<Value, String> {
     let mut spec = spec.clone();
+    let (given, taken) = feature_args(matches, command);
+    let features = repos::merge_features(&repos::features_of(&spec), &given);
+    let there: Vec<&str> = features.iter().map(|f| repos::name_of(f)).collect();
+    for name in &taken {
+        if !there.contains(&name.as_str()) {
+            return Err(format!(
+                "there's no feature {name} to take away (features: {})",
+                listed(&there)
+            ));
+        }
+    }
+    let kept: Vec<String> = features
+        .iter()
+        .filter(|f| !taken.iter().any(|t| t == repos::name_of(f)))
+        .cloned()
+        .collect();
+    spec["features"] = json!(kept);
+    if let Some(memory) = arg(matches, "memory") {
+        spec["memory"] = memory.into();
+    }
+    if flag(matches, "no-memory") {
+        spec["memory"] = repos::DEFAULT_MEMORY.into();
+    }
+    if let Some(disk) = arg(matches, "disk") {
+        spec["disk"] = disk.into();
+    }
+    if flag(matches, "no-disk")
+        && let Some(map) = spec.as_object_mut()
+    {
+        map.remove("disk");
+    }
+    Ok(spec)
+}
+
+/// `names`, as an error lists them.
+fn listed(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// A configure command's features to add, and names to take away, refused as a usage error if one
+/// to take away has options, or one's both.
+fn feature_args(matches: &ArgMatches, command: &str) -> (Vec<String>, Vec<String>) {
     let (given, taken) = (args(matches, "feature"), args(matches, "no-feature"));
     for name in &taken {
         if name.contains(':') || name.contains('=') {
@@ -920,38 +965,7 @@ fn changed(spec: &Value, matches: &ArgMatches, command: &str) -> Result<Value, S
             &format!("--feature and --no-feature both name {}", both.join(", ")),
         );
     }
-    let features = repos::merge_features(&repos::features_of(&spec), &given);
-    let there: Vec<&str> = features.iter().map(|f| repos::name_of(f)).collect();
-    for name in &taken {
-        if !there.contains(&name.as_str()) {
-            return Err(format!(
-                "there's no feature {name} to take away (features: {})",
-                if there.is_empty() {
-                    "none".to_string()
-                } else {
-                    there.join(", ")
-                }
-            ));
-        }
-    }
-    let kept: Vec<String> = features
-        .iter()
-        .filter(|f| !taken.iter().any(|t| t == repos::name_of(f)))
-        .cloned()
-        .collect();
-    spec["features"] = json!(kept);
-    if let Some(memory) = arg(matches, "memory") {
-        spec["memory"] = memory.into();
-    }
-    if let Some(disk) = arg(matches, "disk") {
-        spec["disk"] = disk.into();
-    }
-    if flag(matches, "no-disk")
-        && let Some(map) = spec.as_object_mut()
-    {
-        map.remove("disk");
-    }
-    Ok(spec)
+    (given, taken)
 }
 
 /// A configure command's thread, refused unless it comes first, before any option: a word after a
@@ -964,9 +978,9 @@ fn thread_first(matches: &ArgMatches, command: &str) {
         "feature",
         "no-feature",
         "memory",
+        "no-memory",
         "disk",
         "no-disk",
-        "no-spec",
         "runner",
         "no-runner",
     ];
@@ -991,12 +1005,6 @@ fn configure(matches: &ArgMatches) -> Outcome {
     let repo = current()?;
     if let Some(name) = arg(matches, "thread") {
         return thread_configure(matches, &repo, &threads::load(&repo, name)?);
-    }
-    if flag(matches, "no-spec") {
-        usage_error(
-            "configure",
-            "--no-spec is for a thread's spec: `folio configure THREAD --no-spec`",
-        );
     }
     if !changes(matches) {
         let shown = match repo.spec()? {
@@ -1039,71 +1047,110 @@ fn configure(matches: &ArgMatches) -> Outcome {
     Ok(0)
 }
 
-/// `current` as a configure command changes it: its runner given or the repo's again, its spec
-/// changed (the repo's, copied, if it had none of its own) or the repo's again.
-fn config_changed(
-    repo: &Repo,
-    current: &Config,
+/// `current`, a thread's settings or its sidecar's, as a configure command changes them: features
+/// added or given other options, or ones of its own taken away; its own memory, disk or runner
+/// given, or taken away.
+fn settings_changed(
+    current: &Settings,
     matches: &ArgMatches,
     command: &str,
-) -> Result<Config, String> {
-    let runner = match arg(matches, "runner") {
-        Some(runner) => Some(runner.to_string()),
-        None if flag(matches, "no-runner") => None,
-        None => current.runner.clone(),
+    whose: &str,
+) -> Result<Settings, String> {
+    let (given, taken) = feature_args(matches, command);
+    let own: Vec<&str> = current.features.iter().map(|f| repos::name_of(f)).collect();
+    for name in &taken {
+        if !own.contains(&name.as_str()) {
+            return Err(format!(
+                "{whose} has no feature {name} of its own to take away (its own: {}){}",
+                listed(&own),
+                if command == "configure" {
+                    "; one the repo gives can't be"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    let kept: Vec<String> = current
+        .features
+        .iter()
+        .filter(|f| !taken.iter().any(|t| t == repos::name_of(f)))
+        .cloned()
+        .collect();
+    let given_or = |value: &str, none: &str, now: &Option<String>| match arg(matches, value) {
+        Some(v) => Some(v.to_string()),
+        None if flag(matches, none) => None,
+        None => now.clone(),
     };
-    let spec = if flag(matches, "no-spec") {
-        None
-    } else if changes_spec(matches) {
-        Some(changed(&current.spec(repo)?, matches, command)?)
-    } else {
-        current.spec.clone()
-    };
-    Ok(Config { runner, spec })
+    Ok(Settings {
+        features: repos::merge_features(&kept, &given),
+        memory: given_or("memory", "no-memory", &current.memory),
+        disk: given_or("disk", "no-disk", &current.disk),
+        runner: given_or("runner", "no-runner", &current.runner),
+    })
 }
 
-/// A thread's config, or its sidecar's, as configure shows it: what's the repo's said so.
-fn config_text(repo: &Repo, config: &Config) -> Result<String, String> {
-    let repos = |own: bool| if own { "" } else { " (the repo's)" };
-    let runner = match config.runner(repo)? {
+/// A thread's settings as configure shows them: the bottle it gets next, and what of that is its
+/// own.
+fn thread_text(repo: &Repo, settings: &Settings) -> Result<String, String> {
+    let spec = settings.spec(repo)?;
+    let own = |is: bool| if is { " (its own)" } else { "" };
+    let features: Vec<String> = repos::features_of(&spec)
+        .into_iter()
+        .map(|f| {
+            let mine = own(settings.features.contains(&f));
+            format!("{f}{mine}")
+        })
+        .collect();
+    let disk = spec
+        .get("disk")
+        .and_then(Value::as_str)
+        .map(|d| format!(", disk {d}{}", own(settings.disk.is_some())))
+        .unwrap_or_default();
+    let runner = match settings.runner(repo)? {
         Some(runner) if runner != runners::LOCAL => runner,
         _ => "this machine".into(),
     };
     Ok(format!(
-        "{}{}, runner {runner}{}",
-        spec_text(&config.spec(repo)?),
-        repos(config.spec.is_some()),
-        repos(config.runner.is_some())
+        "features [{}], memory {}{}{disk}, runner {runner}{}",
+        features.join(", "),
+        spec.get("memory")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        own(settings.memory.is_some()),
+        own(settings.runner.is_some())
     ))
 }
 
-/// A bottle's state, as its status says.
-fn bottle_state(name: &str) -> Result<String, String> {
-    Ok(engine::status(&[name.to_string()])?[name]["state"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string())
+/// A sidecar as configure shows it.
+fn sidecar_text(sidecar: &Settings) -> String {
+    format!(
+        "{}, runner {}",
+        spec_text(&sidecar.over(&threads::sidecar_base())),
+        sidecar.runner.as_deref().unwrap_or_default()
+    )
 }
 
 fn thread_configure(matches: &ArgMatches, repo: &Repo, thread: &Thread) -> Outcome {
-    if !changes(matches) && !flag(matches, "no-spec") {
+    if !changes(matches) {
         let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
             .as_str()
             .unwrap_or_default()
             .to_string();
         println!(
             "{}; thread {}, {state}",
-            config_text(repo, &thread.config)?,
+            thread_text(repo, &thread.settings)?,
             thread.name
         );
         return Ok(0);
     }
-    let config = config_changed(repo, &thread.config, matches, "configure")?;
-    let thread = threads::set_config(repo, thread, config)?;
+    let whose = format!("thread {}", thread.name);
+    let settings = settings_changed(&thread.settings, matches, "configure", &whose)?;
+    let thread = threads::set_settings(repo, thread, settings)?;
     println!(
         "Set thread {}: {}{}",
         thread.name,
-        config_text(repo, &thread.config)?,
+        thread_text(repo, &thread.settings)?,
         when(repo, &thread)?
     );
     Ok(0)
@@ -1115,17 +1162,17 @@ fn sidecar_configure(matches: &ArgMatches) -> Outcome {
     let Some(thread) = thread_of(matches, &repo, "sidecar configure", false)? else {
         return Ok(0);
     };
-    if !changes(matches) && !flag(matches, "no-spec") {
+    if !changes(matches) {
         let Some(sidecar) = &thread.sidecar else {
             println!("Thread {} has no sidecar", thread.name);
             return Ok(0);
         };
         let name = thread.sidecar_bottle();
-        println!(
-            "{}; bottle {name}, {}",
-            config_text(&repo, sidecar)?,
-            bottle_state(&name)?
-        );
+        let state = engine::status(std::slice::from_ref(&name))?[&name]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        println!("{}; bottle {name}, {state}", sidecar_text(sidecar));
         return Ok(0);
     }
     if flag(matches, "no-runner") {
@@ -1134,24 +1181,19 @@ fn sidecar_configure(matches: &ArgMatches) -> Outcome {
             thread.name
         ));
     }
-    let runner = arg(matches, "runner");
-    if thread.sidecar.is_none() && runner.is_none() {
+    if thread.sidecar.is_none() && arg(matches, "runner").is_none() {
         return Err(format!(
             "thread {name} has no sidecar; give it one with `folio sidecar configure {name} --runner RUNNER ...`",
             name = thread.name
         ));
     }
-    // A new one is small: a spec of its own, with nothing a thread's bottle needs to run sessions.
-    let current = thread.sidecar.clone().unwrap_or_else(|| Config {
-        runner: runner.map(String::from),
-        spec: Some(json!({"features": [], "memory": repos::DEFAULT_MEMORY})),
-    });
-    let sidecar = config_changed(&repo, &current, matches, "sidecar configure")?;
+    let current = thread.sidecar.clone().unwrap_or_default();
+    let sidecar = settings_changed(&current, matches, "sidecar configure", "the sidecar")?;
     let thread = threads::set_sidecar(&repo, &thread, Some(sidecar))?;
     println!(
         "Set thread {}'s sidecar: {}{}",
         thread.name,
-        config_text(&repo, thread.sidecar.as_ref().unwrap())?,
+        sidecar_text(thread.sidecar.as_ref().unwrap()),
         when(&repo, &thread)?
     );
     Ok(0)

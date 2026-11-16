@@ -41,7 +41,7 @@ use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::engine::{self, Mount};
 use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::store::{self, Content};
-use crate::{broker, lanes, notes, runners, snapshots};
+use crate::{broker, lanes, notes, repos, runners, snapshots};
 
 const RECORD: &str = "thread.json";
 pub const WORKSPACE: &str = "/workspace";
@@ -128,38 +128,98 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
     )
 }
 
-/// Where a bottle is made, and from what: a thread's, or its sidecar's. What's None is the repo's,
-/// as it is when the bottle's made; a spec of its own is a whole one.
+/// What a thread has that the repo's settings don't, or a sidecar has that a new one doesn't (its
+/// base): features it adds or changes the options of (by name: one can't be taken away), and its
+/// own memory, disk and runner. What it doesn't say, it has as its base has it, as that is when a
+/// bottle's made.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Config {
+#[serde(from = "SettingsRecord")]
+pub struct Settings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec: Option<Value>,
 }
 
-impl Config {
-    /// The runner: its own, else the repo's; None: this machine.
+/// Settings as a record has them: a sidecar's from before settings were overlays had a whole spec
+/// of its own, which is the same as its keys over the base.
+#[derive(Deserialize)]
+struct SettingsRecord {
+    #[serde(default)]
+    features: Vec<String>,
+    #[serde(default)]
+    memory: Option<String>,
+    #[serde(default)]
+    disk: Option<String>,
+    #[serde(default)]
+    runner: Option<String>,
+    #[serde(default)]
+    spec: Option<Value>,
+}
+
+impl From<SettingsRecord> for Settings {
+    fn from(r: SettingsRecord) -> Settings {
+        let spec = r.spec.unwrap_or_default();
+        let get = |key: &str| spec.get(key).and_then(Value::as_str).map(String::from);
+        Settings {
+            features: repos::merge_features(&repos::features_of(&spec), &r.features),
+            memory: r.memory.or_else(|| get("memory")),
+            disk: r.disk.or_else(|| get("disk")),
+            runner: r.runner.filter(|r| !r.is_empty()),
+        }
+    }
+}
+
+impl Settings {
+    /// `base`, a spec, with these over it.
+    pub fn over(&self, base: &Value) -> Value {
+        let mut spec = base.clone();
+        spec["features"] = json!(repos::merge_features(
+            &repos::features_of(base),
+            &self.features
+        ));
+        if let Some(memory) = &self.memory {
+            spec["memory"] = memory.as_str().into();
+        }
+        if let Some(disk) = &self.disk {
+            spec["disk"] = disk.as_str().into();
+        }
+        spec
+    }
+
+    /// The spec a thread's bottle is made from: the repo's, with these over it.
+    pub fn spec(&self, repo: &Repo) -> Result<Value, String> {
+        Ok(self.over(&repo.spec()?.unwrap_or_else(default_spec)))
+    }
+
+    /// Where a thread's bottle is made: its own runner, else the repo's; None: this machine.
     pub fn runner(&self, repo: &Repo) -> Result<Option<String>, String> {
         match &self.runner {
-            Some(runner) if !runner.is_empty() => Ok(Some(runner.clone())),
-            _ => repo.runner(),
+            Some(runner) => Ok(Some(runner.clone())),
+            None => repo.runner(),
         }
     }
 
-    /// The spec: its own, else the repo's (else what a new repo's is).
-    pub fn spec(&self, repo: &Repo) -> Result<Value, String> {
-        match &self.spec {
-            Some(spec) => Ok(spec.clone()),
-            None => Ok(repo.spec()?.unwrap_or_else(default_spec)),
-        }
+    /// Whether it says anything of a spec: else its spec is its base's.
+    pub fn changes_spec(&self) -> bool {
+        !self.features.is_empty() || self.memory.is_some() || self.disk.is_some()
     }
+}
+
+/// What a sidecar has when it's given nothing: it runs no sessions, so no features.
+pub fn sidecar_base() -> Value {
+    json!({"features": [], "memory": repos::DEFAULT_MEMORY})
 }
 
 /// A thread's configuration: written only by what changes it (new, configure, rename, a runner
 /// given), never by using it. What its bottle is, and when it was last used, is the bottle's
 /// record's (bottles.rs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ThreadRecord")]
 pub struct Thread {
     pub name: String,
     pub bottle: String,
@@ -170,12 +230,46 @@ pub struct Thread {
     /// The broker (see broker.rs), whose bottle is made folio's way, not the repo's.
     #[serde(default)]
     pub broker: bool,
-    /// Where its bottles are made, and from what, as a sidecar's is: in the record beside the rest.
-    #[serde(flatten)]
-    pub config: Config,
+    /// What it has that the repo's settings don't, as a sidecar's are kept.
+    pub settings: Settings,
     /// Its sidecar, if it has one: a runner of its own, always.
+    pub sidecar: Option<Settings>,
+}
+
+/// A thread as its record has it: one from before settings had a runner alone, at the top.
+#[derive(Deserialize)]
+struct ThreadRecord {
+    name: String,
+    bottle: String,
+    created: f64,
     #[serde(default)]
-    pub sidecar: Option<Config>,
+    base: Option<String>,
+    #[serde(default)]
+    broker: bool,
+    #[serde(default)]
+    settings: Option<Settings>,
+    #[serde(default)]
+    runner: Option<String>,
+    #[serde(default)]
+    sidecar: Option<Settings>,
+}
+
+impl From<ThreadRecord> for Thread {
+    fn from(r: ThreadRecord) -> Thread {
+        let mut settings = r.settings.unwrap_or_default();
+        if settings.runner.is_none() {
+            settings.runner = r.runner.filter(|r| !r.is_empty());
+        }
+        Thread {
+            name: r.name,
+            bottle: r.bottle,
+            created: r.created,
+            base: r.base,
+            broker: r.broker,
+            settings,
+            sidecar: r.sidecar,
+        }
+    }
 }
 
 impl Thread {
@@ -387,9 +481,9 @@ pub fn create(
         created: now(),
         base: base.map(String::from),
         broker: is_broker,
-        config: Config {
+        settings: Settings {
             runner: runner.map(String::from),
-            spec: None,
+            ..Settings::default()
         },
         sidecar: None,
     };
@@ -428,13 +522,21 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             None,
         );
     }
-    // Checked again each time: a feature can have changed since the spec was saved. The repo's,
-    // checked, is saved as checked: validating drops what bottle doesn't know.
-    let spec = engine::validate_spec(&check_repo_spec(thread.config.spec(repo)?, false)?)?;
+    // Checked again each time: a feature can have changed since the spec was saved. The repo's is
+    // saved as checked: validating drops what bottle doesn't know.
+    let repos_spec = engine::validate_spec(&check_repo_spec(
+        repo.spec()?.unwrap_or_else(default_spec),
+        false,
+    )?)?;
     repo.remember()?;
-    if thread.config.spec.is_none() && repo.spec()?.as_ref() != Some(&spec) {
-        repo.save_spec(&spec)?;
+    if repo.spec()?.as_ref() != Some(&repos_spec) {
+        repo.save_spec(&repos_spec)?;
     }
+    let spec = if thread.settings.changes_spec() {
+        engine::validate_spec(&check_repo_spec(thread.settings.over(&repos_spec), false)?)?
+    } else {
+        repos_spec
+    };
     let notes_path = notes::ensure(
         &notes_dir(repo, &thread.name),
         &format!("Notes of thread {}", thread.name),
@@ -477,8 +579,8 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             ),
             Ok(()) => {
                 told = sidecar_advice(
-                    &sidecar.runner(repo)?.unwrap_or_default(),
-                    &sidecar.spec(repo)?,
+                    sidecar.runner.as_deref().unwrap_or_default(),
+                    &sidecar.over(&sidecar_base()),
                 );
                 sidecar_bottle = Some(thread.sidecar_bottle());
             }
@@ -531,21 +633,21 @@ fn elsewhere(thread: &Thread, runner: Option<&str>, e: String) -> String {
 fn make_sidecar(repo: &Repo, thread: &Thread, repos_: &[Mount]) -> Result<(), String> {
     let sidecar = thread.sidecar.as_ref().unwrap();
     // Scratch: whatever's left of one is no use.
-    let runner = sidecar.runner(repo)?;
+    let runner = sidecar.runner.as_deref();
     if !delete_sidecar(thread)? {
         return Err(format!(
             "its old one is on runner {}, which is off",
             runner.unwrap_or_default()
         ));
     }
-    let spec = check_repo_spec(engine::validate_spec(&sidecar.spec(repo)?)?, true)?;
+    let spec = check_repo_spec(engine::validate_spec(&sidecar.over(&sidecar_base()))?, true)?;
     engine::new(
         &directory(repo, &thread.name),
         &thread.sidecar_bottle(),
         &spec,
         repos_,
         &sidecar_itself(&thread.name, &repo.name),
-        runner.as_deref(),
+        runner,
         None,
     )
 }
@@ -700,26 +802,20 @@ pub fn copy(
     )
 }
 
-/// `config`, a spec of its own checked as a thread's (or, with `sidecar`, a sidecar's) is.
-fn checked(config: Config, sidecar: bool) -> Result<Config, String> {
-    let spec = match config.spec {
-        Some(spec) => Some(check_repo_spec(engine::validate_spec(&spec)?, sidecar)?),
-        None => None,
-    };
-    Ok(Config { spec, ..config })
-}
-
 /// The thread, with `sidecar` (None: none) from its next bottle on; its spec checked first.
 pub fn set_sidecar(
     repo: &Repo,
     thread: &Thread,
-    sidecar: Option<Config>,
+    sidecar: Option<Settings>,
 ) -> Result<Thread, String> {
     if thread.broker {
         return Err("the broker has no sidecar".into());
     }
+    if let Some(sidecar) = &sidecar {
+        check_repo_spec(engine::validate_spec(&sidecar.over(&sidecar_base()))?, true)?;
+    }
     let changed = Thread {
-        sidecar: sidecar.map(|s| checked(s, true)).transpose()?,
+        sidecar,
         ..thread.clone()
     };
     save(repo, &changed, Vec::new())?;
@@ -732,21 +828,23 @@ pub fn runner_of(repo: &Repo, thread: &Thread) -> Result<Option<String>, String>
     if thread.broker {
         return Ok(None);
     }
-    thread.config.runner(repo)
+    thread.settings.runner(repo)
 }
 
-/// The thread, with `config` from its next bottle on; its spec checked first.
+/// The thread, with `settings` from its next bottle on; its spec, over the repo's, checked first.
 ///
-/// A paused thread resumes on the runner it says. One with a bottle elsewhere is refused: its
+/// A paused thread resumes on the runner they come to. One with a bottle elsewhere is refused: its
 /// work is in that bottle, and pausing it is what brings it back here, to go on.
-pub fn set_config(repo: &Repo, thread: &Thread, config: Config) -> Result<Thread, String> {
+pub fn set_settings(repo: &Repo, thread: &Thread, settings: Settings) -> Result<Thread, String> {
     if thread.broker {
         return Err(
             "the broker's bottle is folio's: it runs on this machine, from folio's spec".into(),
         );
     }
-    let config = checked(config, false)?;
-    let runner = config.runner(repo)?;
+    if settings.changes_spec() {
+        check_repo_spec(engine::validate_spec(&settings.spec(repo)?)?, false)?;
+    }
+    let runner = settings.runner(repo)?;
     let runner = runner.as_deref().unwrap_or(runners::LOCAL);
     let row = states(repo, std::slice::from_ref(thread))?
         .remove(&thread.name)
@@ -762,11 +860,11 @@ pub fn set_config(repo: &Repo, thread: &Thread, config: Config) -> Result<Thread
             name = thread.name
         ));
     }
-    if thread.config == config {
+    if thread.settings == settings {
         return Ok(thread.clone());
     }
     let changed = Thread {
-        config,
+        settings,
         ..thread.clone()
     };
     save(repo, &changed, Vec::new())?;
@@ -1292,13 +1390,15 @@ mod tests {
             created: 1.5,
             base: None,
             broker: false,
-            config: Config {
-                runner: None,
-                spec: Some(json!({"memory": "8G", "features": ["tools"]})),
+            settings: Settings {
+                memory: Some("8G".into()),
+                features: vec!["jvm:version=21".into()],
+                ..Settings::default()
             },
-            sidecar: Some(Config {
+            sidecar: Some(Settings {
                 runner: Some("box".into()),
-                spec: Some(json!({"memory": "2G", "features": []})),
+                memory: Some("32G".into()),
+                ..Settings::default()
             }),
         };
         assert_eq!(
@@ -1310,19 +1410,39 @@ mod tests {
             serde_json::from_str(r#"{"name": "t", "bottle": "b", "created": 1, "last_active": 2}"#)
                 .unwrap();
         assert_eq!((read.broker, read.sidecar), (false, None));
-        assert_eq!(read.config, Config::default());
-        // A thread's runner, and its sidecar, as they were before a thread had a config: the same.
+        assert_eq!(read.settings, Settings::default());
+        // A thread's runner, alone at the top, and a sidecar's whole spec, as they were before
+        // settings: the same, as settings.
         let read: Thread = serde_json::from_str(
             r#"{"name": "t", "bottle": "b", "created": 1, "runner": "desktop",
-                "sidecar": {"runner": "box", "spec": {"memory": "2G"}}}"#,
+                "sidecar": {"runner": "box", "spec": {"features": ["jvm"], "memory": "32G", "disk": "9G"}}}"#,
         )
         .unwrap();
-        assert_eq!(read.config.runner.as_deref(), Some("desktop"));
-        assert_eq!(read.config.spec, None);
-        let sidecar = read.sidecar.unwrap();
+        assert_eq!(read.settings.runner.as_deref(), Some("desktop"));
+        assert!(!read.settings.changes_spec());
         assert_eq!(
-            (sidecar.runner.as_deref(), sidecar.spec),
-            (Some("box"), Some(json!({"memory": "2G"})))
+            read.sidecar.unwrap(),
+            Settings {
+                features: vec!["jvm".into()],
+                memory: Some("32G".into()),
+                disk: Some("9G".into()),
+                runner: Some("box".into()),
+            }
         );
+    }
+
+    #[test]
+    fn settings_go_over_their_base_feature_by_feature() {
+        let base = json!({"features": ["tools", "jvm:version=17"], "memory": "2G", "disk": "50G"});
+        let settings = Settings {
+            features: vec!["jvm:version=21".into(), "python".into()],
+            memory: Some("16G".into()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.over(&base),
+            json!({"features": ["tools", "jvm:version=21", "python"], "memory": "16G", "disk": "50G"})
+        );
+        assert_eq!(Settings::default().over(&base), base);
     }
 }

@@ -26,7 +26,7 @@ A thread's name is lowercase words joined by `-`, unique within its repo. Its
 bottle is named `<repo key>-<thread>`, so the same thread name in two repos
 never clashes. The repo key is the repo's name and a hash of its path.
 
-- **Its bottle** is made from the repo's spec, or its own (see `folio configure`), with
+- **Its bottle** is made from the repo's spec, with what it's given of its own over it (see `folio configure`), with
   the repo checked out at `/workspace`. In it, Claude and a shell each run in a
   [shpool](https://github.com/shell-pool/shpool) session of their own, started
   the first time you attach to it. Attaching starts the bottle and the session
@@ -196,10 +196,10 @@ folio sidecar cp fix-it:/workspace/build/report .  # a copy out of it (or into i
 ```
 
 `folio sidecar configure` takes what `folio configure THREAD` does (below), for
-the sidecar, and keeps it the same way, as the thread's own is kept: a thread
-without one is given one, which needs `--runner`, and starts with a spec of its
-own with no features and 2G of memory (`--no-spec`: the repo's);
-`folio sidecar remove` takes it away.
+the sidecar, and keeps it as a thread's own settings are kept, over what a new
+sidecar has, no features and 2G of memory, rather than over the repo's: a
+thread without one is given one, which needs `--runner`; `folio sidecar remove`
+takes it away.
 
 It has the thread's repos, as they were when it was made, and their remotes,
 pushes included: what the agent pushes from there lands in the thread's lane,
@@ -566,7 +566,7 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and the space a paused one's snapshot takes up |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
-| `folio configure [THREAD] [--feature F] [--no-feature F] [--memory M] [--disk D \| --no-disk] [--no-spec] [--runner R \| --no-runner]` | The repo's spec and runner, or a thread's: features, memory and disk, and where it runs; shown without options |
+| `folio configure [THREAD] [--feature F] [--no-feature F] [--memory M \| --no-memory] [--disk D \| --no-disk] [--runner R \| --no-runner]` | The repo's spec and runner, or a thread's: features, memory and disk, and where it runs; shown without options |
 | `folio sidecar configure` / `remove` / `shell` / `exec` / `cp` | A thread's sidecar (see Sidecars): `shell`, `exec` and `cp` as for its bottle |
 | `folio broker [claude\|shell\|pause\|notes]` | The broker: attach, pause, or open its notes |
 | `folio repo list` (`ls`) | Every repo folio has state for |
@@ -591,7 +591,7 @@ terminal it needs `--yes`.
 **`folio configure`** shows the repo's spec, which every new bottle of its
 threads is made from, and changes it: `--feature` adds a feature (one there
 already gets the options given), `--no-feature` takes one away, by its name
-alone, `--memory` and `--disk` set them (`--no-disk`: the default again), and
+alone, `--memory` and `--disk` set them (`--no-memory`, `--no-disk`: the defaults again), and
 `--runner` sets where its threads' bottles are made (see Runners;
 `--no-runner`: this machine again). Bottle checks the spec
 before folio saves it: that it's valid, while whether its memory fits is
@@ -607,18 +607,19 @@ folio configure --feature claude --feature jvm:version=21 --memory 8G --disk 50G
 folio configure --no-feature jvm
 ```
 
-**`folio configure THREAD`** does the same for one thread, which follows the
-repo's spec and runner until it's given its own. Its own spec is the repo's,
-copied the first time it's changed and changed from there, so the repo's later
-changes don't reach it; `--no-spec` follows the repo's again, as `--no-runner`
-does its runner. Shown, what's still the repo's says so. A change comes with
-the thread's next bottle (`folio pause`, then `folio claude`); a thread with a
-bottle on another runner than the one it's given is refused: pause it first.
+**`folio configure THREAD`** does the same for one thread, which has the repo's
+settings but for what it's given of its own: features it adds, or gives other
+options (`--feature jvm:version=21` over the repo's `jvm`), and its own memory,
+disk and runner. It can't take away a feature the repo gives. Each `--no-...`
+takes its own away, and it has the repo's again; the repo's changes reach it,
+but for what's its own. Shown, what's its own says so. A change comes with the
+thread's next bottle (`folio pause`, then `folio claude`); a thread with a
+bottle on another runner than the one it comes to is refused: pause it first.
 
 ```sh
 folio configure fix-it --memory 16G    # this thread only
 folio configure fix-it --runner local  # resumes here, whatever the repo's runner
-folio configure fix-it --no-spec --no-runner
+folio configure fix-it --no-memory --no-runner
 folio configure fix-it                 # shows it
 ```
 
