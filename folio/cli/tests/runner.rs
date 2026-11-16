@@ -2,6 +2,9 @@
 //! runs each command here, in a home of the runner's own, and makes a forward (-R) a symlink; the
 //! runner's bottle-cli is this workspace's, copied there as from a distribution; a machine's boot
 //! is a stand-in running bottle-agent on the machine's socket, so exec reaches it.
+//!
+//! Linux only: the stand-in runner runs bottle-agent here, and bottle-agent is Linux's.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::io::{Read, Write};
