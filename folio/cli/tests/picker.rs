@@ -27,8 +27,7 @@ fn attached(f: &Folio) -> Option<String> {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["argv"].as_array().unwrap().iter().any(|a| a == "attach"))
-        .next_back()
+        .rfind(|e| e["argv"].as_array().unwrap().iter().any(|a| a == "attach"))
         .map(|e| e["machine"].as_str().unwrap().to_string())
 }
 
