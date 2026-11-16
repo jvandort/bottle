@@ -273,9 +273,12 @@ impl Server {
         }
     }
 
-    fn release(&self, name: &str) {
+    /// The bottle `name` released; whether there's none left to answer, and so folio serve's to stop.
+    fn release(&self, name: &str) -> bool {
         let released = self.bottles.lock().unwrap().remove(name);
-        let Some(released) = released else { return };
+        let Some(released) = released else {
+            return false;
+        };
         log!("bottle.daemon", "{name}: released");
         let still = self
             .bottles
@@ -286,10 +289,7 @@ impl Server {
         if released.runner != LOCAL && !still {
             self.end_forward(&released.runner);
         }
-        if self.bottles.lock().unwrap().is_empty() {
-            log!("bottle.daemon", "no bottle left to answer: stopping");
-            self.stop();
-        }
+        self.bottles.lock().unwrap().is_empty()
     }
 
     /// Forwards `forwards` to `runner`, unless that's under way already.
@@ -348,12 +348,20 @@ impl Server {
                     Err(e) => json!({"ok": false, "error": e}),
                 },
                 Some("release") => {
-                    self.release(
+                    let none_left = self.release(
                         message
                             .get("bottle")
                             .and_then(Value::as_str)
                             .unwrap_or_default(),
                     );
+                    if none_left {
+                        // Answered first, as a shutdown is: the wind-up may end this process
+                        // before an answer after it is written.
+                        let _ = (&stream).write_all(b"{\"ok\": true}\n");
+                        log!("bottle.daemon", "no bottle left to answer: stopping");
+                        self.stop();
+                        return;
+                    }
                     json!({"ok": true})
                 }
                 Some("shutdown") => {
