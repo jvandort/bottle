@@ -1004,42 +1004,19 @@ fn a_thread_with_a_bottle_elsewhere_is_paused_first() {
     assert_eq!(f.record("fix-it")["runner"], "local");
 }
 
-// --- a home from before ------------------------------------------------------------------
+// --- a home's format ----------------------------------------------------------------------
 
 #[test]
-fn a_home_from_before_is_converted_by_the_next_command() {
+fn a_home_in_a_newer_folios_format_is_refused() {
     let f = started();
-    // As an older folio wrote them: the thread's runner at the top, the bottle's machine_name and
-    // memory, and no stamp.
-    let mut thread = f.thread("fix-it");
-    thread["runner"] = json!("local");
-    thread["settings"] = json!({});
-    thread["last_active"] = json!(1);
-    harness::write_json(
-        &current_slot(&f.thread_dir("fix-it"))
-            .unwrap()
-            .join("thread.json"),
-        &thread,
-    );
-    let path = f
-        .thread_dir("fix-it")
-        .join("bottles")
-        .join(format!("{}.json", f.bottle("fix-it")));
-    let mut record = harness::read_json(&path).unwrap();
-    record["machine_name"] = json!(f.bottle("fix-it"));
-    record["memory"] = json!("2G");
-    record["driver"] = json!("smolvm");
-    harness::write_json(&path, &record);
-    fs::remove_file(f.home.join("format")).unwrap();
-
-    assert_eq!(f.rows()["fix-it"][..2], ["running", "local"]);
     assert_eq!(fs::read_to_string(f.home.join("format")).unwrap(), "1\n");
-    let thread = f.thread("fix-it");
-    assert_eq!(thread["settings"], json!({"runner": "local"}));
-    assert!(thread.get("runner").is_none() && thread.get("last_active").is_none());
-    let record = f.record("fix-it");
-    for gone in ["machine_name", "memory", "driver"] {
-        assert!(record.get(gone).is_none(), "{gone}");
-    }
-    assert_eq!(record["spec"]["memory"], "2G");
+    fs::write(f.home.join("format"), "2\n").unwrap();
+    let out = f.folio(&["list"]);
+    assert_eq!(out.code, 255);
+    assert!(
+        out.stderr
+            .contains("is in format 2, a newer folio's than this one (1)"),
+        "{}",
+        out.stderr
+    );
 }

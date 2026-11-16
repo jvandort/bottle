@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use harness::{Folio, NOTES_ARCHIVE, WORKSPACE_ARCHIVE, argv, current_slot, git_in, read_json};
+use harness::{Folio, argv, git_in, read_json};
 use serde_json::{Value, json};
 
 const GITIGNORE: &str = ".obsidian/\n.trash/\n";
@@ -379,31 +379,4 @@ fn an_obsidian_json_folio_doesnt_understand_is_left_alone() {
         assert_eq!(opened(&log), ["obsidian://choose-vault"]);
         assert!(out.contains("Open folder as vault"), "{out}");
     }
-}
-
-#[test]
-fn a_snapshot_from_before_notes_is_converted_its_vault_and_conversation_at_notes() {
-    let f = Folio::new();
-    f.ok(&["broker"]);
-    let there = f.machine_dir("broker");
-    let transcript = there.join("home/.claude/projects/-workspace");
-    fs::create_dir_all(&transcript).unwrap();
-    fs::write(transcript.join("s.jsonl"), "talk\n").unwrap();
-    fs::write(there.join("notes/mine.md"), "unpushed\n").unwrap();
-    f.ok(&["broker", "pause"]);
-    let slot = current_slot(&f.broker_dir()).unwrap();
-    fs::rename(slot.join(NOTES_ARCHIVE), slot.join(WORKSPACE_ARCHIVE)).unwrap();
-    // A home from before format 1, which the next command converts.
-    fs::remove_file(f.home.join("format")).unwrap();
-    f.ok(&["broker", "shell"]);
-    let there = f.machine_dir("broker");
-    assert_eq!(
-        fs::read_to_string(there.join("home/.claude/projects/-notes/s.jsonl")).unwrap(),
-        "talk\n"
-    );
-    assert!(!there.join("home/.claude/projects/-workspace").exists());
-    assert_eq!(
-        fs::read_to_string(there.join("notes/mine.md")).unwrap(),
-        "unpushed\n"
-    );
 }

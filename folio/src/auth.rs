@@ -94,17 +94,6 @@ pub fn service() -> String {
     )
 }
 
-/// The service bottle kept credentials under, for its home ($BOTTLE_HOME, else ~/.bottle): what
-/// move_from_bottles moves them from.
-fn bottles_service() -> String {
-    let default = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bottle");
-    let home = std::env::var_os("BOTTLE_HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default.clone());
-    keyed("bottle", &home, &default)
-}
-
 /// `name`, for `home`'s credentials: alone for the default home, else with a hash of where it is.
 fn keyed(name: &str, home: &Path, default: &Path) -> String {
     let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -181,32 +170,6 @@ pub fn keychain(name: &str) -> Option<String> {
         return given.get(name).and_then(Value::as_str).map(String::from);
     }
     found(&service(), name)
-}
-
-/// Every declared credential kept under bottle's service, from before folio had its own, moved to
-/// folio's (migrate.rs). One folio has already stays as it is.
-pub fn move_from_bottles() {
-    if std::env::var_os("FOLIO_CREDENTIALS").is_some() {
-        return;
-    }
-    let Ok(declared) = declared() else {
-        return;
-    };
-    let (service, old) = (service(), bottles_service());
-    for name in declared.keys() {
-        if found(&service, name).is_some() {
-            continue;
-        }
-        if let Some(value) = found(&old, name)
-            && stored(&service, name, &value).is_ok()
-        {
-            removed(&old, name);
-            crate::log::log!(
-                "auth",
-                "credential {name} moved from the Keychain's {old} to {service}"
-            );
-        }
-    }
 }
 
 pub fn get(name: &str) -> Option<String> {
@@ -425,20 +388,6 @@ mod tests {
             other.starts_with("folio:") && other.len() == "folio:".len() + 12,
             "{other}"
         );
-    }
-
-    #[test]
-    fn those_kept_under_bottles_service_are_moved_to_folios() {
-        let keychain = Keychain::new();
-        stored("bottle", "claude", "tok-old").unwrap();
-        stored("bottle", "github", "gh-old").unwrap();
-        stored(&service(), "github", "gh-new").unwrap();
-        move_from_bottles();
-        assert_eq!(get("claude").as_deref(), Some("tok-old"));
-        assert_eq!(found("bottle", "claude"), None);
-        // One folio has already stays as it is.
-        assert_eq!(get("github").as_deref(), Some("gh-new"));
-        assert!(!keychain.argv().contains("tok-old"));
     }
 
     #[test]

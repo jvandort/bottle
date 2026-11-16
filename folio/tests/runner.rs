@@ -330,26 +330,6 @@ fn a_forward_makes_sockets_here_reachable_there_until_its_stopped() {
 }
 
 #[test]
-fn runners_bottle_cli_had_are_folios_until_folio_has_its_own() {
-    let f = Fixture::new("m");
-    fs::create_dir_all(f.dir.join("bottle")).unwrap();
-    fs::write(
-        f.dir.join("bottle/runners.json"),
-        r#"{"version": 1, "runners": {"box": {"ssh": "box"}}}"#,
-    )
-    .unwrap();
-    assert_eq!(f.ok(&["runner", "ls"]), "box  box\n");
-    f.ok(&["runner", "detach", "box", "--offline"]);
-    // Written, it's folio's own: bottle-cli's is left as it was.
-    assert!(f.dir.join("folio/runners.json").exists());
-    assert!(
-        !fs::read_to_string(f.dir.join("bottle/runners.json"))
-            .unwrap()
-            .contains("detached")
-    );
-}
-
-#[test]
 fn a_build_sends_its_context_with_the_recipe_and_builds_there() {
     let f = Fixture::new("b");
     // The runner's bottle-cli, for this: says what the build it was given mounts.
