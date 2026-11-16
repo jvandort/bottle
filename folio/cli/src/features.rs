@@ -160,12 +160,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::ExitCode;
 
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::{Map, Value};
 
+use crate::repr;
 use crate::routes::Route;
-use crate::{FAILED, images, repr};
 
 pub const BASE: &str = "base";
 pub const CREDENTIAL_PLACEHOLDER: &str = "${credential}";
@@ -236,6 +237,7 @@ impl OptionValue {
         }
     }
 
+    #[cfg(test)]
     fn json(&self) -> Value {
         match self {
             OptionValue::String(s) => s.clone().into(),
@@ -583,6 +585,7 @@ impl Feature {
     }
 
     /// As its definition says, as JSON.
+    #[cfg(test)]
     pub fn json(&self) -> Value {
         let options: Map<String, Value> = self
             .options
@@ -618,6 +621,7 @@ impl Feature {
         })
     }
 
+    #[cfg(test)]
     /// As json, and what its options make of it: their values, as install.sh sees them, and its
     /// context; and its credentials and packages, filled in, unless what they need isn't set, which
     /// is said instead (`"unresolved": why`).
@@ -649,6 +653,7 @@ impl Feature {
     }
 }
 
+#[cfg(test)]
 fn credential_json(c: &Credential) -> Value {
     let routes = |routes: &[Route]| routes.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
     json!({
@@ -1697,6 +1702,7 @@ pub fn resolve(requested: &[String]) -> Result<Vec<Feature>> {
     Ok(order)
 }
 
+#[cfg(test)]
 /// What folio serve does with a request for `path` by `method` to the hosts of SPEC's
 /// credentials: the path as a server routes it (null: refused as no route), and for each credential
 /// whether the request is forbidden (never sent), and whether the credential would go on it, if it
@@ -1723,47 +1729,9 @@ fn route(spec: &str, method: &str, path: &str) -> Result<Value> {
     Ok(json!({"path": canonical, "credentials": credentials}))
 }
 
-// --- the command ----------------------------------------------------------------
-
-const USAGE: &str = "features list | features show SPEC | features route SPEC METHOD PATH \
-                     | features canonical SPEC... \
-                     | features resolve [SPEC...] | features image [SPEC...] \
-                     | features cached [--build] [SPEC...]";
-
-pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let command = args.next();
-    let args: Vec<String> = args.collect();
-    let result: Result<Value> = match (command.as_deref(), args.as_slice()) {
-        (Some("list"), []) => Ok(json!(available())),
-        (Some("show"), [spec]) => parse_spec(spec)
-            .and_then(|(id, settings)| load(&id)?.configured(&settings))
-            .map(|f| f.derived_json()),
-        (Some("canonical"), specs) if !specs.is_empty() => specs
-            .iter()
-            .map(|s| canonical(s))
-            .collect::<Result<Vec<_>>>()
-            .map(|c| json!(c)),
-        (Some("resolve"), specs) => {
-            resolve(specs).map(|features| features.iter().map(Feature::derived_json).collect())
-        }
-        (Some("image"), []) => images::base(),
-        (Some("image"), specs) => resolve(specs).and_then(|features| images::image(&features)),
-        (Some("route"), [spec, method, path]) => route(spec, method, path),
-        (Some("cached"), [flag]) if flag == "--build" => images::build_cached(),
-        (Some("cached"), specs) => resolve(specs).map(|features| images::cached_for(&features)),
-        _ => return crate::usage_error(USAGE),
-    };
-    match result {
-        Ok(value) => {
-            println!("{value}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("folio: error: {e}");
-            ExitCode::from(FAILED)
-        }
-    }
-}
+#[cfg(test)]
+#[path = "features_tests.rs"]
+mod format;
 
 #[cfg(test)]
 mod tests {

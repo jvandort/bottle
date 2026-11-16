@@ -5,7 +5,6 @@
 //! Beside the commands a person types (`folio --help`), it's its own helper, as folio runs it:
 //!
 //!     folio on [--connect-timeout SECONDS] NAME COMMAND [ARG]...   (bottle-cli on a runner)
-//!     folio features list|show|canonical|resolve|image|cached|route ...
 //!     folio serve --control PATH --service NAME=PATH... [--restore]   (folio serve itself)
 //!     folio hook pre-receive|post-receive   (git's, for a push folio serve takes)
 //!
@@ -56,7 +55,6 @@ fn main() -> ExitCode {
     let mut args = all.iter().skip(1).cloned();
     match all.get(1).map(String::as_str) {
         Some("on") => runner::on(args.by_ref().skip(1)),
-        Some("features") => features::main(args.by_ref().skip(1)),
         // folio serve itself, as folio starts it; `serve start|stop` are folio's commands.
         Some("serve")
             if !matches!(
