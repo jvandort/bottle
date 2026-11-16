@@ -554,8 +554,8 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.collect();
     let result = match (command.as_deref(), args.as_slice()) {
         (Some("add"), [name, flag, destination]) if flag == "--ssh" => add(name, destination),
-        (Some("ls"), []) => ls(false),
-        (Some("ls"), [flag]) if flag == "--json" => ls(true),
+        (Some("ls" | "list"), []) => ls(false),
+        (Some("ls" | "list"), [flag]) if flag == "--json" => ls(true),
         (Some("rm"), [name]) => rm(name),
         (Some("check"), [target]) => check(target, false),
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),

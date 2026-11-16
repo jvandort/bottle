@@ -110,3 +110,13 @@ class DetachTest(DroneCase):
         result = self.folio("exec", "t", "--", "true")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("(detached)", self.ok("runner", "ls"))
+
+    def test_a_paused_thread_it_cant_resume_on_is_told_it_can_resume_here(self) -> None:
+        self.ok("pause", "t")
+        self.off.write_text("")
+        self.ok("runner", "detach", "box", "--offline")
+        refused = self.folio("claude", "t")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("box is detached, and doesn't answer yet", refused.stderr)
+        self.assertIn("`folio claude t --runner local`", refused.stderr)
+        self.assertIn("(detached)", self.ok("runner", "list"))

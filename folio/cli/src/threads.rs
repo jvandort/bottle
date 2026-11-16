@@ -464,15 +464,17 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
     // each is.
     let mut labelled = spec.clone();
     labelled["labels"] = json!({"thread": thread.name});
+    let runner = runner_of(repo, thread)?;
     let made = engine::new(
         &directory(repo, &thread.name),
         &thread.bottle,
         &labelled,
         &repos_,
         &advice(&thread.name, &repo.name, &mounts(thread), &told),
-        runner_of(repo, thread)?.as_deref(),
+        runner.as_deref(),
         sidecar_bottle.as_deref(),
-    );
+    )
+    .map_err(|e| elsewhere(thread, runner.as_deref(), e));
     if let Err(e) = made {
         if thread.sidecar.is_some()
             && let Err(cleanup) = crate::interrupt::shielded(|| delete_sidecar(thread))
@@ -483,6 +485,21 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
         return Err(e);
     }
     Ok(())
+}
+
+/// `e`, from making the thread's bottle on `runner`, with where else it can go, if the runner's
+/// detached: one turned off for good may be the reason.
+fn elsewhere(thread: &Thread, runner: Option<&str>, e: String) -> String {
+    let Some(runner) = runner else {
+        return e;
+    };
+    if !crate::runner::detached().is_ok_and(|d| d.get(runner).copied().unwrap_or(false)) {
+        return e;
+    }
+    format!(
+        "{e}; or make its bottle on this machine instead: `folio claude {name} --runner local`",
+        name = thread.name
+    )
 }
 
 /// Make the thread's sidecar afresh, from its spec as it is now: the thread's repos and remotes,

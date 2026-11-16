@@ -167,11 +167,11 @@ def main(argv: list[str]) -> int:
                 fail(f"no machine {name}")
             if machines[name]["state"] != "running":
                 fail(f"{name} isn't running")
-            stdin = "" if tty else sys.stdin.read()
+            stdin = b"" if tty else sys.stdin.buffer.read()   # a snapshot's archive, say
             step = step_of(command)
             state["execs"].append({"machine": name, "user": (given.get("-u") or [None])[0],
                                    "workdir": (given.get("-w") or [None])[0], "tty": tty, "argv": command,
-                                   "stdin": stdin, "step": step})
+                                   "stdin": stdin.decode(errors="replace"), "step": step})
             save(state)
             if step and failing(step):
                 fail(f"{step} failed")
@@ -193,7 +193,7 @@ def main(argv: list[str]) -> int:
                 return 0
             here = STATE.parent / "machines" / name
             (here / "home").mkdir(parents=True, exist_ok=True)
-            return subprocess.run(command, cwd=here, input=stdin, text=True,
+            return subprocess.run(command, cwd=here, input=stdin,
                                   env={**os.environ, "HOME": str(here / "home")}).returncode
         case ["cp", src, dst]:
             print(dst)
