@@ -93,7 +93,7 @@ pub fn register_remote(repo: &Path, name: &str, out: &str, in_: &str) -> Result<
             format!(
                 "git -c core.hooksPath={} -c folio.remote={name} -c folio.out={out} \
                  -c receive.denyCurrentBranch=ignore --namespace={in_} receive-pack",
-                shell_quote(&hooks.to_string_lossy())
+                crate::shell::quote(&hooks.to_string_lossy())
             ),
         ),
         ("curateDelete", "true".into()),
@@ -110,17 +110,6 @@ pub fn register_remote(repo: &Path, name: &str, out: &str, in_: &str) -> Result<
         )?;
     }
     Ok(())
-}
-
-/// `s` as Python's shlex.quote has it.
-pub fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r#"'"'"'"#))
 }
 
 /// Remove the lane: both namespaces' refs, and the remote with what it fetched. Gone already is
@@ -565,12 +554,5 @@ mod tests {
             String::from_utf8_lossy(&result.stdout).contains("Deleted genie/t-1 from bottle/t.")
         );
         assert_eq!(lane.lane(), map(&[]));
-    }
-
-    #[test]
-    fn quoted_as_shlex_quotes() {
-        assert_eq!(shell_quote("/a/b-c_d.e"), "/a/b-c_d.e");
-        assert_eq!(shell_quote("it's here"), r#"'it'"'"'s here'"#);
-        assert_eq!(shell_quote(""), "''");
     }
 }

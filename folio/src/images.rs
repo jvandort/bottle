@@ -285,19 +285,6 @@ fn split(uri: &str) -> (&str, String, &str) {
     (scheme, host, path)
 }
 
-/// `s` quoted for a POSIX shell, as Python's shlex.quote does.
-fn quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".into();
-    }
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
-    {
-        return s.into();
-    }
-    format!("'{}'", s.replace('\'', "'\"'\"'"))
-}
-
 /// The shell that installs `repositories` (each with where its key is in the build), then
 /// `packages`: each repository's key in /etc/apt/keyrings and its sources signed by it; a build's
 /// https repositories answered from bottle-cli's cache, behind the CA in $BOTTLE_BUILD_CA, which
@@ -315,12 +302,12 @@ fn install_script(repositories: &[(String, &Repository)], packages: &[String]) -
         );
         lines.push(format!(
             "install -D -m 0644 {} {}",
-            quote(at),
-            quote(&keyring)
+            crate::shell::quote(at),
+            crate::shell::quote(&keyring)
         ));
         lines.push(format!(
             "echo {} >> /etc/apt/sources.list.d/{}.list",
-            quote(&source),
+            crate::shell::quote(&source),
             list_name(r)
         ));
     }
@@ -342,7 +329,7 @@ fn install_script(repositories: &[(String, &Repository)], packages: &[String]) -
     lines.push("fi".into());
     lines.push("# shellcheck disable=SC2086 # word splitting is intended".into());
     lines.push("apt-get $options update".into());
-    let quoted: Vec<String> = packages.iter().map(|p| quote(p)).collect();
+    let quoted: Vec<String> = packages.iter().map(|p| crate::shell::quote(p)).collect();
     lines.push(format!(
         "apt-get $options install -y --no-install-recommends {}",
         quoted.join(" ")
@@ -429,6 +416,15 @@ pub fn build_cached() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repository(uri: &str) -> Repository {
+        Repository {
+            uri: uri.into(),
+            suite: String::new(),
+            components: vec![],
+            key: String::new(),
+        }
+    }
 
     #[test]
     fn every_bottle_keeps_debians_packages_and_a_build_apts_alone() {
@@ -517,23 +513,6 @@ mod tests {
         let all: std::collections::BTreeSet<_> =
             [before, edited, executable, more].into_iter().collect();
         assert_eq!(all.len(), 4);
-    }
-
-    #[test]
-    fn quoted_as_pythons_shlex_quotes() {
-        assert_eq!(quote("tools"), "tools");
-        assert_eq!(quote(""), "''");
-        assert_eq!(quote("a b"), "'a b'");
-        assert_eq!(quote("it's"), "'it'\"'\"'s'");
-    }
-
-    fn repository(uri: &str) -> Repository {
-        Repository {
-            uri: uri.into(),
-            suite: String::new(),
-            components: vec![],
-            key: String::new(),
-        }
     }
 
     #[test]

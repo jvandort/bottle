@@ -182,17 +182,6 @@ fn dist_for(target: &str) -> io::Result<PathBuf> {
         .join(format!("dist-{target}")))
 }
 
-/// `s` quoted for a POSIX shell.
-fn quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// A runner, as this machine reaches it.
 #[derive(Debug, Clone)]
 struct Runner {
@@ -292,7 +281,7 @@ impl Runner {
     /// bottle-cli there, with `args`.
     fn cli(&self, args: &[String], tty: Option<bool>) -> Command {
         let mut ssh = self.ssh(tty);
-        let quoted: Vec<String> = args.iter().map(|a| quote(a)).collect();
+        let quoted: Vec<String> = args.iter().map(|a| crate::shell::quote(a)).collect();
         ssh.arg(format!("\"$HOME/{DIST}/bottle-cli\" {}", quoted.join(" ")));
         ssh
     }
@@ -468,7 +457,7 @@ impl Runner {
         // What's changed, over a copy of what's there, with what's gone gone; then that, whole, in
         // its place: it's never half of one build and half of another.
         let there = format!(r#""$HOME/{DIST}""#);
-        let gone: Vec<String> = gone.iter().map(|n| quote(n)).collect();
+        let gone: Vec<String> = gone.iter().map(|n| crate::shell::quote(n)).collect();
         let copied = self.run(
             &format!(
                 "set -e; rm -rf {there}.partial; mkdir -p {there}.partial; \
@@ -892,10 +881,10 @@ fn connect(
     gone: &dyn Fn() -> bool,
 ) -> io::Result<Option<String>> {
     // Whatever a forward that died left there, gone first: ssh won't bind over it.
-    let theres: Vec<String> = pairs.iter().map(|(t, _)| quote(t)).collect();
+    let theres: Vec<String> = pairs.iter().map(|(t, _)| crate::shell::quote(t)).collect();
     let dirs: Vec<String> = pairs
         .iter()
-        .filter_map(|(t, _)| t.rsplit_once('/').map(|(d, _)| quote(d)))
+        .filter_map(|(t, _)| t.rsplit_once('/').map(|(d, _)| crate::shell::quote(d)))
         .collect();
     let made = runner.run(
         &format!("mkdir -p {} && rm -f {}", dirs.join(" "), theres.join(" ")),
@@ -1089,7 +1078,7 @@ fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<
             if a.starts_with("\"$d/") {
                 a.clone()
             } else {
-                quote(a)
+                crate::shell::quote(a)
             }
         })
         .collect();
@@ -1101,19 +1090,4 @@ fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<
     let mut ssh = runner.ssh(Some(false));
     ssh.arg(script);
     Ok((ssh, Some(tar)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quoted_for_a_shell() {
-        assert_eq!(quote("machine"), "machine");
-        assert_eq!(quote("/a/b-c.json"), "/a/b-c.json");
-        assert_eq!(quote(""), "''");
-        assert_eq!(quote("a b"), "'a b'");
-        assert_eq!(quote("it's"), r"'it'\''s'");
-        assert_eq!(quote("$HOME"), "'$HOME'");
-    }
 }

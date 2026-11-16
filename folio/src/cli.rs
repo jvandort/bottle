@@ -415,7 +415,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
 /// A command line, as a shell would take it back.
 fn shell_words(args: &[String]) -> String {
     let mut words = vec!["folio".to_string()];
-    words.extend(args.iter().skip(1).map(|a| crate::lanes::shell_quote(a)));
+    words.extend(args.iter().skip(1).map(|a| crate::shell::quote(a)));
     words.join(" ")
 }
 

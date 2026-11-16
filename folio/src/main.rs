@@ -37,6 +37,7 @@ mod runner;
 mod runners;
 mod serve;
 mod services;
+mod shell;
 mod snapshots;
 mod specs;
 mod store;

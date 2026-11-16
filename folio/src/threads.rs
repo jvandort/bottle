@@ -118,7 +118,7 @@ fn archive_of(path: &str) -> Option<&'static str> {
 /// Lists a workspace's own branches and whether it has uncommitted changes, one per line,
 /// tab-separated so a name is never split.
 pub fn work_script(workspace: &str) -> String {
-    let workspace = lanes::shell_quote(workspace);
+    let workspace = crate::shell::quote(workspace);
     format!(
         "cd {workspace} 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 git for-each-ref --format='%(refname:short)%09%(objectname)' refs/heads
@@ -1124,7 +1124,7 @@ fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
 pub fn session_command(session: &str) -> String {
     ["sh", "-c", session_script(session)]
         .iter()
-        .map(|a| lanes::shell_quote(a))
+        .map(|a| crate::shell::quote(a))
         .collect::<Vec<_>>()
         .join(" ")
 }

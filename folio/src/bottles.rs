@@ -41,11 +41,11 @@ use serde_json::{Value, json};
 use crate::bottle_cli::{Create, Exec};
 use crate::daemon::{self, Binding, Served};
 use crate::git::bottle_git;
-use crate::lanes::shell_quote as q;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
 use crate::serve::host::{HEADS, Remote, UPSTREAM};
 use crate::services::{self, HOST, HOST_ADDRESS};
+use crate::shell::quote as q;
 use crate::{auth, builds, features, images, specs, store};
 
 /// A mount at /x has its objects at /mnt/objects/x.

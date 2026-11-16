@@ -34,7 +34,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::lanes::shell_quote as q;
+use crate::shell::quote as q;
 
 pub const WORKSPACE_ARCHIVE: &str = "workspace.tar.gz";
 pub const NOTES_ARCHIVE: &str = "notes.tar.gz";

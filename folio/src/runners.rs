@@ -21,8 +21,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::bottle_cli::{self, Cli, Create, Exec, Mount};
-use crate::lanes::shell_quote;
 use crate::repos::{self, Repo};
+use crate::shell::quote as shell_quote;
 use crate::{daemon, services};
 
 pub const LOCAL: &str = "local";

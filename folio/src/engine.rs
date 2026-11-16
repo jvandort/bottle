@@ -264,7 +264,7 @@ pub fn attach(
         "becomes {}",
         command
             .iter()
-            .map(|w| crate::lanes::shell_quote(w))
+            .map(|w| crate::shell::quote(w))
             .collect::<Vec<_>>()
             .join(" ")
     );
