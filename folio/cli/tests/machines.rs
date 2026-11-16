@@ -6,11 +6,9 @@
 mod harness;
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -770,59 +768,6 @@ fn a_runner_with_bottles_isnt_removed() {
 
 // --- a bottle's setup script, run for real against folio serve -----------------------
 
-/// A TCP server on 127.0.0.1 standing in for a bottle's machine: each connection carried to folio
-/// serve's socket at `socket` as bottle-cli carries one the machine routes there, after a PROXY
-/// header saying it was to bottle.host (192.0.2.1:80) from `machine`. Its port.
-fn bridge(socket: PathBuf, machine: String) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for client in listener.incoming().flatten() {
-            let (socket, machine) = (socket.clone(), machine.clone());
-            std::thread::spawn(move || carry(client, &socket, &machine));
-        }
-    });
-    port
-}
-
-fn carry(client: TcpStream, socket: &Path, machine: &str) {
-    let Ok(mut there) = UnixStream::connect(socket) else {
-        return;
-    };
-    let header = proxy_header(machine);
-    if there.write_all(&header).is_err() {
-        return;
-    }
-    let (mut from_client, mut to_client) = (client.try_clone().unwrap(), client);
-    let (mut from_there, mut to_there) = (there.try_clone().unwrap(), there);
-    let up = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut from_client, &mut to_there);
-        let _ = to_there.shutdown(std::net::Shutdown::Write);
-    });
-    let _ = std::io::copy(&mut from_there, &mut to_client);
-    let _ = to_client.shutdown(std::net::Shutdown::Write);
-    let _ = up.join();
-}
-
-/// A PROXY protocol v2 header, as bottle-cli writes one: to bottle.host, from `machine`.
-fn proxy_header(machine: &str) -> Vec<u8> {
-    let mut body = vec![0, 0, 0, 0, 192, 0, 2, 1, 0, 0];
-    body.extend(80u16.to_be_bytes());
-    for (kind, value) in [
-        (0x02u8, b"bottle.host".as_slice()),
-        (0xE0, machine.as_bytes()),
-    ] {
-        body.push(kind);
-        body.extend((value.len() as u16).to_be_bytes());
-        body.extend(value);
-    }
-    let mut out = b"\r\n\r\n\x00\r\nQUIT\n".to_vec();
-    out.extend([0x21, 0x11]);
-    out.extend((body.len() as u16).to_be_bytes());
-    out.extend(body);
-    out
-}
-
 /// A thread's bottle's workspace script, run here (its paths its own) against folio serve answering
 /// its machine at bottle.host: the workspace, the notes, genie's home, and the environment git
 /// reaches bottle.host with.
@@ -872,7 +817,7 @@ impl Workspace {
         for (placeholder, here) in &objects {
             script = script.replace(placeholder, here);
         }
-        let port = bridge(f.home.join("services/host.sock"), f.bottle("t"));
+        let port = harness::bridge(f.home.join("services/host.sock"), f.bottle("t"));
         let mut git_env = f.env.clone();
         for (k, v) in [
             ("HOME", genie.display().to_string()),

@@ -70,7 +70,8 @@ impl Drone {
             match UnixStream::connect(&there) {
                 Ok(mut s) => {
                     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-                    s.write_all(&header(said.unwrap_or(&self.machine))).unwrap();
+                    s.write_all(&harness::proxy_header(said.unwrap_or(&self.machine)))
+                        .unwrap();
                     s.write_all(first).unwrap();
                     let mut answer = Vec::new();
                     let _ = s.read_to_end(&mut answer);
@@ -83,25 +84,6 @@ impl Drone {
             }
         }
     }
-}
-
-/// A PROXY protocol v2 header, as bottle-cli writes one: to bottle.host, from `machine`.
-fn header(machine: &str) -> Vec<u8> {
-    let mut body = vec![0, 0, 0, 0, 192, 0, 2, 1, 0, 0];
-    body.extend(80u16.to_be_bytes());
-    for (kind, value) in [
-        (0x02u8, b"bottle.host".as_slice()),
-        (0xE0, machine.as_bytes()),
-    ] {
-        body.push(kind);
-        body.extend((value.len() as u16).to_be_bytes());
-        body.extend(value);
-    }
-    let mut out = b"\r\n\r\n\x00\r\nQUIT\n".to_vec();
-    out.extend([0x21, 0x11]);
-    out.extend((body.len() as u16).to_be_bytes());
-    out.extend(body);
-    out
 }
 
 fn has(haystack: &[u8], needle: &[u8]) -> bool {

@@ -902,3 +902,55 @@ impl Folio {
             .join("broker")
     }
 }
+
+/// A TCP server on 127.0.0.1 standing in for a bottle's machine: each connection carried to folio
+/// serve's socket at `socket` as bottle-cli carries one the machine routes there, after a PROXY
+/// header saying it was to bottle.host (192.0.2.1:80) from `machine`. Its port.
+pub fn bridge(socket: PathBuf, machine: String) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let (socket, machine) = (socket.clone(), machine.clone());
+            std::thread::spawn(move || carry(client, &socket, &machine));
+        }
+    });
+    port
+}
+
+fn carry(client: std::net::TcpStream, socket: &Path, machine: &str) {
+    let Ok(mut there) = std::os::unix::net::UnixStream::connect(socket) else {
+        return;
+    };
+    if there.write_all(&proxy_header(machine)).is_err() {
+        return;
+    }
+    let (mut from_client, mut to_client) = (client.try_clone().unwrap(), client);
+    let (mut from_there, mut to_there) = (there.try_clone().unwrap(), there);
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from_client, &mut to_there);
+        let _ = to_there.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut from_there, &mut to_client);
+    let _ = to_client.shutdown(std::net::Shutdown::Write);
+    let _ = up.join();
+}
+
+/// A PROXY protocol v2 header, as bottle-cli writes one: to bottle.host, from `machine`.
+pub fn proxy_header(machine: &str) -> Vec<u8> {
+    let mut body = vec![0, 0, 0, 0, 192, 0, 2, 1, 0, 0];
+    body.extend(80u16.to_be_bytes());
+    for (kind, value) in [
+        (0x02u8, b"bottle.host".as_slice()),
+        (0xE0, machine.as_bytes()),
+    ] {
+        body.push(kind);
+        body.extend((value.len() as u16).to_be_bytes());
+        body.extend(value);
+    }
+    let mut out = b"\r\n\r\n\x00\r\nQUIT\n".to_vec();
+    out.extend([0x21, 0x11]);
+    out.extend((body.len() as u16).to_be_bytes());
+    out.extend(body);
+    out
+}
