@@ -379,7 +379,16 @@ impl Folio {
         let fd = terminal.as_raw_fd();
         let (mut out, mut steps) = (Vec::new(), steps.to_vec());
         let deadline = Instant::now() + Duration::from_secs(20);
+        // Until it's gone, and what it wrote with it: what it started (folio serve) may keep the
+        // terminal open.
+        let mut gone = None;
         while Instant::now() < deadline {
+            if gone.is_none() && child.try_wait().unwrap().is_some() {
+                gone = Some(Instant::now());
+            }
+            if gone.is_some_and(|at| at.elapsed() > Duration::from_millis(300)) {
+                break;
+            }
             let mut poll = libc::pollfd {
                 fd,
                 events: libc::POLLIN,
@@ -681,4 +690,103 @@ pub fn eventually(what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// What each session runs, and the script that attaches to one (threads.rs).
+pub const CLAUDE_SESSION: &str = r#"set --; if ls "$HOME/.claude/projects/$(pwd | sed "s|[/.]|-|g")"/*.jsonl >/dev/null 2>&1; then set -- --continue; fi; if command -v bottle-event >/dev/null; then set -- "$@" --dangerously-load-development-channels server:events; fi; exec claude "$@""#;
+pub const SHELL_SESSION: &str = "exec bash -l";
+pub const ATTACH: &str = r#"attach() {
+  for i in $(seq 20); do [ "$(stty size)" = "0 0" ] || { shpool attach -f "$1"; return; }; sleep 0.1; done
+  echo "folio: the terminal has no size, so it wasn't attached" >&2; exit 1
+}
+started=$(date +%s)
+attach "$1" && exit 0
+status=$?
+[ $(($(date +%s) - started)) -le 1 ] || exit $status
+echo "folio: shpool couldn't show the $1 session any more, so it's been started again" >&2
+shpool kill "$1"
+env TERM=xterm-256color shpool attach --background --dir "$3" --cmd "$2" "$1" || exit $status
+attach "$1"
+"#;
+
+pub fn session(name: &str) -> &'static str {
+    match name {
+        "claude" => CLAUDE_SESSION,
+        "shell" => SHELL_SESSION,
+        _ => panic!("no session {name}"),
+    }
+}
+
+/// `s`, quoted for sh as Python's shlex.quote has it.
+pub fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+/// What a session runs, as shpool's --cmd takes it.
+pub fn session_command(name: &str) -> String {
+    ["sh", "-c", session(name)]
+        .iter()
+        .map(|w| shell_quote(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl Folio {
+    /// The repo's directory in folio's home.
+    pub fn repo_dir(&self) -> PathBuf {
+        self.home.join(self.key())
+    }
+
+    /// The repo's spec, as folio reads it: every one has the features folio needs. None if it has
+    /// none saved.
+    pub fn repo_spec(&self) -> Option<Value> {
+        let mut spec = read_json(&self.repo_dir().join("spec.json"))?;
+        let mut features: Vec<Value> = spec["features"].as_array().cloned().unwrap_or_default();
+        if !features
+            .iter()
+            .any(|f| f.as_str().unwrap().split(':').next() == Some("tools"))
+        {
+            features.push(json!("tools"));
+        }
+        spec["features"] = json!(features);
+        Some(spec)
+    }
+
+    pub fn save_spec(&self, spec: &Value) {
+        let dir = self.repo_dir();
+        if !dir.join("repo.json").exists() {
+            let repo = Repo::of(&self.repo);
+            write_json(
+                &dir.join("repo.json"),
+                &json!({"name": repo.name, "path": repo.path}),
+            );
+        }
+        write_json(&dir.join("spec.json"), spec);
+    }
+
+    /// The argv of each command that ran in a thread's machine, here.
+    pub fn ran(&self, thread: &str) -> Vec<Vec<String>> {
+        self.execs(thread)
+            .iter()
+            .map(|e| {
+                e["argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+/// `words`, as owned strings, for comparing with what ran.
+pub fn argv(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| w.to_string()).collect()
 }
