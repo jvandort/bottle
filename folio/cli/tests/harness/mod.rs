@@ -867,3 +867,38 @@ impl Runner {
         write_json(&self.state_path(), &state);
     }
 }
+
+impl Folio {
+    /// Machine `name`'s directory, here: where what runs in it runs.
+    pub fn machine_dir(&self, name: &str) -> PathBuf {
+        self.cli_state.parent().unwrap().join("machines").join(name)
+    }
+
+    /// The argv of each command that ran in machine `name`, here.
+    pub fn ran_in(&self, name: &str) -> Vec<Vec<String>> {
+        self.cli()["execs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["machine"] == name)
+            .map(|e| {
+                e["argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The broker's directory: its repo's is where its vault used to be (broker.rs).
+    pub fn broker_dir(&self) -> PathBuf {
+        self.home
+            .join(format!(
+                "broker-{}",
+                path_hash(&self.home.join("repos").join("broker"))
+            ))
+            .join("broker")
+    }
+}
