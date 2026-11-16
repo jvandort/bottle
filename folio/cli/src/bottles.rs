@@ -1489,7 +1489,7 @@ pub fn delete(name: &str) -> Result<(), String> {
     // image that's still current is kept, even with nothing using it: it's a cache, and the next
     // bottle with those features starts without a build. Best effort: the bottle is already gone.
     if let Err(e) = builds::remove_stale(&runner) {
-        crate::log::say!("bottles", "bottle: couldn't remove stale images: {e}");
+        crate::log::say!("bottles", "folio: couldn't remove stale images: {e}");
     }
     Ok(())
 }

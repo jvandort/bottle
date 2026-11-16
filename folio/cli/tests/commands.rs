@@ -95,7 +95,7 @@ fn one_running_other_code_is_restarted_first() {
     let (out, err) = said(&home.folio(&["serve", "start"]));
     assert_eq!(
         err,
-        "bottle: folio serve was running other code; restarting it\n"
+        "folio: folio serve was running other code; restarting it\n"
     );
     assert_eq!(out, "Started folio serve\n");
     let (out, err) = said(&home.folio(&["serve", "start"]));

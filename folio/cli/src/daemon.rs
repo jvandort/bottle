@@ -215,7 +215,7 @@ fn ensure_current() -> Result<bool, String> {
     }
     crate::log::say!(
         "daemon",
-        "bottle: folio serve was running other code; restarting it"
+        "folio: folio serve was running other code; restarting it"
     );
     stop()?;
     wait_gone();

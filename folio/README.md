@@ -255,7 +255,8 @@ Set once, for every bottle. Features declare the credentials they need (the
 feature needs `github`, a personal access token; the `teamcity` feature needs
 `teamcity`, an access token; the `develocity` feature needs `develocity`, an
 access key, which it reads from Gradle's own key file when that has one). `folio auth set NAME`
-stores one in the macOS Keychain, read from stdin, or asked for on a terminal:
+stores one in the macOS Keychain (under the service `folio`; one stored by an older folio, under
+`bottle`, is moved there the first time folio reads it), read from stdin, or asked for on a terminal:
 claude's is what `claude setup-token` prints, run anywhere.
 
 A credential never enters a bottle. folio serve keeps it, and attaches it as a header to the bottle's requests to the hosts the

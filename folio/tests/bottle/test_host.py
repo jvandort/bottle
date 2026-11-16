@@ -343,7 +343,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
                                          env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return "\n".join(line.removeprefix("remote: ").strip() for line in result.stderr.splitlines()
-                         if line.startswith("remote: bottle:"))
+                         if line.startswith("remote: folio:"))
 
     def write(self, path: str, text: str) -> str:
         (self.workspace / path).write_text(text)
@@ -360,7 +360,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pushed, self.users())
         self.assertEqual("second\n", (self.repo / "a.txt").read_text())
         self.assertEqual(pushed, self.users("bottle/t/genie/x"))  # as if the user had fetched
-        self.assertEqual(f"bottle: moved the user's genie/x to {pushed[:12]}, files and all", said)
+        self.assertEqual(f"folio: moved the user's genie/x to {pushed[:12]}, files and all", said)
         self.assertIn("moved the user's genie/x", served_log())
 
     async def test_uncommitted_changes_elsewhere_come_along(self) -> None:
@@ -377,7 +377,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         said = await self.push()
         self.assertEqual(before, self.users())
         self.assertEqual("the user's edit\n", (self.repo / "a.txt").read_text())
-        self.assertEqual("bottle: didn't move the user's genie/x: Your local changes to the following files would be "
+        self.assertEqual("folio: didn't move the user's genie/x: Your local changes to the following files would be "
                          "overwritten by merge: a.txt", said)
 
     async def test_not_over_commits_of_the_users(self) -> None:
@@ -385,7 +385,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.write("a.txt", "second\n")
         said = await self.push()
         self.assertEqual(mine, self.users())
-        self.assertEqual("bottle: didn't move the user's genie/x: it has commits yours doesn't", said)
+        self.assertEqual("folio: didn't move the user's genie/x: it has commits yours doesn't", said)
 
     async def test_not_in_the_middle_of_a_git_operation(self) -> None:
         before = self.users()
@@ -393,7 +393,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         self.write("a.txt", "second\n")
         said = await self.push()
         self.assertEqual(before, self.users())
-        self.assertEqual("bottle: didn't move the user's genie/x: it's in the middle of a merge", said)
+        self.assertEqual("folio: didn't move the user's genie/x: it's in the middle of a merge", said)
 
     async def test_not_when_the_branch_isnt_checked_out(self) -> None:
         # In curate's read mode, HEAD is curate/genie/x: the branch isn't checked out, so nothing moves.
@@ -426,7 +426,7 @@ class FollowTest(GitTestCase, unittest.IsolatedAsyncioTestCase):
         said = await self.push()
         self.assertEqual(pushed, self.users())
         self.assertEqual("second\n", (elsewhere / "a.txt").read_text())
-        self.assertEqual(f"bottle: moved the user's genie/x (in worktree review) to {pushed[:12]}, files and all", said)
+        self.assertEqual(f"folio: moved the user's genie/x (in worktree review) to {pushed[:12]}, files and all", said)
         self.assertNotIn(str(self.tmp), said)  # no host paths for the bottle
 
     async def test_branches_tracking_anything_else_stay_put(self) -> None:

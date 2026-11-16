@@ -25,12 +25,10 @@ use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::Bottle;
 use super::http::{self, Refused};
@@ -173,43 +171,6 @@ fn encoded(rewrite: &Rewrite, value: &str) -> String {
 
 // --- reading credentials ----------------------------------------------------------
 
-/// The Keychain service for this BOTTLE_HOME, so separate homes keep separate credentials.
-pub(crate) fn service() -> String {
-    let home_dir = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let home = std::env::var_os("BOTTLE_HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir.join(".bottle"));
-    let resolve = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-    if resolve(&home) == resolve(&home_dir.join(".bottle")) {
-        return "bottle".into();
-    }
-    let digest: String = Sha256::digest(resolve(&home).display().to_string().as_bytes())
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    format!("bottle:{digest}")
-}
-
-/// The credential `name`, from the Keychain; $FOLIO_CREDENTIALS, a JSON object of name: value, in
-/// its place (the tests', and a machine without a Keychain's).
-pub(crate) fn keychain(name: &str) -> Option<String> {
-    if let Some(file) = std::env::var_os("FOLIO_CREDENTIALS") {
-        let given: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
-        return given.get(name).and_then(Value::as_str).map(String::from);
-    }
-    let out = Command::new("security")
-        .args(["find-generic-password", "-s", &service(), "-a", name, "-w"])
-        .output()
-        .ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches('\n')
-            .to_string()
-    })
-}
-
 /// A Java properties file's `key=value` (or `key:value`) lines, by key; empty when there's no
 /// file. Comments (# and !) and blank lines are skipped, and a backslash escapes the character
 /// after it; a key ends at the first `=`, and only at a `:` on a line with no `=`, so a URL is a key
@@ -306,7 +267,7 @@ pub fn injections_for(specs: &[String]) -> Result<Vec<Injection>, String> {
     for feature in features::resolve(specs)? {
         credentials.extend(feature.resolved_credentials()?);
     }
-    injections_of(credentials, &keychain)
+    injections_of(credentials, &crate::auth::keychain)
 }
 
 /// What's attached for `credentials`, their values from their properties files or `keychain`.

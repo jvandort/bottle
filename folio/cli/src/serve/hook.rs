@@ -168,7 +168,7 @@ fn pre_receive() -> ExitCode {
         .unwrap_or_default()
         .is_empty()
     {
-        eprintln!("bottle: this push has no namespace; refusing it");
+        eprintln!("folio: this push has no namespace; refusing it");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -224,7 +224,7 @@ fn post_receive() -> ExitCode {
         .filter(|s| !s.is_empty())
         .collect();
     for line in &said {
-        println!("bottle: {line}");
+        println!("folio: {line}");
     }
     if let Some(log) = std::env::var_os("FOLIO_HOOK_LOG")
         && !said.is_empty()

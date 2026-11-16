@@ -338,7 +338,7 @@ class AuthTest(MachineTestCase):
     def test_a_value_it_cant_store_is_refused(self) -> None:
         result = self.folio("auth", "set", "claude", input='a"b')
         self.assertEqual(result.returncode, 1)
-        self.assertIn("the value is empty or has characters bottle can't store", result.stderr)
+        self.assertIn("the value is empty or has characters folio can't store", result.stderr)
 
     def test_a_bottle_whose_credential_is_set_is_told_nothing_of_it(self) -> None:
         self.ok("configure", "--feature", "claude")

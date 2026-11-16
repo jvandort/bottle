@@ -24,10 +24,14 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
 use crate::features::{self, Credential};
-use crate::serve::credentials::{STANDIN, destination, keychain, read_properties, service};
+use crate::serve::credentials::{STANDIN, destination, read_properties};
 
 /// A credential, and a feature that declares it.
 pub struct Declared {
@@ -80,24 +84,59 @@ fn get_declared(name: &str) -> Result<Declared, String> {
 
 // --- storage: the macOS Keychain -------------------------------------------------
 
-pub fn get(name: &str) -> Option<String> {
-    keychain(name)
+/// The Keychain service for this folio home, so separate homes keep separate credentials: "folio",
+/// for ~/.folio.
+pub fn service() -> String {
+    keyed(
+        "folio",
+        &crate::home(),
+        &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".folio"),
+    )
 }
 
-/// Store `value`. It goes to `security` on stdin, never on a command line.
-fn put(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.contains(['"', '\\', '\n', '\r'])
-        || !value.chars().all(|c| !c.is_control())
-    {
-        return Err(format!(
-            "{name}: the value is empty or has characters bottle can't store (quotes, backslashes, control)"
-        ));
+/// The service bottle kept credentials under, for its home ($BOTTLE_HOME, else ~/.bottle): what
+/// keychain moves them from.
+fn bottles_service() -> String {
+    let default = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bottle");
+    let home = std::env::var_os("BOTTLE_HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.clone());
+    keyed("bottle", &home, &default)
+}
+
+/// `name`, for `home`'s credentials: alone for the default home, else with a hash of where it is.
+fn keyed(name: &str, home: &Path, default: &Path) -> String {
+    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if resolve(home) == resolve(default) {
+        return name.into();
     }
-    let command = format!(
-        "add-generic-password -U -s \"{}\" -a \"{name}\" -w \"{value}\"\n",
-        service()
-    );
+    let digest: String = Sha256::digest(resolve(home).display().to_string().as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{name}:{digest}")
+}
+
+fn found(service: &str, name: &str) -> Option<String> {
+    let out = Command::new("security")
+        .args(["find-generic-password", "-s", service, "-a", name, "-w"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string()
+    })
+}
+
+/// `value` stored as `name` under `service`. It goes to `security` on stdin, never on a command line.
+fn stored(service: &str, name: &str, value: &str) -> Result<(), String> {
+    let command =
+        format!("add-generic-password -U -s \"{service}\" -a \"{name}\" -w \"{value}\"\n");
     let failed = |why: String| format!("couldn't store {name} in the Keychain: {why}");
     let mut child = Command::new("security")
         .arg("-i")
@@ -113,7 +152,7 @@ fn put(name: &str, value: &str) -> Result<(), String> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success()
         || stderr.to_lowercase().contains("error")
-        || get(name).as_deref() != Some(value)
+        || found(service, name).as_deref() != Some(value)
     {
         return Err(failed(if stderr.is_empty() {
             "unknown error".into()
@@ -121,19 +160,67 @@ fn put(name: &str, value: &str) -> Result<(), String> {
             stderr
         }));
     }
-    crate::log::log!("auth", "credential {name} stored");
     Ok(())
 }
 
-/// Remove the credential. False if it wasn't stored.
-fn delete(name: &str) -> bool {
+fn removed(service: &str, name: &str) -> bool {
     Command::new("security")
-        .args(["delete-generic-password", "-s", &service(), "-a", name])
+        .args(["delete-generic-password", "-s", service, "-a", name])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// The credential `name`, from the Keychain; $FOLIO_CREDENTIALS, a JSON object of name: value, in
+/// its place (the tests', and a machine without a Keychain's). One kept under bottle's service, from
+/// before folio had its own, is moved to folio's as it's found.
+pub fn keychain(name: &str) -> Option<String> {
+    if let Some(file) = std::env::var_os("FOLIO_CREDENTIALS") {
+        let given: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+        return given.get(name).and_then(Value::as_str).map(String::from);
+    }
+    let service = service();
+    if let Some(value) = found(&service, name) {
+        return Some(value);
+    }
+    let old = bottles_service();
+    let value = found(&old, name)?;
+    if stored(&service, name, &value).is_ok() {
+        removed(&old, name);
+        crate::log::log!(
+            "auth",
+            "credential {name} moved from the Keychain's {old} to {service}"
+        );
+    }
+    Some(value)
+}
+
+pub fn get(name: &str) -> Option<String> {
+    keychain(name)
+}
+
+/// Store `value`.
+fn put(name: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.contains(['"', '\\', '\n', '\r'])
+        || !value.chars().all(|c| !c.is_control())
+    {
+        return Err(format!(
+            "{name}: the value is empty or has characters folio can't store (quotes, backslashes, control)"
+        ));
+    }
+    stored(&service(), name, value)?;
+    crate::log::log!("auth", "credential {name} stored");
+    Ok(())
+}
+
+/// Remove the credential (from bottle's service too, where one from before may be). False if it
+/// wasn't stored.
+fn delete(name: &str) -> bool {
+    let here = removed(&service(), name);
+    removed(&bottles_service(), name) || here
 }
 
 // --- commands -------------------------------------------------------------------
@@ -216,7 +303,7 @@ pub fn warn_unset(specs: &[String]) -> Result<(), String> {
         }
         crate::log::say!(
             "auth",
-            "bottle: {} ({}) isn't set: `folio auth set {}`",
+            "folio: {} ({}) isn't set: `folio auth set {}`",
             credential.name,
             credential.description,
             credential.name
@@ -321,13 +408,29 @@ mod tests {
     #[test]
     fn the_default_home_has_the_plain_service_and_others_their_own() {
         let keychain = Keychain::new();
-        assert_eq!(service(), "bottle");
-        tempdir::set(&keychain._env, "BOTTLE_HOME", "/tmp/elsewhere");
+        let home = std::env::var("HOME").unwrap_or_default();
+        tempdir::set(&keychain._env, "FOLIO_HOME", &format!("{home}/.folio"));
+        assert_eq!(service(), "folio");
+        tempdir::set(&keychain._env, "FOLIO_HOME", "/tmp/elsewhere");
         let other = service();
         assert!(
-            other.starts_with("bottle:") && other.len() == "bottle:".len() + 12,
+            other.starts_with("folio:") && other.len() == "folio:".len() + 12,
             "{other}"
         );
+    }
+
+    #[test]
+    fn one_kept_under_bottles_service_is_moved_to_folios_as_its_found() {
+        let keychain = Keychain::new();
+        stored("bottle", "claude", "tok-old").unwrap();
+        assert_eq!(get("claude").as_deref(), Some("tok-old"));
+        assert_eq!(found(&service(), "claude").as_deref(), Some("tok-old"));
+        assert_eq!(found("bottle", "claude"), None);
+        assert!(!keychain.argv().contains("tok-old"));
+        // Removing it takes it from both.
+        stored("bottle", "github", "gh-old").unwrap();
+        assert!(remove("github").unwrap());
+        assert_eq!(found("bottle", "github"), None);
     }
 
     #[test]
