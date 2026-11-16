@@ -14,18 +14,12 @@
 //!   needs (see specs.rs), list-bottles and message-any. No repo's threads can have them
 //!   (repos::check_repo_spec); none lets it start, stop or make anything.
 //! - **Its context** (CONTEXT) says what it's for and how it keeps its notes.
-//!
-//! A broker from before kept its vault at that old path, mounted at /workspace; migrate() moves it
-//! to the notes' place, history, lane and all, when the broker has no bottle to pull it out from
-//! under.
 
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::git::{git, succeeds};
 use crate::repos::{self, Repo};
-use crate::{lanes, notes};
 
 pub const NAME: &str = "broker";
 
@@ -41,39 +35,6 @@ pub fn repo() -> Repo {
 /// Where the broker's notes are: its thread's notes, as any thread's (threads::notes_dir).
 pub fn notes_path(identity: &Repo) -> PathBuf {
     identity.directory().join(NAME).join("notes")
-}
-
-/// The vault of a broker from before notes, if it's still where that broker kept it.
-pub fn old_vault() -> Option<PathBuf> {
-    let path = repos::owned_path(NAME);
-    path.join(".git").exists().then_some(path)
-}
-
-/// Move an old vault to the broker's notes: its history, its lane renamed to the notes'; whether it
-/// moved. Only with no bottle (the caller's to know): a running broker has the old vault mounted,
-/// and moving it would pull it out from under the agent.
-pub fn migrate(identity: &Repo) -> Result<bool, String> {
-    let new = notes_path(identity);
-    let Some(old) = old_vault() else {
-        return Ok(false);
-    };
-    if new.exists() {
-        return Ok(false);
-    }
-    let failed = |e: std::io::Error| format!("moving {} to {}: {e}", old.display(), new.display());
-    std::fs::create_dir_all(new.parent().unwrap()).map_err(failed)?;
-    std::fs::rename(&old, &new).map_err(failed)?;
-    lanes::move_namespace(&new, &lanes::namespace(NAME, lanes::OUT), notes::OUT)?;
-    lanes::move_namespace(&new, &lanes::namespace(NAME, lanes::IN), notes::IN)?;
-    let remote = lanes::remote_name(NAME);
-    if succeeds(
-        &["config", "--get", &format!("remote.{remote}.url")],
-        Some(&new),
-    ) {
-        git(&["remote", "remove", &remote], Some(&new))?;
-    }
-    notes::ensure(&new, "Notes")?;
-    Ok(true)
 }
 
 pub const CONTEXT: &str = r#"

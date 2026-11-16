@@ -204,18 +204,10 @@ pub fn path_hash(path: &Path) -> String {
     digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Where folio keeps a repo it owns, rather than one of yours: the broker's vault.
+/// A path folio names a repo of its own by, rather than one of yours: the broker's identity (where
+/// its vault once was).
 pub fn owned_path(name: &str) -> PathBuf {
     crate::home().join(OWNED).join(name)
-}
-
-fn owned(toplevel: &Path) -> bool {
-    let root = crate::home().join(OWNED);
-    let parent = toplevel.parent();
-    parent == Some(root.as_path())
-        || root
-            .canonicalize()
-            .is_ok_and(|r| parent == Some(r.as_path()))
 }
 
 /// The repo the working directory (or `cwd`) is in.
@@ -223,13 +215,6 @@ pub fn current(cwd: Option<&Path>) -> Result<Repo, String> {
     let toplevel = git(&["rev-parse", "--show-toplevel"], cwd)
         .map(PathBuf::from)
         .map_err(|_| "not in a git repo; folio works on the repo you're in".to_string())?;
-    if owned(&toplevel) {
-        let name = toplevel.file_name().unwrap_or_default().to_string_lossy();
-        return Err(format!(
-            "{} is folio's own; `folio {name}` works in it",
-            toplevel.display()
-        ));
-    }
     Ok(Repo::new(name(&toplevel), toplevel))
 }
 

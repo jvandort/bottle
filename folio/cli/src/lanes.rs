@@ -145,34 +145,6 @@ pub fn forget(repo: &Path, thread: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Move every ref of namespace `old` to namespace `new`, in one update-ref transaction.
-pub fn move_namespace(repo: &Path, old: &str, new: &str) -> Result<(), String> {
-    let prefix = format!("refs/namespaces/{old}/");
-    let refs = git(
-        &["for-each-ref", "--format=%(objectname) %(refname)", &prefix],
-        Some(repo),
-    )?;
-    let mut moves = String::new();
-    for line in refs.lines() {
-        let Some((commit, r)) = line.split_once(' ') else {
-            continue;
-        };
-        let moved = format!(
-            "refs/namespaces/{new}/{}",
-            r.strip_prefix(&prefix).unwrap_or(r)
-        );
-        moves += &format!("create {moved} {commit}\ndelete {r} {commit}\n");
-    }
-    if !moves.is_empty() {
-        git_input(
-            &["update-ref", "--stdin"],
-            repo,
-            &format!("start\n{moves}commit\n"),
-        )?;
-    }
-    Ok(())
-}
-
 /// Move the lane: both namespaces' refs to the new thread's, and the remote to `bottle/<new>`.
 ///
 /// One update-ref transaction moves every lane ref, so a failure moves none. `git remote rename`

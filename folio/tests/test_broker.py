@@ -174,59 +174,6 @@ class BrokerTest(FolioTestCase):
                 self.assertEqual(["obsidian://choose-vault"], self.opened(log))
                 self.assertIn("Open folder as vault", out)
 
-
-
-class MigrationTest(FolioTestCase):
-    """A broker from before notes: its vault at ~/.folio/repos/broker, its lane broker-out/-in, mounted at /workspace."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.old = self.home / "repos" / "broker"
-
-    def make_old(self) -> None:
-        self.old.mkdir(parents=True)
-        git("init", "-q", "-b", "main", str(self.old))
-        (self.old / "For you.md").write_text("priorities\n")
-        git("-C", str(self.old), "add", ".")
-        git("-C", str(self.old), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "memory")
-        self.head = git("-C", str(self.old), "rev-parse", "HEAD")
-        git("-C", str(self.old), "update-ref", "refs/namespaces/broker-out/refs/heads/main", self.head)
-        git("-C", str(self.old), "update-ref", "refs/namespaces/broker-in/refs/heads/idea", self.head)
-        git("-C", str(self.old), "remote", "add", "bottle/broker", str(self.old))
-
-    def new(self) -> Path:
-        return kept.broker_notes()
-
-    def assert_moved(self) -> None:
-        self.assertFalse(self.old.exists())
-        self.assertEqual("priorities\n", (self.new() / "For you.md").read_text())
-        self.assertEqual(self.head, git("-C", str(self.new()), "rev-parse", "refs/namespaces/notes-out/refs/heads/main"))
-        self.assertEqual(self.head, git("-C", str(self.new()), "rev-parse", "refs/namespaces/notes-in/refs/heads/idea"))
-        self.assertEqual("", git("-C", str(self.new()), "for-each-ref", "refs/namespaces/broker-out",
-                                 "refs/namespaces/broker-in"))
-        self.assertNotIn("bottle/broker", git("-C", str(self.new()), "remote").split())
-        self.assertEqual("bottle", git("-C", str(self.new()), "config", "branch.main.remote"))
-
-    def test_a_broker_with_no_bottle_moves_its_vault_history_lane_and_all(self) -> None:
-        self.make_old()
-        result = self.folio("broker")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("Moved the broker's notes", result.stderr)
-        self.assert_moved()
-        self.assertEqual(str(self.new()), self.fake()["bottles"]["broker"]["mounts"][0]["repo"])
-
-    def test_a_running_brokers_vault_moves_when_its_paused(self) -> None:
-        self.ok("broker")
-        shutil.rmtree(self.new())   # as a broker started before notes has none
-        self.make_old()
-        self.env["FOLIO_OPEN"] = "no-such-opener"
-        result = self.folio("broker", "notes")
-        self.assertIn(str(self.old), result.stdout)
-        self.assertIn("when it's next paused", result.stderr)
-        self.assertTrue(self.old.exists())
-        self.ok("broker", "pause")
-        self.assert_moved()
-
     def test_a_snapshot_from_before_restores_its_vault_and_conversation_at_notes(self) -> None:
         self.ok("broker")
         home = Path(self.fake()["bottles"]["broker"]["home"])
@@ -243,8 +190,3 @@ class MigrationTest(FolioTestCase):
         mount = Path(self.fake()["bottles"]["broker"]["mounts"][0]["dir"])
         self.assertEqual("unpushed\n", (mount / "mine.md").read_text())
 
-    def test_thread_commands_dont_work_in_the_old_vault(self) -> None:
-        self.make_old()
-        result = self.folio("claude", "other", cwd=self.old)
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("folio broker", result.stderr)

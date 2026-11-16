@@ -238,10 +238,6 @@ its notes, at `/notes`, kept as any thread's are (see Notes), in
 it goes, so the vault Obsidian opens is always its latest. Hand it a branch
 the way you would any thread's notes: push it to `bottle` from the vault.
 
-A broker from before kept its vault at `~/.folio/repos/broker`, mounted at
-`/workspace`. folio moves it -- history, lane and all -- the next time the
-broker has no bottle: at `folio broker pause`, or when it starts one.
-
 Its bottle, `broker`, is made folio's way, not from a repo's spec: `claude` and
 `tools`, 2G, and two permissions no thread has: `list-bottles`, to see the
 running threads, and `message-any`, to send them messages. Threads can only

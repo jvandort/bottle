@@ -667,33 +667,9 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
     } else {
         None
     };
-    let state = match &thread {
-        Some(t) => threads::states(&identity, std::slice::from_ref(t))?[broker::NAME]["state"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        None => "new".into(),
-    };
     let notes_path = broker::notes_path(&identity);
-    if matches!(state.as_str(), "new" | "missing" | "paused") && broker::migrate(&identity)? {
-        crate::log::say!(
-            "threads",
-            "Moved the broker's notes to {}",
-            notes_path.display()
-        );
-    } else if broker::old_vault().is_some() && command != "pause" {
-        crate::log::say!(
-            "threads",
-            "The broker's notes move to {} when it's next paused (`folio broker pause`) and resumed",
-            notes_path.display()
-        );
-    }
     if command == "notes" {
-        let path = match broker::old_vault() {
-            Some(old) => old,
-            None => notes::ensure(&notes_path, "The broker's notes")?,
-        };
-        return open_notes(&path);
+        return open_notes(&notes::ensure(&notes_path, "The broker's notes")?);
     }
     if thread.is_none() && command == "pause" {
         return Err("there's no broker to pause; `folio broker` starts it".into());
@@ -708,13 +684,6 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
     if command == "pause" {
         crate::log::say!("threads", "Pausing the broker...");
         threads::pause(&identity, &thread)?;
-        if broker::migrate(&identity)? {
-            crate::log::say!(
-                "threads",
-                "Moved the broker's notes to {}",
-                notes_path.display()
-            );
-        }
         println!("Paused the broker. Resume it with: folio broker");
         return Ok(0);
     }
