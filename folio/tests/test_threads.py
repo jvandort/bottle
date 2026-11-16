@@ -273,13 +273,16 @@ class ConfigureTest(FolioTestCase):
                             (("--no-feature", "tools", "--feature", "tools"), "both name tools"),
                             # A usage error names what's wrong, in the argument parser's own words.
                             (("--disk", "50G", "--no-disk"), "--no-disk"),
-                            (("--no-disk", "fix-it", "50G"), "50G")):
+                            # A thread comes first: a word after a flag that takes none isn't one.
+                            (("--no-disk", "50G"), "unexpected argument '50G': the thread comes first"),
+                            (("--memory", "8G", "fix-it"), "unexpected argument 'fix-it'")):
             with self.subTest(args):
                 result = self.folio("configure", *args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(error, result.stderr)
-        # One word more is a thread's name.
-        self.assertIn("no thread named '50G'", self.folio("configure", "--no-disk", "50G").stderr)
+        result = self.folio("sidecar", "configure", "--memory", "8G", "fix-it")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("the thread comes first, `folio sidecar configure THREAD [OPTIONS]`", result.stderr)
         result = self.folio("configure", "--no-feature", "jvm")
         self.assertEqual(result.returncode, 1)
         self.assertIn("there's no feature jvm to take away (features: tools)", result.stderr)

@@ -131,6 +131,7 @@ fn command() -> Command {
         .subcommand(no_spec(configure_arguments(
             Command::new("configure")
                 .about("the thread's sidecar, as `folio configure THREAD` the thread: --runner gives it one")
+                .override_usage("folio sidecar configure [THREAD] [OPTIONS]")
                 .long_about(
                     "The thread's sidecar: shown without options, changed with them, as `folio configure THREAD` \
                      does the thread; a thread without one is given one, which needs --runner. Bottle checks its \
@@ -235,6 +236,7 @@ fn command() -> Command {
         .subcommand(no_spec(configure_arguments(
             Command::new("configure")
                 .about("the repo's spec and runner, or a thread's: features, memory and disk, and where it runs")
+                .override_usage("folio configure [THREAD] [OPTIONS]")
                 .long_about(
                     "The repo's spec and runner, or, given a thread, the thread's: shown without options, changed \
                      with them. Bottle checks a spec before it's saved. A thread follows the repo's until it's \
@@ -952,7 +954,40 @@ fn changed(spec: &Value, matches: &ArgMatches, command: &str) -> Result<Value, S
     Ok(spec)
 }
 
+/// A configure command's thread, refused unless it comes first, before any option: a word after a
+/// flag that takes none (`--no-disk 50G`) isn't taken for one.
+fn thread_first(matches: &ArgMatches, command: &str) {
+    let Some(at) = matches.index_of("thread") else {
+        return;
+    };
+    let options = [
+        "feature",
+        "no-feature",
+        "memory",
+        "disk",
+        "no-disk",
+        "no-spec",
+        "runner",
+        "no-runner",
+    ];
+    let first = options
+        .iter()
+        .filter(|id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine))
+        .filter_map(|id| matches.index_of(id))
+        .min();
+    if first.is_some_and(|first| first < at) {
+        usage_error(
+            command,
+            &format!(
+                "unexpected argument '{}': the thread comes first, `folio {command} THREAD [OPTIONS]`",
+                arg(matches, "thread").unwrap_or_default()
+            ),
+        );
+    }
+}
+
 fn configure(matches: &ArgMatches) -> Outcome {
+    thread_first(matches, "configure");
     let repo = current()?;
     if let Some(name) = arg(matches, "thread") {
         return thread_configure(matches, &repo, &threads::load(&repo, name)?);
@@ -1075,6 +1110,7 @@ fn thread_configure(matches: &ArgMatches, repo: &Repo, thread: &Thread) -> Outco
 }
 
 fn sidecar_configure(matches: &ArgMatches) -> Outcome {
+    thread_first(matches, "sidecar configure");
     let repo = current()?;
     let Some(thread) = thread_of(matches, &repo, "sidecar configure", false)? else {
         return Ok(0);
