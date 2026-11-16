@@ -291,12 +291,10 @@ pub fn home(name: &str) -> Result<String, String> {
 pub fn controller_key() -> String {
     let mut name = [0u8; 256];
     // SAFETY: gethostname writes at most the length it's given.
-    let host = unsafe {
-        libc::gethostname(name.as_mut_ptr().cast(), name.len());
-        std::ffi::CStr::from_ptr(name.as_ptr().cast())
-            .to_string_lossy()
-            .into_owned()
-    };
+    unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    // Up to its NUL, which one that fills the buffer hasn't.
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    let host = String::from_utf8_lossy(&name[..end]).into_owned();
     let key = format!("{host}\0{}", crate::home().display());
     Sha256::digest(key.as_bytes())[..4]
         .iter()

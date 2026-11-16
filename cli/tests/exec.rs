@@ -2,6 +2,9 @@
 //!
 //! The agent is another package's binary, which cargo doesn't hand a test: it's built here (cargo
 //! does nothing if it's up to date), and found beside this test's own profile directory.
+//!
+//! Linux only: the agent is Linux's.
+#![cfg(target_os = "linux")]
 
 use std::fs::File;
 use std::io::{Read, Write};

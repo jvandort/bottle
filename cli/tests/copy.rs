@@ -1,5 +1,8 @@
 //! `bottle-cli cp`, end to end, out of a VM and without root: a machine's boot is a stand-in running
 //! bottle-agent on the machine's socket, so exec, which cp is a shorthand for, reaches it.
+//!
+//! Linux only: bottle-agent is Linux's.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::path::{Path, PathBuf};
