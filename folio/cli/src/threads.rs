@@ -1089,16 +1089,31 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
         let path = snapshot(repo, thread).unwrap().join(snapshots::WORK);
         fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
     } else {
-        if state != "running" {
-            engine::start(&thread.bottle)?;
+        // A bottle that can't say what's in it (one broken from inside, say) is no reason to keep it:
+        // that it couldn't is what's said to lose.
+        let asked = if state == "running" {
+            Ok(())
+        } else {
+            engine::start(&thread.bottle)
         }
-        engine::run(
-            &thread.bottle,
-            &sh(work_script(&workdir(thread)?)),
-            None,
-            true,
-        )?
-        .stdout
+        .and_then(|()| {
+            engine::run(
+                &thread.bottle,
+                &sh(work_script(&workdir(thread)?)),
+                None,
+                true,
+            )
+        });
+        match asked {
+            Ok(out) => out.stdout,
+            Err(e) => {
+                crate::interrupt::check()?;
+                lost.push(format!(
+                    "whatever is in the bottle, which couldn't be asked what it has ({e})"
+                ));
+                return Ok(lost);
+            }
+        }
     };
     let (mut tips, mut dirty) = (BTreeMap::new(), false);
     for line in work.lines() {

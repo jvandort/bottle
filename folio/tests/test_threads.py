@@ -234,6 +234,14 @@ class DeleteTest(FolioTestCase):
         self.delete_typing(b"fix-it\r")
         self.assertEqual(self.calls("start"), [["start", self.bottle]])
 
+    def test_a_bottle_that_cant_be_asked_is_said_to_lose_whatever_is_in_it(self) -> None:
+        # One broken from inside (its /etc/passwd gone, say), so nothing runs in it.
+        self.env["FAKE_BOTTLE_FAIL_EXEC"] = "for-each-ref"
+        code, out = self.delete_typing(b"fix-it\r")
+        self.assertEqual(code, 0, out)
+        self.assertIn("whatever is in the bottle, which couldn't be asked what it has", out)
+        self.assertEqual(self.fake()["bottles"], {})
+
     def test_a_thread_whose_bottle_is_gone(self) -> None:
         state = self.fake()
         del state["bottles"][self.bottle]
