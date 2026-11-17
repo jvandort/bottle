@@ -6,9 +6,10 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::repos::{self, Repo};
+use crate::specs::Spec;
 use crate::threads::{self, Settings, Thread};
 use crate::{auth, broker, daemon, engine, features, notes, obsidian, picker, runners};
 
@@ -900,10 +901,10 @@ fn usage_error(command: &str, message: &str) -> ! {
 
 /// `spec` as a configure command changes it: features added (one there already gets the options
 /// given) or taken away, memory or disk set, or the disk the default again.
-fn changed(spec: &Value, matches: &ArgMatches, command: &str) -> Result<Value, String> {
+fn changed(spec: &Spec, matches: &ArgMatches, command: &str) -> Result<Spec, String> {
     let mut spec = spec.clone();
     let (given, taken) = feature_args(matches, command);
-    let features = repos::merge_features(&repos::features_of(&spec), &given);
+    let features = repos::merge_features(&spec.features, &given);
     let there: Vec<&str> = features.iter().map(|f| repos::name_of(f)).collect();
     for name in &taken {
         if !there.contains(&name.as_str()) {
@@ -918,20 +919,18 @@ fn changed(spec: &Value, matches: &ArgMatches, command: &str) -> Result<Value, S
         .filter(|f| !taken.iter().any(|t| t == repos::name_of(f)))
         .cloned()
         .collect();
-    spec["features"] = json!(kept);
+    spec.features = kept;
     if let Some(memory) = arg(matches, "memory") {
-        spec["memory"] = memory.into();
+        spec.memory = memory.into();
     }
     if flag(matches, "no-memory") {
-        spec["memory"] = repos::DEFAULT_MEMORY.into();
+        spec.memory = repos::DEFAULT_MEMORY.into();
     }
     if let Some(disk) = arg(matches, "disk") {
-        spec["disk"] = disk.into();
+        spec.disk = Some(disk.into());
     }
-    if flag(matches, "no-disk")
-        && let Some(map) = spec.as_object_mut()
-    {
-        map.remove("disk");
+    if flag(matches, "no-disk") {
+        spec.disk = None;
     }
     Ok(spec)
 }
@@ -1025,7 +1024,7 @@ fn configure(matches: &ArgMatches) -> Outcome {
         println!("{shown}{}", runner_text(&repo)?);
         return Ok(0);
     }
-    let mut spec = Value::Null;
+    let mut spec = Spec::default();
     if changes_spec(matches) {
         // Checked before anything's saved, the runner included.
         let current = repo.spec()?.unwrap_or_else(repos::default_spec);
@@ -1105,16 +1104,17 @@ fn settings_changed(
 fn thread_text(repo: &Repo, settings: &Settings) -> Result<String, String> {
     let spec = settings.spec(repo)?;
     let own = |is: bool| if is { " (overridden)" } else { "" };
-    let features: Vec<String> = repos::features_of(&spec)
-        .into_iter()
+    let features: Vec<String> = spec
+        .features
+        .iter()
         .map(|f| {
-            let mine = own(settings.features.contains(&f));
+            let mine = own(settings.features.contains(f));
             format!("{f}{mine}")
         })
         .collect();
     let disk = spec
-        .get("disk")
-        .and_then(Value::as_str)
+        .disk
+        .as_ref()
         .map(|d| format!(", disk {d}{}", own(settings.disk.is_some())))
         .unwrap_or_default();
     let runner = match settings.runner(repo)? {
@@ -1124,9 +1124,7 @@ fn thread_text(repo: &Repo, settings: &Settings) -> Result<String, String> {
     Ok(format!(
         "features [{}], memory {}{}{disk}, runner {runner}{}",
         features.join(", "),
-        spec.get("memory")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        spec.memory,
         own(settings.memory.is_some()),
         own(settings.runner.is_some())
     ))
@@ -1387,18 +1385,16 @@ fn repo_list() -> Outcome {
     Ok(0)
 }
 
-fn spec_text(spec: &Value) -> String {
+fn spec_text(spec: &Spec) -> String {
     let disk = spec
-        .get("disk")
-        .and_then(Value::as_str)
+        .disk
+        .as_ref()
         .map(|d| format!(", disk {d}"))
         .unwrap_or_default();
     format!(
         "features [{}], memory {}{disk}",
-        repos::features_of(spec).join(", "),
-        spec.get("memory")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
+        spec.features.join(", "),
+        spec.memory
     )
 }
 

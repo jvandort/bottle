@@ -4,7 +4,7 @@
 //! the thread, its branches, and the exchange with the user. Often the only thing an agent is told
 //! about it, so it says what the rules are for and not just what they refuse.
 
-use serde_json::Value;
+use crate::specs::Spec;
 
 const ADVICE: &str = r#"
 # Thread `{thread}`
@@ -127,11 +127,8 @@ pub fn durable(paths: &[&str]) -> String {
 }
 
 /// What a thread's agent is told about its sidecar.
-pub fn sidecar(runner: &str, spec: &Value) -> String {
-    let features: Vec<String> = crate::repos::features_of(spec)
-        .iter()
-        .map(|f| format!("`{f}`"))
-        .collect();
+pub fn sidecar(runner: &str, spec: &Spec) -> String {
+    let features: Vec<String> = spec.features.iter().map(|f| format!("`{f}`")).collect();
     let features = if features.is_empty() {
         "none".to_string()
     } else {
@@ -139,12 +136,7 @@ pub fn sidecar(runner: &str, spec: &Value) -> String {
     };
     SIDECAR
         .replace("{where}", &format!("runner `{runner}`"))
-        .replace(
-            "{memory}",
-            spec.get("memory")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
+        .replace("{memory}", &spec.memory)
         .replace("{features}", &features)
 }
 
@@ -168,7 +160,7 @@ mod tests {
     /// kept as files, so a change to the wording shows in review.
     #[test]
     fn as_it_was() {
-        let spec = json!({"features": ["tools", "jvm:version=21"], "memory": "8G"});
+        let spec = Spec::of(json!({"features": ["tools", "jvm:version=21"], "memory": "8G"}));
         assert_eq!(
             advice(
                 "fix-it",
@@ -178,7 +170,7 @@ mod tests {
             ),
             include_str!("../tests/fixtures/advice.txt")
         );
-        let spec = json!({"features": [], "memory": "2G"});
+        let spec = Spec::of(json!({"features": [], "memory": "2G"}));
         assert_eq!(
             sidecar_itself("fix-it", "project") + &durable(&["/notes"]) + &sidecar("box", &spec),
             include_str!("../tests/fixtures/advice-sidecar.txt")

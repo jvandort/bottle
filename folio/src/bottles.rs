@@ -47,6 +47,7 @@ use crate::runners::{self, Runner};
 use crate::serve::host::{HEADS, Remote, UPSTREAM};
 use crate::services::{self, HOST, HOST_ADDRESS, Network};
 use crate::shell::quote as q;
+use crate::specs::Spec;
 use crate::{auth, builds, features, images, specs, store};
 
 /// A mount at /x has its objects at /mnt/objects/x.
@@ -214,7 +215,7 @@ pub struct Bottle {
     /// dependencies.
     pub features: Vec<String>,
     /// The spec it was made from, canonical: its memory, say.
-    pub spec: Value,
+    pub spec: Spec,
     /// Its repos, each checked out at its path; the first is where a shell starts.
     pub mounts: Vec<Mount>,
     /// Its creator's addition to ~/BOTTLE.md.
@@ -253,7 +254,7 @@ impl Bottle {
 
     /// Its memory, as its spec says.
     fn memory(&self) -> Option<&str> {
-        self.spec.get("memory").and_then(Value::as_str)
+        Some(&self.spec.memory)
     }
 
     /// Its machine and where it is, as folio shows it: RUNNER/NAME for one on a runner.
@@ -266,15 +267,7 @@ impl Bottle {
     }
 
     fn permissions(&self) -> Vec<String> {
-        self.spec
-            .get("permissions")
-            .and_then(Value::as_array)
-            .map(|p| {
-                p.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.spec.permissions.clone()
     }
 }
 
@@ -368,7 +361,7 @@ fn forget(name: &str) {
 /// it may ssh to that bottle, as `sidecar`. Its record is kept in `owner`, its thread's directory.
 pub fn create(
     owner: &Path,
-    spec: &Value,
+    spec: &Spec,
     name: &str,
     mounts: &[MountRequest],
     context: &str,
@@ -381,8 +374,8 @@ pub fn create(
     } else {
         format!("runner {runner}")
     };
-    let spec = specs::canonical(spec, Some(on.memory_mib()?), &place)?;
-    let installed: Vec<String> = features::resolve(&repos::features_of(&spec))?
+    let spec = spec.canonical(Some(on.memory_mib()?), &place)?;
+    let installed: Vec<String> = features::resolve(&spec.features)?
         .iter()
         .map(|f| f.spec())
         .collect();
@@ -588,11 +581,11 @@ fn run_machine(mut bottle: Bottle, mounted: &[Repo], tag: &str) -> Result<Bottle
             env: machine_env(&bottle.features, &bottle.permissions(), bottle.workdir())?,
             memory_mib: Some(memory_mib(bottle.memory())?),
             cpus: 0,
-            disk_gib: specs::disk_gib(&bottle.spec),
+            disk_gib: bottle.spec.disk_gib(),
             // What bottle-cli's exec and shell use unless told, and what its ls shows.
             user: Some(USER),
             workdir: Some(bottle.workdir()),
-            labels: specs::labels(&bottle.spec),
+            labels: bottle.spec.labels.clone(),
         },
         Some(&network(&bottle)?),
     )?;
@@ -764,7 +757,7 @@ fn binding(bottle: &Bottle) -> Binding<'_> {
             .collect(),
         features: bottle.features.clone(),
         permissions: bottle.permissions(),
-        labels: specs::labels(&bottle.spec),
+        labels: bottle.spec.labels.clone(),
         repo: bottle.mounts.first().map(|m| {
             Path::new(&m.repo)
                 .file_name()
@@ -1363,7 +1356,10 @@ mod tests {
             created: 0.0,
             status: "ready".into(),
             features: features.iter().map(|f| f.to_string()).collect(),
-            spec,
+            spec: Spec::of(
+                json!({"memory": "2G", "permissions": spec["permissions"].clone()
+                .as_array().cloned().unwrap_or_default()}),
+            ),
             mounts: vec![],
             context: String::new(),
             runner: "local".into(),

@@ -17,14 +17,19 @@
 
 use std::path::PathBuf;
 
-use serde_json::{Value, json};
-
 use crate::repos::{self, Repo};
+use crate::specs::Spec;
 
 pub const NAME: &str = "broker";
 
-pub fn spec() -> Value {
-    json!({"features": ["claude", "tools"], "memory": "2G", "permissions": ["list-bottles", "message-any"]})
+pub fn spec() -> Spec {
+    let strings = |s: &[&str]| s.iter().map(|s| s.to_string()).collect();
+    Spec {
+        features: strings(&["claude", "tools"]),
+        memory: "2G".into(),
+        permissions: strings(&["list-bottles", "message-any"]),
+        ..Spec::default()
+    }
 }
 
 /// The broker's identity, for where folio keeps its state: the path its vault used to be.

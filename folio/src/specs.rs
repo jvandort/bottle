@@ -21,9 +21,49 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::features;
+
+/// A spec, as folio keeps it: as canonical gives it, or (on its way there) as a command changes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spec {
+    #[serde(default)]
+    pub features: Vec<String>,
+    pub memory: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+impl Spec {
+    /// A spec from its JSON, as a test writes one.
+    #[cfg(test)]
+    pub fn of(json: Value) -> Spec {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// This spec checked and in canonical form (see canonical).
+    pub fn canonical(&self, memory_mib: Option<u64>, place: &str) -> Result<Spec, String> {
+        canonical(
+            &serde_json::to_value(self).expect("a spec is JSON"),
+            memory_mib,
+            place,
+        )
+    }
+
+    /// Its disk in GiB; None: bottle-cli's default (64G, sparse).
+    pub fn disk_gib(&self) -> Option<u64> {
+        self.disk
+            .as_deref()
+            .and_then(|d| d[..d.len() - 1].parse().ok())
+    }
+}
 
 pub const KEYS: [&str; 5] = ["features", "memory", "disk", "permissions", "labels"];
 /// What a bottle may be allowed beyond answering messages (serve/messages.rs), and what its agent
@@ -53,7 +93,7 @@ fn permission_names() -> String {
 /// Validate a spec and put it in canonical form. Given `memory_mib`, the memory of the machine it's
 /// for (`place`), its memory must fit it too: which machine a spec is for, its bottle knows and a
 /// spec doesn't, since the same spec makes bottles on any runner.
-pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<Value, String> {
+pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<Spec, String> {
     let Some(data) = data.as_object() else {
         return Err(r#"a spec is a JSON object, e.g. {"features": ["tools"]}"#.into());
     };
@@ -177,7 +217,7 @@ pub fn canonical(data: &Value, memory_mib: Option<u64>, place: &str) -> Result<V
         let sorted: BTreeMap<String, Value> = given.into_iter().collect();
         spec.insert("labels".into(), json!(sorted));
     }
-    Ok(Value::Object(spec))
+    Ok(serde_json::from_value(Value::Object(spec)).expect("a canonical spec is a Spec"))
 }
 
 /// Whether `c` is printable: not a control character.
@@ -201,16 +241,6 @@ fn is_disk(disk: &str) -> bool {
 fn is_size(number: &str) -> bool {
     number.starts_with(|c: char| ('1'..='9').contains(&c))
         && number.chars().all(|c| c.is_ascii_digit())
-}
-
-/// A spec's labels.
-pub fn labels(spec: &Value) -> BTreeMap<String, String> {
-    spec.get("labels")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-        .collect()
 }
 
 /// Validate feature specs and put each in canonical form, keeping their order.
@@ -285,19 +315,16 @@ pub fn host_memory_mib() -> Result<u64, String> {
     Ok(bytes / (1024 * 1024))
 }
 
-/// The spec's disk in GiB; None: bottle-cli's default (64G, sparse).
-pub fn disk_gib(spec: &Value) -> Option<u64> {
-    spec.get("disk")
-        .and_then(Value::as_str)
-        .and_then(|d| d[..d.len() - 1].parse().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn typed(data: Value) -> Spec {
+        canonical(&data, None, "this machine").unwrap()
+    }
+
     fn canon(data: Value) -> Result<Value, String> {
-        canonical(&data, None, "this machine")
+        canonical(&data, None, "this machine").map(|spec| serde_json::to_value(spec).unwrap())
     }
 
     #[test]
@@ -419,21 +446,21 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
         assert_eq!(
-            labels(&spec),
+            typed(spec).labels,
             pairs(&[("repo", "app"), ("thread", "fix-it")])
         );
-        assert_eq!(labels(&json!({"memory": "2G"})), pairs(&[]));
+        assert_eq!(typed(json!({"memory": "2G"})).labels, pairs(&[]));
     }
 
     #[test]
     fn a_disk_in_whole_g_or_none() {
         let spec = canon(json!({"memory": "2G", "disk": "50g"})).unwrap();
         assert_eq!(
-            (spec["disk"].as_str(), disk_gib(&spec)),
+            (spec["disk"].as_str(), typed(spec.clone()).disk_gib()),
             (Some("50G"), Some(50))
         );
         assert_eq!(canon(spec.clone()).unwrap(), spec);
-        assert_eq!(disk_gib(&canon(json!({"memory": "2G"})).unwrap()), None);
+        assert_eq!(typed(json!({"memory": "2G"})).disk_gib(), None);
         for disk in [
             json!("50"),
             json!("512M"),
@@ -455,7 +482,9 @@ mod tests {
         // Which machine it's for is its bottle's to know, and to check it against.
         assert_eq!(canon(json!({"memory": "512G"})).unwrap()["memory"], "512G");
         assert_eq!(
-            canonical(&json!({"memory": "8G"}), Some(16384), "runner box").unwrap()["memory"],
+            canonical(&json!({"memory": "8G"}), Some(16384), "runner box")
+                .unwrap()
+                .memory,
             "8G"
         );
         assert_eq!(

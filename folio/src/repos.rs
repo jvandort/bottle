@@ -11,10 +11,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::git::{bottle_git, git};
+use crate::specs::Spec;
 use crate::store;
 
 /// What folio needs in every thread's bottle, by feature, and what for: every repo's spec has them,
@@ -30,16 +31,25 @@ const OWNED: &str = "repos";
 const NOT_IN_A_REPOS_SPEC: [&str; 2] = ["permissions", "labels"];
 
 /// What a new repo's bottles get: what folio needs, and memory, which every spec gives.
-pub fn default_spec() -> Value {
-    json!({"features": REQUIRED_FEATURES.iter().map(|(f, _)| *f).collect::<Vec<_>>(), "memory": DEFAULT_MEMORY})
+pub fn default_spec() -> Spec {
+    Spec {
+        features: REQUIRED_FEATURES
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .collect(),
+        memory: DEFAULT_MEMORY.into(),
+        ..Spec::default()
+    }
 }
 
 /// `spec`, if it's one a repo's threads (or, with `sidecar`, their sidecars, which run no
 /// sessions) can be made from.
-pub fn check_repo_spec(spec: Value, sidecar: bool) -> Result<Value, String> {
+pub fn check_repo_spec(spec: Spec, sidecar: bool) -> Result<Spec, String> {
     let given: Vec<&str> = NOT_IN_A_REPOS_SPEC
         .into_iter()
-        .filter(|key| spec.get(key).is_some())
+        .zip([spec.permissions.is_empty(), spec.labels.is_empty()])
+        .filter(|(_, empty)| !empty)
+        .map(|(key, _)| key)
         .collect();
     if !given.is_empty() {
         return Err(format!(
@@ -57,23 +67,11 @@ pub fn check_repo_spec(spec: Value, sidecar: bool) -> Result<Value, String> {
     Ok(spec)
 }
 
-fn feature_names(spec: &Value) -> Vec<String> {
-    features_of(spec)
+fn feature_names(spec: &Spec) -> Vec<String> {
+    spec.features
         .iter()
         .map(|f| name_of(f).to_string())
         .collect()
-}
-
-/// A spec's features, as given.
-pub fn features_of(spec: &Value) -> Vec<String> {
-    spec.get("features")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|f| f.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// A feature spec's name: what's before its options.
@@ -137,19 +135,17 @@ impl Repo {
 
     /// The repo's bottle spec, as last saved; None until it has one. One saved before folio needed a
     /// feature (REQUIRED_FEATURES) has it.
-    pub fn spec(&self) -> Result<Option<Value>, String> {
-        let Some(mut spec) = store::read_json(&self.spec_path())? else {
+    pub fn spec(&self) -> Result<Option<Spec>, String> {
+        let Some(spec) = store::read_json(&self.spec_path())? else {
             return Ok(None);
         };
-        let Some(map) = spec.as_object_mut() else {
-            return Ok(Some(spec));
-        };
-        let features = with_required(features_of(&Value::Object(map.clone())));
-        map.insert("features".into(), json!(features));
+        let mut spec: Spec = serde_json::from_value(spec)
+            .map_err(|e| format!("{}: {e}", self.spec_path().display()))?;
+        spec.features = with_required(spec.features);
         Ok(Some(spec))
     }
 
-    pub fn save_spec(&self, spec: &Value) -> Result<(), String> {
+    pub fn save_spec(&self, spec: &Spec) -> Result<(), String> {
         self.remember()?;
         store::write_json(&self.spec_path(), spec)
     }
@@ -390,6 +386,7 @@ pub fn toplevel(path: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use crate::tempdir::{self, git as g};
+    use serde_json::json;
 
     fn rev(repo: &Path, what: &str) -> String {
         g(&["-C", repo.to_str().unwrap(), "rev-parse", what])
@@ -547,12 +544,12 @@ mod tests {
             "not in a git repo; folio works on the repo you're in"
         );
         assert!(known().is_empty());
-        repo.save_spec(&json!({"features": [], "memory": "2G"}))
+        repo.save_spec(&Spec::of(json!({"features": [], "memory": "2G"})))
             .unwrap();
         assert_eq!(known(), std::slice::from_ref(&repo));
         assert_eq!(
             repo.spec().unwrap().unwrap(),
-            json!({"features": ["tools"], "memory": "2G"})
+            Spec::of(json!({"features": ["tools"], "memory": "2G"}))
         );
         assert_eq!(
             toplevel(&path.join("sub")).unwrap_err(),
@@ -633,16 +630,27 @@ mod tests {
 
     #[test]
     fn a_repos_spec_has_what_folio_needs_and_nothing_of_a_bottles_own() {
-        assert!(check_repo_spec(json!({"features": ["tools"], "memory": "2G"}), false).is_ok());
+        assert!(
+            check_repo_spec(
+                Spec::of(json!({"features": ["tools"], "memory": "2G"})),
+                false
+            )
+            .is_ok()
+        );
         assert_eq!(
-            check_repo_spec(json!({"features": [], "memory": "2G"}), false).unwrap_err(),
+            check_repo_spec(Spec::of(json!({"features": [], "memory": "2G"})), false).unwrap_err(),
             "folio's threads need the tools feature: shpool, which every thread's sessions run in"
         );
-        assert!(check_repo_spec(json!({"features": [], "memory": "2G"}), true).is_ok());
+        assert!(check_repo_spec(Spec::of(json!({"features": [], "memory": "2G"})), true).is_ok());
         assert!(
-            check_repo_spec(json!({"features": ["tools"], "permissions": []}), false)
-                .unwrap_err()
-                .starts_with("a repo's spec can't give permissions:")
+            check_repo_spec(
+                Spec::of(
+                    json!({"features": ["tools"], "memory": "2G", "permissions": ["message-any"]})
+                ),
+                false
+            )
+            .unwrap_err()
+            .starts_with("a repo's spec can't give permissions:")
         );
     }
 }

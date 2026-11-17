@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::engine::{self, Mount};
 use crate::repos::{Repo, check_repo_spec, default_spec};
+use crate::specs::Spec;
 use crate::store::{self, Content};
 use crate::{broker, lanes, notes, repos, runners, snapshots};
 
@@ -146,23 +147,20 @@ pub struct Settings {
 
 impl Settings {
     /// `base`, a spec, with these over it.
-    pub fn over(&self, base: &Value) -> Value {
+    pub fn over(&self, base: &Spec) -> Spec {
         let mut spec = base.clone();
-        spec["features"] = json!(repos::merge_features(
-            &repos::features_of(base),
-            &self.features
-        ));
+        spec.features = repos::merge_features(&base.features, &self.features);
         if let Some(memory) = &self.memory {
-            spec["memory"] = memory.as_str().into();
+            spec.memory = memory.clone();
         }
         if let Some(disk) = &self.disk {
-            spec["disk"] = disk.as_str().into();
+            spec.disk = Some(disk.clone());
         }
         spec
     }
 
     /// The spec a thread's bottle is made from: the repo's, with these over it.
-    pub fn spec(&self, repo: &Repo) -> Result<Value, String> {
+    pub fn spec(&self, repo: &Repo) -> Result<Spec, String> {
         Ok(self.over(&repo.spec()?.unwrap_or_else(default_spec)))
     }
 
@@ -181,8 +179,11 @@ impl Settings {
 }
 
 /// What a sidecar has when it's given nothing: it runs no sessions, so no features.
-pub fn sidecar_base() -> Value {
-    json!({"features": [], "memory": repos::DEFAULT_MEMORY})
+pub fn sidecar_base() -> Spec {
+    Spec {
+        memory: repos::DEFAULT_MEMORY.into(),
+        ..Spec::default()
+    }
 }
 
 /// A thread's configuration: written only by what changes it (new, configure, rename, a runner
@@ -519,7 +520,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
     // The thread's name goes with its bottle, so a bottle that lists the others sees which thread
     // each is.
     let mut labelled = spec.clone();
-    labelled["labels"] = json!({"thread": thread.name});
+    labelled.labels = BTreeMap::from([("thread".into(), thread.name.clone())]);
     let runner = runner_of(repo, thread)?;
     let made = engine::new(
         &directory(repo, &thread.name),
@@ -1325,7 +1326,9 @@ mod tests {
 
     #[test]
     fn settings_go_over_their_base_feature_by_feature() {
-        let base = json!({"features": ["tools", "jvm:version=17"], "memory": "2G", "disk": "50G"});
+        let base = Spec::of(
+            json!({"features": ["tools", "jvm:version=17"], "memory": "2G", "disk": "50G"}),
+        );
         let settings = Settings {
             features: vec!["jvm:version=21".into(), "python".into()],
             memory: Some("16G".into()),
@@ -1333,7 +1336,9 @@ mod tests {
         };
         assert_eq!(
             settings.over(&base),
-            json!({"features": ["tools", "jvm:version=21", "python"], "memory": "16G", "disk": "50G"})
+            Spec::of(
+                json!({"features": ["tools", "jvm:version=21", "python"], "memory": "16G", "disk": "50G"})
+            )
         );
         assert_eq!(Settings::default().over(&base), base);
     }

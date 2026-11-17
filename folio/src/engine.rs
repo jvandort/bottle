@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::bottle_cli::Cli;
 use crate::bottles::{self, MountRequest};
 use crate::runners;
+use crate::specs::Spec;
 
 /// A repo for a bottle: checked out at `path`, from `checkout` (None: bottle's default), served
 /// `remotes`.
@@ -87,8 +88,8 @@ fn status_of(command: &mut Command) -> Result<std::process::ExitStatus, String> 
 }
 
 /// The spec in canonical form, or the reason it isn't one.
-pub fn validate_spec(spec: &Value) -> Result<Value, String> {
-    crate::specs::canonical(spec, None, "this machine")
+pub fn validate_spec(spec: &Spec) -> Result<Spec, String> {
+    spec.canonical(None, "this machine")
 }
 
 /// Create a bottle for the thread whose directory is `owner`, where its record is kept, on
@@ -97,7 +98,7 @@ pub fn validate_spec(spec: &Value) -> Result<Value, String> {
 pub fn new(
     owner: &Path,
     name: &str,
-    spec: &Value,
+    spec: &Spec,
     mounts: &[Mount],
     context: &str,
     runner: Option<&str>,

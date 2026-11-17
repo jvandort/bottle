@@ -188,10 +188,7 @@ fn steps(features: &[Feature]) -> Result<Vec<Step>> {
     for f in features {
         let mut env = step_env();
         env.insert("_REMOTE_USER".into(), REMOTE_USER.into());
-        env.insert(
-            "_REMOTE_USER_HOME".into(),
-            format!("/home/{REMOTE_USER}"),
-        );
+        env.insert("_REMOTE_USER_HOME".into(), format!("/home/{REMOTE_USER}"));
         env.insert("_CONTAINER_USER".into(), REMOTE_USER.into());
         env.insert(
             "_CONTAINER_USER_HOME".into(),
