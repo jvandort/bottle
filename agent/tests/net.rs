@@ -231,17 +231,46 @@ fn connections_are_decided_by_the_host_and_names_resolved_there() {
         "the service is given the bytes after the header"
     );
 
-    // The bottle's own names, then the host's: bottle.host, struck from the bottle's /etc/hosts.
+    // The bottle's own names, then the host's: a name of this machine's /etc/hosts, struck from
+    // the bottle's (its root is this machine's), is answered as this machine answers it.
     assert_eq!(
         bottle.ok(&["cat", "/etc/resolv.conf"]),
         "nameserver 127.0.0.53\n"
     );
-    bottle.ok(&["sed", "-i", "/bottle.host/d", "/etc/hosts"]);
-    let found = bottle.ok(&["getent", "ahostsv4", "bottle.host"]);
-    assert!(found.starts_with("192.0.2.1"), "{found}");
+    match hosts_name() {
+        Some((name, ip)) => {
+            bottle.ok(&[
+                "sed",
+                "-i",
+                &format!("/\\s{}\\(\\s\\|$\\)/d", name.replace('.', "\\.")),
+                "/etc/hosts",
+            ]);
+            let hosts = bottle.ok(&["cat", "/etc/hosts"]);
+            assert!(!hosts.split_whitespace().any(|w| w == name), "{hosts}");
+            let found = bottle.ok(&["getent", "ahostsv4", &name]);
+            assert!(found.starts_with(&format!("{ip} ")), "{name}: {found}");
+        }
+        None => eprintln!("not checked: this machine's /etc/hosts names nothing but localhost"),
+    }
     let (_, exit) = bottle.exec(&["getent", "hosts", "no-such-name.invalid"]);
     assert_ne!(exit, Exit::Code(0));
     drop(bottle);
+}
+
+/// A name this machine's /etc/hosts gives an IPv4 address, other than localhost's and this
+/// machine's own (which a resolver may answer by itself), and that address.
+fn hosts_name() -> Option<(String, IpAddr)> {
+    let own = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    fs::read_to_string("/etc/hosts")
+        .ok()?
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split('#').next()?.split_whitespace();
+            let ip: IpAddr = words.next()?.parse().ok()?;
+            let name = words.find(|n| !n.starts_with("localhost") && *n != own.trim())?;
+            (ip.is_ipv4() && !ip.is_loopback()).then(|| (name.to_string(), ip))
+        })
+        .next()
 }
 
 fn kill(pid: u32) {
