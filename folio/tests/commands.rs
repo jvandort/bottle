@@ -58,8 +58,8 @@ fn folio_serve_starts_and_stops_and_says_when_it_was_already() {
         "folio serve isn't running\n"
     );
     assert_eq!(
-        said(&home.folio(&["serve", "start"])).0,
-        "Started folio serve\n"
+        said(&home.folio(&["serve", "start"])),
+        ("Started folio serve\n".into(), String::new())
     );
     assert_eq!(
         said(&home.folio(&["serve", "start"])).0,
@@ -68,8 +68,8 @@ fn folio_serve_starts_and_stops_and_says_when_it_was_already() {
     assert!(home.0.join("serve.sock").exists());
     assert!(home.0.join("logs/serve.log").exists());
     assert_eq!(
-        said(&home.folio(&["serve", "stop"])).0,
-        "Stopped folio serve\n"
+        said(&home.folio(&["serve", "stop"])),
+        ("Stopped folio serve\n".into(), String::new())
     );
     assert_eq!(
         said(&home.folio(&["serve", "stop"])).0,
@@ -187,8 +187,11 @@ fn one_from_before_it_said_its_code_is_restarted() {
     let home = Home::new("b");
     let calls = pretend(&home.0, None, 0, false);
     assert_eq!(
-        said(&home.folio(&["serve", "start"])).0,
-        "Started folio serve\n"
+        said(&home.folio(&["serve", "start"])),
+        (
+            "Started folio serve\n".into(),
+            "folio: folio serve was running other code; restarting it\n".into()
+        )
     );
     assert_eq!(asked(&calls), ["ping", "ping", "shutdown"]);
 }
@@ -198,8 +201,8 @@ fn starting_one_on_its_way_out_waits_it_out_and_starts_this() {
     let home = Home::new("o");
     let calls = pretend(&home.0, Some("old"), 2, true);
     assert_eq!(
-        said(&home.folio(&["serve", "start"])).0,
-        "Started folio serve\n"
+        said(&home.folio(&["serve", "start"])),
+        ("Started folio serve\n".into(), String::new())
     );
     assert_eq!(asked(&calls), ["closed", "closed"]);
 }
@@ -209,8 +212,8 @@ fn stopping_one_waits_till_its_gone() {
     let home = Home::new("g");
     let calls = pretend(&home.0, Some("old"), 2, false);
     assert_eq!(
-        said(&home.folio(&["serve", "stop"])).0,
-        "Stopped folio serve\n"
+        said(&home.folio(&["serve", "stop"])),
+        ("Stopped folio serve\n".into(), String::new())
     );
     assert_eq!(asked(&calls), ["shutdown", "closed", "closed"]);
     assert!(!home.0.join("serve.sock").exists());
