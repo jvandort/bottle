@@ -465,3 +465,60 @@ pub mod net {
         }
     }
 }
+
+/// What a bottle is given past its disks, as a file (`bottle-agent init --config`), which libkrun
+/// serves from memory in its first root: the kernel's command line has room for only so much.
+/// bottle-cli's boot writes it; the agent, as init, reads it.
+pub mod init {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Config {
+        /// Set for everything run in the bottle, under what a command is given itself.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub env: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub mounts: Vec<Mount>,
+        /// The bottle's network; none if None.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub net: Option<Net>,
+        /// What its image runs, its entrypoint and command: started once the bottle's up, in the
+        /// background, as root, in /.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub run: Option<Vec<String>>,
+        /// Files written into the bottle as it boots, before its image runs anything: on /run's
+        /// tmpfs, say, so they're there each boot as given and on no disk.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub files: Vec<File>,
+    }
+
+    /// A file, written by init: `content` at `path`, readable by everyone, its directories made.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct File {
+        pub path: String,
+        pub content: String,
+    }
+
+    /// A directory of the host's, in the bottle at `target`: read-only, unless it's `writable`.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Mount {
+        /// Its virtio-fs tag; or, out of a VM, a directory, bound.
+        pub source: String,
+        pub target: String,
+        #[serde(default)]
+        pub writable: bool,
+    }
+
+    /// The bottle's network, as the host gives it.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Net {
+        /// The bottle's address, and its prefix's length: "100.96.0.2/30".
+        pub address: String,
+        /// How to reach the host: "vsock", or, out of a VM, "unix:PATH".
+        pub host: String,
+    }
+}

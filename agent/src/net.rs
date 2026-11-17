@@ -27,14 +27,7 @@ const INTERFACE: &str = "bottle0";
 const STACK: usize = 64 * 1024;
 
 /// The bottle's network, as the host gives it (see init's Config).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    /// The bottle's address, and its prefix's length: "100.96.0.2/30".
-    pub address: String,
-    /// How to reach the host: "vsock", or, out of a VM, "unix:PATH".
-    pub host: String,
-}
+pub use bottle_agent_proto::init::Net as Config;
 
 /// Brings loopback up: everything has it, network or not.
 pub fn loopback_up() -> io::Result<()> {

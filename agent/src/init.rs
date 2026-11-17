@@ -37,47 +37,7 @@ pub struct Stack {
     pub config: Config,
 }
 
-/// What a bottle is given past its disks, as a file (`--config`), which libkrun serves from memory
-/// in its first root: the kernel's command line has room for only so much.
-#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    /// Set for everything run in the bottle, under what a command is given itself.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    #[serde(default)]
-    pub mounts: Vec<Mount>,
-    /// The bottle's network; none if None.
-    #[serde(default)]
-    pub net: Option<crate::net::Config>,
-    /// What its image runs, its entrypoint and command: started once the bottle's up, in the
-    /// background, as root, in /.
-    #[serde(default)]
-    pub run: Option<Vec<String>>,
-    /// Files written into the bottle as it boots, before its image runs anything: on /run's
-    /// tmpfs, say, so they're there each boot as given and on no disk.
-    #[serde(default)]
-    pub files: Vec<File>,
-}
-
-/// A file, written by init: `content` at `path`, readable by everyone, its directories made.
-#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct File {
-    pub path: String,
-    pub content: String,
-}
-
-/// A directory of the host's, in the bottle at `target`: read-only, unless it's `writable`.
-#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Mount {
-    /// Its virtio-fs tag; or, out of a VM, a directory, bound.
-    pub source: String,
-    pub target: String,
-    #[serde(default)]
-    pub writable: bool,
-}
+pub use bottle_agent_proto::init::{Config, File, Mount};
 
 /// Init's options, taken from `args`; what's left there is how to serve.
 pub fn parse(args: &mut Vec<String>) -> Result<Stack, String> {

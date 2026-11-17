@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bottle_agent_client::policy::Decide as _;
+use bottle_agent_proto::init;
 
 use crate::FAILED;
 use crate::libkrun as krun;
@@ -308,28 +309,37 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     crate::upkeep::spawn(args.socket.clone());
     // The bottle's environment, mounts and network, as a file in the first root (see
     // bottle-agent init).
-    let mut config = serde_json::json!({
-        "env": args.env,
-        "mounts": args.mounts.iter().enumerate()
-            .map(|(i, (_, target, writable))| {
-                serde_json::json!({"source": format!("m{i}"), "target": target, "writable": writable})
+    let mut config = init::Config {
+        env: args.env.clone(),
+        mounts: args
+            .mounts
+            .iter()
+            .enumerate()
+            .map(|(i, (_, target, writable))| init::Mount {
+                source: format!("m{i}"),
+                target: target.clone(),
+                writable: *writable,
             })
-            .collect::<Vec<_>>(),
-    });
-    if net_socket.is_some() {
-        config["net"] = serde_json::json!({"address": ADDRESS, "host": "vsock"});
-    }
-    if let Some(run) = &args.run {
-        config["run"] = serde_json::json!(run);
-    }
+            .collect(),
+        net: net_socket.as_ref().map(|_| init::Net {
+            address: ADDRESS.into(),
+            host: "vsock".into(),
+        }),
+        run: args.run.clone(),
+        files: vec![],
+    };
     // Its caching CA's certificate, where the image trusts it from as it starts (CA_CERTIFICATE).
     if let (Net::Policy(path), Some(name)) = (&args.net, &args.ca)
         && let Some(pem) =
             bottle_agent_client::ca::certificate(name, &policy(path)?.terminated_hosts())?
     {
-        config["files"] = serde_json::json!([{"path": CA_CERTIFICATE, "content": pem}]);
+        config.files.push(init::File {
+            path: CA_CERTIFICATE.into(),
+            content: pem,
+        });
     }
-    let config: &'static [u8] = Box::leak(config.to_string().into_bytes().into_boxed_slice());
+    let config = serde_json::to_vec(&config).expect("a config is JSON");
+    let config: &'static [u8] = Box::leak(config.into_boxed_slice());
     init.extend(["--config".into(), format!("/{}", CONFIG.to_string_lossy())]);
     init.extend(["--vsock".into(), AGENT_PORT.to_string()]);
     let mounts = args

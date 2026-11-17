@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 sha2.workspace = true
 bottle-agent-client.workspace = true
+bottle-agent-proto.workspace = true
 bottle-disk.workspace = true
 bottle-formats.workspace = true
 libc.workspace = true
