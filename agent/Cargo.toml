@@ -15,7 +15,7 @@ serde_json.workspace = true
 tar.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-bottle-agent-client.workspace = true
+bottle-net.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 tar.workspace = true

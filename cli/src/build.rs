@@ -32,12 +32,12 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
-use bottle_agent_client::policy::Decide as _;
 use bottle_agent_client::{Start, wait_for_agent};
 use bottle_disk::Archive;
 use bottle_disk::build::{Launch, Mount, Recipe, Run, Step, Store, Vm};
 use bottle_disk::registry::{Reference, Registry};
 use bottle_formats::listing::Image;
+use bottle_net::policy::Decide as _;
 
 use crate::boot::Net;
 use crate::{FAILED, store};
@@ -212,7 +212,7 @@ fn give_builds_ca(recipe: &mut Recipe, net: &Net) -> io::Result<()> {
         Net::Policy(path) => crate::boot::policy(path)?.terminated_hosts(),
         _ => vec![],
     };
-    let certificate = bottle_agent_client::ca::certificate(BUILDS_CA, &hosts)?.unwrap_or_default();
+    let certificate = bottle_net::ca::certificate(BUILDS_CA, &hosts)?.unwrap_or_default();
     for env in &mut asking {
         **env = certificate.clone();
     }
@@ -364,7 +364,7 @@ struct Booted {
     said: Option<thread::JoinHandle<Downloads>>,
 }
 
-/// A build's requests to the hosts it caches, by what became of them (see agent-client's cache).
+/// A build's requests to the hosts it caches, by what became of them (see bottle-net's cache).
 #[derive(Default)]
 struct Downloads {
     kept: usize,

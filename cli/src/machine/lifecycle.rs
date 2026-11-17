@@ -9,9 +9,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
-use bottle_agent_client::policy::Decide as _;
 use bottle_agent_client::wait_for_agent;
 use bottle_formats::listing::State;
+use bottle_net::policy::Decide as _;
 
 use super::{Config, STOP_TIMEOUT, machines, other};
 
@@ -138,7 +138,7 @@ impl Machine {
             }
             // Its caching CA, for its policy's hosts as they are: made now if it isn't.
             let hosts = crate::boot::policy(&self.network())?.terminated_hosts();
-            bottle_agent_client::ca::certificate(&self.name, &hosts)?;
+            bottle_net::ca::certificate(&self.name, &hosts)?;
             own = crate::boot::Net::Policy(self.network());
             &own
         } else {

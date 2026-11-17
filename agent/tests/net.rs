@@ -1,5 +1,5 @@
 //! The bottle's network, out of a VM: the agent in PID, mount, UTS and network namespaces of its
-//! own (this machine's own network untouched), its host side (bottle-agent-client's net) served
+//! own (this machine's own network untouched), its host side (bottle-net) served
 //! here on a unix socket mounted into the bottle, deciding by a policy that routes one port to a
 //! service here, as bottled is one, and refuses what else it can't allow (a private address no name
 //! leads to).
@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bottle_agent_client::net::{Network, serve};
 use bottle_agent_proto::{Exit, Start, ToGuest, ToHost};
+use bottle_net::{Network, serve};
 
 fn root() -> bool {
     rustix::process::geteuid().is_root()

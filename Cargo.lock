@@ -163,8 +163,8 @@ dependencies = [
 name = "bottle-agent"
 version = "0.1.0"
 dependencies = [
- "bottle-agent-client",
  "bottle-agent-proto",
+ "bottle-net",
  "libc",
  "rustix",
  "serde",
@@ -177,16 +177,6 @@ name = "bottle-agent-client"
 version = "0.1.0"
 dependencies = [
  "bottle-agent-proto",
- "bottle-formats",
- "libc",
- "rcgen",
- "rustix",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2",
- "time",
 ]
 
 [[package]]
@@ -205,6 +195,7 @@ dependencies = [
  "bottle-agent-proto",
  "bottle-disk",
  "bottle-formats",
+ "bottle-net",
  "libc",
  "libkrun",
  "rustix",
@@ -236,6 +227,22 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bottle-net"
+version = "0.1.0"
+dependencies = [
+ "bottle-agent-proto",
+ "bottle-formats",
+ "libc",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "rustls-native-certs",
+ "serde_json",
+ "sha2",
+ "time",
 ]
 
 [[package]]

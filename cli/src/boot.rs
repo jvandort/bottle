@@ -10,9 +10,9 @@
 //! own, read-write, made (--size GIB, sparse) if it isn't there. SOCKET is where the agent is
 //! reached, for `bottle-cli exec`. Everything run in it gets --env's variables; each --mount is a
 //! host directory, read-only at TARGET (virtio-fs). With --network, the bottle has a network,
-//! every connection it makes decided by FILE's policy (see bottle-agent-client's policy): cached
+//! every connection it makes decided by FILE's policy (see bottle-net's policy): cached
 //! hosts answered here and routed ones given to their services, their TLS with NAME's caching CA
-//! (see bottle-agent-client's ca), NAME being who a service is told they're from; its certificate
+//! (see bottle-net's ca), NAME being who a service is told they're from; its certificate
 //! is given to the bottle at /run/bottle/ca.crt (CA_CERTIFICATE), for its image to trust. With --net-direct,
 //! every connection's allowed; without either, there's none.
 //! --run's JSON array of strings is what its image runs (entrypoint and command), started once
@@ -34,8 +34,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bottle_agent_client::policy::Decide as _;
 use bottle_agent_proto::init;
+use bottle_net::policy::Decide as _;
 
 use crate::FAILED;
 use crate::libkrun as krun;
@@ -274,27 +274,24 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         init.extend(["--hostname".into(), name.clone()]);
     }
     // The bottle's network: served here, on a unix socket libkrun carries the agent's vsock
-    // connections to (see bottle-agent-client's net).
+    // connections to (see bottle-net's net).
     let net_socket = match &args.net {
         Net::None => None,
         net => {
             let network = match net {
-                Net::Policy(path) => Some(bottle_agent_client::net::Network::new(
-                    policy(path)?,
-                    args.ca.clone(),
-                )),
+                Net::Policy(path) => Some(bottle_net::Network::new(policy(path)?, args.ca.clone())),
                 _ => None,
             };
             let path = net_socket_beside(&args.socket);
             let _ = fs::remove_file(&path);
             let listener = std::os::unix::net::UnixListener::bind(&path)
                 .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
-            std::thread::spawn(move || bottle_agent_client::net::serve(listener, network));
+            std::thread::spawn(move || bottle_net::serve(listener, network));
             if matches!(net, Net::Policy(_)) {
                 // The cache it answers from loses what's gone unused, now and every few hours.
                 std::thread::spawn(|| {
                     loop {
-                        bottle_agent_client::store::Store::at_home().expire();
+                        bottle_net::store::Store::at_home().expire();
                         std::thread::sleep(CACHE_EXPIRY_INTERVAL);
                     }
                 });
@@ -304,7 +301,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     };
     // The bottle's network takes several descriptors here per connection it makes, and libkrun's
     // half of each fails, or worse, at the limit: macOS gives a process a shell starts 256.
-    bottle_agent_client::net::raise_open_files();
+    bottle_net::raise_open_files();
     // Its clock and memory kept, by exec, once the agent answers (see upkeep).
     crate::upkeep::spawn(args.socket.clone());
     // The bottle's environment, mounts and network, as a file in the first root (see
@@ -330,8 +327,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
     };
     // Its caching CA's certificate, where the image trusts it from as it starts (CA_CERTIFICATE).
     if let (Net::Policy(path), Some(name)) = (&args.net, &args.ca)
-        && let Some(pem) =
-            bottle_agent_client::ca::certificate(name, &policy(path)?.terminated_hosts())?
+        && let Some(pem) = bottle_net::ca::certificate(name, &policy(path)?.terminated_hosts())?
     {
         config.files.push(init::File {
             path: CA_CERTIFICATE.into(),
@@ -379,7 +375,7 @@ fn boot(args: &Args) -> io::Result<std::convert::Infallible> {
         // The guest connects; libkrun connects here for it.
         vm.add_vsock_port(
             "adding the network's port",
-            bottle_agent_client::net::PORT,
+            bottle_net::PORT,
             net_socket,
             false,
         )?;
@@ -445,13 +441,13 @@ pub fn policy_given(arg: &str) -> io::Result<Vec<u8>> {
     } else {
         fs::read(arg).map_err(|e| io::Error::other(format!("{arg}: {e}")))?
     };
-    serde_json::from_slice::<bottle_agent_client::policy::Policy>(&json)
+    serde_json::from_slice::<bottle_net::policy::Policy>(&json)
         .map_err(|e| io::Error::other(format!("{arg}: {e}")))?;
     Ok(json)
 }
 
-/// A machine's network policy, as a file has it (see bottle-agent-client's policy).
-pub fn policy(path: &Path) -> io::Result<bottle_agent_client::policy::Policy> {
+/// A machine's network policy, as a file has it (see bottle-net's policy).
+pub fn policy(path: &Path) -> io::Result<bottle_net::policy::Policy> {
     let json = fs::read(path).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
     serde_json::from_slice(&json).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
 }

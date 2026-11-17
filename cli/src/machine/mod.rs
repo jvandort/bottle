@@ -23,7 +23,7 @@
 //! most), and, while it runs, its pid, its agent's socket and its console's log. Started, it runs
 //! in the background, as `bottle-cli boot` ($BOTTLE_BOOT instead, a program taking boot's
 //! arguments, to try this without VMs); start returns once its agent answers. Its network is the
-//! policy it was made with (--network: kept as its network.json, see bottle-agent-client's policy),
+//! policy it was made with (--network: kept as its network.json, see bottle-net's policy),
 //! every connection decided by it, cached and routed hosts' TLS answered with its own caching CA,
 //! made for that policy's hosts as it starts. Without one, with --net-direct, every connection's
 //! allowed; otherwise, it has none. A machine is "created" until it's first started, then "running"

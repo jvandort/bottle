@@ -2,7 +2,7 @@
 //! (haproxy's proxy-protocol.txt), first: the address and port the bottle connected to, then, as
 //! fields, the name it asked for (SNI or Host), whether it spoke TLS (which bottle-cli has taken
 //! off, so what follows is the plain conversation), and, in a field of bottle-cli's own, the
-//! machine it's from (agent-client's net.rs, PP2_TYPE_MACHINE).
+//! machine it's from (bottle-net's lib.rs, PP2_TYPE_MACHINE).
 
 use std::io::{self, Read};
 use std::net::IpAddr;

@@ -206,8 +206,8 @@ pub(super) fn delete(machine: &Machine, args: &[String]) -> io::Result<()> {
     }
     let _ = fs::remove_file(machine.socket());
     fs::remove_dir_all(&machine.dir)?;
-    // Its caching CA too (see bottle-agent-client's ca): another machine of its name gets a new one.
-    bottle_agent_client::ca::forget(&machine.name)
+    // Its caching CA too (see bottle-net's ca): another machine of its name gets a new one.
+    bottle_net::ca::forget(&machine.name)
 }
 
 /// `configure NAME --network FILE|-`: a stopped machine's network policy, given again (its
@@ -243,7 +243,7 @@ pub(super) fn rename(machine: &Machine, args: &[String]) -> io::Result<()> {
     let _ = fs::remove_file(machine.dir.join("pid"));
     fs::rename(&machine.dir, &new.dir)?;
     // Its caching CA is its old name's: one is made for the new name as it's next started.
-    bottle_agent_client::ca::forget(&machine.name)
+    bottle_net::ca::forget(&machine.name)
 }
 
 pub(super) fn status(machine: &Machine, args: &[String]) -> io::Result<()> {

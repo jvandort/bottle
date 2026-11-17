@@ -519,7 +519,7 @@ mod tests {
     }
 }
 
-/// Against the internet: `cargo test -p bottle-agent-client -- --ignored`.
+/// Against the internet: `cargo test -p bottle-net -- --ignored`.
 #[cfg(test)]
 mod online {
     use super::*;

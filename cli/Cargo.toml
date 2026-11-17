@@ -11,6 +11,7 @@ bottle-agent-client.workspace = true
 bottle-agent-proto.workspace = true
 bottle-disk.workspace = true
 bottle-formats.workspace = true
+bottle-net.workspace = true
 libc.workspace = true
 libkrun.workspace = true
 rustix.workspace = true

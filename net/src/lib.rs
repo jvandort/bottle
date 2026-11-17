@@ -3,6 +3,14 @@
 //! machine's network policy (see policy.rs): connected from here directly, answered here from the
 //! cache (see cache.rs), given to the service its policy routes it to, or refused. Names the bottle
 //! looks up are resolved here, by this machine's own resolver, at the time.
+//!
+//! The bottle's agent is reached for commands by bottle-agent-client; this is the rest of what
+//! the host does for a bottle: its network.
+
+pub mod ca;
+pub mod cache;
+pub mod policy;
+pub mod store;
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
@@ -11,7 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::cache;
 use crate::policy::{Decide, Local, Policy};
 
 pub use bottle_agent_proto::net::PORT;
