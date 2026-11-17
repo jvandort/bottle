@@ -86,7 +86,10 @@ pub fn run(
                     Control::Resize(size) => ToGuest::Resize(size),
                     Control::Signal(signal) => ToGuest::Signal(signal),
                 };
-                if message.write(&mut *outgoing.lock().unwrap()).is_err() {
+                if message
+                    .write(&mut *outgoing.lock().unwrap_or_else(|e| e.into_inner()))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -134,7 +137,11 @@ fn send_stdin(mut stdin: impl Read, outgoing: &Mutex<UnixStream>) {
             Err(_) => ToGuest::StdinEof,
         };
         let end = message == ToGuest::StdinEof;
-        if message.write(&mut *outgoing.lock().unwrap()).is_err() || end {
+        if message
+            .write(&mut *outgoing.lock().unwrap_or_else(|e| e.into_inner()))
+            .is_err()
+            || end
+        {
             return;
         }
     }

@@ -237,7 +237,7 @@ impl Server {
     fn bottle_of(&self, machine: &str) -> Option<Arc<Bottle>> {
         self.bottles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .find(|b| b.machine == machine)
             .cloned()
@@ -245,12 +245,22 @@ impl Server {
 
     /// Bottle `name`, if it's bound.
     pub fn bound(&self, name: &str) -> Option<Arc<Bottle>> {
-        self.bottles.lock().unwrap().get(name).cloned()
+        self.bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
     }
 
     /// Every bottle bound.
     pub fn all(&self) -> Vec<Arc<Bottle>> {
-        let mut all: Vec<Arc<Bottle>> = self.bottles.lock().unwrap().values().cloned().collect();
+        let mut all: Vec<Arc<Bottle>> = self
+            .bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
         all
     }
@@ -266,7 +276,7 @@ impl Server {
         );
         self.bottles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(bottle.name.clone(), Arc::new(bottle));
         if runner != LOCAL && !forwards.is_empty() {
             self.forward(&runner, forwards);
@@ -275,7 +285,11 @@ impl Server {
 
     /// The bottle `name` released; whether there's none left to answer, and so folio serve's to stop.
     fn release(&self, name: &str) -> bool {
-        let released = self.bottles.lock().unwrap().remove(name);
+        let released = self
+            .bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         let Some(released) = released else {
             return false;
         };
@@ -283,18 +297,21 @@ impl Server {
         let still = self
             .bottles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .any(|b| b.runner == released.runner);
         if released.runner != LOCAL && !still {
             self.end_forward(&released.runner);
         }
-        self.bottles.lock().unwrap().is_empty()
+        self.bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Forwards `forwards` to `runner`, unless that's under way already.
     fn forward(self: &Arc<Self>, runner: &str, forwards: Vec<String>) {
-        let mut all = self.forwards.lock().unwrap();
+        let mut all = self.forwards.lock().unwrap_or_else(|e| e.into_inner());
         if all.get(runner).is_some_and(|f| !f.thread.is_finished()) {
             return;
         }
@@ -312,7 +329,11 @@ impl Server {
     }
 
     fn end_forward(&self, runner: &str) {
-        let forward = self.forwards.lock().unwrap().remove(runner);
+        let forward = self
+            .forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(runner);
         if let Some(forward) = forward {
             log!("bottle.daemon", "no longer forwarding to runner {runner}");
             forward.stop.store(true, Ordering::Relaxed);
@@ -582,8 +603,13 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
                 for (_, path) in &server.services {
                     let _ = fs::remove_file(path);
                 }
-                let runners: Vec<String> =
-                    server.forwards.lock().unwrap().keys().cloned().collect();
+                let runners: Vec<String> = server
+                    .forwards
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect();
                 for runner in runners {
                     server.end_forward(&runner);
                 }

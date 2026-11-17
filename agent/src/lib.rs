@@ -108,7 +108,8 @@ struct Input {
 fn handle(conn: Socket, reaper: &Reaper, upper: &Option<File>) -> io::Result<()> {
     let mut incoming = conn.try_clone()?;
     let outgoing = Arc::new(Mutex::new(conn.try_clone()?));
-    let send = |message: ToHost| message.write(&mut *outgoing.lock().unwrap());
+    let send =
+        |message: ToHost| message.write(&mut *outgoing.lock().unwrap_or_else(|e| e.into_inner()));
 
     let start = match ToGuest::read(&mut incoming)? {
         Some(ToGuest::Stop) => {
@@ -387,7 +388,10 @@ fn pump(mut reader: Box<dyn Read + Send>, stderr: bool, outgoing: &Mutex<Socket>
         } else {
             ToHost::Stdout(data)
         };
-        if message.write(&mut *outgoing.lock().unwrap()).is_err() {
+        if message
+            .write(&mut *outgoing.lock().unwrap_or_else(|e| e.into_inner()))
+            .is_err()
+        {
             // The host is gone: keep reading, so the command isn't blocked writing.
             continue;
         }

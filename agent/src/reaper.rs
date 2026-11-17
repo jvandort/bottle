@@ -52,7 +52,7 @@ impl Reaper {
         let (lock, wake) = &*self.inner;
         // Held while spawning, so the child is in `waiting`, and its pidfd open, before the reaper
         // can reap it.
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         let child = command.spawn()?;
         // The child can't have been reaped yet: the reaper reaps only with the lock.
         let pid = rustix::process::Pid::from_child(&child);
@@ -73,7 +73,7 @@ fn reap(inner: &(Mutex<State>, Condvar)) {
         // spawned is in `waiting`, its pidfd open, before it can be.
         match waitid(WaitId::All, WaitIdOptions::EXITED | WaitIdOptions::NOWAIT) {
             Ok(_) => {
-                let mut state = lock.lock().unwrap();
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Ok(Some((pid, status))) = wait(WaitOptions::NOHANG) {
                     let exit = match status.terminating_signal() {
                         Some(signal) => Exit::Signal(signal),
@@ -89,8 +89,8 @@ fn reap(inner: &(Mutex<State>, Condvar)) {
             // No children: sleep until one's spawned. Orphans only come from children, but a
             // timeout costs nothing and covers whatever this misses.
             Err(Errno::CHILD) => {
-                let state = lock.lock().unwrap();
-                let _ = wake.wait_timeout(state, Duration::from_secs(1)).unwrap();
+                let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = wake.wait_timeout(state, Duration::from_secs(1));
             }
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }

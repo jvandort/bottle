@@ -398,22 +398,22 @@ static PULLS: LazyLock<Mutex<HashMap<PathBuf, Arc<Pulls>>>> = LazyLock::new(Defa
 pub fn pull_through(git_dir: &Path) {
     let pulls = PULLS
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .entry(git_dir.to_path_buf())
         .or_default()
         .clone();
-    let mut state = pulls.state.lock().unwrap();
+    let mut state = pulls.state.lock().unwrap_or_else(|e| e.into_inner());
     let wanted = state.1 + 1;
     while state.2 < wanted {
         if state.0 {
-            state = pulls.changed.wait(state).unwrap();
+            state = pulls.changed.wait(state).unwrap_or_else(|e| e.into_inner());
             continue;
         }
         state.0 = true;
         state.1 += 1;
         drop(state);
         fetch_origin(git_dir);
-        state = pulls.state.lock().unwrap();
+        state = pulls.state.lock().unwrap_or_else(|e| e.into_inner());
         state.0 = false;
         state.2 = state.1;
         pulls.changed.notify_all();

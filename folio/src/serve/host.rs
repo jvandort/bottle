@@ -218,22 +218,20 @@ fn message(
         );
         return "bad-message".into();
     }
-    if let Some(problem) = message_problem(body) {
-        http::respond(
-            writer,
-            400,
-            "Bad Request",
-            format!("{problem}\n").as_bytes(),
-            "text/plain",
-        );
-        return "bad-message".into();
-    }
-    let message: Value = serde_json::from_slice(body).unwrap();
-    let (to, text) = (
-        message["to"].as_str().unwrap(),
-        message["text"].as_str().unwrap(),
-    );
-    match messages::deliver(server, bottle, to, text) {
+    let message = match parse_message(body) {
+        Ok(message) => message,
+        Err(problem) => {
+            http::respond(
+                writer,
+                400,
+                "Bad Request",
+                format!("{problem}\n").as_bytes(),
+                "text/plain",
+            );
+            return "bad-message".into();
+        }
+    };
+    match messages::deliver(server, bottle, &message.to, &message.text) {
         Ok(()) => {
             http::respond(writer, 200, "OK", b"delivered\n", "text/plain");
             "message".into()
@@ -251,16 +249,22 @@ fn message(
     }
 }
 
-/// What's wrong with a message's body, or None: it's {"to": a destination, "text": the message}.
-fn message_problem(body: &[u8]) -> Option<String> {
+/// A message a bottle sends: to a destination, its text.
+struct Message {
+    to: String,
+    text: String,
+}
+
+/// The message a body is, {"to": a destination, "text": the message}; else what's wrong with it.
+fn parse_message(body: &[u8]) -> Result<Message, String> {
     if body.len() > MAX_MESSAGE {
-        return Some(format!("a message is at most {MAX_MESSAGE} bytes"));
+        return Err(format!("a message is at most {MAX_MESSAGE} bytes"));
     }
     let Ok(message) = serde_json::from_slice::<Value>(body) else {
-        return Some("a message is JSON: {\"to\": ..., \"text\": ...}".into());
+        return Err("a message is JSON: {\"to\": ..., \"text\": ...}".into());
     };
     let Some(fields) = message.as_object() else {
-        return Some("a message is a JSON object: {\"to\": ..., \"text\": ...}".into());
+        return Err("a message is a JSON object: {\"to\": ..., \"text\": ...}".into());
     };
     let extra: Vec<&str> = fields
         .keys()
@@ -268,18 +272,21 @@ fn message_problem(body: &[u8]) -> Option<String> {
         .filter(|k| !["to", "text"].contains(k))
         .collect();
     if !extra.is_empty() {
-        return Some(format!(
+        return Err(format!(
             "a message has only to and text, not {}",
             extra.join(", ")
         ));
     }
-    if !message["to"].as_str().is_some_and(|t| !t.trim().is_empty()) {
-        return Some("a message needs to: the address or bottle it's for".into());
-    }
-    if !message["text"].is_string() {
-        return Some("a message needs text".into());
-    }
-    None
+    let Some(to) = message["to"].as_str().filter(|t| !t.trim().is_empty()) else {
+        return Err("a message needs to: the address or bottle it's for".into());
+    };
+    let Some(text) = message["text"].as_str() else {
+        return Err("a message needs text".into());
+    };
+    Ok(Message {
+        to: to.into(),
+        text: text.into(),
+    })
 }
 
 /// The running bottles but the asker, for a bottle with list-bottles: each one's name, repo and labels.
