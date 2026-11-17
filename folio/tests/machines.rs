@@ -125,12 +125,12 @@ fn its_machine_is_made_with_its_image_memory_objects_and_policy() {
         f.repo.display()
     )));
     let routes = machine["network"]["routes"].as_array().unwrap();
-    assert_eq!(routes[0]["address"], "192.0.2.1");
+    assert_eq!(routes[0]["host"], "git.bottle.internal");
     assert!(
         routes[0]["socket"]
             .as_str()
             .unwrap()
-            .ends_with("services/host.sock"),
+            .ends_with("services/git.sock"),
         "{routes:?}"
     );
     let cached: Vec<&Value> = machine["network"]["cache"]
@@ -140,7 +140,7 @@ fn its_machine_is_made_with_its_image_memory_objects_and_policy() {
         .map(|c| &c["host"])
         .collect();
     assert!(cached.contains(&&json!("deb.debian.org")));
-    assert_eq!(f.record("t")["network_version"], 3);
+    assert_eq!(f.record("t")["network_version"], 4);
 }
 
 #[test]
@@ -152,8 +152,8 @@ fn its_workspace_borrows_the_repos_objects_and_serves_its_lane() {
     let text = script["argv"][2].as_str().unwrap();
     for line in [
         "echo /mnt/objects/workspace > /workspace/.git/objects/info/alternates",
-        "git -C /workspace remote add origin http://bottle.host/git/workspace/origin",
-        "git -C /workspace remote add agent http://bottle.host/git/workspace/agent",
+        "git -C /workspace remote add origin http://git.bottle.internal/workspace/origin",
+        "git -C /workspace remote add agent http://git.bottle.internal/workspace/agent",
         "git -C /workspace fetch -q --multiple origin host agent user",
         "> \"$HOME/BOTTLE.md\"",
         "running in bottle `",
@@ -169,7 +169,7 @@ fn its_workspace_borrows_the_repos_objects_and_serves_its_lane() {
         hosts[0]["argv"][2]
             .as_str()
             .unwrap()
-            .contains("192.0.2.1 bottle.host")
+            .contains("192.0.2.1 git.bottle.internal")
     );
 }
 
@@ -474,7 +474,7 @@ fn one_made_with_an_older_policy_gets_this_one_and_is_checked_again() {
     f.set_machine("t", json!({"state": "stopped"}));
     f.ok(&["exec", "t", "--", "true"]);
     assert_eq!(f.machine("t")["configured"], 1);
-    assert_eq!(f.record("t")["network_version"], 3);
+    assert_eq!(f.record("t")["network_version"], 4);
     let steps = f.steps("t");
     assert_eq!(&steps[steps.len() - 2..], ["contract", "hosts"]);
 }
@@ -772,8 +772,8 @@ fn a_runner_with_bottles_isnt_removed() {
 // --- a bottle's setup script, run for real against folio serve -----------------------
 
 /// A thread's bottle's workspace script, run here (its paths its own) against folio serve answering
-/// its machine at bottle.host: the workspace, the notes, genie's home, and the environment git
-/// reaches bottle.host with.
+/// its machine at git.bottle.internal: the workspace, the notes, genie's home, and the environment git
+/// reaches git.bottle.internal with.
 struct Workspace {
     f: Folio,
     workspace: PathBuf,
@@ -802,7 +802,7 @@ impl Workspace {
             ("/notes", f.thread_dir("t").join("notes")),
         ];
         // Each mount where it's a path here, not where it's in a remote's URL
-        // (bottle.host/git/workspace/...).
+        // (git.bottle.internal/workspace/...).
         let mut objects = Vec::new();
         for (i, mount) in record["mounts"].as_array().unwrap().iter().enumerate() {
             let path = mount["path"].as_str().unwrap();
@@ -813,14 +813,14 @@ impl Workspace {
         }
         for (path, here) in [("/workspace", &workspace), ("/notes", &notes)] {
             script = script
-                .replace(&format!("/git{path}/"), "\0")
+                .replace(&format!("internal{path}/"), "\0")
                 .replace(path, &here.display().to_string())
-                .replace('\0', &format!("/git{path}/"));
+                .replace('\0', &format!("internal{path}/"));
         }
         for (placeholder, here) in &objects {
             script = script.replace(placeholder, here);
         }
-        let port = harness::bridge(f.home.join("services/host.sock"), f.bottle("t"));
+        let port = harness::bridge(f.home.join("services/git.sock"), f.bottle("t"));
         let mut git_env = f.env.clone();
         for (k, v) in [
             ("HOME", genie.display().to_string()),
@@ -833,7 +833,7 @@ impl Workspace {
                 "GIT_CONFIG_KEY_0",
                 format!("url.http://127.0.0.1:{port}/.insteadOf"),
             ),
-            ("GIT_CONFIG_VALUE_0", "http://bottle.host/".into()),
+            ("GIT_CONFIG_VALUE_0", "http://git.bottle.internal/".into()),
         ] {
             git_env.retain(|(key, _)| key != k);
             git_env.push((k.into(), v));
@@ -1064,7 +1064,7 @@ fn a_stopped_bottle_started_again_isnt_set_up_again() {
     let steps = f.steps("t").len();
     f.set_machine("t", json!({"state": "stopped"}));
     f.ok(&["exec", "t", "--", "true"]);
-    // Its CA, bottle.host and what the contract checked are on its disk, from when it was made.
+    // Its CA, folio serve's names and what the contract checked are on its disk, from when it was made.
     assert_eq!(f.steps("t").len(), steps);
 }
 

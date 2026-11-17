@@ -876,7 +876,7 @@ impl Folio {
 
 /// A TCP server on 127.0.0.1 standing in for a bottle's machine: each connection carried to folio
 /// serve's socket at `socket` as bottle-cli carries one the machine routes there, after a PROXY
-/// header saying it was to bottle.host (192.0.2.1:80) from `machine`. Its port.
+/// header saying it was to git.bottle.internal (at 192.0.2.1:80) from `machine`. Its port.
 pub fn bridge(socket: PathBuf, machine: String) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -907,9 +907,15 @@ fn carry(client: std::net::TcpStream, socket: &Path, machine: &str) {
     let _ = up.join();
 }
 
-/// A PROXY protocol v2 header, as bottle-cli writes one: to bottle.host, from `machine`.
+/// A PROXY protocol v2 header, as bottle-cli writes one: to git.bottle.internal, from `machine`.
 pub fn proxy_header(machine: &str) -> Vec<u8> {
-    header([192, 0, 2, 1], 80, Some("bottle.host"), false, machine)
+    header(
+        [192, 0, 2, 1],
+        80,
+        Some("git.bottle.internal"),
+        false,
+        machine,
+    )
 }
 
 /// The bottle-cli the tests with real VMs run: $BOTTLE_CLI, else this checkout's, built first if

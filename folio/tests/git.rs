@@ -1,4 +1,4 @@
-//! bottle.host as a bottle reaches it: folio serve, told of a bottle and the repos it's served, and
+//! folio serve's git service, as a bottle reaches it at git.bottle.internal: folio serve, told of a bottle and the repos it's served, and
 //! real git in a bottle-style workspace talking to it through a stand-in for the bottle's machine
 //! (harness::bridge). Its remotes' views and rules, its lanes, and the host's branches following a
 //! bottle's push.
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 const MACHINE: &str = "t-m";
 
 /// One repo a bottle is served, as folio serve is told of it: its git dir, its remotes' specs, and
-/// where under bottle.host/git they are.
+/// where under git.bottle.internal they are.
 fn served(git_dir: &Path, remotes: &[&str]) -> Value {
     json!({"git_dir": git_dir, "at": "", "remotes": remotes})
 }
@@ -37,13 +37,13 @@ fn control(f: &Folio, message: &Value) -> Value {
     serde_json::from_str(answer.lines().next().unwrap()).unwrap()
 }
 
-/// folio serve, given a bottle served `repos`, and git's http://bottle.host/ pointed at a stand-in
+/// folio serve, given a bottle served `repos`, and git's http://git.bottle.internal/ pointed at a stand-in
 /// for its machine: its port, and the environment git runs with.
-fn serve_bottle_host(f: &Folio, repos: Vec<Value>) -> (u16, Vec<(String, String)>) {
+fn serve_git(f: &Folio, repos: Vec<Value>) -> (u16, Vec<(String, String)>) {
     f.ok(&["serve", "start"]);
     let reply = control(f, &bind_message(repos));
     assert_eq!(reply["ok"], true, "{reply}");
-    let port = harness::bridge(f.home.join("services/host.sock"), MACHINE.into());
+    let port = harness::bridge(f.home.join("services/git.sock"), MACHINE.into());
     let mut env = f.env.clone();
     env.extend([
         ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
@@ -51,7 +51,10 @@ fn serve_bottle_host(f: &Folio, repos: Vec<Value>) -> (u16, Vec<(String, String)
             "GIT_CONFIG_KEY_0".into(),
             format!("url.http://127.0.0.1:{port}/.insteadOf"),
         ),
-        ("GIT_CONFIG_VALUE_0".into(), "http://bottle.host/".into()),
+        (
+            "GIT_CONFIG_VALUE_0".into(),
+            "http://git.bottle.internal/".into(),
+        ),
     ]);
     (port, env)
 }
@@ -64,7 +67,7 @@ fn s(p: &Path) -> String {
     p.display().to_string()
 }
 
-/// A workspace, as a bottle's is, and git run there with bottle.host's environment.
+/// A workspace, as a bottle's is, and git run there with git.bottle.internal's environment.
 struct Workspace {
     f: Folio,
     dir: PathBuf,
@@ -89,7 +92,7 @@ impl Workspace {
     }
 
     fn ls_remote(&self, remote: &str) -> Vec<String> {
-        let out = self.git(&["ls-remote", &format!("http://bottle.host/git/{remote}")]);
+        let out = self.git(&["ls-remote", &format!("http://git.bottle.internal/{remote}")]);
         assert!(out.status.success(), "{}", stderr(&out));
         let mut refs: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -106,7 +109,7 @@ impl Workspace {
             .collect()
     }
 
-    /// A raw request to bottle.host: what came back.
+    /// A raw request to git.bottle.internal: what came back.
     fn request(&self, raw: &[u8]) -> Vec<u8> {
         let mut s = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.write_all(raw).unwrap();
@@ -153,7 +156,7 @@ impl Remotes {
                 "work:fetch=ns/bottle-b-in,push=ns/bottle-b-out",
             ],
         );
-        let (port, env) = serve_bottle_host(&f, vec![served.clone()]);
+        let (port, env) = serve_git(&f, vec![served.clone()]);
         let dir = f.tmp.join("workspace");
         f.git(&["init", "-q", "-b", "main", &s(&dir)]);
         for remote in ["origin", "host", "work"] {
@@ -163,7 +166,7 @@ impl Remotes {
                     "remote",
                     "add",
                     remote,
-                    &format!("http://bottle.host/git/{remote}"),
+                    &format!("http://git.bottle.internal/{remote}"),
                 ],
             );
         }
@@ -443,9 +446,10 @@ fn the_repos_own_hooks_never_run() {
 #[test]
 fn other_paths_are_not_found() {
     let r = Remotes::new();
-    for path in ["/nope", "/git", "/git/other/info/refs"] {
-        let answer =
-            r.w.request(format!("GET {path} HTTP/1.1\r\nHost: bottle.host\r\n\r\n").as_bytes());
+    for path in ["/nope", "/", "/other/info/refs"] {
+        let answer = r.w.request(
+            format!("GET {path} HTTP/1.1\r\nHost: git.bottle.internal\r\n\r\n").as_bytes(),
+        );
         assert!(
             answer.starts_with(b"HTTP/1.1 404"),
             "{path}: {}",
@@ -467,7 +471,7 @@ impl Follow {
     fn new() -> Follow {
         let f = Folio::new();
         let repo = f.make_repo("app");
-        let (port, env) = serve_bottle_host(
+        let (port, env) = serve_git(
             &f,
             vec![served(
                 &repo.join(".git"),
@@ -488,7 +492,7 @@ impl Follow {
         f.git(&["clone", "-q", &s(&repo), &s(&dir)]);
         git_in(
             &dir,
-            &["remote", "add", "agent", "http://bottle.host/git/agent"],
+            &["remote", "add", "agent", "http://git.bottle.internal/agent"],
         );
         git_in(&dir, &["checkout", "-q", "-b", "genie/x"]);
         let follow = Follow {
@@ -752,7 +756,7 @@ impl Named {
             "lane:fetch=ns/t-in,push=ns/t-out",
             "own:fetch=ns/o,push=ns/o",
         ];
-        let (port, env) = serve_bottle_host(&f, vec![served(&repo.join(".git"), &remotes)]);
+        let (port, env) = serve_git(&f, vec![served(&repo.join(".git"), &remotes)]);
         let dir = f.tmp.join("workspace");
         f.git(&["init", "-q", "-b", "main", &s(&dir)]);
         for remote in ["up", "theirs", "lane", "own", "origin", "work"] {
@@ -762,7 +766,7 @@ impl Named {
                     "remote",
                     "add",
                     remote,
-                    &format!("http://bottle.host/git/{remote}"),
+                    &format!("http://git.bottle.internal/{remote}"),
                 ],
             );
         }
@@ -810,13 +814,9 @@ fn names_it_wasnt_given_arent_served() {
     let n = Named::new();
     for remote in ["origin", "work"] {
         let out =
-            n.w.git(&["ls-remote", &format!("http://bottle.host/git/{remote}")]);
+            n.w.git(&["ls-remote", &format!("http://git.bottle.internal/{remote}")]);
         assert!(!out.status.success(), "{remote}");
-        assert!(
-            stderr(&out).contains("no such bottle.host service"),
-            "{}",
-            stderr(&out)
-        );
+        assert!(stderr(&out).contains("no such remote"), "{}", stderr(&out));
     }
 }
 

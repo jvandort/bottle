@@ -2,7 +2,8 @@
 //! response, one per connection.
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 /// How long a request has to send its head (and a body read here).
@@ -208,6 +209,40 @@ pub fn respond_refused(writer: &mut impl Write, refused: &Refused) {
     respond(writer, status, reason, &body, refused.content_type);
 }
 
+/// A request read off `stream`, whole: its head, and its body (at most `max_body` bytes); and the
+/// stream to answer it on. One that isn't is refused, answered so, and the log's outcome is the error.
+pub fn read_request(
+    stream: UnixStream,
+    max_body: usize,
+) -> Result<(Head, Vec<u8>, UnixStream), String> {
+    let _ = stream.set_read_timeout(Some(HEADER_TIMEOUT));
+    let Ok(read) = stream.try_clone() else {
+        return Err("error".into());
+    };
+    let mut reader = BufReader::new(read);
+    let mut writer = stream;
+    let request = (|| -> Result<(Head, Vec<u8>), Refused> {
+        let head = read_head(&mut reader)?;
+        if !head.target.starts_with('/') {
+            return Err(Refused::bad_request());
+        }
+        let body = read_body(&mut reader, &head.headers(), max_body)
+            .map_err(|_| Refused::bad_request())?
+            .ok_or_else(Refused::bad_request)?;
+        Ok((head, body))
+    })();
+    match request {
+        Ok((head, body)) => {
+            let _ = writer.set_read_timeout(None);
+            Ok((head, body, writer))
+        }
+        Err(refused) => {
+            respond_refused(&mut writer, &refused);
+            Err(refused.outcome.into())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,11 +250,11 @@ mod tests {
     #[test]
     fn a_head_and_a_body_by_length_or_in_chunks() {
         let mut input: &[u8] =
-            b"POST /git/x HTTP/1.1\r\nHost: bottle.host\r\nX-A: 1\r\nx-a: 2\r\n\r\nhello";
+            b"POST /x HTTP/1.1\r\nHost: git.bottle.internal\r\nX-A: 1\r\nx-a: 2\r\n\r\nhello";
         let head = read_head(&mut input).unwrap();
         assert_eq!(
             (head.method.as_str(), head.target.as_str()),
-            ("POST", "/git/x")
+            ("POST", "/x")
         );
         let mut headers = head.headers();
         assert_eq!(headers["x-a"], "1, 2");

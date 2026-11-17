@@ -1,0 +1,69 @@
+//! The bottles service: for a bottle with the list-bottles permission, `GET http://bottle.internal/`,
+//! the other running bottles: each one's name, repo and labels.
+
+use std::collections::BTreeMap;
+use std::os::unix::net::UnixStream;
+
+use serde::Serialize;
+
+use super::http;
+use super::service::{Caller, Flow, Service};
+
+/// The bottles service.
+pub struct Bottles;
+
+impl Service for Bottles {
+    fn serve(&self, caller: &Caller, stream: UnixStream) -> Flow {
+        let (head, _, mut writer) = match http::read_request(stream, 0) {
+            Ok(request) => request,
+            Err(outcome) => return Flow::new("bottles", outcome),
+        };
+        if head.method != "GET" || head.path_and_query().0 != "/" {
+            http::respond(
+                &mut writer,
+                405,
+                "Method Not Allowed",
+                b"GET / for the running bottles\n",
+                "text/plain",
+            );
+            return Flow::new("bottles", "bad-request");
+        }
+        let bottle = caller.bottle;
+        if !bottle.permissions.iter().any(|p| p == "list-bottles") {
+            http::respond(
+                &mut writer,
+                403,
+                "Forbidden",
+                b"listing bottles needs the list-bottles permission\n",
+                "text/plain",
+            );
+            return Flow::new("bottles", "refused");
+        }
+        /// A running bottle, as another with list-bottles sees it.
+        #[derive(Serialize)]
+        struct Peer<'a> {
+            labels: &'a BTreeMap<String, String>,
+            name: &'a str,
+            repo: &'a Option<String>,
+        }
+        let all = caller.bound.all();
+        let peers: Vec<Peer> = all
+            .iter()
+            .filter(|b| b.name != bottle.name)
+            .map(|b| Peer {
+                name: &b.name,
+                repo: &b.repo,
+                labels: &b.labels,
+            })
+            .collect();
+        let peers = serde_json::to_string(&peers).expect("bottles are JSON");
+        http::respond(
+            &mut writer,
+            200,
+            "OK",
+            format!("{peers}\n").as_bytes(),
+            "application/json",
+        );
+        Flow::new("bottles", "bottles")
+    }
+}

@@ -75,7 +75,8 @@ pub fn context(bottle: &Bottle) -> Result<String, String> {
     }
     lines.push(
         "- The network works as usual, DNS included. Every connection is decided by\n  the host: private \
-         addresses are blocked, and a refused one is reset. `bottle.host` is the host."
+         addresses are blocked, and a refused one is reset. Your repos' remotes are at \
+         `git.bottle.internal`."
             .into(),
     );
     let resolved = features::resolve(&bottle.features)?;

@@ -32,10 +32,34 @@ use serde_json::{Value, json};
 use super::Bottle;
 use super::http::{self, Refused};
 use super::proxy::Header;
+use super::service::{Caller, Flow, Service};
 use crate::auth::{self, STANDIN, destination};
 use crate::features::{self, Credential, Rewrite};
 use crate::log::log;
 use crate::routes::Route;
+
+/// The credentials service: a bottle's flow to one of its credentials' hosts, over TLS bottle-cli
+/// took off, with that credential put in.
+pub struct Credentials;
+
+impl Service for Credentials {
+    fn serve(&self, caller: &Caller, stream: UnixStream) -> Flow {
+        let header = caller.header;
+        // A credential goes only on TLS, to a host and port one of the bottle's is for.
+        let injection = match (&header.name, header.tls) {
+            (Some(name), true) => caller
+                .bottle
+                .injections
+                .iter()
+                .find(|i| i.matches(name, header.port)),
+            _ => None,
+        };
+        match injection {
+            Some(injection) => serve(caller.bottle, injection, header, stream),
+            None => Flow::new("-", "not-a-service"),
+        }
+    }
+}
 
 mod encoding;
 mod flow;

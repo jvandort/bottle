@@ -35,7 +35,7 @@ pub(super) fn start_machine(known: &Known, bottle: &Bottle) -> Result<(), String
 }
 
 /// The policy the bottle's machine decides its connections by (services::network): what its
-/// features cache, and what it routes to folio serve: bottle.host, ssh to bottles, and its
+/// features cache, and what it routes to folio serve: its services, ssh to bottles, and its
 /// credentials' hosts, logged in or not.
 pub(super) fn network(bottle: &Bottle) -> Result<Network, String> {
     let resolved = features::resolve(&bottle.features)?;
@@ -65,10 +65,13 @@ pub(super) fn memory_mib(memory: Option<&str>) -> Result<u64, String> {
     Ok(amount * if unit == "G" { 1024 } else { 1 })
 }
 
-/// Give the bottle bottle.host, at the address whose flows its machine routes to folio serve's git
-/// service, and the name of each bottle it may ssh to, at its address.
+/// Give the bottle the names of folio serve's services, at the address whose flows its machine
+/// routes there by name, and the name of each bottle it may ssh to, at its address.
 pub(super) fn point_at_host(bottle: &Bottle) -> Result<(), String> {
-    let mut entries = vec![format!("{HOST_ADDRESS} {HOST}")];
+    let mut entries: Vec<String> = services::NAMES
+        .iter()
+        .map(|name| format!("{HOST_ADDRESS} {name}"))
+        .collect();
     entries.extend(
         bottle
             .ssh
@@ -86,7 +89,37 @@ pub(super) fn point_at_host(bottle: &Bottle) -> Result<(), String> {
         .collect();
     exec(bottle, &sh(&script.join("; ")), Some("root"), None)
         .map(|_| ())
-        .map_err(|e| format!("giving {} bottle.host failed: {e}", bottle.machine()))
+        .map_err(|e| {
+            format!(
+                "giving {} folio serve's names failed: {e}",
+                bottle.machine()
+            )
+        })
+}
+
+/// Point each of the bottle's repos' remotes where they are now (Mount::url): for one made when
+/// they were elsewhere.
+pub(super) fn point_remotes(bottle: &Bottle) -> Result<(), String> {
+    let script: Vec<String> = bottle
+        .mounts
+        .iter()
+        .flat_map(|m| {
+            m.remotes.iter().map(move |r| {
+                format!(
+                    "git -C {} remote set-url {} {}",
+                    q(&m.path),
+                    q(&r.name),
+                    q(&m.url(&r.name))
+                )
+            })
+        })
+        .collect();
+    if script.is_empty() {
+        return Ok(());
+    }
+    in_bottle(bottle, &sh(&script.join(" && ")))
+        .map(|_| ())
+        .map_err(|e| format!("pointing {}'s remotes failed: {e}", bottle.name))
 }
 
 /// Run a command in the bottle's running machine and return its output.
@@ -145,6 +178,7 @@ pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
             // on its disk, as bottle-cli's start alone would find it.
             verify_contract(&bottle)?;
             point_at_host(&bottle)?;
+            point_remotes(&bottle)?;
         }
     } else {
         // Running: folio serve, if it had stopped, binds it again as it starts.

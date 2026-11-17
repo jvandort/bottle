@@ -7,7 +7,7 @@
 # serve also gives the agent a tool, send, for a message to another bottle,
 # which arrives there as an event from this one: to answer an event, the agent
 # sends to its from, an address bottled issued for answering it. The message
-# is POSTed to bottled at http://bottle.host/messages, which runs send in the
+# is POSTed to folio serve at http://messages.bottle.internal/, which runs send in the
 # bottle it's for, and the tool's result is bottled's answer: delivered, or why
 # not. A bottle with the message-any permission can also send to a bottle's
 # name, and one with list-bottles has a tool that lists them. Which tools serve
@@ -40,7 +40,8 @@
 set -eu
 
 spool="${BOTTLE_EVENTS:-$HOME/.events}"
-host="${BOTTLE_HOST_URL:-http://bottle.host}"
+messages="${BOTTLE_MESSAGES_URL:-http://messages.bottle.internal/}"
+bottles="${BOTTLE_BOTTLES_URL:-http://bottle.internal/}"
 
 # Whether this bottle has permission $1 (see bottle/specs.py).
 can() {
@@ -87,10 +88,10 @@ call() {
   case "$(printf '%s' "$1" | jq -r '.params.name')" in
     send)
       reply="$(printf '%s' "$1" | jq -c '.params.arguments // {} | {to, text}' |
-        curl -sS --max-time 30 --fail-with-body -H 'Content-Type: application/json' --data-binary @- "$host/messages" 2>&1)" &&
+        curl -sS --max-time 30 --fail-with-body -H 'Content-Type: application/json' --data-binary @- "$messages" 2>&1)" &&
         error=false || error=true ;;
     list_bottles)
-      reply="$(curl -sS --max-time 30 --fail-with-body "$host/bottles" 2>&1)" && error=false || error=true ;;
+      reply="$(curl -sS --max-time 30 --fail-with-body "$bottles" 2>&1)" && error=false || error=true ;;
     *)
       reply="no such tool" error=true ;;
   esac

@@ -278,7 +278,7 @@ fn a_forward_makes_sockets_here_reachable_there_until_its_stopped() {
     f.ok(&["runner", "add", "box", "--ssh", "box"]);
     let here = f.dir.join("here.sock");
     let listener = UnixListener::bind(&here).unwrap();
-    let there = f.there().join(".folio/services/host.sock");
+    let there = f.there().join(".folio/services/git.sock");
     let pair = format!("{}={}", there.display(), here.display());
     // As folio serve starts it: the leader of a process group of its own.
     let mut forward = f

@@ -237,7 +237,10 @@ fn a_private_address_is_refused_at_once(e: &EndToEnd) {
 }
 
 fn git_through_bottle_host(e: &EndToEnd) {
-    assert!(e.out(&["cat", "/etc/hosts"]).contains("bottle.host"));
+    assert!(
+        e.out(&["cat", "/etc/hosts"])
+            .contains("git.bottle.internal")
+    );
     e.out(&["git", "-C", "/workspace", "fetch", "-q", "origin"]);
     e.out(&["sh", "-c", "cd /workspace && git commit -q --allow-empty -m e2e && git push -q agent HEAD:refs/heads/e2e"]);
     let landed = harness::git_in(

@@ -334,8 +334,8 @@ mod tests {
         let there = boxed.services_sockets().unwrap();
         let here = daemon::services_sockets();
         assert_eq!(
-            there["host"],
-            format!("/home/me/.folio/services/{key}/host.sock")
+            there["git"],
+            format!("/home/me/.folio/services/{key}/git.sock")
         );
         assert_eq!(
             there.keys().collect::<Vec<_>>(),

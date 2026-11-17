@@ -27,12 +27,16 @@ impl Serve {
             .arg("serve")
             .arg("--control")
             .arg(dir.join("serve.sock"))
-            .args(["host", "ssh", "credentials"].iter().flat_map(|s| {
-                [
-                    "--service".to_string(),
-                    format!("{s}={}", dir.join(format!("s/{s}.sock")).display()),
-                ]
-            }))
+            .args(
+                ["git", "messages", "bottles", "ssh", "credentials"]
+                    .iter()
+                    .flat_map(|s| {
+                        [
+                            "--service".to_string(),
+                            format!("{s}={}", dir.join(format!("s/{s}.sock")).display()),
+                        ]
+                    }),
+            )
             .arg("--restore")
             .env("FOLIO_HOME", dir.join("home"))
             .stdin(Stdio::piped())

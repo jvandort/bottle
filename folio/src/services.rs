@@ -1,26 +1,34 @@
 //! Services: what a machine's policy routes to folio serve.
 //!
 //! A machine's policy (its network.json, given when bottle makes it: see network()) routes some of
-//! its connections to a unix socket of folio serve's: bottle.host's services, ssh to the bottles it
-//! may reach, and each credential's host. bottle-cli decides everything else itself, and gives folio
+//! its connections to a unix socket of folio serve's, one for each service: git (its repos'
+//! remotes), messages (to other bottles), bottles (the list of them), ssh (to the bottles it may
+//! reach), and credentials (each credential's host). bottle-cli decides everything else itself, and gives folio
 //! serve each routed connection with a PROXY protocol header saying what it was for and which
-//! machine it's from (serve/proxy.rs and gateway.rs).
+//! machine it's from (serve/proxy.rs and serve/service.rs).
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 
 use bottle_formats::policy::{Cached, Policy, Route};
 
-/// Where a bottle reaches bottle.host: its /etc/hosts says so. A documentation address (TEST-NET-1)
-/// that nothing real uses, which the bottle's machine routes to folio serve.
+/// Where a bottle reaches folio serve's services by name: its /etc/hosts says so. A documentation
+/// address (TEST-NET-1) that nothing real uses; what the machine routes, by the name a request asks
+/// for (HTTP's Host), is a name's, whatever the address. Names under .internal, which ICANN keeps for
+/// private use: none is ever anyone's.
 pub const HOST_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-pub const HOST: &str = "bottle.host";
+/// The bottles running, for one with list-bottles: `GET http://bottle.internal/`.
+pub const BOTTLES_HOST: &str = "bottle.internal";
+/// A bottle's repos' remotes: http://git.bottle.internal/<mount>/<remote>.
+pub const GIT_HOST: &str = "git.bottle.internal";
+/// Messages to other bottles: `POST http://messages.bottle.internal/`.
+pub const MESSAGES_HOST: &str = "messages.bottle.internal";
+/// The names a bottle reaches folio serve's HTTP services by, at HOST_ADDRESS.
+pub const NAMES: [&str; 3] = [GIT_HOST, MESSAGES_HOST, BOTTLES_HOST];
 /// Where a bottle reaches the bottles it may ssh to (a thread's, its sidecar): the rest of
 /// TEST-NET-1, an address for each, under the name its creator gave it.
 pub const SSH_NETWORK: &str = "192.0.2.0/24";
 pub const SSH_PORT: u16 = 22;
-/// Where a bottle's remotes are: http://bottle.host/git/<mount>/<remote>.
-pub const GIT_PATH: &str = "/git";
 
 /// The address of a bottle's `index`th ssh grant: 192.0.2.2 onwards.
 pub fn ssh_address(index: usize) -> String {
@@ -30,8 +38,12 @@ pub fn ssh_address(index: usize) -> String {
 /// What folio serve answers for a machine, each on a socket of its own (daemon::services_sockets).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Service {
-    /// bottle.host's: git, messages.
-    Host,
+    /// Its repos' remotes, over git's smart HTTP.
+    Git,
+    /// Messages to other bottles.
+    Messages,
+    /// The bottles running, for one with list-bottles.
+    Bottles,
     /// ssh to the bottles it may reach.
     Ssh,
     /// Its credentials' hosts.
@@ -42,7 +54,9 @@ impl Service {
     /// Its name among folio serve's sockets.
     pub fn name(self) -> &'static str {
         match self {
-            Service::Host => "host",
+            Service::Git => "git",
+            Service::Messages => "messages",
+            Service::Bottles => "bottles",
             Service::Ssh => "ssh",
             Service::Credentials => "credentials",
         }
@@ -57,20 +71,25 @@ pub struct Network {
     pub routes: Vec<(Destination, Service)>,
 }
 
-/// Where a route's connections go: to an address, into a network, or to a host by name, on a port.
+/// Where a route's connections go: into a network, or to a host by name, on a port.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {
-    Address(IpAddr, u16),
     Network(String, u16),
     Host(String, u16),
 }
 
 /// A machine's network policy: what it caches, and what it routes to folio serve, by service:
-/// bottle.host's (git, messages), ssh to bottles, and each credential's host pattern and port,
+/// its services (git, messages, the bottles running), ssh to bottles, and each credential's host
+/// pattern and port,
 /// logged in or not.
 pub fn network(credentials: &[(String, u16)], cache: Vec<Cached>) -> Network {
     let mut routes = vec![
-        (Destination::Address(HOST_ADDRESS.into(), 80), Service::Host),
+        (Destination::Host(GIT_HOST.into(), 80), Service::Git),
+        (
+            Destination::Host(MESSAGES_HOST.into(), 80),
+            Service::Messages,
+        ),
+        (Destination::Host(BOTTLES_HOST.into(), 80), Service::Bottles),
         (
             Destination::Network(SSH_NETWORK.into(), SSH_PORT),
             Service::Ssh,
@@ -101,11 +120,6 @@ pub fn with_sockets(
                 .ok_or_else(|| format!("folio serve has no socket for {}", service.name()))?
                 .into();
             Ok(match to.clone() {
-                Destination::Address(address, port) => Route::Address {
-                    address,
-                    port,
-                    socket,
-                },
                 Destination::Network(network, port) => Route::Network {
                     network,
                     port,
@@ -127,7 +141,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_machines_policy_routes_bottle_host_ssh_and_credentials_here_and_says_what_it_caches() {
+    fn a_machines_policy_routes_each_service_to_its_socket_and_says_what_it_caches() {
         let cached = vec![Cached {
             host: "deb.example".into(),
             include: vec!["/debian/*.deb".into()],
@@ -141,7 +155,9 @@ mod tests {
             ("api.example".to_string(), 443),
         ];
         let sockets: BTreeMap<String, String> = [
-            ("host", "/h.sock"),
+            ("git", "/g.sock"),
+            ("messages", "/m.sock"),
+            ("bottles", "/b.sock"),
             ("ssh", "/s.sock"),
             ("credentials", "/c.sock"),
         ]
@@ -153,7 +169,9 @@ mod tests {
         assert_eq!(
             policy.routes,
             [
-                route(r#"{"address": "192.0.2.1", "port": 80, "socket": "/h.sock"}"#),
+                route(r#"{"host": "git.bottle.internal", "port": 80, "socket": "/g.sock"}"#),
+                route(r#"{"host": "messages.bottle.internal", "port": 80, "socket": "/m.sock"}"#),
+                route(r#"{"host": "bottle.internal", "port": 80, "socket": "/b.sock"}"#),
                 route(r#"{"network": "192.0.2.0/24", "port": 22, "socket": "/s.sock"}"#),
                 route(r#"{"host": "api.example", "port": 443, "socket": "/c.sock"}"#),
                 route(r#"{"host": "ci.example", "port": 8111, "socket": "/c.sock"}"#),

@@ -115,12 +115,12 @@ mod tests {
 
     #[test]
     fn a_header_says_where_what_and_whose() {
-        let bytes = header([192, 0, 2, 1], 80, Some("bottle.host"), true, "m1");
+        let bytes = header([192, 0, 2, 1], 80, Some("git.bottle.internal"), true, "m1");
         let h = read(&mut bytes.as_slice()).unwrap();
         assert_eq!(h.address.to_string(), "192.0.2.1");
         assert_eq!(
             (h.port, h.name.as_deref(), h.tls, h.machine.as_deref()),
-            (80, Some("bottle.host"), true, Some("m1"))
+            (80, Some("git.bottle.internal"), true, Some("m1"))
         );
         assert!(read(&mut &b"GET / HTTP/1.1\r\n\r\n"[..]).is_err());
         let plain = read(&mut header([192, 0, 2, 1], 80, None, false, "m1").as_slice()).unwrap();

@@ -3,11 +3,12 @@
 //!     folio-cli serve --control PATH --service NAME=PATH... [--restore]
 //!
 //! bottle-cli decides a bottle's connections itself, by the policy its machine was made with, and
-//! gives folio serve the ones that policy routes here, on a unix socket per service (--service:
-//! host, ssh, credentials), each starting with a PROXY header saying which machine it's from
-//! (proxy.rs). A machine is answered as the bottle it was bound as (gateway.rs): bottle.host's git,
-//! messages and list of bottles (host.rs), ssh to the bottles it may reach (ssh.rs), and its
-//! credentials' hosts (credentials.rs). A connection from a machine no bottle is is dropped.
+//! gives folio serve the ones that policy routes here, on a unix socket per service (--service
+//! NAME=PATH), each starting with a PROXY header saying which machine it's from and what it was for
+//! (proxy.rs). Each socket is one service's, which answers it as the bottle the machine was bound
+//! as (service.rs): git (git/: its repos' remotes), messages (messages/: to other bottles), bottles
+//! (bottles/: the list of them), ssh (ssh/: to the bottles it may reach) and credentials
+//! (credentials/: its credentials' hosts). A connection from a machine no bottle is is dropped.
 //!
 //! What folio asks of it comes on --control, a JSON line per request, answered with one:
 //! `{"op": "ping"}` (it says the code it runs: a hash of this program), `{"op": "bind", ...}` (a
@@ -22,13 +23,13 @@
 //! up while still taking connections, closing them unanswered (what says it's on its way out), and
 //! only then is it gone: what's routed here stops first, then its forwards.
 
+mod bottles;
 pub(crate) mod credentials;
-mod gateway;
 mod git;
-pub(crate) mod host;
 mod http;
 mod messages;
 mod proxy;
+mod service;
 mod ssh;
 
 use std::collections::{BTreeMap, HashMap};
@@ -42,10 +43,11 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::control::{Bind, Grant, Reply, Request};
 use crate::log::log;
+use service::{Bound, Caller, Service};
 
 use crate::FAILED;
 
@@ -174,8 +176,6 @@ pub struct Server {
     control: PathBuf,
     services: Vec<(String, PathBuf)>,
     code: String,
-    /// Its repos' pull-through fetches.
-    pulls: git::PullThroughs,
 }
 
 impl Server {
@@ -187,28 +187,6 @@ impl Server {
             .values()
             .find(|b| b.machine == machine)
             .cloned()
-    }
-
-    /// Bottle `name`, if it's bound.
-    pub fn bound(&self, name: &str) -> Option<Arc<Bottle>> {
-        self.bottles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(name)
-            .cloned()
-    }
-
-    /// Every bottle bound.
-    pub fn all(&self) -> Vec<Arc<Bottle>> {
-        let mut all: Vec<Arc<Bottle>> = self
-            .bottles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        all
     }
 
     fn bind(self: &Arc<Self>, bottle: Bottle) {
@@ -342,8 +320,10 @@ impl Server {
         let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
     }
 
-    /// A routed connection, as its header says: given to its bottle's gateway, or dropped.
-    fn routed(self: &Arc<Self>, mut stream: UnixStream) {
+    /// A connection routed to `service`'s socket: answered by it as the bottle its header says it's
+    /// from, or dropped; a line in the log for each: who, where, to what, how it ended, the bytes
+    /// each way, and how long it took.
+    fn routed(self: &Arc<Self>, service: &dyn Service, mut stream: UnixStream) {
         let _ = stream.set_read_timeout(Some(HEADER_TIMEOUT));
         let header = match proxy::read(&mut stream) {
             Ok(header) => header,
@@ -370,8 +350,64 @@ impl Server {
             );
             return;
         };
-        gateway::serve(self, &bottle, &header, stream);
+        let started = Instant::now();
+        let caller = Caller {
+            bottle: &bottle,
+            header: &header,
+            bound: self.as_ref(),
+        };
+        let flow = service.serve(&caller, stream);
+        let target = if flow.injected {
+            format!("{target} +credential")
+        } else {
+            target
+        };
+        log!(
+            "bottle.egress",
+            "{} {target} -> {} {}{} up={} down={} {:.2}s",
+            bottle.name,
+            flow.to,
+            flow.outcome,
+            flow.status.map_or(String::new(), |s| format!(" {s}")),
+            flow.up,
+            flow.down,
+            started.elapsed().as_secs_f64()
+        );
     }
+}
+
+impl Bound for Server {
+    fn bound(&self, name: &str) -> Option<Arc<Bottle>> {
+        self.bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    fn all(&self) -> Vec<Arc<Bottle>> {
+        let mut all: Vec<Arc<Bottle>> = self
+            .bottles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        all
+    }
+}
+
+/// The service named `name` (the name of a --service), if there's one.
+fn service_named(name: &str) -> Option<Box<dyn Service>> {
+    Some(match name {
+        "git" => Box::new(git::Git::default()),
+        "messages" => Box::new(messages::Messages),
+        "bottles" => Box::new(bottles::Bottles),
+        "ssh" => Box::new(ssh::Ssh),
+        "credentials" => Box::new(credentials::Credentials),
+        _ => return None,
+    })
 }
 
 /// Listens at `path`, its owner alone let in, anything there before gone first.
@@ -472,10 +508,12 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         control: control.clone(),
         services: services.clone(),
         code: crate::control::code(),
-        pulls: git::PullThroughs::default(),
     });
     let mut routed = Vec::new();
-    for (_, path) in &services {
+    for (name, path) in &services {
+        let service: Arc<dyn Service> = service_named(name)
+            .ok_or_else(|| io::Error::other(format!("no service {name}")))?
+            .into();
         let listener = listen(path)?;
         let server = server.clone();
         routed.push(thread::spawn(move || {
@@ -484,8 +522,8 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
                     break;
                 }
                 if let Ok(stream) = stream {
-                    let server = server.clone();
-                    thread::spawn(move || server.routed(stream));
+                    let (server, service) = (server.clone(), service.clone());
+                    thread::spawn(move || server.routed(service.as_ref(), stream));
                 }
             }
         }));

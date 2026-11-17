@@ -1,4 +1,5 @@
-//! Messages between bottles, and the addresses that say who may write to whom, without a table.
+//! The messages service: messages between bottles, a POST to http://messages.bottle.internal/ of
+//! {"to": ..., "text": ...}, and the addresses that say who may write to whom, without a table.
 //!
 //! A bottle sends a message to `to`: a bottle's name, or an address, `<name>~<signature>` (names
 //! can't hold a `~`). An address is issued to one bottle, the holder, for reaching another, the
@@ -14,13 +15,17 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use super::{Bottle, Server, exec_command};
+use serde_json::Value;
+
+use super::http;
+use super::service::{Bound, Caller, Flow, Service};
+use super::{Bottle, exec_command};
 use crate::log::log;
 
 const MARK: char = '~';
@@ -34,6 +39,101 @@ const DELIVERY_GRACE: u64 = 15;
 const BOTTLE_EVENT: &str = "/usr/local/bin/bottle-event";
 /// What bottle-event exits when no session took the event in time (EX_TEMPFAIL).
 const NOT_TAKEN: i32 = 75;
+
+/// The most of a message.
+const MAX_MESSAGE: usize = 1024 * 1024;
+
+/// The messages service.
+pub struct Messages;
+
+impl Service for Messages {
+    fn serve(&self, caller: &Caller, stream: UnixStream) -> Flow {
+        // Read past the most a message is, to say so of one a little over it.
+        let (head, body, mut writer) = match http::read_request(stream, 2 * MAX_MESSAGE) {
+            Ok(request) => request,
+            Err(outcome) => return Flow::new("messages", outcome),
+        };
+        if head.method != "POST" || head.path_and_query().0 != "/" {
+            http::respond(
+                &mut writer,
+                405,
+                "Method Not Allowed",
+                b"POST a message to /: {\"to\": ..., \"text\": ...}\n",
+                "text/plain",
+            );
+            return Flow::new("messages", "bad-message");
+        }
+        let message = match parse_message(&body) {
+            Ok(message) => message,
+            Err(problem) => {
+                http::respond(
+                    &mut writer,
+                    400,
+                    "Bad Request",
+                    format!("{problem}\n").as_bytes(),
+                    "text/plain",
+                );
+                return Flow::new("messages", "bad-message");
+            }
+        };
+        match deliver(caller.bound, caller.bottle, &message.to, &message.text) {
+            Ok(()) => {
+                http::respond(&mut writer, 200, "OK", b"delivered\n", "text/plain");
+                Flow::new("messages", "message")
+            }
+            Err(refused) => {
+                http::respond(
+                    &mut writer,
+                    refused.0,
+                    refused.1,
+                    format!("{}\n", refused.2).as_bytes(),
+                    "text/plain",
+                );
+                Flow::new("messages", "undelivered")
+            }
+        }
+    }
+}
+
+/// A message a bottle sends: to a destination, its text.
+struct Message {
+    to: String,
+    text: String,
+}
+
+/// The message a body is, {"to": a destination, "text": the message}; else what's wrong with it.
+fn parse_message(body: &[u8]) -> Result<Message, String> {
+    if body.len() > MAX_MESSAGE {
+        return Err(format!("a message is at most {MAX_MESSAGE} bytes"));
+    }
+    let Ok(message) = serde_json::from_slice::<Value>(body) else {
+        return Err("a message is JSON: {\"to\": ..., \"text\": ...}".into());
+    };
+    let Some(fields) = message.as_object() else {
+        return Err("a message is a JSON object: {\"to\": ..., \"text\": ...}".into());
+    };
+    let extra: Vec<&str> = fields
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !["to", "text"].contains(k))
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!(
+            "a message has only to and text, not {}",
+            extra.join(", ")
+        ));
+    }
+    let Some(to) = message["to"].as_str().filter(|t| !t.trim().is_empty()) else {
+        return Err("a message needs to: the address or bottle it's for".into());
+    };
+    let Some(text) = message["text"].as_str() else {
+        return Err("a message needs text".into());
+    };
+    Ok(Message {
+        to: to.into(),
+        text: text.into(),
+    })
+}
 
 /// Why a message wasn't delivered: an HTTP status, its reason, and what the sender is told.
 pub type Undelivered = (u16, &'static str, String);
@@ -136,7 +236,7 @@ fn target_by(key: &[u8], to: &str, holder: &str) -> Option<String> {
 /// Hands `text` from `sender` to the bottle `to` reaches, as an event from `sender` (its address,
 /// issued to the recipient, so it can answer): returns once the recipient's session has taken it.
 pub fn deliver(
-    server: &Arc<Server>,
+    bound: &dyn Bound,
     sender: &Bottle,
     to: &str,
     text: &str,
@@ -159,7 +259,7 @@ pub fn deliver(
     }
     // The same whether there's no such bottle or the sender may not reach it: a refusal gives
     // nothing away.
-    let Some(recipient) = named.and_then(|n| server.bound(&n)) else {
+    let Some(recipient) = named.and_then(|n| bound.bound(&n)) else {
         return Err((
             404,
             "Not Found",

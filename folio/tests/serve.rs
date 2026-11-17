@@ -49,7 +49,7 @@ fn hub(dir: &Path) -> (PathBuf, String) {
 }
 
 #[test]
-fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last() {
+fn its_services_answer_a_bottle_each_on_its_socket_and_it_stops_with_its_last() {
     let dir = PathBuf::from(format!("/tmp/fsrepo{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -61,12 +61,12 @@ fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last(
     let code = serve.control(json!({"op": "ping"})).unwrap()["code"].clone();
     assert!(code.as_str().is_some_and(|c| c.len() == 16), "{code}");
 
-    let fetch = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n";
+    let fetch = b"GET /workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: git.bottle.internal\r\n\r\n";
     let answer = String::from_utf8_lossy(&serve.flow(
-        "host",
+        "git",
         [192, 0, 2, 1],
         80,
-        Some("bottle.host"),
+        Some("git.bottle.internal"),
         false,
         "m1",
         fetch,
@@ -78,17 +78,17 @@ fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last(
         "the upstream, as branches: {answer}"
     );
     // A push to a read-only remote is refused, saying where to push.
-    let push = b"GET /git/workspace/origin/info/refs?service=git-receive-pack HTTP/1.1\r\n\r\n";
+    let push = b"GET /workspace/origin/info/refs?service=git-receive-pack HTTP/1.1\r\n\r\n";
     let answer =
-        String::from_utf8_lossy(&serve.flow("host", [192, 0, 2, 1], 80, None, false, "m1", push))
+        String::from_utf8_lossy(&serve.flow("git", [192, 0, 2, 1], 80, None, false, "m1", push))
             .into_owned();
     assert!(
         answer.starts_with("HTTP/1.1 403") && answer.contains("read-only; push to agent instead"),
         "{answer}"
     );
-    let push = b"GET /git/workspace/agent/info/refs?service=git-receive-pack HTTP/1.1\r\n\r\n";
+    let push = b"GET /workspace/agent/info/refs?service=git-receive-pack HTTP/1.1\r\n\r\n";
     let answer =
-        String::from_utf8_lossy(&serve.flow("host", [192, 0, 2, 1], 80, None, false, "m1", push))
+        String::from_utf8_lossy(&serve.flow("git", [192, 0, 2, 1], 80, None, false, "m1", push))
             .into_owned();
     assert!(
         answer.starts_with("HTTP/1.1 200") && answer.contains("git-receive-pack"),
@@ -98,32 +98,32 @@ fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last(
     // A machine no bottle is gets nothing.
     assert!(
         serve
-            .flow("host", [192, 0, 2, 1], 80, None, false, "stranger", fetch)
+            .flow("git", [192, 0, 2, 1], 80, None, false, "stranger", fetch)
             .is_empty()
     );
-    // Nor does one of bottle.host's ports that isn't a service.
+    // A request for no remote of its own is answered so.
     let answer = String::from_utf8_lossy(&serve.flow(
-        "host",
+        "git",
         [192, 0, 2, 1],
-        8080,
+        80,
         None,
         false,
         "m1",
-        fetch,
+        b"GET /nowhere/origin/info/refs HTTP/1.1\r\n\r\n",
     ))
     .into_owned();
-    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
 
     // Messages: a bare name is for bottles that may message any.
     let message = |to: &str| {
         let body = json!({"to": to, "text": "hi"}).to_string();
         format!(
-            "POST /messages HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
     };
     let answer = String::from_utf8_lossy(&serve.flow(
-        "host",
+        "messages",
         [192, 0, 2, 1],
         80,
         None,
@@ -134,13 +134,13 @@ fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last(
     .into_owned();
     assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
     let answer = String::from_utf8_lossy(&serve.flow(
-        "host",
+        "messages",
         [192, 0, 2, 1],
         80,
         None,
         false,
         "m1",
-        b"POST /messages HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
     ))
     .into_owned();
     assert!(
@@ -154,14 +154,28 @@ fn bottle_host_serves_its_repos_messages_and_bottles_and_it_stops_with_its_last(
         "m2",
         json!({"permissions": ["list-bottles"], "repo": "r", "labels": {"thread": "t"}}),
     ));
-    let list = b"GET /bottles HTTP/1.1\r\n\r\n";
-    let answer =
-        String::from_utf8_lossy(&serve.flow("host", [192, 0, 2, 1], 80, None, false, "m1", list))
-            .into_owned();
+    let list = b"GET / HTTP/1.1\r\n\r\n";
+    let answer = String::from_utf8_lossy(&serve.flow(
+        "bottles",
+        [192, 0, 2, 1],
+        80,
+        None,
+        false,
+        "m1",
+        list,
+    ))
+    .into_owned();
     assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
-    let answer =
-        String::from_utf8_lossy(&serve.flow("host", [192, 0, 2, 1], 80, None, false, "m2", list))
-            .into_owned();
+    let answer = String::from_utf8_lossy(&serve.flow(
+        "bottles",
+        [192, 0, 2, 1],
+        80,
+        None,
+        false,
+        "m2",
+        list,
+    ))
+    .into_owned();
     assert!(
         answer.ends_with("[{\"labels\":{},\"name\":\"b\",\"repo\":null}]\n"),
         "{answer}"
@@ -242,10 +256,18 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
         json!({"ok": true, "code": code[..16]})
     );
     assert!(serve.log().contains("bad: couldn't restore its decisions"));
-    let list = b"GET /bottles HTTP/1.1\r\n\r\n";
+    let list = b"GET / HTTP/1.1\r\n\r\n";
     let answer = |machine| {
-        String::from_utf8_lossy(&serve.flow("host", [192, 0, 2, 1], 80, None, false, machine, list))
-            .into_owned()
+        String::from_utf8_lossy(&serve.flow(
+            "bottles",
+            [192, 0, 2, 1],
+            80,
+            None,
+            false,
+            machine,
+            list,
+        ))
+        .into_owned()
     };
     assert!(answer("m-good").starts_with("HTTP/1.1 403"));
     assert!(answer("m-bad").is_empty());
@@ -253,7 +275,9 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
     // Its sockets are its owner's alone.
     for socket in [
         "serve.sock",
-        "s/host.sock",
+        "s/git.sock",
+        "s/messages.sock",
+        "s/bottles.sock",
         "s/ssh.sock",
         "s/credentials.sock",
     ] {
@@ -304,7 +328,7 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
     // Shut down, with a bottle bound: its sockets go, and so does it.
     serve.ok(json!({"op": "shutdown"}));
     serve.eventually("it's gone", || !serve.dir.join("serve.sock").exists());
-    assert!(!serve.dir.join("s/host.sock").exists());
+    assert!(!serve.dir.join("s/git.sock").exists());
 }
 
 #[test]
@@ -346,11 +370,11 @@ fn a_message_goes_to_the_bottle_its_address_names_as_an_event_from_the_sender() 
         let _ = fs::remove_file(dir.join("argv"));
         let body = json!({"to": to, "text": text}).to_string();
         let request = format!(
-            "POST /messages HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         String::from_utf8_lossy(&serve.flow(
-            "host",
+            "messages",
             [192, 0, 2, 1],
             80,
             None,
@@ -430,13 +454,13 @@ fn a_message_goes_to_the_bottle_its_address_names_as_an_event_from_the_sender() 
 
     // The other bottles running, by name, repo and labels, without a host's paths.
     let list = String::from_utf8_lossy(&serve.flow(
-        "host",
+        "bottles",
         [192, 0, 2, 1],
         80,
         None,
         false,
         "m-broker",
-        b"GET /bottles HTTP/1.1\r\n\r\n",
+        b"GET / HTTP/1.1\r\n\r\n",
     ))
     .into_owned();
     let body: Value = serde_json::from_str(list.split("\r\n\r\n").nth(1).unwrap()).unwrap();

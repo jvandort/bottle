@@ -143,11 +143,11 @@ mod tests {
         );
         let urls = BTreeMap::from([(
             "origin".to_string(),
-            "http://bottle.host/git/workspace/origin".to_string(),
+            "http://git.bottle.internal/workspace/origin".to_string(),
         )]);
         assert_eq!(
             repoint("/workspace", "/mnt/objects/workspace", &urls),
-            "set -e\necho /mnt/objects/workspace > /workspace/.git/objects/info/alternates\ngit -C /workspace remote set-url origin http://bottle.host/git/workspace/origin 2>/dev/null || git -C /workspace remote add origin http://bottle.host/git/workspace/origin"
+            "set -e\necho /mnt/objects/workspace > /workspace/.git/objects/info/alternates\ngit -C /workspace remote set-url origin http://git.bottle.internal/workspace/origin 2>/dev/null || git -C /workspace remote add origin http://git.bottle.internal/workspace/origin"
         );
     }
 

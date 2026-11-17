@@ -71,13 +71,13 @@ pub const KEYS: [&str; 5] = ["features", "memory", "disk", "permissions", "label
 pub const PERMISSIONS: [(&str, &str); 2] = [
     (
         "list-bottles",
-        "You can list the other running bottles: `GET http://bottle.host/bottles` gives each one's name, \
+        "You can list the other running bottles: `GET http://bottle.internal/` gives each one's name, \
          repo and labels (its creator's: a folio thread's says which thread).",
     ),
     (
         "message-any",
         "You can send a message to any running bottle by its name, not only answer one: its session gets \
-         it as an event from you. `POST http://bottle.host/messages` with `{\"to\": NAME, \"text\": ...}`.",
+         it as an event from you. `POST http://messages.bottle.internal/` with `{\"to\": NAME, \"text\": ...}`.",
     ),
 ];
 const LABEL_VALUE_MAX: usize = 200;

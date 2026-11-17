@@ -76,7 +76,7 @@ pub struct Bind {
     pub forwards: Vec<String>,
 }
 
-/// One repo a bottle is served -- a mount's -- with its remotes (specs), under bottle.host/git/<at>.
+/// One repo a bottle is served -- a mount's -- with its remotes (specs), under git.bottle.internal/<at>.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Served {
     /// The repo its remotes are served from; None: it's gone.
@@ -110,7 +110,7 @@ fn is_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
-/// One remote a bottle is served: http://bottle.host/git/<mount>/<name>.
+/// One remote a bottle is served: http://git.bottle.internal/<mount>/<name>.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Remote {

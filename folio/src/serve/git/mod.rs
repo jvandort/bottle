@@ -1,4 +1,5 @@
-//! A bottle's repos' remotes, over git's smart HTTP protocol, with `git http-backend`. What a fetch
+//! The git service: a bottle's repos' remotes, at http://git.bottle.internal/<mount>/<remote>, over
+//! git's smart HTTP protocol, with `git http-backend`. What a fetch
 //! sees is one of three views: the upstream (the hub's refs/remotes/origin/*, served as branches,
 //! plus tags, from a view folio serve writes beside the hub, the hub fetching origin first), the
 //! hub's own refs (heads), or the refs in one git namespace of the hub (ns/<namespace>).
@@ -19,7 +20,10 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+use std::os::unix::net::UnixStream;
+
 use super::http::{self, Head};
+use super::service::{Caller, Flow, Service};
 use crate::control::{Remote, Served, UPSTREAM};
 use crate::log::log;
 
@@ -35,15 +39,81 @@ const CGI_DROP: [&str; 4] = [
 ];
 
 /// Answers a request for `remote` of `repo`; an outcome for the log.
+/// The most of a request's body read: a push's pack.
+const MAX_BODY: usize = 64 * 1024 * 1024;
+
+/// The git service, and its repos' pull-through fetches.
+#[derive(Default)]
+pub struct Git {
+    pulls: PullThroughs,
+}
+
+impl Service for Git {
+    fn serve(&self, caller: &Caller, stream: UnixStream) -> Flow {
+        let (head, body, mut writer) = match http::read_request(stream, MAX_BODY) {
+            Ok(request) => request,
+            Err(outcome) => return Flow::new("git", outcome),
+        };
+        let (path, query) = head.path_and_query();
+        let Some((repo, remote, path_info)) = route(&caller.bottle.repos, path) else {
+            http::respond(
+                &mut writer,
+                404,
+                "Not Found",
+                b"no such remote\n",
+                "text/plain",
+            );
+            return Flow::new("git", "not-found");
+        };
+        let asked = Asked {
+            path_info: &path_info,
+            head: &head,
+            query,
+            body: &body,
+        };
+        Flow::new(
+            "git",
+            answer(&self.pulls, repo, remote, &asked, &mut writer),
+        )
+    }
+}
+
+/// The repo, remote and rest of path a request is for (/<mount>/<remote>/...); None if none is
+/// served there.
+fn route<'a>(repos: &'a [Served], path: &str) -> Option<(&'a Served, &'a Remote, String)> {
+    let rest = path.strip_prefix('/')?;
+    // The longest `at` first, so a mount at /a/b isn't taken for one at /a.
+    let mut by_length: Vec<&Served> = repos.iter().collect();
+    by_length.sort_by_key(|r| std::cmp::Reverse(r.at.len()));
+    for repo in by_length {
+        let prefix = if repo.at.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", repo.at)
+        };
+        let Some(after) = rest.strip_prefix(&prefix) else {
+            continue;
+        };
+        if repo.git_dir.is_none() {
+            continue;
+        }
+        let (name, path_info) = after.split_once('/').unwrap_or((after, ""));
+        if let Some(remote) = repo.remotes.iter().find(|r| r.name == name) {
+            return Some((repo, remote, format!("/{path_info}")));
+        }
+    }
+    None
+}
+
 /// A request for a remote: the path under it, its head, query and body.
-pub struct Asked<'a> {
+struct Asked<'a> {
     pub path_info: &'a str,
     pub head: &'a Head,
     pub query: &'a str,
     pub body: &'a [u8],
 }
 
-pub fn serve(
+fn answer(
     pulls: &PullThroughs,
     repo: &Served,
     remote: &Remote,
@@ -404,12 +474,12 @@ struct Pulls {
 
 /// Every repo's pull-through fetches, by its git dir: folio serve's (Server's).
 #[derive(Default)]
-pub struct PullThroughs(Mutex<HashMap<PathBuf, Arc<Pulls>>>);
+struct PullThroughs(Mutex<HashMap<PathBuf, Arc<Pulls>>>);
 
 /// `git fetch origin` in the hub, one that starts after this was asked for: fetches of one repo
 /// share, so each sees origin as it was when it asked, and a repo has at most one fetch running and
 /// one waiting, however many bottles fetch at once.
-pub fn pull_through(pulls: &PullThroughs, git_dir: &Path) {
+fn pull_through(pulls: &PullThroughs, git_dir: &Path) {
     let pulls = pulls
         .0
         .lock()
@@ -493,6 +563,23 @@ fn fetch_origin(git_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_is_routed_to_the_longest_mount_it_names() {
+        let served = |at: &str| Served {
+            git_dir: Some("/r".into()),
+            remotes: vec![Remote::parse("origin:fetch=upstream").unwrap()],
+            at: at.into(),
+        };
+        let repos = [served("a"), served("a/b")];
+        let (repo, remote, rest) = route(&repos, "/a/b/origin/info/refs").unwrap();
+        assert_eq!(
+            (repo.at.as_str(), remote.name.as_str(), rest.as_str()),
+            ("a/b", "origin", "/info/refs")
+        );
+        assert!(route(&repos, "/c/origin").is_none());
+        assert!(route(&repos, "other").is_none());
+    }
 
     #[test]
     fn a_cgi_response_is_an_http_one() {

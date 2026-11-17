@@ -2,16 +2,6 @@
 
 use super::*;
 
-/// How a credential's flow went.
-pub struct Served {
-    pub to: String,
-    pub outcome: String,
-    pub status: Option<String>,
-    pub up: u64,
-    pub down: u64,
-    pub injected: bool,
-}
-
 /// A request inside a credential's host's TLS, made ready for the host.
 pub(super) struct Request {
     method: String,
@@ -22,14 +12,9 @@ pub(super) struct Request {
 }
 
 /// Is the far end of `stream`, a flow bottle-cli gave here unwrapped, for `injection`'s host.
-pub fn serve(
-    bottle: &Bottle,
-    injection: &Injection,
-    header: &Header,
-    stream: UnixStream,
-) -> Served {
+pub fn serve(bottle: &Bottle, injection: &Injection, header: &Header, stream: UnixStream) -> Flow {
     let name = header.name.clone().unwrap_or_default();
-    let mut served = Served {
+    let mut served = Flow {
         to: "-".into(),
         outcome: "ok".into(),
         status: None,

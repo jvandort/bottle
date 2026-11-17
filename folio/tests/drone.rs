@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use harness::{Folio, Runner};
 use serde_json::json;
 
-const FETCH: &[u8] = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n";
-const PUSH: &[u8] = b"GET /git/workspace/agent/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n";
+const FETCH: &[u8] = b"GET /workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: git.bottle.internal\r\n\r\n";
+const PUSH: &[u8] = b"GET /workspace/agent/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: git.bottle.internal\r\n\r\n";
 
 /// A thread `t` on runner box, its repo a clone of an upstream that gets commits the repo never
 /// fetched (named as the repo is, so the repo's name, which is its origin's, stays the same).
@@ -59,7 +59,7 @@ impl Drone {
             .to_string()
     }
 
-    /// A connection from the machine's guest to bottle.host, as bottle-cli there gives it to the
+    /// A connection from the machine's guest to git.bottle.internal, as bottle-cli there gives it to the
     /// socket its routes name, from the machine its PROXY header says (its own, unless `said`);
     /// what came back. One closed unanswered may be reset, if it hadn't read all that was sent.
     fn guest_connects(&self, first: &[u8], said: Option<&str>) -> Vec<u8> {

@@ -30,7 +30,7 @@ const MAX_SOCKET_PATH: usize = 100;
 /// Its log, in folio's home.
 const LOG: &str = "serve";
 /// What it serves, each on a socket of its own, which a machine's routes name (services::network).
-const SERVICES: [&str; 3] = ["host", "ssh", "credentials"];
+const SERVICES: [&str; 5] = ["git", "messages", "bottles", "ssh", "credentials"];
 
 pub fn socket_path(name: &str) -> PathBuf {
     let path = crate::home().join(name);
@@ -50,8 +50,8 @@ fn control() -> PathBuf {
     socket_path("serve.sock")
 }
 
-/// Where folio serve answers what machines route to it, by service: bottle.host's (git, messages),
-/// ssh to bottles, and credentials' hosts.
+/// Where folio serve answers what machines route to it, by service (services::Service): git,
+/// messages, bottles, ssh and credentials, a socket each.
 pub fn services_sockets() -> BTreeMap<String, PathBuf> {
     SERVICES
         .iter()

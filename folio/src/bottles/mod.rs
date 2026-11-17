@@ -8,8 +8,9 @@
 //! Each bottle has:
 //!   - a machine, <name> (see bottle_cli.rs), with each of its mounts' repos' objects mounted
 //!     read-only, and the network policy it decides its connections by (network), which routes
-//!     some to folio serve: bottle.host, which serves each mount's git remotes, ssh to bottles, and
-//!     its credentials' hosts (see services.rs; serve/)
+//!     some to folio serve: its services (git: each mount's git remotes, at git.bottle.internal;
+//!     messages; the bottles running), ssh to bottles, and its credentials' hosts (see
+//!     services.rs; serve/)
 //!   - for each mount, a checkout at its path that borrows those objects via alternates. Which paths
 //!     is the bottle's creator's to say; none is special, but the first is where a shell or a
 //!     command starts (genie's home without one).
@@ -46,7 +47,7 @@ use crate::daemon;
 use crate::git::bottle_git;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
-use crate::services::{self, HOST, HOST_ADDRESS, Network};
+use crate::services::{self, GIT_HOST, HOST_ADDRESS, Network};
 use crate::shell::quote as q;
 use crate::specs::Spec;
 use crate::{auth, builds, features, images, specs, store};
@@ -75,8 +76,10 @@ const ORIGIN: &str = "origin";
 const RECORDS: &str = "bottles";
 /// The version of the policy network() makes: 1, its routes to folio serve's one socket; 2, folio
 /// serve's, by service; 3, on a runner, to folio serve's forwarded there (services_sockets), not
-/// bottle-cli's.
-const NETWORK: u32 = 3;
+/// bottle-cli's; 4, a socket for each service, git, messages and the bottles routed by their names
+/// under bottle.internal (bottle.host's paths before). A bottle given 4 has its names and remotes
+/// pointed there again (machine.rs's ensure_running).
+const NETWORK: u32 = 4;
 fn now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,7 +135,7 @@ pub struct Mount {
     pub remotes: Vec<Remote>,
     /// Where its objects are mounted in the bottle: under OBJECTS_ROOT, at its path.
     pub objects: String,
-    /// Where its remotes are under bottle.host/git: its path, less the /.
+    /// Where its remotes are under git.bottle.internal: its path, less the /.
     pub at: String,
 }
 
@@ -155,8 +158,12 @@ impl Mount {
         }
     }
 
+    /// Where its remote `remote` is: http://git.bottle.internal/<at>/<remote>.
     pub fn url(&self, remote: &str) -> String {
-        format!("http://{HOST}{}/{}/{remote}", services::GIT_PATH, self.at)
+        match self.at.as_str() {
+            "" => format!("http://{GIT_HOST}/{remote}"),
+            at => format!("http://{GIT_HOST}/{at}/{remote}"),
+        }
     }
 }
 

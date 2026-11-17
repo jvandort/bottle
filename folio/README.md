@@ -476,7 +476,7 @@ remote's default branch, or, if there's no origin, whatever the repo has
 checked out.
 
 Each is served the remotes it's given, `NAME:fetch=VIEW[,push=ns/NAMESPACE]`, live, at
-`http://bottle.host/git/<PATH>/<NAME>`, which folio serve answers. What a fetch
+`http://git.bottle.internal/<PATH>/<NAME>`, which folio serve answers. What a fetch
 sees is one of three views:
 
 - `upstream`: your repo's upstream (its `origin/*` branches), read-only.
@@ -535,9 +535,11 @@ name others.
 bottles' machines route to it. A machine decides each TCP connection the bottle opens
 itself, by the network policy it was made with (`network.json` in its
 directory): public destinations go straight there; private addresses are
-refused, but for a name allowed private; `bottle.host`, ssh to other bottles
-and credentials' hosts are routed to folio serve's sockets, one per service (`~/.folio/services`),
-which answers `bottle.host` with the bottle's git remotes. A refused
+refused, but for a name allowed private; folio serve's services are routed to its sockets, one per
+service (`~/.folio/services`): git (`git.bottle.internal`, the bottle's git remotes), messages
+(`messages.bottle.internal`), the bottles running (`bottle.internal`, with list-bottles), ssh to
+other bottles, and credentials' hosts. Each name is under `.internal`, which is kept for private
+use: no one else's. A refused
 connection is reset, and logged in the machine's `boot.log`. A bottle's names
 are looked up by the machine it runs on, with its resolver, as they're asked;
 a bottle has no UDP or IPv6. A machine starts with nothing but its name
@@ -549,7 +551,7 @@ folio serve starts automatically when a command needs it, and when it starts it
 picks up the bottles there are. It stops itself once there's no bottle left to
 answer: when the last is deleted, or its thread paused. While it's stopped, a running bottle's
 connections go on as its policy says, but for what it routes to folio serve
-(`bottle.host`, ssh, credentials' hosts), which is refused. A command that finds it running other code (another
+(its services, ssh, credentials' hosts), which is refused. A command that finds it running other code (another
 checkout's, or this one's before it changed) restarts it first, and says so.
 
 ## Commands

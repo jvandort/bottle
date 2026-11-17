@@ -139,7 +139,7 @@ folio serve is refused while it isn't running. Stopping keeps its disk.
 A machine decides each TCP connection the bottle opens itself, by the network
 policy it was made with (`network.json` in its directory): public destinations
 go straight there; private addresses are refused, but for a name allowed
-private; and what the policy routes (folio's: `bottle.host`, ssh to other
+private; and what the policy routes (folio's: its services by name, ssh to other
 bottles, and credentials' hosts) goes to the unix socket it names, after a
 PROXY protocol header saying where it was going and from which machine. A
 refused connection is reset, and logged in the machine's `boot.log`. A

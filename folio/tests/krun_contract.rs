@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-/// Where a bottle reaches bottle.host, as folio's policy routes it.
-const HOST: &str = "bottle.host";
+/// Where a bottle reaches folio serve's git service, as folio's policy routes it: by name.
+const HOST: &str = "git.bottle.internal";
 const HOST_ADDRESS: &str = "192.0.2.1";
 /// Where a build's directory is in its VM.
 const MOUNT: &str = "/run/bottle-build";
@@ -146,12 +146,12 @@ impl Contract {
             .unwrap_or_else(|e| panic!("bottle-cli {args:?}: {e}"))
     }
 
-    /// A machine's policy, as folio makes one: bottle.host and ssh to bottles routed to the stand-in,
+    /// A machine's policy, as folio makes one: git by its name, and ssh to bottles, routed to the stand-in,
     /// nothing cached.
     fn network(&self) -> String {
         let socket = self.work.join("services.sock");
         json!({"allow_private": [], "cache": [], "routes": [
-            {"address": HOST_ADDRESS, "port": 80, "socket": socket},
+            {"host": HOST, "port": 80, "socket": socket},
             {"network": "192.0.2.0/24", "port": 22, "socket": socket},
         ]})
         .to_string()
@@ -439,11 +439,12 @@ fn a_built_image_boots(c: &Contract, _alpine: &str) {
 }
 
 fn decided_egress(c: &Contract) {
-    // bottle.host is routed to the services socket, and answered.
+    // git.bottle.internal is routed to the services socket by the name the request asks for, and
+    // answered.
     let answer = c
         .exec(
             &c.machine,
-            &["wget", "-qO-", "-T", "5", "http://bottle.host/git/x"],
+            &["wget", "-qO-", "-T", "5", "http://git.bottle.internal/x"],
             None,
             None,
             &[],
@@ -455,7 +456,7 @@ fn decided_egress(c: &Contract) {
         .lock()
         .unwrap()
         .iter()
-        .filter(|f| has(&f.first, b"/git/x"))
+        .filter(|f| has(&f.first, b"GET /x "))
         .cloned()
         .collect();
     assert_eq!(flows.len(), 1, "{flows:?}");
@@ -471,7 +472,7 @@ fn decided_egress(c: &Contract) {
         (HOST_ADDRESS, 80, Some(HOST), Some(c.machine.as_str()))
     );
     assert!(
-        flow.first.starts_with(b"GET /git/x "),
+        flow.first.starts_with(b"GET /x "),
         "{:?}",
         String::from_utf8_lossy(&flow.first)
     );

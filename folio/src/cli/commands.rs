@@ -263,8 +263,8 @@ pub(super) fn command() -> Command {
                 .about("what bottles' machines route to folio: their git, credentials, ssh and messages")
                 .long_about(
                     "Start or stop folio serve, which answers what bottles' machines route to it, on sockets in \
-                     $FOLIO_HOME/services: bottle.host (their repos' git, messages between bottles), ssh to bottles, \
-                     and credentials' hosts. bottle starts it when it's needed; its log is \
+                     $FOLIO_HOME/services, one for each service: git (their repos' remotes), messages between \
+                     bottles, the bottles running, ssh to bottles, and credentials' hosts. bottle starts it when it's needed; its log is \
                      $FOLIO_HOME/logs/serve.log.",
                 )
                 .subcommand_required(true)

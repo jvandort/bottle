@@ -5,7 +5,7 @@
 //! directory of its own beside the state file, which stands in for its disk: what runs in it runs
 //! here, in that directory, with its home there ($HOME, and /home/genie), its repos there
 //! (/workspace and /notes), and each mount's target its source here. Its repos' remotes at
-//! bottle.host are empty repos of its own: it has no network.
+//! git.bottle.internal are empty repos of its own: it has no network.
 //!
 //! An exec is recorded, with what it was given on stdin, and answered as a machine that meets the
 //! bottle contract would: the checks pass (or name what $FAKE_CLI_MISSING says is missing), the
@@ -41,7 +41,7 @@ const GUEST_HOME: &str = "/home/genie";
 /// Where a bottle's repos' objects are mounted: /mnt/objects/PATH for the repo at PATH.
 const OBJECTS: &str = "/mnt/objects";
 /// Where a bottle's remotes are, in it.
-const REMOTES: &str = "http://bottle.host/git/";
+const REMOTES: &str = "http://git.bottle.internal/";
 /// A pretended session's pid: above Linux's highest, so no process has it. One whose program has
 /// exited has another, which kill -0 doesn't find either.
 const NO_PID: u64 = 4194305;
@@ -424,7 +424,7 @@ fn create(name: &str, rest: &[String]) -> ExitCode {
 }
 
 /// How paths in a machine are this machine's: each mount's target its source, its repos and home
-/// its directory's, its remotes at bottle.host empty repos of its own.
+/// its directory's, its remotes at git.bottle.internal empty repos of its own.
 struct Paths {
     here: PathBuf,
     /// Longest first: a path in a mount is that mount's, not one it's in.
@@ -500,7 +500,7 @@ impl Paths {
         out
     }
 
-    /// A remote at bottle.host: an empty repo of the machine's own.
+    /// A remote at git.bottle.internal: an empty repo of the machine's own.
     fn remote(&self, path: &str) -> String {
         let repo = self.here.join("remotes").join(format!("{path}.git"));
         if !repo.exists() {
