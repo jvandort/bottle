@@ -33,8 +33,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use bottle_agent_client::policy::Decide as _;
+use bottle_agent_client::{Start, wait_for_agent};
 use bottle_disk::Archive;
-use bottle_disk::build::{Launch, Mount, Recipe, Step, Store, Vm, wait_for_agent};
+use bottle_disk::build::{Launch, Mount, Recipe, Run, Step, Store, Vm};
 use bottle_disk::registry::{Reference, Registry};
 use bottle_formats::listing::Image;
 
@@ -451,8 +452,10 @@ impl Launch for Boot {
         };
         let socket = booted.socket.clone();
         // Dropped if it doesn't answer: killed.
-        wait_for_agent(&socket, || matches!(booted.child.try_wait(), Ok(None)))
-            .map_err(|e| booted.with_console(e))?;
+        wait_for_agent(&socket, crate::BOOT_TIMEOUT, || {
+            matches!(booted.child.try_wait(), Ok(None))
+        })
+        .map_err(|e| booted.with_console(e))?;
         Ok(Box::new(booted))
     }
 }
@@ -471,8 +474,18 @@ impl Booted {
 }
 
 impl Vm for Booted {
-    fn socket(&self) -> &Path {
-        &self.socket
+    fn run(&self, run: Run, stdin: Box<dyn Read + Send>) -> io::Result<()> {
+        let start = Start {
+            argv: run.argv,
+            env: run.env,
+            cwd: Some(run.cwd),
+            ..Start::default()
+        };
+        bottle_agent_client::run_to_stderr(&self.socket, start, stdin)
+    }
+
+    fn stop(&self) -> io::Result<()> {
+        bottle_agent_client::stop(&self.socket).map_err(|e| io::Error::other(e.to_string()))
     }
 
     fn wait(mut self: Box<Self>) -> io::Result<()> {

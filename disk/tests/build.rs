@@ -15,7 +15,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use bottle_disk::build::{Launch, Mount, Recipe, Stage, Step, Store, Vm, wait_for_agent};
+use bottle_agent_client::{Start, wait_for_agent};
+use bottle_disk::build::{Launch, Mount, Recipe, Run, Stage, Step, Store, Vm};
 use bottle_disk::{Archive, oci::sha256};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -157,14 +158,27 @@ impl Launch for Namespaces {
             loops,
         };
         // Dropped if it doesn't answer: stopped, its loop devices detached.
-        wait_for_agent(&socket, || matches!(running.unshare.try_wait(), Ok(None)))?;
+        let a_minute = std::time::Duration::from_secs(60);
+        wait_for_agent(&socket, a_minute, || {
+            matches!(running.unshare.try_wait(), Ok(None))
+        })?;
         Ok(Box::new(running))
     }
 }
 
 impl Vm for Running {
-    fn socket(&self) -> &Path {
-        &self.socket
+    fn run(&self, run: Run, stdin: Box<dyn std::io::Read + Send>) -> std::io::Result<()> {
+        let start = Start {
+            argv: run.argv,
+            env: run.env,
+            cwd: Some(run.cwd),
+            ..Start::default()
+        };
+        bottle_agent_client::run_to_stderr(&self.socket, start, stdin)
+    }
+
+    fn stop(&self) -> std::io::Result<()> {
+        bottle_agent_client::stop(&self.socket).map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     fn wait(mut self: Box<Self>) -> std::io::Result<()> {

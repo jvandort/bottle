@@ -147,6 +147,67 @@ fn send_stdin(mut stdin: impl Read, outgoing: &Mutex<UnixStream>) {
     }
 }
 
+/// Runs `start` to its end, `stdin` its input, its output (both streams) to this process's stderr:
+/// what a command run for its effect shows as it goes. An error unless it exits 0, saying how it
+/// ended.
+pub fn run_to_stderr(
+    socket: &Path,
+    start: Start,
+    stdin: impl Read + Send + 'static,
+) -> io::Result<()> {
+    let argv = start.argv.clone();
+    let (_, controls) = std::sync::mpsc::channel();
+    let exit = run(
+        socket,
+        start,
+        stdin,
+        &mut io::stderr(),
+        &mut io::stderr(),
+        controls,
+    )
+    .map_err(|e| io::Error::other(format!("{argv:?}: {e}")))?;
+    match exit {
+        Exit::Code(0) => Ok(()),
+        exit => Err(io::Error::other(format!("{argv:?}: {exit:?}"))),
+    }
+}
+
+/// Waits for the agent at `socket` to answer, as long as `alive` says what it runs in is there,
+/// at most `timeout`.
+pub fn wait_for_agent(
+    socket: &Path,
+    timeout: std::time::Duration,
+    mut alive: impl FnMut() -> bool,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let (_, controls) = std::sync::mpsc::channel();
+        let start = Start {
+            argv: vec!["true".into()],
+            ..Start::default()
+        };
+        // Any answer: a VM with nothing installed has no `true` to run, and says so.
+        match run(
+            socket,
+            start,
+            io::empty(),
+            &mut io::sink(),
+            &mut io::sink(),
+            controls,
+        ) {
+            Ok(_) | Err(Error::Agent(_)) => return Ok(()),
+            Err(_) => {}
+        }
+        if !alive() {
+            return Err(io::Error::other("the VM ended before its agent answered"));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(io::Error::other("the VM's agent didn't answer"));
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// The exit status a shell gives a command that ended so: its code, or 128 and the signal.
 pub fn status(exit: Exit) -> i32 {
     match exit {

@@ -16,6 +16,9 @@ mod upkeep;
 /// A failure of bottle-cli's own, not a command's: as ssh has it.
 const FAILED: u8 = 255;
 
+/// How long a VM gets to start answering.
+const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {

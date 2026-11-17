@@ -12,11 +12,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
 use std::thread;
-use std::time::{Duration, Instant};
 
-use bottle_agent_client::{Exit, Start, run, stop};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -29,9 +26,6 @@ const FORMAT: &str = "bottle-stage 1";
 
 /// How big a stage's disk is, at most: sparse, what isn't used of it takes no room.
 const DISK_BYTES: u64 = 64 << 30;
-
-/// How long a VM gets to start answering.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub use bottle_formats::recipe::{Mount, Recipe, Step};
 
@@ -47,9 +41,20 @@ pub struct Stage {
     pub labels: BTreeMap<String, String>,
 }
 
-/// A VM booted for a build, its agent answering at `socket()`.
+/// What a build runs in its VM: `argv`, as root, with `env`, in `cwd`.
+pub struct Run {
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: String,
+}
+
+/// A VM booted for a build, ready to run what it's given: what a build needs of it.
 pub trait Vm {
-    fn socket(&self) -> &Path;
+    /// Runs `run` to its end, `stdin` its input, its output what the build shows as it goes. An
+    /// error unless it exits 0, saying how it ended.
+    fn run(&self, run: Run, stdin: Box<dyn Read + Send>) -> io::Result<()>;
+    /// Has the VM stop: what it wrote made clean on its disks.
+    fn stop(&self) -> io::Result<()>;
     /// Waits for the VM to end, once it's been told to stop.
     fn wait(self: Box<Self>) -> io::Result<()>;
 }
@@ -215,7 +220,7 @@ impl Store {
             .cmd
             .clone()
             .or_else(|| parent.as_ref().and_then(|(_, s)| s.cmd.clone()));
-        self.make(&name, &disks, launch, recipe.mount.as_ref(), |socket| {
+        self.make(&name, &disks, launch, recipe.mount.as_ref(), |vm| {
             for step in &recipe.steps {
                 match step {
                     Step::Run {
@@ -227,7 +232,7 @@ impl Store {
                             .iter()
                             .chain(step_env)
                             .map(|(k, v)| (k.clone(), v.clone()));
-                        command(socket, argv, all.collect(), cwd.as_deref())?;
+                        command(vm, argv, all.collect(), cwd.as_deref())?;
                     }
                     Step::Env { env: set } => env.extend(set.clone()),
                 }
@@ -265,7 +270,7 @@ impl Store {
             return Ok(name);
         }
         let open = &layer;
-        self.make(&name, &[], launch, None, |socket| {
+        self.make(&name, &[], launch, None, |vm| {
             for layer in &image.layers {
                 thread::scope(|scope| -> io::Result<()> {
                     let (reader, mut writer) = io::pipe()?;
@@ -273,7 +278,7 @@ impl Store {
                         io::copy(&mut open(layer)?, &mut writer)?;
                         Ok(())
                     });
-                    let unpacked = unpack_from(socket, "/", true, reader);
+                    let unpacked = unpack_from(vm, "/", true, reader);
                     let fed = feeding.join().unwrap();
                     // What went wrong reading the layer comes first: unpack failing is only what
                     // followed.
@@ -332,7 +337,7 @@ impl Store {
         lowers: &[PathBuf],
         launch: &dyn Launch,
         mount: Option<&Mount>,
-        steps: impl FnOnce(&Path) -> io::Result<()>,
+        steps: impl FnOnce(&dyn Vm) -> io::Result<()>,
     ) -> io::Result<()> {
         let partial = self
             .dir
@@ -341,9 +346,9 @@ impl Store {
         crate::mke2fs::empty(&self.mke2fs, &partial, DISK_BYTES)?;
         let result = (|| {
             let vm = launch.launch(lowers, &partial, mount)?;
-            let ran = steps(vm.socket());
+            let ran = steps(vm.as_ref());
             // Stopped either way, so the VM doesn't outlive the build.
-            let stopped = stop(vm.socket()).map_err(|e| other(format!("stopping: {e}")));
+            let stopped = vm.stop().map_err(|e| other(format!("stopping: {e}")));
             let ended = vm.wait();
             ran?;
             stopped?;
@@ -365,69 +370,24 @@ impl Store {
     }
 }
 
-/// Waits for the agent at `socket` to answer, as long as `alive` says the VM is there.
-pub fn wait_for_agent(socket: &Path, mut alive: impl FnMut() -> bool) -> io::Result<()> {
-    let deadline = Instant::now() + BOOT_TIMEOUT;
-    loop {
-        let (_, controls) = channel();
-        let start = Start {
-            argv: vec!["true".into()],
-            ..Start::default()
-        };
-        // Any answer: a stage being made on nothing has no `true` to run, and says so.
-        match run(
-            socket,
-            start,
-            io::empty(),
-            &mut io::sink(),
-            &mut io::sink(),
-            controls,
-        ) {
-            Ok(_) | Err(bottle_agent_client::Error::Agent(_)) => return Ok(()),
-            Err(_) => {}
-        }
-        if !alive() {
-            return Err(other("the VM ended before its agent answered".into()));
-        }
-        if Instant::now() > deadline {
-            return Err(other("the VM's agent didn't answer".into()));
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Runs `argv` with `env`, in `cwd` (`/` if None), its output to stderr: what a build shows as
 /// it goes.
 fn command(
-    socket: &Path,
+    vm: &dyn Vm,
     argv: &[String],
     env: Vec<(String, String)>,
     cwd: Option<&str>,
 ) -> io::Result<()> {
-    let (_, controls) = channel();
-    let start = Start {
+    let run = Run {
         argv: argv.to_vec(),
         env,
-        cwd: Some(cwd.unwrap_or("/").into()),
-        ..Start::default()
+        cwd: cwd.unwrap_or("/").into(),
     };
-    let exit = run(
-        socket,
-        start,
-        io::empty(),
-        &mut io::stderr(),
-        &mut io::stderr(),
-        controls,
-    )
-    .map_err(|e| other(format!("{argv:?}: {e}")))?;
-    match exit {
-        Exit::Code(0) => Ok(()),
-        exit => Err(other(format!("{argv:?}: {exit:?}"))),
-    }
+    vm.run(run, Box::new(io::empty()))
 }
 
 fn unpack_from(
-    socket: &Path,
+    vm: &dyn Vm,
     dir: &str,
     oci: bool,
     tar: impl Read + Send + 'static,
@@ -436,24 +396,13 @@ fn unpack_from(
     if oci {
         argv.push("--oci".into());
     }
-    let (_, controls) = channel();
-    let start = Start {
-        argv: argv.clone(),
-        ..Start::default()
+    let run = Run {
+        argv,
+        env: vec![],
+        cwd: "/".into(),
     };
-    let exit = run(
-        socket,
-        start,
-        tar,
-        &mut io::stderr(),
-        &mut io::stderr(),
-        controls,
-    )
-    .map_err(|e| other(format!("unpacking into {dir}: {e}")))?;
-    match exit {
-        Exit::Code(0) => Ok(()),
-        exit => Err(other(format!("unpacking into {dir}: {exit:?}"))),
-    }
+    vm.run(run, Box::new(tar))
+        .map_err(|e| other(format!("unpacking into {dir}: {e}")))
 }
 
 /// Everything under `dir`, sorted, each as its path in it, its metadata and its path.

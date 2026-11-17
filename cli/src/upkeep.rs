@@ -31,7 +31,7 @@ const COMPACTION_PROACTIVENESS: u32 = 100;
 /// Keeps the VM whose agent is at `socket`, on a thread of its own, until this process ends.
 pub fn spawn(socket: PathBuf) {
     thread::spawn(move || {
-        if bottle_disk::build::wait_for_agent(&socket, || true).is_err() {
+        if bottle_agent_client::wait_for_agent(&socket, crate::BOOT_TIMEOUT, || true).is_err() {
             return;
         }
         set_clock(&socket);

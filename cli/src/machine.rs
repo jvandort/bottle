@@ -44,7 +44,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bottle_agent_client::policy::Decide as _;
-use bottle_disk::build::{Store, wait_for_agent};
+use bottle_agent_client::wait_for_agent;
+use bottle_disk::build::Store;
 use bottle_formats::listing::{self, State};
 use serde::{Deserialize, Serialize};
 
@@ -376,7 +377,9 @@ impl Machine {
         pid_file.set_len(0)?;
         pid_file.write_all(child.id().to_string().as_bytes())?;
         drop(pid_file);
-        let answered = wait_for_agent(&socket, || matches!(child.try_wait(), Ok(None)));
+        let answered = wait_for_agent(&socket, crate::BOOT_TIMEOUT, || {
+            matches!(child.try_wait(), Ok(None))
+        });
         if let Err(e) = answered {
             let _ = child.kill();
             let _ = child.wait();
