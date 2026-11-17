@@ -96,7 +96,7 @@ fn agent() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf();
-    let mut build = Command::new(env!("CARGO"));
+    let mut build = test_cargo::cargo();
     build.args(["build", "-q", "-p", "bottle-agent"]);
     if profile.ends_with("release") {
         build.arg("--release");

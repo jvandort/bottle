@@ -17,3 +17,6 @@ rustix.workspace = true
 signal-hook.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+test-cargo.workspace = true

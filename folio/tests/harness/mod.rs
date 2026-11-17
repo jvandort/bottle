@@ -40,7 +40,7 @@ fn target() -> PathBuf {
 pub fn standin() -> PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
     BUILT.call_once(|| {
-        let status = Command::new(env!("CARGO"))
+        let status = test_cargo::cargo()
             .args(["build", "-q", "-p", "folio-standin"])
             .status()
             .unwrap();

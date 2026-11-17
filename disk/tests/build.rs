@@ -54,25 +54,7 @@ fn agent() -> &'static PathBuf {
         if profile.ends_with("release") {
             args.push("--release");
         }
-        let cargo = env!("CARGO");
-        let mut command = match std::env::var("SUDO_USER") {
-            Ok(user) => {
-                // sudo sets its own PATH: cargo's own directory, where rustc is, goes first.
-                let bin = Path::new(cargo).parent().unwrap().display().to_string();
-                let path = std::env::var("PATH").unwrap_or_default();
-                let mut c = Command::new("sudo");
-                c.args([
-                    "-E",
-                    "-u",
-                    &user,
-                    "env",
-                    &format!("PATH={bin}:{path}"),
-                    cargo,
-                ]);
-                c
-            }
-            Err(_) => Command::new(cargo),
-        };
+        let mut command = test_cargo::cargo();
         command.args(&args);
         assert!(
             command.status().unwrap().success(),

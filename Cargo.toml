@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["agent-proto", "agent", "agent-client", "cli", "disk", "formats", "xtask", "folio", "folio/standin"]
+members = ["agent-proto", "agent", "agent-client", "cli", "disk", "formats", "xtask", "folio", "folio/standin", "test-cargo"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,7 @@ bottle-agent-client = { path = "agent-client" }
 bottle-agent-proto = { path = "agent-proto" }
 bottle-disk = { path = "disk" }
 bottle-formats = { path = "formats" }
+test-cargo = { path = "test-cargo" }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
 # The system's calls, safe: rustix's own (on Linux, without libc), where libc's would be unsafe ours.

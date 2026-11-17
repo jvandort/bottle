@@ -24,5 +24,6 @@ signal-hook.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+test-cargo.workspace = true
 libc.workspace = true
 rcgen.workspace = true

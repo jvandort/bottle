@@ -85,7 +85,7 @@ pub fn folio() -> PathBuf {
     let built = target.join("debug").join("folio");
     static BUILT: std::sync::Once = std::sync::Once::new();
     BUILT.call_once(|| {
-        let status = std::process::Command::new(env!("CARGO"))
+        let status = test_cargo::cargo()
             .args(["build", "-q", "-p", "folio"])
             .status()
             .unwrap();
@@ -102,7 +102,7 @@ pub fn standin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")));
     static BUILT: std::sync::Once = std::sync::Once::new();
     BUILT.call_once(|| {
-        let status = std::process::Command::new(env!("CARGO"))
+        let status = test_cargo::cargo()
             .args(["build", "-q", "-p", "folio-standin"])
             .status()
             .unwrap();
