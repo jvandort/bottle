@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::advice::{advice, durable, sidecar as sidecar_advice};
 use crate::bottles::State;
@@ -13,7 +14,7 @@ use super::sessions::ensure_running;
 use super::sidecar::{delete_sidecar, make_sidecar, running_sidecar};
 use super::state::{state_of, states};
 use super::{
-    Settings, Thread, WORKSPACE, directory, is_name, mounts, notes_dir, now, runner_of, save,
+    Settings, Thread, WORKSPACE, directory, is_name, mounts, notes_dir, runner_of, save,
     sidecar_base,
 };
 
@@ -365,4 +366,11 @@ pub fn delete(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), Strin
     }
     crate::log::log!("threads", "{}: deleted", thread.name);
     Ok(())
+}
+
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }

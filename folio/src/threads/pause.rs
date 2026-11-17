@@ -16,15 +16,6 @@ use super::sidecar::delete_sidecar;
 use super::state::state_of;
 use super::{Thread, directory, mounts, save, snapshot};
 
-/// A bottle's state when its runner is off, as bottle says it: unreachable, or detached to be
-/// turned off.
-pub(super) const SNAPSHOT: [&str; 4] = [
-    snapshots::WORKSPACE_ARCHIVE,
-    snapshots::NOTES_ARCHIVE,
-    snapshots::CLAUDE_ARCHIVE,
-    snapshots::WORK,
-];
-
 /// Each mount's archive in a snapshot.
 pub(super) fn archive_of(path: &str) -> Option<&'static str> {
     match path {

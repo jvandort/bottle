@@ -1,13 +1,16 @@
 //! Where threads are: each one's bottle's state, and its sidecar's.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use crate::bottles::{State, Status};
 use crate::engine::Engine;
 use crate::repos::Repo;
 use crate::snapshots;
 
-use super::{Thread, mtime, snapshot};
+use super::{Thread, snapshot};
 
 /// When the thread was last used, its state row (states) saying: its bottle's last use; a paused
 /// thread's, when it was paused; else when it was made.
@@ -85,4 +88,12 @@ pub(super) fn state_of(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<
             .status
             .state,
     )
+}
+
+fn mtime(path: &Path) -> f64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0.0, |d| d.as_secs_f64())
 }

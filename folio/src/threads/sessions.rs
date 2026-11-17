@@ -10,10 +10,10 @@ use crate::store::Content;
 
 use super::CLAUDE;
 use super::lifecycle::{bottle_for, workdir};
-use super::pause::{SNAPSHOT, resume};
+use super::pause::resume;
 use super::sidecar::start_sidecar;
 use super::state::state_of;
-use super::{TERM, Thread, save, snapshot};
+use super::{SNAPSHOT, TERM, Thread, save, snapshot};
 
 /// What each session runs. Claude carries on with the thread's conversation if it has one, and
 /// runs the claude feature's channel, bottle-event, if the bottle has it, so events and other
