@@ -29,20 +29,18 @@
 //! started keeps running. shpool passes the session's output straight through, so it's the
 //! terminal's own scrollback that has it.
 
-use std::collections::BTreeMap;
+use pause::SNAPSHOT;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
-use crate::bottles::{State, Status};
-use crate::engine::{self, Engine, Mount, Order};
-use crate::repos::{Repo, check_repo_spec, default_spec};
+use crate::repos::{Repo, default_spec};
 use crate::specs::Spec;
 use crate::store::{self, Content};
-use crate::{broker, lanes, notes, repos, runners, snapshots};
+use crate::{notes, repos, snapshots};
 
 mod lifecycle;
 mod pause;
@@ -50,11 +48,11 @@ mod sessions;
 mod sidecar;
 mod state;
 
-pub use lifecycle::*;
-pub use pause::*;
-pub use sessions::*;
-pub use sidecar::*;
-pub use state::*;
+pub use lifecycle::{create, delete, rename, set_settings};
+pub use pause::{losses, pause};
+pub use sessions::{attach, copy, exec};
+pub use sidecar::{set_sidecar, sidecar_shell};
+pub use state::{last_active, recent, states};
 
 pub const RECORD: &str = "thread.json";
 pub const WORKSPACE: &str = "/workspace";
@@ -277,6 +275,7 @@ pub fn runner_of(repo: &Repo, thread: &Thread) -> Result<Option<String>, String>
 
 #[cfg(test)]
 mod tests {
+    use super::sessions::session_command;
     use super::*;
     use serde_json::json;
 

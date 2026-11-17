@@ -2,12 +2,20 @@
 //! say, as folio loads, resolves and builds them. Each feature is read as its JSON (`derived_json`):
 //! what it is, and what its options make of it.
 
+use crate::features::TEST_DIR;
+
+use super::feature::Feature;
+use super::load::{available, load};
+use super::resolve::{parse_spec, resolve};
+use super::route;
+
+use super::Result;
+
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use super::*;
 use crate::images;
 
 /// The features in `dir`, for as long as this is held, on this test's thread.

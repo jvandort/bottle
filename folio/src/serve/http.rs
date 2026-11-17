@@ -252,10 +252,7 @@ mod tests {
         let mut input: &[u8] =
             b"POST /x HTTP/1.1\r\nHost: git.bottle.internal\r\nX-A: 1\r\nx-a: 2\r\n\r\nhello";
         let head = read_head(&mut input).unwrap();
-        assert_eq!(
-            (head.method.as_str(), head.target.as_str()),
-            ("POST", "/x")
-        );
+        assert_eq!((head.method.as_str(), head.target.as_str()), ("POST", "/x"));
         let mut headers = head.headers();
         assert_eq!(headers["x-a"], "1, 2");
         headers.insert("content-length".into(), "5".into());

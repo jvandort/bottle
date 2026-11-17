@@ -1,6 +1,20 @@
 //! Pausing a thread (its work and Claude's kept in a snapshot, its bottle deleted) and resuming it.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::fs;
+
+use crate::bottles::State;
+use crate::engine::Engine;
+use crate::repos::Repo;
+use crate::store::{self, Content};
+use crate::{lanes, notes, snapshots};
+
+use super::WORKSPACE;
+use super::lifecycle::{bottle_mounts, make_bottle, workdir};
+use super::sessions::{sh, stop_sessions};
+use super::sidecar::delete_sidecar;
+use super::state::state_of;
+use super::{Thread, directory, mounts, save, snapshot};
 
 /// A bottle's state when its runner is off, as bottle says it: unreachable, or detached to be
 /// turned off.

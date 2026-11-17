@@ -1,6 +1,19 @@
 //! A feature, as folio has it once loaded: its options, credentials, cache, apt and the rest.
 
-use super::*;
+#[cfg(test)]
+use serde_json::{Map, json};
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::quoted;
+use crate::routes::Route;
+
+use super::names::{is_package, option_env_name, or_none, references, substitute, whole_reference};
+
+use super::Result;
 
 /// An option's value: a string or a boolean.
 #[derive(Debug, Clone, PartialEq)]

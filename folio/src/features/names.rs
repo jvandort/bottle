@@ -1,6 +1,6 @@
 //! Names a feature uses (ids, variables, headers, packages), and `${references}` to its options.
 
-use super::*;
+use serde_json::{Map, Value};
 
 /// `[a-z0-9][a-z0-9-]*`
 pub(super) fn is_id(s: &str) -> bool {

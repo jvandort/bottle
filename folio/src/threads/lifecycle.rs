@@ -1,6 +1,21 @@
 //! A thread's bottle made, and the thread changed, renamed and deleted.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::fs;
+
+use crate::advice::{advice, durable, sidecar as sidecar_advice};
+use crate::bottles::State;
+use crate::engine::{self, Engine, Mount, Order};
+use crate::repos::{Repo, check_repo_spec, default_spec};
+use crate::{broker, lanes, notes, runners, store};
+
+use super::sessions::ensure_running;
+use super::sidecar::{delete_sidecar, make_sidecar, running_sidecar};
+use super::state::{state_of, states};
+use super::{
+    Settings, Thread, WORKSPACE, directory, is_name, mounts, notes_dir, now, runner_of, save,
+    sidecar_base,
+};
 
 /// The paths of the mounts the thread's bottle has, as bottle has them -- a bottle made before this
 /// folio may have fewer, or have them elsewhere -- else the thread's.

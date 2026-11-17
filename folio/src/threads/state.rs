@@ -1,6 +1,13 @@
 //! Where threads are: each one's bottle's state, and its sidecar's.
 
-use super::*;
+use std::collections::BTreeMap;
+
+use crate::bottles::{State, Status};
+use crate::engine::Engine;
+use crate::repos::Repo;
+use crate::snapshots;
+
+use super::{Thread, mtime, snapshot};
 
 /// When the thread was last used, its state row (states) saying: its bottle's last use; a paused
 /// thread's, when it was paused; else when it was made.

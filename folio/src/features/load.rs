@@ -1,6 +1,18 @@
 //! Reading a feature's devcontainer-feature.json, and checking it: what folio supports of it, and nothing else.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::fs;
+
+use serde_json::{Map, Value};
+
+use crate::quoted;
+
+use super::feature::{Apt, Feature, FeatureOption, OptionValue};
+use super::names::{is_env_name, is_id, option_env_name, or_none, references, unsupported};
+use super::sections::{apt, cache, credential};
+use super::{BASE, BOTTLE_KEYS, METADATA_KEYS, OPTION_KEYS, SUPPORTED_KEYS, dir};
+
+use super::Result;
 
 /// The features a bottle can ask for: all but base, which every bottle has.
 pub fn available() -> Vec<String> {

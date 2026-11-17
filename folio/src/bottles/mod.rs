@@ -31,26 +31,18 @@
 //! deletes a branch a bottle checked out and gc later prunes its commits (after git's grace
 //! periods, weeks to months), that checkout breaks, and the bottle has to be made again.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bottle_formats::listing;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::bottle_cli::{Create, Exec};
-use crate::control::{self, Bind, Served};
-use crate::control::{HEADS, Remote, UPSTREAM};
-use crate::daemon;
-use crate::git::bottle_git;
-use crate::repos::{self, Repo};
+use crate::control::Remote;
 use crate::runners::{self, Runner};
-use crate::services::{self, GIT_HOST, HOST_ADDRESS, Network};
-use crate::shell::quote as q;
+use crate::services::GIT_HOST;
 use crate::specs::Spec;
-use crate::{auth, builds, features, images, specs, store};
+use crate::store;
 
 mod bind;
 mod context;
@@ -58,11 +50,10 @@ mod create;
 mod machine;
 mod state;
 
-pub use bind::*;
-pub use context::*;
-pub use create::*;
-pub use machine::*;
-pub use state::*;
+pub use bind::bindings;
+pub use create::{MountRequest, Order, create};
+pub use machine::{delete, ensure_running, exec_command, start};
+pub use state::{Known, Made, State, Status, status};
 
 /// A mount at /x has its objects at /mnt/objects/x.
 const OBJECTS_ROOT: &str = "/mnt/objects";
@@ -327,6 +318,12 @@ pub fn touch(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::quote as q;
+    use crate::specs;
+
+    use super::context::context;
+    use super::context::machine_env;
+    use super::machine::{CONTRACT, memory_mib};
     use crate::tempdir;
     use serde_json::{Value, json};
 

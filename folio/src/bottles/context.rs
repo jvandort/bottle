@@ -1,6 +1,12 @@
 //! What a bottle is told of itself: its machine's environment, and its context (BOTTLE.md).
 
-use super::*;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use crate::control::{HEADS, Remote, UPSTREAM};
+use crate::{auth, features, specs};
+
+use super::{Bottle, USER};
 
 /// What a bottle's machine is created with: the stand-ins its features asked for, never
 /// credentials; its permissions, as BOTTLE_PERMISSIONS, so the tools that use them know to offer

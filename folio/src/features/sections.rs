@@ -1,6 +1,22 @@
 //! The sections of a feature's customizations.bottle: credentials (inject, rewrites), cache and apt.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value;
+
+use crate::quoted;
+use crate::routes::Route;
+
+use super::feature::{Apt, Cache, Credential, FeatureOption, Inject, Repository, Rewrite};
+use super::names::{
+    is_env_name, is_header_name, is_id, is_package, or_none, references, unsupported,
+};
+use super::{
+    APT_KEYS, BASE64, CACHE_KEYS, CREDENTIAL_KEYS, CREDENTIAL_PLACEHOLDER, INJECT_KEYS, RAW,
+    REPOSITORY_KEYS, REWRITE_KEYS,
+};
+
+use super::Result;
 
 pub(super) fn credential(
     name: &str,

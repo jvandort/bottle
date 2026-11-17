@@ -156,17 +156,19 @@
 //! (images.rs); and the hosts a bottle with those features has its downloads kept for (`--build`:
 //! what every build keeps).
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use resolve::parse_spec;
+#[cfg(test)]
+use serde_json::Value;
+
+#[cfg(test)]
+use crate::routes::Route;
+
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 
 #[cfg(test)]
 use serde_json::json;
-use serde_json::{Map, Value};
-
-use crate::quoted;
-use crate::routes::Route;
 
 mod feature;
 mod load;
@@ -174,11 +176,9 @@ mod names;
 mod resolve;
 mod sections;
 
-pub use feature::*;
-pub use load::*;
-pub use names::*;
-pub use resolve::*;
-pub use sections::*;
+pub use feature::{Credential, Feature, Repository, Rewrite};
+pub use load::{available, load};
+pub use resolve::{canonical, resolve};
 
 pub const BASE: &str = "base";
 pub const CREDENTIAL_PLACEHOLDER: &str = "${credential}";
@@ -266,7 +266,8 @@ mod format;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::names::{is_package, references, substitute, whole_reference};
+    use super::resolve::parse_spec;
 
     fn settings(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

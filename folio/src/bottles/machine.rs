@@ -1,6 +1,15 @@
 //! A bottle's machine, once made: started (with its contract checked), commands run in it, and deleted.
 
-use super::*;
+use bottle_formats::listing;
+
+use crate::bottle_cli::Exec;
+use crate::services::{self, HOST_ADDRESS, Network};
+use crate::shell::quote as q;
+use crate::{auth, builds, features, images};
+
+use super::bind::binding;
+use super::state::{Known, Made};
+use super::{Bottle, NETWORK, USER, forget, get, runner_of, save};
 
 /// What bottle relies on inside every bottle, checked (as genie) whenever one starts. Documented in
 /// folio/features/base/install.sh; keep them in sync.

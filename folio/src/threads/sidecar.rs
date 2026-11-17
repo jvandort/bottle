@@ -1,6 +1,12 @@
 //! A thread's sidecar: a bottle of its own, which the thread's may ssh to.
 
-use super::*;
+use crate::advice::sidecar_itself;
+use crate::bottles::State;
+use crate::engine::{self, Engine, Mount, Order};
+use crate::repos::{Repo, check_repo_spec};
+
+use super::state::state_of;
+use super::{Settings, Thread, directory, save, sidecar_base};
 
 /// Make the thread's sidecar afresh, from its spec as it is now: the thread's repos and remotes,
 /// pushes included, which bottle allows as the thread's bottle may ssh to it.

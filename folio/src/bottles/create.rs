@@ -1,6 +1,26 @@
 //! Making a bottle: its mounts and sidecar planned, its machine made and set up, rolled back if that fails.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::bottle_cli::Create;
+use crate::control::Remote;
+use crate::git::bottle_git;
+use crate::repos::{self, Repo};
+use crate::shell::quote as q;
+use crate::specs::Spec;
+use crate::{auth, builds, features, runners, services};
+
+use super::context::{context, machine_env};
+use super::machine::{
+    delete, ensure_running, exec, in_bottle, memory_mib, network, point_at_host, sh, start_machine,
+    verify_contract,
+};
+use super::state::{Known, Made};
+use super::{
+    Bottle, CONTEXT_FILE, Mount, NETWORK, ORIGIN, SshGrant, USER, load, now, runner_of, save,
+};
 
 /// A bottle to make: named `name`, from `spec`, with `mounts`, its creator's `context` for
 /// ~/BOTTLE.md, on `runner` (None: this machine), that may ssh to its `sidecar`, if it's given one;

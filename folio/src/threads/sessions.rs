@@ -1,6 +1,19 @@
 //! A thread's sessions (shpool's, in its bottle), and commands run in it.
 
-use super::*;
+use serde::Deserialize;
+
+use crate::bottles::State;
+use crate::engine::Engine;
+use crate::lanes;
+use crate::repos::Repo;
+use crate::store::Content;
+
+use super::CLAUDE;
+use super::lifecycle::{bottle_for, workdir};
+use super::pause::{SNAPSHOT, resume};
+use super::sidecar::start_sidecar;
+use super::state::state_of;
+use super::{TERM, Thread, save, snapshot};
 
 /// What each session runs. Claude carries on with the thread's conversation if it has one, and
 /// runs the claude feature's channel, bottle-event, if the bottle has it, so events and other

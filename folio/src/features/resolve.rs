@@ -1,6 +1,14 @@
 //! Feature specs (id:option=value,...), and a set of them resolved with their dependencies, in order.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::quoted;
+
+use super::BASE;
+use super::feature::Feature;
+use super::load::load;
+
+use super::Result;
 
 /// `jvm:version=25,additionalVersions=17,21` -> ("jvm", [("version", "25"), ("additionalVersions",
 /// "17,21")]): options are comma-separated NAME=VALUE pairs, and a segment without `=` continues
