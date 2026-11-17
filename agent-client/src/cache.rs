@@ -28,7 +28,7 @@ use rustls::{
 };
 
 use crate::ca::Authority;
-use crate::policy::Cached;
+use crate::policy::{CacheRule, Cached};
 use crate::store::Store;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;

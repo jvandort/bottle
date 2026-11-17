@@ -13,92 +13,22 @@
 //! IPv6 is refused: the bottle has no route for it.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 
-use serde::Deserialize;
+pub use bottle_formats::policy::{Cached, HTTP_PORT, HTTPS_PORT, Policy, Route};
 
-#[derive(Debug, Default, Deserialize)]
-pub struct Policy {
-    #[serde(default)]
-    pub allow_private: Vec<String>,
-    /// The hosts whose downloads are kept here (see cache.rs), as bottled's cache.Cached has them.
-    #[serde(default)]
-    pub cache: Vec<Cached>,
-    /// The connections a service answers, on its unix socket.
-    #[serde(default)]
-    pub routes: Vec<Route>,
+/// Which requests to a cached host are kept (see cache.rs).
+pub trait CacheRule {
+    fn matches(&self, host: &str) -> bool;
+    /// Whether a request for `path` isn't one to keep.
+    fn excludes(&self, path: &str) -> bool;
 }
 
-/// Connections a service answers: to an address, into a network, or by name, each on a port.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum Route {
-    Address {
-        address: IpAddr,
-        port: u16,
-        socket: PathBuf,
-    },
-    Network {
-        network: String,
-        port: u16,
-        socket: PathBuf,
-    },
-    Host {
-        host: String,
-        port: u16,
-        socket: PathBuf,
-    },
-}
-
-impl Route {
-    pub fn socket(&self) -> &PathBuf {
-        match self {
-            Route::Address { socket, .. }
-            | Route::Network { socket, .. }
-            | Route::Host { socket, .. } => socket,
-        }
-    }
-
-    fn port(&self) -> u16 {
-        match self {
-            Route::Address { port, .. }
-            | Route::Network { port, .. }
-            | Route::Host { port, .. } => *port,
-        }
-    }
-}
-
-/// A host whose downloads are kept, asked on `ports`: those at paths matching `include`, if it
-/// says any, but for paths matching `exclude`; `immutable` if what's at a path never changes,
-/// whatever the host says about keeping it.
-#[derive(Clone, Debug, Deserialize)]
-pub struct Cached {
-    pub host: String,
-    #[serde(default)]
-    pub exclude: Vec<String>,
-    #[serde(default)]
-    pub include: Vec<String>,
-    #[serde(default = "https_port")]
-    pub ports: Vec<u16>,
-    #[serde(default)]
-    pub immutable: bool,
-}
-
-fn https_port() -> Vec<u16> {
-    vec![HTTPS_PORT]
-}
-
-/// Where a cached host is asked: over https, whose TLS is terminated here, or plain http.
-pub const HTTPS_PORT: u16 = 443;
-pub const HTTP_PORT: u16 = 80;
-
-impl Cached {
-    pub fn matches(&self, host: &str) -> bool {
+impl CacheRule for Cached {
+    fn matches(&self, host: &str) -> bool {
         glob(&self.host, host)
     }
 
-    /// Whether a request for `path` isn't one to keep.
-    pub fn excludes(&self, path: &str) -> bool {
+    fn excludes(&self, path: &str) -> bool {
         (!self.include.is_empty() && !self.include.iter().any(|p| glob_case(p, path)))
             || self.exclude.iter().any(|p| glob_case(p, path))
     }
@@ -116,20 +46,33 @@ pub enum Local {
     Unread,
 }
 
-impl Policy {
+/// What a policy decides of each connection, and what it says beside.
+pub trait Decide {
     /// What to do with a connection to `to` whose first bytes are `first`; `resolve` gives a name's
     /// addresses, for a private address reached by name.
-    pub fn decide(
+    fn decide(&self, to: SocketAddr, first: &[u8], resolve: impl Fn(&str) -> Vec<IpAddr>) -> Local;
+    /// As decide; `opened`: as much of its opening as will be read has been, so it's never Unread.
+    fn decide_opened(
         &self,
         to: SocketAddr,
         first: &[u8],
         resolve: impl Fn(&str) -> Vec<IpAddr>,
-    ) -> Local {
+        opened: bool,
+    ) -> Local;
+    /// The hosts whose TLS is terminated here: those cached over https, and those routed by name.
+    /// What a machine's caching CA is for.
+    fn terminated_hosts(&self) -> Vec<String>;
+    /// The addresses of `name` a connection may be made to from here, for a cached host's
+    /// fetches: public ones, and private ones too if the name's allowed private.
+    fn reachable(&self, name: &str, resolve: impl Fn(&str) -> Vec<IpAddr>) -> Vec<IpAddr>;
+}
+
+impl Decide for Policy {
+    fn decide(&self, to: SocketAddr, first: &[u8], resolve: impl Fn(&str) -> Vec<IpAddr>) -> Local {
         self.decide_opened(to, first, resolve, false)
     }
 
-    /// As decide; `opened`: as much of its opening as will be read has been, so it's never Unread.
-    pub fn decide_opened(
+    fn decide_opened(
         &self,
         to: SocketAddr,
         first: &[u8],
@@ -207,12 +150,8 @@ impl Policy {
             _ => Local::Deny,
         }
     }
-}
 
-impl Policy {
-    /// The hosts whose TLS is terminated here: those cached over https, and those routed by name.
-    /// What a machine's caching CA is for.
-    pub fn terminated_hosts(&self) -> Vec<String> {
+    fn terminated_hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self
             .cache
             .iter()
@@ -228,9 +167,7 @@ impl Policy {
         hosts
     }
 
-    /// The addresses of `name` a connection may be made to from here, for a cached host's
-    /// fetches: public ones, and private ones too if the name's allowed private.
-    pub fn reachable(&self, name: &str, resolve: impl Fn(&str) -> Vec<IpAddr>) -> Vec<IpAddr> {
+    fn reachable(&self, name: &str, resolve: impl Fn(&str) -> Vec<IpAddr>) -> Vec<IpAddr> {
         let private = self.allow_private.iter().any(|p| glob(p, name));
         resolve(name)
             .into_iter()
@@ -443,6 +380,7 @@ fn hostname(name: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn policy(json: &str) -> Policy {
         serde_json::from_str(json).unwrap()

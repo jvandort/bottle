@@ -34,6 +34,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bottle_agent_client::policy::Decide as _;
+
 use crate::FAILED;
 use crate::libkrun as krun;
 

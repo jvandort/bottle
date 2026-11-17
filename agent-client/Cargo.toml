@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 bottle-agent-proto.workspace = true
+bottle-formats.workspace = true
 libc.workspace = true
 rcgen.workspace = true
 rustix.workspace = true

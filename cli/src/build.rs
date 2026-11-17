@@ -32,9 +32,11 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
+use bottle_agent_client::policy::Decide as _;
 use bottle_disk::Archive;
 use bottle_disk::build::{Launch, Mount, Recipe, Store, Vm, wait_for_agent};
 use bottle_disk::registry::{Reference, Registry};
+use bottle_formats::listing::Image;
 
 use crate::FAILED;
 use crate::boot::Net;
@@ -245,7 +247,7 @@ pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
         [flag] if flag == "--json" => true,
         _ => return crate::usage_error(USAGE),
     };
-    let listed = (|| -> io::Result<Vec<serde_json::Value>> {
+    let listed = (|| -> io::Result<Vec<Image>> {
         let store = store_for_reading(&store)?;
         let mut images = Vec::new();
         for (tag, name) in store.tags()? {
@@ -254,24 +256,23 @@ pub fn images(args: impl Iterator<Item = String>) -> ExitCode {
                 Ok(stage) => (store.disks(&name)?, stage.labels),
                 Err(_) => (vec![], Default::default()),
             };
-            images.push(serde_json::json!({
-                "tag": tag, "name": name, "disks": disks, "labels": labels,
-            }));
+            images.push(Image {
+                tag,
+                name,
+                disks,
+                labels,
+            });
         }
         Ok(images)
     })();
     match listed {
         Ok(images) if json => {
-            println!("{}", serde_json::Value::Array(images));
+            println!("{}", serde_json::to_string(&images).unwrap());
             ExitCode::SUCCESS
         }
         Ok(images) => {
             for image in images {
-                println!(
-                    "{}\t{}",
-                    image["tag"].as_str().unwrap_or(""),
-                    image["name"].as_str().unwrap_or("")
-                );
+                println!("{}\t{}", image.tag, image.name);
             }
             ExitCode::SUCCESS
         }

@@ -43,7 +43,9 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bottle_agent_client::policy::Decide as _;
 use bottle_disk::build::{Store, wait_for_agent};
+use bottle_formats::listing::{self, State};
 use serde::{Deserialize, Serialize};
 
 use crate::FAILED;
@@ -249,16 +251,16 @@ impl Machine {
         !taken
     }
 
-    /// "created", "running" or "stopped"; None if there's no such machine.
-    fn state(&self) -> Option<&'static str> {
+    /// Where it is; None if there's no such machine.
+    fn state(&self) -> Option<State> {
         if !self.exists() {
             None
         } else if self.running() {
-            Some("running")
+            Some(State::Running)
         } else if self.dir.join("started").exists() {
-            Some("stopped")
+            Some(State::Stopped)
         } else {
-            Some("created")
+            Some(State::Created)
         }
     }
 
@@ -695,29 +697,27 @@ fn ls(args: &[String]) -> io::Result<()> {
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    let rows: Vec<_> = found
-        .iter()
-        .map(|(name, state, config)| {
-            let mut row = serde_json::json!({"name": name, "state": state});
-            if let Some(config) = config {
-                row["cpus"] = config.cpus.into();
-                row["mem_mib"] = config.mem_mib.into();
-                row["storage_gib"] = config.storage_gib.into();
-                row["image"] = image_name(&config.image).into();
-                row["labels"] = serde_json::to_value(&config.labels).unwrap();
-            }
-            row
+    let rows: Vec<listing::Machine> = found
+        .into_iter()
+        .map(|(name, state, config)| listing::Machine {
+            name,
+            state,
+            made: config.map(|config| listing::Made {
+                cpus: config.cpus,
+                mem_mib: config.mem_mib,
+                storage_gib: config.storage_gib,
+                image: image_name(&config.image),
+                labels: config.labels,
+            }),
         })
         .collect();
     if json {
-        println!("{}", serde_json::Value::Array(rows));
+        println!(
+            "{}",
+            serde_json::to_string(&rows).map_err(io::Error::other)?
+        );
         return Ok(());
     }
-    let text = |row: &serde_json::Value, key: &str| match &row[key] {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
     let mut table = vec![[
         "NAME".to_string(),
         "STATE".into(),
@@ -727,22 +727,25 @@ fn ls(args: &[String]) -> io::Result<()> {
         "LABELS".into(),
     ]];
     for row in &rows {
-        let labels = row["labels"].as_object().map_or(String::new(), |labels| {
-            labels
-                .iter()
-                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("")))
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-        let memory = row["mem_mib"]
-            .as_u64()
-            .map_or(String::new(), |m| format!("{m}M"));
+        let (cpus, memory, image, labels) = match &row.made {
+            Some(made) => (
+                made.cpus.to_string(),
+                format!("{}M", made.mem_mib),
+                made.image.clone(),
+                made.labels
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            None => Default::default(),
+        };
         table.push([
-            text(row, "name"),
-            text(row, "state"),
-            text(row, "cpus"),
+            row.name.clone(),
+            row.state.to_string(),
+            cpus,
             memory,
-            text(row, "image"),
+            image,
             labels,
         ]);
     }
@@ -791,9 +794,13 @@ fn status(machine: &Machine, args: &[String]) -> io::Result<()> {
         .state()
         .ok_or_else(|| other(format!("no machine {}", machine.name)))?;
     if args.iter().any(|a| a == "--json") {
+        let status = listing::Status {
+            name: machine.name.clone(),
+            state,
+        };
         println!(
             "{}",
-            serde_json::json!({"name": machine.name, "state": state})
+            serde_json::to_string(&status).map_err(io::Error::other)?
         );
     } else {
         println!("{state}");
@@ -851,10 +858,12 @@ pub fn info(args: impl Iterator<Item = String>) -> ExitCode {
             home.display()
         );
     } else {
-        println!(
-            "{}",
-            serde_json::json!({"memory_mib": memory_mib, "cpus": cpus, "home": home})
-        );
+        let info = listing::Info {
+            memory_mib,
+            cpus: cpus as u64,
+            home,
+        };
+        println!("{}", serde_json::to_string(&info).unwrap());
     }
     ExitCode::SUCCESS
 }

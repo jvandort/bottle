@@ -9,6 +9,7 @@ publish.workspace = true
 sha2.workspace = true
 bottle-agent-client.workspace = true
 bottle-disk.workspace = true
+bottle-formats.workspace = true
 libc.workspace = true
 libkrun.workspace = true
 rustix.workspace = true

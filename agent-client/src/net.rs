@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cache;
-use crate::policy::{Local, Policy};
+use crate::policy::{Decide, Local, Policy};
 
 pub use bottle_agent_proto::net::PORT;
 use bottle_agent_proto::net::{CONNECTED, REFUSED, Request, Resolved};

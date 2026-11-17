@@ -25,6 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use bottle_formats::recipe::{Mount, Recipe, Step};
 use sha2::{Digest, Sha256};
 
 use crate::{Profile, Result, mac_dist, out_of, root, run, step, target};
@@ -61,7 +62,7 @@ pub fn dist(profile: Profile, dists: &[(String, PathBuf)]) -> Result<()> {
     let debian = last_line(bottle_cli(&["image", "pull", DEBIAN, "--net-direct"]))?;
     let recipe = recipe(stem(&debian)?)?;
     let file = home.join("builder.json");
-    fs::write(&file, serde_json(&recipe)).map_err(|e| e.to_string())?;
+    fs::write(&file, serde_json::to_string_pretty(&recipe).unwrap()).map_err(|e| e.to_string())?;
     let image = last_line(bottle_cli(&[
         "image",
         "build",
@@ -79,14 +80,10 @@ pub fn dist(profile: Profile, dists: &[(String, PathBuf)]) -> Result<()> {
     });
     // (-cargo: one with cargo's home mounted, not one from before it was.)
     let machine = format!("builder-{}-{mem}m-{cpus}c-cargo", &stem(&image)?[..12]);
-    let listed: serde_json::Value = serde_json::from_slice(&output(bottle_cli(&["ls", "--json"]))?)
-        .map_err(|e| format!("bottle-cli ls: {e}"))?;
-    let machines: Vec<&str> = listed
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m["name"].as_str())
-        .collect();
+    let listed: Vec<bottle_formats::listing::Machine> =
+        serde_json::from_slice(&output(bottle_cli(&["ls", "--json"]))?)
+            .map_err(|e| format!("bottle-cli ls: {e}"))?;
+    let machines: Vec<&str> = listed.iter().map(|m| m.name.as_str()).collect();
     for old in machines
         .iter()
         .filter(|name| name.starts_with("builder-") && **name != machine)
@@ -190,25 +187,29 @@ fn take_out(exec: &dyn Fn(&[&str]) -> Command, there: &Path, out: &Path) -> Resu
 /// of what `cargo xtask dist` takes on Linux) in one apt step, then their install scripts (each's
 /// directory mounted, read-only, where it runs). Labelled with a hash of all of that, so other
 /// scripts make another stage.
-fn recipe(debian: &str) -> Result<serde_json::Value> {
+fn recipe(debian: &str) -> Result<Recipe> {
     // folio's features, borrowed: the same cc and rust a bottle gets.
     let features = root().join("folio/features");
-    let user = BTreeMap::from([
+    let user: BTreeMap<String, String> = [
         ("_REMOTE_USER", "root"),
         ("_REMOTE_USER_HOME", "/root"),
         ("HOME", "/root"),
         ("DEBIAN_FRONTEND", "noninteractive"),
-    ]);
+    ]
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .into();
     let musl: Vec<String> = ARCHES
         .iter()
         .map(|arch| format!("{arch}-unknown-linux-musl"))
         .collect();
     let musl = musl.join(",");
-    let rust = BTreeMap::from([
+    let rust: BTreeMap<String, String> = [
         ("TOOLCHAIN", "stable"),
         ("COMPONENTS", ""),
         ("TARGETS", musl.as_str()),
-    ]);
+    ]
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .into();
     // What the features install with apt (their customizations.bottle.apt's packages), and the
     // toolchain, first and in one step, as bottle installs features'.
     let mut packages = vec![];
@@ -231,31 +232,41 @@ fn recipe(debian: &str) -> Result<serde_json::Value> {
     let mut inputs = Sha256::new();
     inputs.update(&toolchain);
     inputs.update(&musl);
-    let mut steps = vec![serde_json::json!({ "run": ["/bin/sh", "-c", toolchain], "env": user })];
+    let mut steps = vec![Step::Run {
+        run: vec!["/bin/sh".into(), "-c".into(), toolchain],
+        env: user.clone(),
+        cwd: None,
+    }];
     for (feature, options) in [("cc", BTreeMap::new()), ("rust", rust)] {
         let script =
             fs::read(features.join(feature).join("install.sh")).map_err(|e| e.to_string())?;
         inputs.update(&script);
-        let env: BTreeMap<_, _> = user.iter().chain(options.iter()).collect();
-        steps.push(serde_json::json!({
-            "run": ["/bin/sh", "./install.sh"],
-            "env": env,
-            "cwd": format!("/run/features/{feature}"),
-        }));
+        let env = user.clone().into_iter().chain(options).collect();
+        steps.push(Step::Run {
+            run: vec!["/bin/sh".into(), "./install.sh".into()],
+            env,
+            cwd: Some(format!("/run/features/{feature}")),
+        });
     }
     // What the rust feature's devcontainer-feature.json gives every command.
-    steps.push(serde_json::json!({ "env": { "RUSTUP_HOME": "/usr/local/rustup" } }));
+    steps.push(Step::Env {
+        env: BTreeMap::from([("RUSTUP_HOME".into(), "/usr/local/rustup".into())]),
+    });
     let hash: String = inputs
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok(serde_json::json!({
-        "from": debian,
-        "mount": { "source": features, "target": "/run/features" },
-        "steps": steps,
-        "labels": { "bottle.builder": hash },
-    }))
+    Ok(Recipe {
+        from: Some(debian.into()),
+        mount: Some(Mount {
+            source: features,
+            target: "/run/features".into(),
+        }),
+        steps,
+        labels: BTreeMap::from([("bottle.builder".into(), hash)]),
+        ..Recipe::default()
+    })
 }
 
 /// The shell that installs `features`' packages and what else `cargo xtask dist` takes on Linux,
@@ -302,10 +313,6 @@ fn stem(disk: &str) -> Result<&str> {
         .ok_or_else(|| format!("not a stage's disk: {disk}"))
 }
 
-fn serde_json(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value).unwrap()
-}
-
 /// What `command` prints, its progress on stderr; it must succeed.
 fn output(mut command: Command) -> Result<Vec<u8>> {
     let done = command
@@ -339,9 +346,12 @@ mod tests {
     #[test]
     fn the_builder_installs_the_features_packages_and_the_toolchain_then_runs_their_scripts() {
         let recipe = recipe("debian-stage").unwrap();
-        assert_eq!(recipe["from"], "debian-stage");
-        let steps = recipe["steps"].as_array().unwrap();
-        let script = steps[0]["run"][2].as_str().unwrap();
+        assert_eq!(recipe.from.as_deref(), Some("debian-stage"));
+        let run = |i: usize| match &recipe.steps[i] {
+            Step::Run { run, env, cwd } => (run.clone(), env.clone(), cwd.clone()),
+            Step::Env { .. } => panic!("step {i} sets variables"),
+        };
+        let script = run(0).0[2].clone();
         // cc's and rust's own, from their devcontainer-feature.json, with the toolchain's.
         for package in ["gcc", "libc6-dev", "curl", "musl-tools"] {
             assert!(
@@ -356,14 +366,20 @@ mod tests {
             _ => "musl-dev:amd64",
         };
         assert!(script.contains(other), "{other} in {script}");
-        assert_eq!(steps[1]["cwd"], "/run/features/cc");
-        assert_eq!(steps[2]["cwd"], "/run/features/rust");
+        assert_eq!(run(1).2.as_deref(), Some("/run/features/cc"));
+        let (_, env, cwd) = run(2);
+        assert_eq!(cwd.as_deref(), Some("/run/features/rust"));
         assert_eq!(
-            steps[2]["env"]["TARGETS"],
+            env["TARGETS"],
             "aarch64-unknown-linux-musl,x86_64-unknown-linux-musl"
         );
-        assert_eq!(steps[2]["env"]["_REMOTE_USER"], "root");
-        assert_eq!(steps[3]["env"]["RUSTUP_HOME"], "/usr/local/rustup");
+        assert_eq!(env["_REMOTE_USER"], "root");
+        assert_eq!(
+            recipe.steps[3],
+            Step::Env {
+                env: BTreeMap::from([("RUSTUP_HOME".into(), "/usr/local/rustup".into())])
+            }
+        );
     }
 
     #[test]

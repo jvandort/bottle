@@ -177,6 +177,7 @@ name = "bottle-agent-client"
 version = "0.1.0"
 dependencies = [
  "bottle-agent-proto",
+ "bottle-formats",
  "libc",
  "rcgen",
  "rustix",
@@ -202,6 +203,7 @@ version = "0.1.0"
 dependencies = [
  "bottle-agent-client",
  "bottle-disk",
+ "bottle-formats",
  "libc",
  "libkrun",
  "rustix",
@@ -216,12 +218,21 @@ name = "bottle-disk"
 version = "0.1.0"
 dependencies = [
  "bottle-agent-client",
+ "bottle-formats",
  "flate2",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tar",
+]
+
+[[package]]
+name = "bottle-formats"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1927,6 +1938,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "bottle-formats",
  "linux-loader",
  "serde_json",
  "sha2",

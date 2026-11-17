@@ -1,0 +1,14 @@
+[package]
+name = "bottle-formats"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# What bottle-cli takes and gives as JSON, as Rust types: serde's, nothing else. folio's to depend
+# on, as bottle's own crates do (folio/tests/boundary.rs allows it, of bottle's crates, alone).
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
