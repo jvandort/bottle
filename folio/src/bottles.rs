@@ -40,7 +40,8 @@ use bottle_formats::listing;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::bottle_cli::{Create, Exec};
-use crate::daemon::{self, Bind, Request, Served};
+use crate::control::{self, Bind, Served};
+use crate::daemon;
 use crate::git::bottle_git;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
@@ -155,12 +156,21 @@ pub struct Status {
 /// each bottle's status as it last asked (engine's status), and which it has found running or
 /// started. Kept as the command changes them: a bottle made or deleted is forgotten, one started
 /// (or run in, which starts it) is running. Made by each command, and given to what it asks.
-#[derive(Default)]
 pub struct Known {
     statuses: RefCell<BTreeMap<String, Status>>,
     running: RefCell<BTreeSet<String>>,
     /// folio serve, as this command has seen it.
     pub serve: daemon::Serve,
+}
+
+impl Default for Known {
+    fn default() -> Known {
+        Known {
+            statuses: RefCell::default(),
+            running: RefCell::default(),
+            serve: daemon::Serve::new(bindings),
+        }
+    }
 }
 
 impl Known {
@@ -909,33 +919,33 @@ fn binding(bottle: &Bottle) -> Bind {
                 .to_string_lossy()
                 .into_owned()
         }),
-        ssh: bottle.ssh.clone(),
+        ssh: bottle
+            .ssh
+            .iter()
+            .map(|g| control::Grant {
+                name: g.name.clone(),
+                bottle: g.bottle.clone(),
+                id: g.id.clone(),
+                address: g.address.clone(),
+            })
+            .collect(),
         forwards: vec![],
     }
 }
 
-/// What folio serve is told of every ready bottle as it starts, to answer them before anyone else:
-/// wherever they run, but on a runner detached (turned off). One it can't be told of (its runner
-/// unreachable) is left out, as it can't be reached either.
-pub fn bind_messages() -> Result<Vec<Request>, String> {
-    let mut messages = Vec::new();
+/// What folio serve is told of every ready bottle as it starts (daemon::Restore), to answer them
+/// before anyone else: wherever they run, but on a runner detached (turned off).
+pub fn bindings() -> Result<Vec<Bind>, String> {
     let detached = runners::registered()?;
-    for bottle in load()?.values() {
-        let off = bottle.runner != runners::LOCAL
-            && detached.get(&bottle.runner).copied().unwrap_or(false);
-        if bottle.status != Made::Ready || off {
-            continue;
-        }
-        match daemon::bind_message(binding(bottle)) {
-            Ok(message) => messages.push(message),
-            Err(e) => crate::log::say!(
-                "bottles",
-                "{}: folio serve won't answer it: {e}",
-                bottle.name
-            ),
-        }
-    }
-    Ok(messages)
+    Ok(load()?
+        .values()
+        .filter(|bottle| {
+            let off = bottle.runner != runners::LOCAL
+                && detached.get(&bottle.runner).copied().unwrap_or(false);
+            bottle.status == Made::Ready && !off
+        })
+        .map(binding)
+        .collect())
 }
 
 /// What a bottle's machine is created with: the stand-ins its features asked for, never

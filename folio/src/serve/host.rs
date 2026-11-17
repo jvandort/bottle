@@ -104,7 +104,7 @@ pub struct Served {
 
 impl Served {
     /// A repo as bind said it, its remotes parsed.
-    pub fn from_bind(repo: crate::daemon::Served) -> Result<Served, String> {
+    pub fn from_bind(repo: crate::control::Served) -> Result<Served, String> {
         Ok(Served {
             git_dir: repo.git_dir,
             remotes: repo

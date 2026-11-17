@@ -6,9 +6,9 @@
 //! service (services_sockets).
 //!
 //! A bind says all folio serve needs of a bottle (its machine, runner, repos, features,
-//! permissions, labels and ssh grants, and what to forward to its runner), so folio serve reads no
-//! record of folio's; when it starts, it's given the bottles whose machines are running
-//! (bottles::bind_messages), to answer before anyone else. A command finds it running this
+//! permissions, labels and ssh grants, and what to forward to its runner: control.rs), so folio
+//! serve reads no record of folio's; when it starts, it's given the bottles whose machines are
+//! running, to answer before anyone else: what its caller's restore says (Serve::new). A command finds it running this
 //! program, or restarts it first: one running another may not know what's asked of it.
 
 use std::cell::Cell;
@@ -20,10 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bottles::SshGrant;
+use crate::control::{Bind, Reply, Request};
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// macOS caps Unix socket paths at 104 bytes.
@@ -75,84 +74,6 @@ pub fn code_hash() -> String {
     crate::serve::code()
 }
 
-/// A request on folio serve's control socket, a JSON line: {"op": ..., ...}.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "lowercase")]
-pub enum Request {
-    /// What code it runs: Reply's code.
-    Ping,
-    /// Answer a bottle's machine.
-    Bind(Box<Bind>),
-    /// Stop answering a bottle's machine: with none left, folio serve stops.
-    Release {
-        bottle: String,
-    },
-    Shutdown,
-}
-
-/// What folio serve answers a request: whether it did, why not, and to a ping, the code it runs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Reply {
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-}
-
-impl Reply {
-    pub fn ok() -> Reply {
-        Reply {
-            ok: true,
-            ..Reply::default()
-        }
-    }
-
-    pub fn refused(error: impl Into<String>) -> Reply {
-        Reply {
-            ok: false,
-            error: Some(error.into()),
-            ..Reply::default()
-        }
-    }
-}
-
-/// What folio serve is told of a bottle: its machine, on its runner, and what that routes to folio
-/// serve to answer: its repos, features (whose credentials it attaches), permissions, labels and
-/// first repo's name (as the list of bottles has them), the bottles it may ssh to, and, on a runner,
-/// what to forward there (THERE=HERE).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Bind {
-    pub bottle: String,
-    pub machine: String,
-    pub runner: String,
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub repos: Vec<Served>,
-    #[serde(default)]
-    pub features: Vec<String>,
-    #[serde(default)]
-    pub permissions: Vec<String>,
-    #[serde(default)]
-    pub labels: BTreeMap<String, String>,
-    #[serde(default)]
-    pub repo: Option<String>,
-    #[serde(default)]
-    pub ssh: Vec<SshGrant>,
-    #[serde(default)]
-    pub forwards: Vec<String>,
-}
-
-/// One repo a bottle is served -- a mount's -- with its remotes (specs), under bottle.host/git/<at>.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Served {
-    /// The repo its remotes are served from; None: it's gone.
-    pub git_dir: Option<PathBuf>,
-    pub remotes: Vec<String>,
-    pub at: String,
-}
-
 /// `bind`, told to folio serve: on a runner, what to forward there with it.
 pub fn bind_message(mut bind: Bind) -> Result<Request, String> {
     if bind.runner != crate::runners::LOCAL {
@@ -161,15 +82,26 @@ pub fn bind_message(mut bind: Bind) -> Result<Request, String> {
     Ok(Request::Bind(Box::new(bind)))
 }
 
+/// What folio serve is to answer as it starts: every bottle there is to answer.
+pub type Restore = fn() -> Result<Vec<Bind>, String>;
+
 /// folio serve, as a command talks to it: whether the command has seen it running this program
-/// (asked once a command, see ensure_current). Made by each command, as part of what it knows of
-/// bottles (bottles::Known), or for `folio serve start`.
-#[derive(Default)]
+/// (asked once a command, see ensure_current), and what a folio serve it starts is to answer first
+/// (`restore`). Made by each command, as part of what it knows of bottles (bottles::Known), or for
+/// `folio serve start`.
 pub struct Serve {
     current: Cell<bool>,
+    restore: Restore,
 }
 
 impl Serve {
+    pub fn new(restore: Restore) -> Serve {
+        Serve {
+            current: Cell::new(false),
+            restore,
+        }
+    }
+
     /// Have folio serve answer a bottle's machine, starting folio serve if it isn't running. Its
     /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
     /// folio serve is.
@@ -189,13 +121,13 @@ impl Serve {
     pub fn start(&self) -> Result<bool, String> {
         match send(&Request::Ping, DEFAULT_TIMEOUT) {
             Err(Failure::NotRunning) => {
-                start_daemon()?;
+                start_daemon(self.restore)?;
                 Ok(true)
             }
             // On its way out: this one starts once it's gone.
             Err(Failure::Closed) => {
                 wait_gone();
-                start_daemon()?;
+                start_daemon(self.restore)?;
                 Ok(true)
             }
             Err(Failure::Other(e)) => Err(e),
@@ -253,7 +185,7 @@ impl Serve {
         );
         stop()?;
         wait_gone();
-        start_daemon()?;
+        start_daemon(self.restore)?;
         Ok(true)
     }
 }
@@ -284,7 +216,7 @@ impl Serve {
         let reply = match send(message, DEFAULT_TIMEOUT) {
             Err(Failure::NotRunning) if !start => return Ok(Reply::ok()),
             Err(Failure::NotRunning) => {
-                start_daemon()?;
+                start_daemon(self.restore)?;
                 send(message, DEFAULT_TIMEOUT)
             }
             other => other,
@@ -348,11 +280,22 @@ fn send(message: &Request, timeout: Duration) -> Result<Reply, Failure> {
 }
 
 /// folio serve, this program's `serve`, on folio serve's sockets, given the bottles to answer
-/// (bottles::bind_messages): in a session of its own and in /, for one that outlives this command (a
+/// (restore): in a session of its own and in /, for one that outlives this command (a
 /// machine's directory may be deleted while it runs, and then every git it runs fails), its output
 /// in its log; else here.
-fn launch(background: bool) -> Result<Child, String> {
-    let restore = serde_json::to_string(&crate::bottles::bind_messages()?).unwrap();
+fn launch(restore: Restore, background: bool) -> Result<Child, String> {
+    let restore: Vec<Request> = restore()?
+        .into_iter()
+        .filter_map(|bind| {
+            let name = bind.bottle.clone();
+            bind_message(bind)
+                .inspect_err(|e| {
+                    crate::log::say!("daemon", "{name}: folio serve won't answer it: {e}")
+                })
+                .ok()
+        })
+        .collect();
+    let restore = serde_json::to_string(&restore).unwrap();
     let mut command = Command::new(crate::bottle_cli::me());
     command
         .args(["serve", "--control"])
@@ -390,9 +333,9 @@ fn launch(background: bool) -> Result<Child, String> {
     Ok(child)
 }
 
-fn start_daemon() -> Result<(), String> {
+fn start_daemon(restore: Restore) -> Result<(), String> {
     crate::log::log!("daemon", "starting folio serve");
-    launch(true)?;
+    launch(restore, true)?;
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         match send(&Request::Ping, DEFAULT_TIMEOUT) {
@@ -407,8 +350,8 @@ fn start_daemon() -> Result<(), String> {
 }
 
 /// folio serve, in this process's place: `folio serve start --foreground`.
-pub fn run() -> Result<i32, String> {
-    let status = launch(false)?.wait().map_err(|e| e.to_string())?;
+pub fn run(restore: Restore) -> Result<i32, String> {
+    let status = launch(restore, false)?.wait().map_err(|e| e.to_string())?;
     Ok(status.code().unwrap_or(1))
 }
 

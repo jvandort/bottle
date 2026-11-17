@@ -19,6 +19,7 @@ mod bottles;
 mod broker;
 mod builds;
 mod cli;
+mod control;
 mod daemon;
 mod engine;
 mod features;

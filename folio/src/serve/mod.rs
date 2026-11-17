@@ -47,8 +47,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::bottles::SshGrant;
-use crate::daemon::{Bind, Reply, Request};
+use crate::control::{Bind, Grant, Reply, Request};
 use crate::log::log;
 
 use crate::FAILED;
@@ -73,7 +72,7 @@ pub struct Bottle {
     pub labels: BTreeMap<String, String>,
     /// Its first repo's name, as the list of bottles has it.
     pub repo: Option<String>,
-    pub ssh: Vec<SshGrant>,
+    pub ssh: Vec<Grant>,
     pub injections: Vec<credentials::Injection>,
     /// What's forwarded to its runner while it's answered: THERE=HERE.
     pub forwards: Vec<String>,

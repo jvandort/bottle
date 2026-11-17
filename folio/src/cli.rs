@@ -1270,7 +1270,7 @@ fn serve_start(matches: &ArgMatches) -> Outcome {
     if !flag(matches, "foreground") {
         println!(
             "{}",
-            if daemon::Serve::default().start()? {
+            if daemon::Serve::new(crate::bottles::bindings).start()? {
                 "Started folio serve"
             } else {
                 "folio serve is already running"
@@ -1278,7 +1278,7 @@ fn serve_start(matches: &ArgMatches) -> Outcome {
         );
         return Ok(0);
     }
-    daemon::run()
+    daemon::run(crate::bottles::bindings)
 }
 
 fn serve_stop() -> Outcome {
