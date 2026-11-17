@@ -158,7 +158,7 @@ impl Decide for Policy {
             .filter(|c| c.ports.iter().any(|&p| p != HTTP_PORT))
             .map(|c| c.host.to_lowercase())
             .chain(self.routes.iter().filter_map(|r| match r {
-                Route::Host { host, .. } => Some(host.to_lowercase()),
+                Route::Host { host, port, .. } if *port != HTTP_PORT => Some(host.to_lowercase()),
                 _ => None,
             }))
             .collect();
@@ -557,7 +557,8 @@ mod tests {
             r#"{"routes": [
                 {"address": "192.0.2.1", "port": 80, "socket": "/s/host.sock"},
                 {"network": "192.0.2.0/24", "port": 22, "socket": "/s/ssh.sock"},
-                {"host": "*.anthropic.example", "port": 443, "socket": "/s/folio.sock"}],
+                {"host": "*.anthropic.example", "port": 443, "socket": "/s/folio.sock"},
+                {"host": "git.bottle.example", "port": 80, "socket": "/s/git.sock"}],
               "cache": [{"host": "deb.example", "ports": [80]}, {"host": "repo.example"}]}"#,
         );
         let nothing = |_: &str| vec![];
@@ -589,7 +590,8 @@ mod tests {
             p.decide_opened(to("1.2.3.4", 443), b"", nothing, true),
             Local::Direct
         );
-        // What a machine's caching CA is for: the hosts cached over https, and those routed by name.
+        // What a machine's caching CA is for: the hosts cached over https, and those routed by name
+        // to a port that isn't plain HTTP's (a new set mints a new CA, which a running bottle trusts late).
         assert_eq!(
             p.terminated_hosts(),
             ["*.anthropic.example", "repo.example"]
