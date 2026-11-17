@@ -38,10 +38,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bottle_formats::listing;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Value, json};
 
 use crate::bottle_cli::{Create, Exec};
-use crate::daemon::{self, Binding, Served};
+use crate::daemon::{self, Bind, Request, Served};
 use crate::git::bottle_git;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
@@ -802,7 +801,7 @@ fn let_in(known: &Known, bottle: &Bottle, grant: &SshGrant) -> Result<(), String
 /// credentials read now. bottle-cli makes the machine's caching CA as it starts, for its policy's
 /// hosts, and gives it to the bottle to trust (the base image's entrypoint does).
 fn start_machine(bottle: &Bottle) -> Result<(), String> {
-    daemon::bind(&binding(bottle))?;
+    daemon::bind(binding(bottle))?;
     runner_of(bottle)?.start(bottle.machine())
 }
 
@@ -883,12 +882,12 @@ pub fn git_dir(mount: &Mount) -> Option<PathBuf> {
 }
 
 /// What folio serve is told of the bottle: all it needs of it.
-fn binding(bottle: &Bottle) -> Binding<'_> {
-    Binding {
-        bottle: &bottle.name,
-        machine: bottle.machine(),
-        runner: &bottle.runner,
-        id: &bottle.id,
+fn binding(bottle: &Bottle) -> Bind {
+    Bind {
+        bottle: bottle.name.clone(),
+        machine: bottle.machine().into(),
+        runner: bottle.runner.clone(),
+        id: bottle.id.clone(),
         repos: bottle
             .mounts
             .iter()
@@ -908,18 +907,15 @@ fn binding(bottle: &Bottle) -> Binding<'_> {
                 .to_string_lossy()
                 .into_owned()
         }),
-        ssh: bottle
-            .ssh
-            .iter()
-            .map(|g| json!({"name": g.name, "bottle": g.bottle, "id": g.id, "address": g.address}))
-            .collect(),
+        ssh: bottle.ssh.clone(),
+        forwards: vec![],
     }
 }
 
 /// What folio serve is told of every ready bottle as it starts, to answer them before anyone else:
 /// wherever they run, but on a runner detached (turned off). One it can't be told of (its runner
 /// unreachable) is left out, as it can't be reached either.
-pub fn bind_messages() -> Result<Vec<Value>, String> {
+pub fn bind_messages() -> Result<Vec<Request>, String> {
     let mut messages = Vec::new();
     let detached = runners::registered()?;
     for bottle in load()?.values() {
@@ -928,7 +924,7 @@ pub fn bind_messages() -> Result<Vec<Value>, String> {
         if bottle.status != Made::Ready || off {
             continue;
         }
-        match daemon::bind_message(&binding(bottle)) {
+        match daemon::bind_message(binding(bottle)) {
             Ok(message) => messages.push(message),
             Err(e) => crate::log::say!(
                 "bottles",
@@ -1399,6 +1395,7 @@ pub fn delete(known: &Known, name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::tempdir;
+    use serde_json::{Value, json};
 
     #[test]
     fn the_contract_checks_run_and_name_what_failed() {

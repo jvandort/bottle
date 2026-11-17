@@ -20,8 +20,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::bottles::SshGrant;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// macOS caps Unix socket paths at 104 bytes.
@@ -73,7 +75,77 @@ pub fn code_hash() -> String {
     crate::serve::code()
 }
 
+/// A request on folio serve's control socket, a JSON line: {"op": ..., ...}.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum Request {
+    /// What code it runs: Reply's code.
+    Ping,
+    /// Answer a bottle's machine.
+    Bind(Bind),
+    /// Stop answering a bottle's machine: with none left, folio serve stops.
+    Release {
+        bottle: String,
+    },
+    Shutdown,
+}
+
+/// What folio serve answers a request: whether it did, why not, and to a ping, the code it runs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Reply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+impl Reply {
+    pub fn ok() -> Reply {
+        Reply {
+            ok: true,
+            ..Reply::default()
+        }
+    }
+
+    pub fn refused(error: impl Into<String>) -> Reply {
+        Reply {
+            ok: false,
+            error: Some(error.into()),
+            ..Reply::default()
+        }
+    }
+}
+
+/// What folio serve is told of a bottle: its machine, on its runner, and what that routes to folio
+/// serve to answer: its repos, features (whose credentials it attaches), permissions, labels and
+/// first repo's name (as the list of bottles has them), the bottles it may ssh to, and, on a runner,
+/// what to forward there (THERE=HERE).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bind {
+    pub bottle: String,
+    pub machine: String,
+    pub runner: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub repos: Vec<Served>,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub ssh: Vec<SshGrant>,
+    #[serde(default)]
+    pub forwards: Vec<String>,
+}
+
 /// One repo a bottle is served -- a mount's -- with its remotes (specs), under bottle.host/git/<at>.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Served {
     /// The repo its remotes are served from; None: it's gone.
     pub git_dir: Option<PathBuf>,
@@ -81,61 +153,32 @@ pub struct Served {
     pub at: String,
 }
 
-/// What folio serve is told of a bottle.
-pub struct Binding<'a> {
-    pub bottle: &'a str,
-    pub machine: &'a str,
-    pub runner: &'a str,
-    pub id: &'a str,
-    pub repos: Vec<Served>,
-    pub features: Vec<String>,
-    pub permissions: Vec<String>,
-    pub labels: BTreeMap<String, String>,
-    pub repo: Option<String>,
-    pub ssh: Vec<Value>,
-}
-
-/// What has folio serve answer what a bottle's machine, on its runner, routes to it: its repos,
-/// features (whose credentials it attaches), permissions, labels and first repo's name (as the list
-/// of bottles has them), the bottles it may ssh to ({name, bottle, id, address}), and, on a runner,
-/// what to forward there.
-pub fn bind_message(binding: &Binding) -> Result<Value, String> {
-    let forwards = if binding.runner == crate::runners::LOCAL {
-        Vec::new()
-    } else {
-        crate::runners::get(binding.runner)?.forwards()?
-    };
-    let repos: Vec<Value> = binding
-        .repos
-        .iter()
-        .map(|r| {
-            json!({"git_dir": r.git_dir.as_ref().map(|d| d.display().to_string()), "at": r.at,
-                   "remotes": r.remotes})
-        })
-        .collect();
-    Ok(json!({
-        "op": "bind", "bottle": binding.bottle, "machine": binding.machine, "runner": binding.runner,
-        "id": binding.id, "features": binding.features, "permissions": binding.permissions,
-        "labels": binding.labels, "repo": binding.repo, "ssh": binding.ssh, "forwards": forwards,
-        "repos": repos,
-    }))
+/// `bind`, told to folio serve: on a runner, what to forward there with it.
+pub fn bind_message(mut bind: Bind) -> Result<Request, String> {
+    if bind.runner != crate::runners::LOCAL {
+        bind.forwards = crate::runners::get(&bind.runner)?.forwards()?;
+    }
+    Ok(Request::Bind(bind))
 }
 
 /// Have folio serve answer a bottle's machine, starting folio serve if it isn't running. Its
 /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
 /// folio serve is.
-pub fn bind(binding: &Binding) -> Result<(), String> {
-    request(&bind_message(binding)?, true).map(|_| ())
+pub fn bind(bind: Bind) -> Result<(), String> {
+    request(&bind_message(bind)?, true).map(|_| ())
 }
 
 /// Stop answering `bottle`'s machine, if folio serve is running at all.
 pub fn release(bottle: &str) -> Result<(), String> {
-    request(&json!({"op": "release", "bottle": bottle}), false).map(|_| ())
+    let release = Request::Release {
+        bottle: bottle.into(),
+    };
+    request(&release, false).map(|_| ())
 }
 
 /// Start folio serve in the background. False if it was already running this program.
 pub fn start() -> Result<bool, String> {
-    match send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
+    match send(&Request::Ping, DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => {
             start_daemon()?;
             Ok(true)
@@ -155,7 +198,7 @@ pub fn start() -> Result<bool, String> {
 /// finds none. False if it wasn't running.
 pub fn stop() -> Result<bool, String> {
     crate::log::log!("daemon", "asking folio serve to stop");
-    let reply = match send(&json!({"op": "shutdown"}), DEFAULT_TIMEOUT) {
+    let reply = match send(&Request::Shutdown, DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => return Ok(false),
         // On its way out already.
         Err(Failure::Closed) => {
@@ -165,11 +208,8 @@ pub fn stop() -> Result<bool, String> {
         Err(Failure::Other(e)) => return Err(e),
         Ok(reply) => reply,
     };
-    if reply.get("ok") != Some(&Value::Bool(true)) {
-        let error = reply
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("shutdown failed");
+    if !reply.ok {
+        let error = reply.error.as_deref().unwrap_or("shutdown failed");
         return Err(format!("folio serve: {error}"));
     }
     wait_gone();
@@ -186,7 +226,7 @@ fn ensure_current() -> Result<bool, String> {
     if CURRENT.load(Ordering::Relaxed) {
         return Ok(false);
     }
-    let reply = match send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
+    let reply = match send(&Request::Ping, DEFAULT_TIMEOUT) {
         Err(Failure::NotRunning) => return Ok(false), // not running: whoever starts it starts this one
         Err(Failure::Closed) => {
             wait_gone(); // on its way out: whoever starts it next starts this one
@@ -196,7 +236,7 @@ fn ensure_current() -> Result<bool, String> {
         Ok(reply) => reply,
     };
     CURRENT.store(true, Ordering::Relaxed);
-    if reply.get("code").and_then(Value::as_str) == Some(code_hash().as_str()) {
+    if reply.code.as_deref() == Some(code_hash().as_str()) {
         return Ok(false);
     }
     crate::log::say!(
@@ -214,7 +254,7 @@ fn ensure_current() -> Result<bool, String> {
 fn wait_gone() {
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        if let Err(Failure::NotRunning) = send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
+        if let Err(Failure::NotRunning) = send(&Request::Ping, DEFAULT_TIMEOUT) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -223,11 +263,16 @@ fn wait_gone() {
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn request(message: &Value, start: bool) -> Result<Value, String> {
+fn request(message: &Request, start: bool) -> Result<Reply, String> {
     ensure_current()?;
-    let op = message["op"].as_str().unwrap_or_default().to_string();
+    let op = match message {
+        Request::Ping => "ping",
+        Request::Bind(_) => "bind",
+        Request::Release { .. } => "release",
+        Request::Shutdown => "shutdown",
+    };
     let reply = match send(message, DEFAULT_TIMEOUT) {
-        Err(Failure::NotRunning) if !start => return Ok(json!({"ok": true})),
+        Err(Failure::NotRunning) if !start => return Ok(Reply::ok()),
         Err(Failure::NotRunning) => {
             start_daemon()?;
             send(message, DEFAULT_TIMEOUT)
@@ -250,11 +295,8 @@ fn request(message: &Value, start: bool) -> Result<Value, String> {
         }
         Err(Failure::Other(e)) => return Err(e),
     };
-    if reply.get("ok") != Some(&Value::Bool(true)) {
-        let error = reply
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("request failed");
+    if !reply.ok {
+        let error = reply.error.as_deref().unwrap_or("request failed");
         return Err(format!("folio serve: {error}"));
     }
     Ok(reply)
@@ -268,7 +310,7 @@ enum Failure {
     Other(String),
 }
 
-fn send(message: &Value, timeout: Duration) -> Result<Value, Failure> {
+fn send(message: &Request, timeout: Duration) -> Result<Reply, Failure> {
     let path = control();
     let stream = UnixStream::connect(&path).map_err(|e| match e.kind() {
         ErrorKind::NotFound | ErrorKind::ConnectionRefused => Failure::NotRunning,
@@ -281,7 +323,7 @@ fn send(message: &Value, timeout: Duration) -> Result<Value, Failure> {
         _ => Failure::Other(format!("folio serve: {e}")),
     };
     (&stream)
-        .write_all(format!("{message}\n").as_bytes())
+        .write_all(format!("{}\n", serde_json::to_string(message).unwrap()).as_bytes())
         .map_err(closed)?;
     let mut line = String::new();
     BufReader::new(&stream)
@@ -299,7 +341,7 @@ fn send(message: &Value, timeout: Duration) -> Result<Value, Failure> {
 /// machine's directory may be deleted while it runs, and then every git it runs fails), its output
 /// in its log; else here.
 fn launch(background: bool) -> Result<Child, String> {
-    let restore = Value::Array(crate::bottles::bind_messages()?).to_string();
+    let restore = serde_json::to_string(&crate::bottles::bind_messages()?).unwrap();
     let mut command = Command::new(crate::bottle_cli::me());
     command
         .args(["serve", "--control"])
@@ -342,7 +384,7 @@ fn start_daemon() -> Result<(), String> {
     launch(true)?;
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        match send(&json!({"op": "ping"}), DEFAULT_TIMEOUT) {
+        match send(&Request::Ping, DEFAULT_TIMEOUT) {
             Err(Failure::NotRunning) => std::thread::sleep(Duration::from_millis(50)),
             _ => return Ok(()),
         }

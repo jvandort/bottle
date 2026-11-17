@@ -101,21 +101,16 @@ pub struct Served {
 }
 
 impl Served {
-    pub fn from_json(repo: &Value) -> Result<Served, String> {
-        let remotes = repo["remotes"]
-            .as_array()
-            .map(|r| {
-                r.iter()
-                    .filter_map(Value::as_str)
-                    .map(Remote::parse)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+    /// A repo as bind said it, its remotes parsed.
+    pub fn from_bind(repo: crate::daemon::Served) -> Result<Served, String> {
         Ok(Served {
-            git_dir: repo["git_dir"].as_str().map(PathBuf::from),
-            remotes,
-            at: repo["at"].as_str().unwrap_or_default().to_string(),
+            git_dir: repo.git_dir,
+            remotes: repo
+                .remotes
+                .iter()
+                .map(|r| Remote::parse(r))
+                .collect::<Result<_, _>>()?,
+            at: repo.at,
         })
     }
 }

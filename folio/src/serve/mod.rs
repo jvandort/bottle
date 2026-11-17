@@ -32,7 +32,7 @@ mod messages;
 mod proxy;
 mod ssh;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
@@ -45,9 +45,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::bottles::SshGrant;
+use crate::daemon::{Bind, Reply, Request};
 use crate::log::log;
 
 use crate::FAILED;
@@ -69,82 +70,33 @@ pub struct Bottle {
     pub id: String,
     pub repos: Vec<host::Served>,
     pub permissions: Vec<String>,
-    pub labels: serde_json::Map<String, Value>,
+    pub labels: BTreeMap<String, String>,
     /// Its first repo's name, as the list of bottles has it.
     pub repo: Option<String>,
-    pub ssh: Vec<Grant>,
+    pub ssh: Vec<SshGrant>,
     pub injections: Vec<credentials::Injection>,
     /// What's forwarded to its runner while it's answered: THERE=HERE.
     pub forwards: Vec<String>,
 }
 
-/// A bottle another may ssh to: as `name`, at `address`, which is bottle `bottle` with id `id` and
-/// no other.
-#[derive(Debug, Clone)]
-pub struct Grant {
-    pub name: String,
-    pub bottle: String,
-    pub id: String,
-    pub address: String,
-}
-
 impl Bottle {
-    fn from_bind(message: &Value) -> Result<Bottle, String> {
-        let text = |key: &str| message.get(key).and_then(Value::as_str).map(String::from);
-        let texts = |key: &str| -> Vec<String> {
-            message
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let name = text("bottle").ok_or("bind needs the bottle")?;
-        let machine = text("machine").ok_or("bind needs the machine")?;
-        let repos = message
-            .get("repos")
-            .and_then(Value::as_array)
-            .map(|r| {
-                r.iter()
-                    .map(host::Served::from_json)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let ssh = message
-            .get("ssh")
-            .and_then(Value::as_array)
-            .map(|grants| {
-                grants
-                    .iter()
-                    .map(|g| Grant {
-                        name: g["name"].as_str().unwrap_or_default().into(),
-                        bottle: g["bottle"].as_str().unwrap_or_default().into(),
-                        id: g["id"].as_str().unwrap_or_default().into(),
-                        address: g["address"].as_str().unwrap_or_default().into(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+    fn from_bind(bind: Bind) -> Result<Bottle, String> {
         Ok(Bottle {
-            injections: credentials::injections_for(&texts("features"))?,
-            name,
-            machine,
-            runner: text("runner").unwrap_or_else(|| LOCAL.into()),
-            id: text("id").unwrap_or_default(),
-            repos,
-            permissions: texts("permissions"),
-            labels: message
-                .get("labels")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default(),
-            repo: text("repo"),
-            ssh,
-            forwards: texts("forwards"),
+            injections: credentials::injections_for(&bind.features)?,
+            repos: bind
+                .repos
+                .into_iter()
+                .map(host::Served::from_bind)
+                .collect::<Result<_, _>>()?,
+            name: bind.bottle,
+            machine: bind.machine,
+            runner: bind.runner,
+            id: bind.id,
+            permissions: bind.permissions,
+            labels: bind.labels,
+            repo: bind.repo,
+            ssh: bind.ssh,
+            forwards: bind.forwards,
         })
     }
 }
@@ -357,24 +309,22 @@ impl Server {
         {
             return;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Err(e) => json!({"ok": false, "error": format!("not JSON: {e}")}),
-            Ok(message) => match message.get("op").and_then(Value::as_str) {
-                Some("ping") => json!({"ok": true, "code": self.code}),
-                Some("bind") => match Bottle::from_bind(&message) {
+        let reply = match serde_json::from_str::<Request>(&line) {
+            Err(e) => Reply::refused(format!("not a request: {e}")),
+            Ok(message) => match message {
+                Request::Ping => Reply {
+                    code: Some(self.code.clone()),
+                    ..Reply::ok()
+                },
+                Request::Bind(bind) => match Bottle::from_bind(bind) {
                     Ok(bottle) => {
                         self.bind(bottle);
-                        json!({"ok": true})
+                        Reply::ok()
                     }
-                    Err(e) => json!({"ok": false, "error": e}),
+                    Err(e) => Reply::refused(e),
                 },
-                Some("release") => {
-                    let none_left = self.release(
-                        message
-                            .get("bottle")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    );
+                Request::Release { bottle } => {
+                    let none_left = self.release(&bottle);
                     if none_left {
                         // Answered first, as a shutdown is: the wind-up may end this process
                         // before an answer after it is written.
@@ -383,18 +333,18 @@ impl Server {
                         self.stop();
                         return;
                     }
-                    json!({"ok": true})
+                    Reply::ok()
                 }
-                Some("shutdown") => {
+                Request::Shutdown => {
                     log!("bottle.daemon", "shutdown requested");
                     // Answered first: the wind-up closes what comes after unanswered.
                     let _ = (&stream).write_all(b"{\"ok\": true}\n");
                     self.stop();
                     return;
                 }
-                op => json!({"ok": false, "error": format!("unknown op {}", json!(op))}),
             },
         };
+        let reply = serde_json::to_string(&reply).expect("a reply is JSON");
         let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
     }
 
@@ -571,14 +521,17 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
     if restore {
         let mut given = String::new();
         io::stdin().read_to_string(&mut given)?;
-        let bottles: Vec<Value> = serde_json::from_str(given.trim()).unwrap_or_default();
+        let bottles: Vec<Request> = serde_json::from_str(given.trim()).unwrap_or_default();
         for message in bottles {
-            match Bottle::from_bind(&message) {
+            let Request::Bind(bind) = message else {
+                continue;
+            };
+            let name = bind.bottle.clone();
+            match Bottle::from_bind(bind) {
                 Ok(bottle) => server.bind(bottle),
                 Err(e) => log!(
                     "bottle.daemon",
-                    "{}: couldn't restore its decisions: {e}",
-                    message["bottle"].as_str().unwrap_or("?")
+                    "{name}: couldn't restore its decisions: {e}"
                 ),
             }
         }
