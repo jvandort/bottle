@@ -30,6 +30,7 @@
 //! deletes a branch a bottle checked out and gc later prunes its commits (after git's grace
 //! periods, weeks to months), that checkout breaks, and the bottle has to be made again.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -149,6 +150,50 @@ pub struct Status {
     pub name: String,
     pub state: State,
     pub bottle: Option<Bottle>,
+}
+
+/// What a command knows of bottles, so that what it does in several steps asks each runner once:
+/// each bottle's status as it last asked (engine's status), and which it has found running or
+/// started. Kept as the command changes them: a bottle made or deleted is forgotten, one started
+/// (or run in, which starts it) is running. Made by each command, and given to what it asks.
+#[derive(Default)]
+pub struct Known {
+    statuses: RefCell<BTreeMap<String, Status>>,
+    running: RefCell<BTreeSet<String>>,
+}
+
+impl Known {
+    /// What's known of `name`, if it was asked.
+    pub fn status(&self, name: &str) -> Option<Status> {
+        self.statuses.borrow().get(name).cloned()
+    }
+
+    pub fn learn(&self, status: Status) {
+        if status.state == State::Running {
+            self.running.borrow_mut().insert(status.name.clone());
+        }
+        self.statuses
+            .borrow_mut()
+            .insert(status.name.clone(), status);
+    }
+
+    /// What's known of `name` is out of date.
+    pub fn forget(&self, name: &str) {
+        self.statuses.borrow_mut().remove(name);
+        self.running.borrow_mut().remove(name);
+    }
+
+    /// `name` is running now.
+    pub fn started(&self, name: &str) {
+        if let Some(status) = self.statuses.borrow_mut().get_mut(name) {
+            status.state = State::Running;
+        }
+        self.running.borrow_mut().insert(name.to_string());
+    }
+
+    fn running(&self, name: &str) -> bool {
+        self.running.borrow().contains(name)
+    }
 }
 
 /// What bottle relies on inside every bottle, checked (as genie) whenever one starts. Documented in
@@ -272,7 +317,22 @@ pub struct SshGrant {
     pub address: String,
 }
 
-/// A mount as create is asked for one: the repo, where, from what, served what.
+/// A bottle to make: named `name`, from `spec`, with `mounts`, its creator's `context` for
+/// ~/BOTTLE.md, on `runner` (None: this machine), that may ssh to its `sidecar`, if it's given one;
+/// its record kept in `owner`, its creator's directory.
+#[derive(Clone, Copy)]
+pub struct Order<'a> {
+    pub owner: &'a Path,
+    pub name: &'a str,
+    pub spec: &'a Spec,
+    pub mounts: &'a [MountRequest],
+    pub context: &'a str,
+    pub runner: Option<&'a str>,
+    pub sidecar: Option<&'a str>,
+}
+
+/// A mount as create is asked for one: the repo, checked out at `path`, from `checkout`, served
+/// `remotes`.
 pub struct MountRequest {
     pub path: String,
     pub repo: PathBuf,
@@ -429,15 +489,17 @@ fn forget(name: &str) {
 /// path (a thread's /workspace and /notes; the broker's /notes alone). Nothing is registered in a
 /// repo: the thread reads what it pushes from its lane. Its machine is on `runner`. With `sidecar`,
 /// it may ssh to that bottle, as `sidecar`. Its record is kept in `owner`, its thread's directory.
-pub fn create(
-    owner: &Path,
-    spec: &Spec,
-    name: &str,
-    mounts: &[MountRequest],
-    context: &str,
-    runner: &str,
-    sidecar: Option<&str>,
-) -> Result<Bottle, String> {
+pub fn create(known: &Known, order: &Order) -> Result<Bottle, String> {
+    let Order {
+        owner,
+        name,
+        spec,
+        mounts,
+        context,
+        runner,
+        sidecar,
+    } = *order;
+    let runner = runner.unwrap_or(runners::LOCAL);
     let on = runners::get(runner)?;
     let place = if runner == runners::LOCAL {
         "this machine".to_string()
@@ -478,7 +540,7 @@ pub fn create(
         last_active: now,
     };
     let repos: Vec<Repo> = planned.into_iter().map(|(_, r)| r).collect();
-    let bottle = bring_up(bottle, &repos, &tag, owner)?;
+    let bottle = bring_up(known, bottle, &repos, &tag, owner)?;
     let mounts: Vec<String> = bottle
         .mounts
         .iter()
@@ -573,7 +635,13 @@ fn plan_sidecar(
 
 /// Create the bottle's machine from `tag`, and set it up, its record in `owner`'s; roll it all back
 /// on failure.
-fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result<Bottle, String> {
+fn bring_up(
+    known: &Known,
+    bottle: Bottle,
+    mounted: &[Repo],
+    tag: &str,
+    owner: &Path,
+) -> Result<Bottle, String> {
     // Never build on a name something else is using: rollback would then be cleaning up after it.
     if runner_of(&bottle)?.state(bottle.machine())?.is_some() {
         return Err(format!(
@@ -582,7 +650,7 @@ fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result
         ));
     }
     save(&bottle, Some(owner))?;
-    let mut bottle = match run_machine(bottle.clone(), mounted, tag) {
+    let mut bottle = match run_machine(known, bottle.clone(), mounted, tag) {
         Ok(bottle) => bottle,
         Err(failure) => {
             crate::log::say!(
@@ -590,7 +658,7 @@ fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result
                 "{}: creating failed, rolling back: {failure}",
                 bottle.name
             );
-            if let Err(cleanup) = crate::interrupt::shielded(|| delete(&bottle.name)) {
+            if let Err(cleanup) = crate::interrupt::shielded(|| delete(known, &bottle.name)) {
                 return Err(format!("{failure}; cleanup also failed: {cleanup}"));
             }
             return Err(failure);
@@ -635,7 +703,12 @@ fn start_at(repo: &Repo, checkout: Option<&str>) -> Result<repos::Start, String>
 }
 
 /// Create and start a fresh machine for the bottle from image `tag`, and set it up from scratch.
-fn run_machine(mut bottle: Bottle, mounted: &[Repo], tag: &str) -> Result<Bottle, String> {
+fn run_machine(
+    known: &Known,
+    mut bottle: Bottle,
+    mounted: &[Repo],
+    tag: &str,
+) -> Result<Bottle, String> {
     let runner = runner_of(&bottle)?;
     // The bottle gets stand-ins, never credentials (see auth.rs), and no proxy: its flows are
     // decided as they open, by the policy its machine is made with.
@@ -666,7 +739,7 @@ fn run_machine(mut bottle: Bottle, mounted: &[Repo], tag: &str) -> Result<Bottle
     point_at_host(&bottle)?;
     init_mounts(&bottle)?;
     for grant in &bottle.ssh {
-        let_in(&bottle, grant)?;
+        let_in(known, &bottle, grant)?;
     }
     Ok(bottle)
 }
@@ -677,8 +750,8 @@ fn sh(script: &str) -> Vec<String> {
 
 /// Let the bottle ssh to the one it's granted, as grant.name: its key let in there, that one's host
 /// key known here.
-fn let_in(bottle: &Bottle, grant: &SshGrant) -> Result<(), String> {
-    let there = ensure_running(&grant.bottle)?;
+fn let_in(known: &Known, bottle: &Bottle, grant: &SshGrant) -> Result<(), String> {
+    let there = ensure_running(known, &grant.bottle)?;
     let key = in_bottle(
         bottle,
         &sh(&format!(
@@ -1079,24 +1152,16 @@ fn init_mounts(bottle: &Bottle) -> Result<(), String> {
         .map_err(|e| format!("checking out {checked_out} failed: {e}"))
 }
 
-pub fn start(name: &str) -> Result<Bottle, String> {
+pub fn start(known: &Known, name: &str) -> Result<Bottle, String> {
     auth::warn_unset(&get(name)?.features)?;
-    ensure_running(name)
+    ensure_running(known, name)
 }
 
-/// The bottles this command has found running (a list said so), or started: their machines not
-/// asked again (a command runs several things in one).
-static RUNNING: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
-
-/// None found running: a new test's.
-/// Start the bottle's machine if it isn't running, folio serve answering it.
-pub fn ensure_running(name: &str) -> Result<Bottle, String> {
+/// Start the bottle's machine if it isn't running, folio serve answering it; one `known` running
+/// isn't asked again.
+pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
     let mut bottle = get(name)?;
-    if RUNNING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .contains(name)
-    {
+    if known.running(name) {
         // Running: folio serve, if it had stopped, binds it again as it starts.
         daemon::start()?;
         return Ok(bottle);
@@ -1134,10 +1199,7 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
         // Running: folio serve, if it had stopped, binds it again as it starts.
         daemon::start()?;
     }
-    RUNNING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(name.to_string());
+    known.started(name);
     Ok(bottle)
 }
 
@@ -1172,9 +1234,14 @@ pub fn touch(name: &str) -> Result<(), String> {
 
 /// The command line, for this machine, that runs `argv` in the bottle as genie, at its first mount:
 /// started if it's stopped, logged in first to what its features need.
-pub fn exec_command(name: &str, argv: &[String], tty: bool) -> Result<Vec<String>, String> {
+pub fn exec_command(
+    known: &Known,
+    name: &str,
+    argv: &[String],
+    tty: bool,
+) -> Result<Vec<String>, String> {
     auth::warn_unset(&get(name)?.features)?;
-    let bottle = ensure_running(name)?;
+    let bottle = ensure_running(known, name)?;
     let how = Exec {
         user: Some(USER),
         workdir: Some(bottle.workdir()),
@@ -1253,12 +1320,6 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, State)>, String
                         .map_or(State::Missing, |&s| s.into()),
                 },
             };
-            if state == State::Running {
-                RUNNING
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(bottle.name.clone());
-            }
             (bottle, state)
         })
         .collect())
@@ -1298,11 +1359,8 @@ pub fn status(names: &[String]) -> Result<Vec<Status>, String> {
 ///
 /// Each step tolerates its part being absent, so this also finishes off a bottle left half-made or
 /// half-deleted. If a step fails, the record stays (marked broken) so the next delete can retry.
-pub fn delete(name: &str) -> Result<(), String> {
-    RUNNING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(name);
+pub fn delete(known: &Known, name: &str) -> Result<(), String> {
+    known.forget(name);
     let mut bottle = get(name)?;
     // The registry says the machine is the bottle's: a machine has no labels to ask.
     let runner = runner_of(&bottle)?;

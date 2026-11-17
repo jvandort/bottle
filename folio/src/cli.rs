@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use crate::bottles::State;
+use crate::engine::Engine;
 use crate::repos::{self, Repo};
 use crate::specs::Spec;
 use crate::threads::{self, Settings, Thread};
@@ -363,29 +364,31 @@ pub fn main(args: Vec<String>) -> ExitCode {
         return ExitCode::from(crate::FAILED);
     }
     let (name, sub) = matches.subcommand().unwrap();
+    // What this command learns of bottles, kept while it runs.
+    let engine = &Engine::default();
     let outcome = match name {
-        "new" => new(sub),
-        "claude" => attach(sub, threads::CLAUDE, "claude"),
-        "shell" => attach(sub, threads::SHELL, "shell"),
-        "exec" => exec(sub, false, "exec"),
-        "cp" => cp(sub, false, "cp"),
-        "pause" => pause(sub),
-        "notes" => notes_command(sub),
-        "rename" => rename(sub),
-        "list" => list(),
-        "delete" => delete(sub),
-        "configure" => configure(sub),
+        "new" => new(engine, sub),
+        "claude" => attach(engine, sub, threads::CLAUDE, "claude"),
+        "shell" => attach(engine, sub, threads::SHELL, "shell"),
+        "exec" => exec(engine, sub, false, "exec"),
+        "cp" => cp(engine, sub, false, "cp"),
+        "pause" => pause(engine, sub),
+        "notes" => notes_command(engine, sub),
+        "rename" => rename(engine, sub),
+        "list" => list(engine),
+        "delete" => delete(engine, sub),
+        "configure" => configure(engine, sub),
         "sidecar" => {
             let (name, sub) = sub.subcommand().unwrap();
             match name {
-                "configure" => sidecar_configure(sub),
-                "remove" => sidecar_remove(sub),
-                "shell" => sidecar_shell(sub),
-                "exec" => exec(sub, true, "sidecar exec"),
-                _ => cp(sub, true, "sidecar cp"),
+                "configure" => sidecar_configure(engine, sub),
+                "remove" => sidecar_remove(engine, sub),
+                "shell" => sidecar_shell(engine, sub),
+                "exec" => exec(engine, sub, true, "sidecar exec"),
+                _ => cp(engine, sub, true, "sidecar cp"),
             }
         }
-        "broker" => broker_command(sub),
+        "broker" => broker_command(engine, sub),
         "repo" => repo_list(),
         "serve" => match sub.subcommand().unwrap() {
             ("start", sub) => serve_start(sub),
@@ -441,7 +444,7 @@ fn current() -> Result<Repo, String> {
     repos::current(None)
 }
 
-fn exec(matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
+fn exec(engine: &Engine, matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
     let repo = current()?;
     let mut argv = args(matches, "argv");
     if argv.first().map(String::as_str) == Some("--") {
@@ -453,10 +456,10 @@ fn exec(matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
         ));
     }
     let thread = threads::load(&repo, arg(matches, "thread").unwrap())?;
-    match threads::exec(&repo, &thread, &argv, sidecar, flag(matches, "tty"))? {}
+    match threads::exec(engine, &repo, &thread, &argv, sidecar, flag(matches, "tty"))? {}
 }
 
-fn cp(matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
+fn cp(engine: &Engine, matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
     let repo = current()?;
     // THREAD:PATH, if what's before the first colon is a thread of the repo's; else a path here.
     let side = |given: &str| -> Result<(Option<Thread>, String), String> {
@@ -485,6 +488,7 @@ fn cp(matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
         ));
     }
     let went = threads::copy(
+        engine,
         &repo,
         (src.0.as_ref(), &src.1),
         (dst.0.as_ref(), &dst.1),
@@ -502,8 +506,9 @@ fn runner_command(matches: &ArgMatches) -> ExitCode {
     crate::runner::main(args(matches, "arguments").into_iter())
 }
 
-fn new(matches: &ArgMatches) -> Outcome {
+fn new(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let thread = start(
+        engine,
         &current()?,
         arg(matches, "thread").unwrap(),
         arg(matches, "from"),
@@ -517,6 +522,7 @@ fn new(matches: &ArgMatches) -> Outcome {
 }
 
 fn start(
+    engine: &Engine,
     repo: &Repo,
     name: &str,
     base: Option<&str>,
@@ -527,7 +533,7 @@ fn start(
         "Starting thread {name} in {}...",
         repo.path.display()
     );
-    let thread = threads::create(repo, name, base, false, runner)?;
+    let thread = threads::create(engine, repo, name, base, false, runner)?;
     println!(
         "Started thread {name} in bottle {}. Its branches: git fetch bottle/{name}",
         thread.bottle,
@@ -594,6 +600,7 @@ pub fn input(prompt: &str) -> Option<String> {
 /// The thread the command names (started, if it's new and the command may start one), else the
 /// one chosen in the picker; None if none was.
 fn thread_of(
+    engine: &Engine,
     matches: &ArgMatches,
     repo: &Repo,
     command: &str,
@@ -606,7 +613,7 @@ fn thread_of(
                 .ok()
                 .flatten()
                 .map(String::as_str);
-            return start(repo, name, None, runner).map(Some);
+            return start(engine, repo, name, None, runner).map(Some);
         }
         return threads::load(repo, name).map(Some);
     }
@@ -622,7 +629,7 @@ fn thread_of(
             repo.path.display()
         ));
     }
-    let states = threads::states(repo, &all)?;
+    let states = threads::states(engine, repo, &all)?;
     let all = threads::recent(repo, all, &states);
     let width = all
         .iter()
@@ -657,14 +664,14 @@ fn thread_of(
         return threads::load(repo, &name).map(Some);
     }
     match input("The new thread's name: ").map(|n| n.trim().to_string()) {
-        Some(name) if !name.is_empty() => start(repo, &name, None, None).map(Some),
+        Some(name) if !name.is_empty() => start(engine, repo, &name, None, None).map(Some),
         _ => Ok(None),
     }
 }
 
-fn attach(matches: &ArgMatches, session: &str, command: &str) -> Outcome {
+fn attach(engine: &Engine, matches: &ArgMatches, session: &str, command: &str) -> Outcome {
     let repo = current()?;
-    let Some(mut thread) = thread_of(matches, &repo, command, true)? else {
+    let Some(mut thread) = thread_of(engine, matches, &repo, command, true)? else {
         return Ok(0);
     };
     if let Some(runner) = arg(matches, "runner") {
@@ -672,18 +679,18 @@ fn attach(matches: &ArgMatches, session: &str, command: &str) -> Outcome {
             runner: Some(runner.into()),
             ..thread.settings.clone()
         };
-        thread = threads::set_settings(&repo, &thread, settings)?;
+        thread = threads::set_settings(engine, &repo, &thread, settings)?;
     }
-    match threads::attach(&repo, &thread, session)? {}
+    match threads::attach(engine, &repo, &thread, session)? {}
 }
 
-fn pause(matches: &ArgMatches) -> Outcome {
+fn pause(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
-    let Some(thread) = thread_of(matches, &repo, "pause", false)? else {
+    let Some(thread) = thread_of(engine, matches, &repo, "pause", false)? else {
         return Ok(0);
     };
     crate::log::say!("threads", "Pausing thread {}...", thread.name);
-    threads::pause(&repo, &thread)?;
+    threads::pause(engine, &repo, &thread)?;
     println!(
         "Paused thread {name}. Resume it with: folio claude {name}",
         name = thread.name
@@ -691,7 +698,7 @@ fn pause(matches: &ArgMatches) -> Outcome {
     Ok(0)
 }
 
-fn broker_command(matches: &ArgMatches) -> Outcome {
+fn broker_command(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let command = arg(matches, "command").unwrap_or("claude");
     let identity = broker::repo();
     let mut thread = if threads::exists(&identity, broker::NAME) {
@@ -708,14 +715,21 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
     }
     if thread.is_none() {
         crate::log::say!("threads", "Starting the broker...");
-        thread = Some(threads::create(&identity, broker::NAME, None, true, None)?);
+        thread = Some(threads::create(
+            engine,
+            &identity,
+            broker::NAME,
+            None,
+            true,
+            None,
+        )?);
         println!("Started the broker. Its notes: {}", notes_path.display());
         let _ = std::io::stdout().flush();
     }
     let thread = thread.unwrap();
     if command == "pause" {
         crate::log::say!("threads", "Pausing the broker...");
-        threads::pause(&identity, &thread)?;
+        threads::pause(engine, &identity, &thread)?;
         println!("Paused the broker. Resume it with: folio broker");
         return Ok(0);
     }
@@ -724,7 +738,7 @@ fn broker_command(matches: &ArgMatches) -> Outcome {
     } else {
         threads::SHELL
     };
-    match threads::attach(&identity, &thread, session)? {}
+    match threads::attach(engine, &identity, &thread, session)? {}
 }
 
 /// Open the vault in Obsidian, if it's installed; else say where it is.
@@ -740,11 +754,11 @@ fn open_notes(path: &Path) -> Outcome {
     Ok(0)
 }
 
-fn notes_command(matches: &ArgMatches) -> Outcome {
+fn notes_command(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
     let name = match arg(matches, "thread") {
         Some(name) => name.to_string(), // a deleted thread's notes too
-        None => match thread_of(matches, &repo, "notes", false)? {
+        None => match thread_of(engine, matches, &repo, "notes", false)? {
             Some(thread) => thread.name,
             None => return Ok(0),
         },
@@ -758,10 +772,11 @@ fn notes_command(matches: &ArgMatches) -> Outcome {
     open_notes(&path)
 }
 
-fn rename(matches: &ArgMatches) -> Outcome {
+fn rename(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
     let old = arg(matches, "thread").unwrap();
     let thread = threads::rename(
+        engine,
         &repo,
         &threads::load(&repo, old)?,
         arg(matches, "new").unwrap(),
@@ -773,10 +788,10 @@ fn rename(matches: &ArgMatches) -> Outcome {
     Ok(0)
 }
 
-fn list() -> Outcome {
+fn list(engine: &Engine) -> Outcome {
     let repo = current()?;
     let all = threads::all(&repo)?;
-    let states = threads::states(&repo, &all)?;
+    let states = threads::states(engine, &repo, &all)?;
     let all = threads::recent(&repo, all, &states);
     let mut rows = vec![
         [
@@ -834,9 +849,9 @@ fn list() -> Outcome {
     Ok(0)
 }
 
-fn delete(matches: &ArgMatches) -> Outcome {
+fn delete(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
-    let Some(thread) = thread_of(matches, &repo, "delete", false)? else {
+    let Some(thread) = thread_of(engine, matches, &repo, "delete", false)? else {
         return Ok(0);
     };
     if !flag(matches, "yes") {
@@ -846,7 +861,7 @@ fn delete(matches: &ArgMatches) -> Outcome {
                 thread.name
             ));
         }
-        let lost = threads::losses(&repo, &thread)?;
+        let lost = threads::losses(engine, &repo, &thread)?;
         if lost.is_empty() {
             println!(
                 "Deleting {} loses nothing that isn't on your branches or origin's.",
@@ -865,7 +880,7 @@ fn delete(matches: &ArgMatches) -> Outcome {
             return Ok(1);
         }
     }
-    threads::delete(&repo, &thread)?;
+    threads::delete(engine, &repo, &thread)?;
     println!("Deleted thread {}", thread.name);
     Ok(0)
 }
@@ -1003,11 +1018,11 @@ fn thread_first(matches: &ArgMatches, command: &str) {
     }
 }
 
-fn configure(matches: &ArgMatches) -> Outcome {
+fn configure(engine: &Engine, matches: &ArgMatches) -> Outcome {
     thread_first(matches, "configure");
     let repo = current()?;
     if let Some(name) = arg(matches, "thread") {
-        return thread_configure(matches, &repo, &threads::load(&repo, name)?);
+        return thread_configure(engine, matches, &repo, &threads::load(&repo, name)?);
     }
     if !changes(matches) {
         let shown = match repo.spec()? {
@@ -1135,9 +1150,14 @@ fn sidecar_text(sidecar: &Settings) -> String {
     )
 }
 
-fn thread_configure(matches: &ArgMatches, repo: &Repo, thread: &Thread) -> Outcome {
+fn thread_configure(
+    engine: &Engine,
+    matches: &ArgMatches,
+    repo: &Repo,
+    thread: &Thread,
+) -> Outcome {
     if !changes(matches) {
-        let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]
+        let state = threads::states(engine, repo, std::slice::from_ref(thread))?[&thread.name]
             .status
             .state;
         println!(
@@ -1149,20 +1169,20 @@ fn thread_configure(matches: &ArgMatches, repo: &Repo, thread: &Thread) -> Outco
     }
     let whose = format!("thread {}", thread.name);
     let settings = settings_changed(&thread.settings, matches, "configure", &whose)?;
-    let thread = threads::set_settings(repo, thread, settings)?;
+    let thread = threads::set_settings(engine, repo, thread, settings)?;
     println!(
         "Set thread {}: {}{}",
         thread.name,
         thread_text(repo, &thread.settings)?,
-        when(repo, &thread)?
+        when(engine, repo, &thread)?
     );
     Ok(0)
 }
 
-fn sidecar_configure(matches: &ArgMatches) -> Outcome {
+fn sidecar_configure(engine: &Engine, matches: &ArgMatches) -> Outcome {
     thread_first(matches, "sidecar configure");
     let repo = current()?;
-    let Some(thread) = thread_of(matches, &repo, "sidecar configure", false)? else {
+    let Some(thread) = thread_of(engine, matches, &repo, "sidecar configure", false)? else {
         return Ok(0);
     };
     if !changes(matches) {
@@ -1171,7 +1191,7 @@ fn sidecar_configure(matches: &ArgMatches) -> Outcome {
             return Ok(0);
         };
         let name = thread.sidecar_bottle();
-        let state = engine::status(std::slice::from_ref(&name))?[&name].state;
+        let state = engine.status(std::slice::from_ref(&name))?[&name].state;
         println!("{}; bottle {name}, {state}", sidecar_text(sidecar));
         return Ok(0);
     }
@@ -1194,14 +1214,14 @@ fn sidecar_configure(matches: &ArgMatches) -> Outcome {
         "Set thread {}'s sidecar: {}{}",
         thread.name,
         sidecar_text(thread.sidecar.as_ref().unwrap()),
-        when(&repo, &thread)?
+        when(engine, &repo, &thread)?
     );
     Ok(0)
 }
 
-fn sidecar_remove(matches: &ArgMatches) -> Outcome {
+fn sidecar_remove(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
-    let Some(thread) = thread_of(matches, &repo, "sidecar remove", false)? else {
+    let Some(thread) = thread_of(engine, matches, &repo, "sidecar remove", false)? else {
         return Ok(0);
     };
     if thread.sidecar.is_none() {
@@ -1212,22 +1232,22 @@ fn sidecar_remove(matches: &ArgMatches) -> Outcome {
     println!(
         "Took thread {}'s sidecar away{}",
         thread.name,
-        when(&repo, &thread)?
+        when(engine, &repo, &thread)?
     );
     Ok(0)
 }
 
-fn sidecar_shell(matches: &ArgMatches) -> Outcome {
+fn sidecar_shell(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let repo = current()?;
-    let Some(thread) = thread_of(matches, &repo, "sidecar shell", false)? else {
+    let Some(thread) = thread_of(engine, matches, &repo, "sidecar shell", false)? else {
         return Ok(0);
     };
-    match threads::sidecar_shell(&repo, &thread)? {}
+    match threads::sidecar_shell(engine, &repo, &thread)? {}
 }
 
 /// When a change to it or its sidecar reaches the thread: at once, for one with no bottle.
-fn when(repo: &Repo, thread: &Thread) -> Result<String, String> {
-    let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]
+fn when(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<String, String> {
+    let state = threads::states(engine, repo, std::slice::from_ref(thread))?[&thread.name]
         .status
         .state;
     if matches!(state, State::Paused | State::Missing) {

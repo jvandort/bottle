@@ -8,22 +8,14 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::bottle_cli::Cli;
-use crate::bottles::{self, MountRequest, State, Status};
-use crate::runners;
+use crate::bottles::{self, Known, Status};
 use crate::specs::Spec;
 
-/// A repo for a bottle: checked out at `path`, from `checkout` (None: bottle's default), served
-/// `remotes`.
-pub struct Mount {
-    pub path: String,
-    pub repo: PathBuf,
-    pub checkout: Option<String>,
-    pub remotes: Vec<String>,
-}
+pub use crate::bottles::{MountRequest as Mount, Order};
 
 /// What a command run with pipes said, and how it ended.
 #[derive(Debug)]
@@ -90,234 +82,221 @@ pub fn validate_spec(spec: &Spec) -> Result<Spec, String> {
     spec.canonical(None, "this machine")
 }
 
-/// Create a bottle for the thread whose directory is `owner`, where its record is kept, on
-/// `runner` (None: this machine), that may ssh to its sidecar, if it's given one. On
-/// this terminal: an image build shows, and a login can ask.
-pub fn new(
-    owner: &Path,
-    name: &str,
-    spec: &Spec,
-    mounts: &[Mount],
-    context: &str,
-    runner: Option<&str>,
-    sidecar: Option<&str>,
-) -> Result<(), String> {
-    forget(name);
-    crate::log::say!("bottles", "Creating bottle {name}...");
-    let requests: Vec<MountRequest> = mounts
-        .iter()
-        .map(|m| MountRequest {
-            path: m.path.clone(),
-            repo: m.repo.clone(),
-            checkout: m.checkout.clone(),
-            remotes: m.remotes.clone(),
-        })
-        .collect();
-    bottles::create(
-        owner,
-        spec,
-        name,
-        &requests,
-        context,
-        runner.unwrap_or(runners::LOCAL),
-        sidecar,
-    )?;
-    Ok(())
+/// What threads ask of bottles, for one command: what it learns of them (bottles::Known) kept
+/// while it runs, so a bottle is asked about once a command, not once a step. Made by each command.
+#[derive(Default)]
+pub struct Engine {
+    known: Known,
 }
 
-/// What this command has been told of each bottle it asked about, by name: asked once a command,
-/// not once a step (each asks every runner the bottles are on), and changed as the command changes
-/// the bottle: gone when it makes or deletes one, running when it starts one or runs something in
-/// it (which starts it).
-static KNOWN: std::sync::Mutex<BTreeMap<String, Status>> = std::sync::Mutex::new(BTreeMap::new());
-
-fn known() -> std::sync::MutexGuard<'static, BTreeMap<String, Status>> {
-    KNOWN.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// What this command knows of `name` is out of date.
-fn forget(name: &str) {
-    known().remove(name);
-}
-
-/// `name` is running now (what's known of it, if anything is, says so).
-fn running(name: &str) {
-    if let Some(row) = known().get_mut(name) {
-        row.state = State::Running;
+impl Engine {
+    /// Make the bottle `order` asks for. On this terminal: an image build shows, and a login can
+    /// ask.
+    pub fn create(&self, order: &Order) -> Result<(), String> {
+        self.known.forget(order.name);
+        crate::log::say!("bottles", "Creating bottle {}...", order.name);
+        bottles::create(&self.known, order)?;
+        Ok(())
     }
-}
 
-/// Each named bottle's status (bottles::status); Missing if there's no such bottle. Asked once a
-/// command (KNOWN).
-pub fn status(names: &[String]) -> Result<BTreeMap<String, Status>, String> {
-    let unknown: Vec<String> = names
-        .iter()
-        .filter(|n| !known().contains_key(*n))
-        .cloned()
-        .collect();
-    if !unknown.is_empty() {
-        let rows = bottles::status(&unknown)?;
-        let mut known = known();
-        for row in rows {
-            known.insert(row.name.clone(), row);
+    /// Each named bottle's status (bottles::status); Missing if there's no such bottle. Asked once a
+    /// command: then known.
+    pub fn status(&self, names: &[String]) -> Result<BTreeMap<String, Status>, String> {
+        let unknown: Vec<String> = names
+            .iter()
+            .filter(|n| self.known.status(n).is_none())
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            for row in bottles::status(&unknown)? {
+                self.known.learn(row);
+            }
         }
+        Ok(names
+            .iter()
+            .filter_map(|n| self.known.status(n).map(|row| (n.clone(), row)))
+            .collect())
     }
-    let known = known();
-    Ok(names
-        .iter()
-        .filter_map(|n| known.get(n).map(|row| (n.clone(), row.clone())))
-        .collect())
-}
 
-/// Start a stopped bottle. On this terminal, as `new` is: starting can need a login.
-pub fn start(name: &str) -> Result<(), String> {
-    forget(name);
-    bottles::start(name).map(|_| ())
-}
+    /// Start a stopped bottle. On this terminal, as `new` is: starting can need a login.
+    pub fn start(&self, name: &str) -> Result<(), String> {
+        self.known.forget(name);
+        bottles::start(&self.known, name).map(|_| ())
+    }
 
-pub fn delete(name: &str) -> Result<(), String> {
-    forget(name);
-    bottles::delete(name)
-}
+    pub fn delete(&self, name: &str) -> Result<(), String> {
+        bottles::delete(&self.known, name)
+    }
 
-/// Record that the bottle is being used now.
-pub fn touch(name: &str) -> Result<(), String> {
-    bottles::touch(name)
-}
+    /// Record that the bottle is being used now.
+    pub fn touch(&self, name: &str) -> Result<(), String> {
+        bottles::touch(name)
+    }
 
-/// The command line that runs `argv` in the bottle (which starts it, if it's stopped).
-fn command(name: &str, argv: &[String], tty: bool) -> Result<Vec<String>, String> {
-    running(name);
-    bottles::exec_command(name, argv, tty)
+    /// The command line that runs `argv` in the bottle (which starts it, if it's stopped).
+    fn command(&self, name: &str, argv: &[String], tty: bool) -> Result<Vec<String>, String> {
+        let command = bottles::exec_command(&self.known, name, argv, tty)?;
+        self.known.started(name);
+        Ok(command)
+    }
+
+    /// Run a command in the bottle, with pipes. Without `check`, a failure is the caller's to expect,
+    /// so its stderr is dropped rather than shown as if something went wrong.
+    pub fn run(
+        &self,
+        name: &str,
+        argv: &[String],
+        input: Option<&str>,
+        check: bool,
+    ) -> Result<Ran, String> {
+        let command = self.command(name, argv, false)?;
+        let ran = piped(Command::new(&command[0]).args(&command[1..]), input, check)?;
+        if check && ran.code != 0 {
+            return Err(failed(name, argv, ran.code));
+        }
+        Ok(ran)
+    }
+
+    /// Run a command in the bottle with its stdout, bytes and all, going to `path`.
+    pub fn run_to_file(&self, name: &str, argv: &[String], path: &Path) -> Result<(), String> {
+        let command = self.command(name, argv, false)?;
+        let out = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let status = status_of(
+            Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::null())
+                .stdout(out),
+        )?;
+        if !status.success() {
+            return Err(failed(name, argv, status.code().unwrap_or(-1)));
+        }
+        Ok(())
+    }
+
+    /// Run a command in the bottle with `path` as its stdin.
+    pub fn run_from_file(&self, name: &str, argv: &[String], path: &Path) -> Result<(), String> {
+        let command = self.command(name, argv, false)?;
+        let input = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let status = status_of(
+            Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(input)
+                .stdout(Stdio::null()),
+        )?;
+        if !status.success() {
+            return Err(failed(name, argv, status.code().unwrap_or(-1)));
+        }
+        Ok(())
+    }
+
+    /// Replace folio with a command in the bottle, on this terminal: given one (`tty`; None, if this is
+    /// one).
+    pub fn attach(
+        &self,
+        name: &str,
+        argv: &[String],
+        tty: Option<bool>,
+    ) -> Result<std::convert::Infallible, String> {
+        let tty = tty
+            .unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+        // Flushed: what's buffered goes with this process.
+        let _ = std::io::stdout().flush();
+        let command = self.command(name, argv, tty)?;
+        crate::interrupt::check()?;
+        crate::log::log!(
+            "command",
+            "becomes {}",
+            command
+                .iter()
+                .map(|w| crate::shell::quote(w))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let error = Command::new(&command[0]).args(&command[1..]).exec();
+        Err(format!("{}: {error}", command[0]))
+    }
+
+    /// Copy a file or a directory, as `cp -r` would, between here and bottles: each side (a bottle's
+    /// name, a path in it; or None, a path here). Where it went: a path here, or in `dst`'s bottle.
+    pub fn copy(
+        &self,
+        src: (Option<&str>, &str),
+        dst: (Option<&str>, &str),
+    ) -> Result<String, String> {
+        let sides = [self.cp_side(src)?, self.cp_side(dst)?];
+        let commands = copy_commands(&sides[0], &sides[1]);
+        let (code, sent, stdout) = if commands.len() == 1 {
+            let ran = piped(
+                Command::new(&commands[0][0]).args(&commands[0][1..]),
+                None,
+                true,
+            )?;
+            (ran.code, 0, ran.stdout)
+        } else {
+            let mut sender = Command::new(&commands[0][0]);
+            crate::interrupt::guard(&mut sender)?;
+            let mut sender = sender
+                .args(&commands[0][1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("{}: {e}", commands[0][0]))?;
+            let pipe = sender.stdout.take().unwrap();
+            let mut receiver = Command::new(&commands[1][0]);
+            crate::interrupt::guard(&mut receiver)?;
+            let receiver = receiver
+                .args(&commands[1][1..])
+                .stdin(pipe)
+                .stdout(Stdio::piped())
+                .output()
+                .map_err(|e| format!("{}: {e}", commands[1][0]))?;
+            let sent = sender
+                .wait()
+                .map_err(|e| e.to_string())?
+                .code()
+                .unwrap_or(-1);
+            (
+                receiver.status.code().unwrap_or(-1),
+                sent,
+                String::from_utf8_lossy(&receiver.stdout).into_owned(),
+            )
+        };
+        if code != 0 || sent != 0 {
+            crate::interrupt::check()?;
+            return Err("copying failed".into()); // bottle-cli has said why
+        }
+        let went = stdout.trim();
+        Ok(match dst.0 {
+            Some(_) => went
+                .split_once(':')
+                .map_or(went, |(_, path)| path)
+                .to_string(),
+            None => went.to_string(),
+        })
+    }
+
+    /// A side of a copy, as bottle-cli's cp takes it, with the bottle-cli it's that one's: a bottle's
+    /// (started, if it's stopped) MACHINE:PATH, on its runner's; else a path here, on this machine's.
+    fn cp_side(&self, (name, path): (Option<&str>, &str)) -> Result<(Cli, String), String> {
+        let Some(name) = name else {
+            return Ok((Cli::Local, local_side(path)));
+        };
+        let bottle = bottles::ensure_running(&self.known, name)?;
+        let runner = bottles::runner_of(&bottle)?;
+        Ok((
+            runner.cli,
+            format!(
+                "{}:{}",
+                bottle.machine(),
+                if path.is_empty() { "." } else { path }
+            ),
+        ))
+    }
 }
 
 /// That a command in a bottle failed; what it said, it said on stderr.
 fn failed(name: &str, argv: &[String], code: i32) -> String {
     format!("`{}` in {name} failed (exit {code})", argv[0])
-}
-
-/// Run a command in the bottle, with pipes. Without `check`, a failure is the caller's to expect,
-/// so its stderr is dropped rather than shown as if something went wrong.
-pub fn run(name: &str, argv: &[String], input: Option<&str>, check: bool) -> Result<Ran, String> {
-    let command = command(name, argv, false)?;
-    let ran = piped(Command::new(&command[0]).args(&command[1..]), input, check)?;
-    if check && ran.code != 0 {
-        return Err(failed(name, argv, ran.code));
-    }
-    Ok(ran)
-}
-
-/// Run a command in the bottle with its stdout, bytes and all, going to `path`.
-pub fn run_to_file(name: &str, argv: &[String], path: &Path) -> Result<(), String> {
-    let command = command(name, argv, false)?;
-    let out = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let status = status_of(
-        Command::new(&command[0])
-            .args(&command[1..])
-            .stdin(Stdio::null())
-            .stdout(out),
-    )?;
-    if !status.success() {
-        return Err(failed(name, argv, status.code().unwrap_or(-1)));
-    }
-    Ok(())
-}
-
-/// Run a command in the bottle with `path` as its stdin.
-pub fn run_from_file(name: &str, argv: &[String], path: &Path) -> Result<(), String> {
-    let command = command(name, argv, false)?;
-    let input = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let status = status_of(
-        Command::new(&command[0])
-            .args(&command[1..])
-            .stdin(input)
-            .stdout(Stdio::null()),
-    )?;
-    if !status.success() {
-        return Err(failed(name, argv, status.code().unwrap_or(-1)));
-    }
-    Ok(())
-}
-
-/// Replace folio with a command in the bottle, on this terminal: given one (`tty`; None, if this is
-/// one).
-pub fn attach(
-    name: &str,
-    argv: &[String],
-    tty: Option<bool>,
-) -> Result<std::convert::Infallible, String> {
-    let tty =
-        tty.unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
-    // Flushed: what's buffered goes with this process.
-    let _ = std::io::stdout().flush();
-    let command = command(name, argv, tty)?;
-    crate::interrupt::check()?;
-    crate::log::log!(
-        "command",
-        "becomes {}",
-        command
-            .iter()
-            .map(|w| crate::shell::quote(w))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    let error = Command::new(&command[0]).args(&command[1..]).exec();
-    Err(format!("{}: {error}", command[0]))
-}
-
-/// Copy a file or a directory, as `cp -r` would, between here and bottles: each side (a bottle's
-/// name, a path in it; or None, a path here). Where it went: a path here, or in `dst`'s bottle.
-pub fn copy(src: (Option<&str>, &str), dst: (Option<&str>, &str)) -> Result<String, String> {
-    let sides = [cp_side(src)?, cp_side(dst)?];
-    let commands = copy_commands(&sides[0], &sides[1]);
-    let (code, sent, stdout) = if commands.len() == 1 {
-        let ran = piped(
-            Command::new(&commands[0][0]).args(&commands[0][1..]),
-            None,
-            true,
-        )?;
-        (ran.code, 0, ran.stdout)
-    } else {
-        let mut sender = Command::new(&commands[0][0]);
-        crate::interrupt::guard(&mut sender)?;
-        let mut sender = sender
-            .args(&commands[0][1..])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("{}: {e}", commands[0][0]))?;
-        let pipe = sender.stdout.take().unwrap();
-        let mut receiver = Command::new(&commands[1][0]);
-        crate::interrupt::guard(&mut receiver)?;
-        let receiver = receiver
-            .args(&commands[1][1..])
-            .stdin(pipe)
-            .stdout(Stdio::piped())
-            .output()
-            .map_err(|e| format!("{}: {e}", commands[1][0]))?;
-        let sent = sender
-            .wait()
-            .map_err(|e| e.to_string())?
-            .code()
-            .unwrap_or(-1);
-        (
-            receiver.status.code().unwrap_or(-1),
-            sent,
-            String::from_utf8_lossy(&receiver.stdout).into_owned(),
-        )
-    };
-    if code != 0 || sent != 0 {
-        crate::interrupt::check()?;
-        return Err("copying failed".into()); // bottle-cli has said why
-    }
-    let went = stdout.trim();
-    Ok(match dst.0 {
-        Some(_) => went
-            .split_once(':')
-            .map_or(went, |(_, path)| path)
-            .to_string(),
-        None => went.to_string(),
-    })
 }
 
 /// A path here, as bottle-cli's cp takes it: a colon in a relative path would name a machine.
@@ -327,24 +306,6 @@ fn local_side(path: &str) -> String {
     } else {
         format!("./{path}")
     }
-}
-
-/// A side of a copy, as bottle-cli's cp takes it, with the bottle-cli it's that one's: a bottle's
-/// (started, if it's stopped) MACHINE:PATH, on its runner's; else a path here, on this machine's.
-fn cp_side((name, path): (Option<&str>, &str)) -> Result<(Cli, String), String> {
-    let Some(name) = name else {
-        return Ok((Cli::Local, local_side(path)));
-    };
-    let bottle = bottles::ensure_running(name)?;
-    let runner = bottles::runner_of(&bottle)?;
-    Ok((
-        runner.cli,
-        format!(
-            "{}:{}",
-            bottle.machine(),
-            if path.is_empty() { "." } else { path }
-        ),
-    ))
 }
 
 /// The command lines that copy `src` to `dst`, each a side as bottle-cli's cp takes it with the

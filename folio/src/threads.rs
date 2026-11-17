@@ -40,6 +40,7 @@ use serde_json::Value;
 use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::bottles::{State, Status};
 use crate::engine::{self, Mount};
+use crate::engine::{Engine, Order};
 use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::specs::Spec;
 use crate::store::{self, Content};
@@ -363,8 +364,8 @@ fn mounts(thread: &Thread) -> Vec<&'static str> {
 
 /// The paths of the mounts the thread's bottle has, as bottle has them -- a bottle made before this
 /// folio may have fewer, or have them elsewhere -- else the thread's.
-fn bottle_mounts(thread: &Thread) -> Result<Vec<String>, String> {
-    let row = &engine::status(std::slice::from_ref(&thread.bottle))?[&thread.bottle];
+fn bottle_mounts(engine: &Engine, thread: &Thread) -> Result<Vec<String>, String> {
+    let row = &engine.status(std::slice::from_ref(&thread.bottle))?[&thread.bottle];
     let paths: Vec<String> = row
         .bottle
         .iter()
@@ -379,13 +380,14 @@ fn bottle_mounts(thread: &Thread) -> Result<Vec<String>, String> {
 }
 
 /// Where the thread's sessions start: its bottle's first mount.
-fn workdir(thread: &Thread) -> Result<String, String> {
-    Ok(bottle_mounts(thread)?.remove(0))
+fn workdir(engine: &Engine, thread: &Thread) -> Result<String, String> {
+    Ok(bottle_mounts(engine, thread)?.remove(0))
 }
 
 /// A new thread: its bottle (on `runner`, else the repo's) and its lane. Nothing runs in it until
 /// something attaches.
 pub fn create(
+    engine: &Engine,
     repo: &Repo,
     name: &str,
     base: Option<&str>,
@@ -419,7 +421,7 @@ pub fn create(
         },
         sidecar: None,
     };
-    make_bottle(repo, &thread)?;
+    make_bottle(engine, repo, &thread)?;
     let registered = (|| {
         if !is_broker {
             lanes::register(&repo.path, name)?;
@@ -427,14 +429,14 @@ pub fn create(
         save(repo, &thread, Vec::new())
     })();
     if let Err(e) = registered {
-        crate::interrupt::shielded(|| undo(repo, &thread));
+        crate::interrupt::shielded(|| undo(engine, repo, &thread));
         return Err(e);
     }
     Ok(thread)
 }
 
 /// Create the thread's bottle from the repo's spec as it is now, served the thread's lane.
-fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
+fn make_bottle(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
     if thread.broker {
         repo.remember()?;
         let notes_path = notes::ensure(&notes_dir(repo, &thread.name), "The broker's notes")?;
@@ -444,15 +446,15 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
             checkout: None,
             remotes: notes::remotes(),
         }];
-        return engine::new(
-            &directory(repo, &thread.name),
-            &thread.bottle,
-            &engine::validate_spec(&broker::spec())?,
-            &mounts_,
-            &(broker::CONTEXT.to_string() + &durable(&mounts(thread))),
-            None,
-            None,
-        );
+        return engine.create(&Order {
+            owner: &directory(repo, &thread.name),
+            name: &thread.bottle,
+            spec: &engine::validate_spec(&broker::spec())?,
+            mounts: &mounts_,
+            context: &(broker::CONTEXT.to_string() + &durable(&mounts(thread))),
+            runner: None,
+            sidecar: None,
+        });
     }
     // Checked again each time: a feature can have changed since the spec was saved. The repo's is
     // saved as checked: validating drops what bottle doesn't know.
@@ -493,7 +495,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
         None => {
             // One left from before it was taken away: it pushes into the thread's lane, as this
             // bottle will.
-            if !delete_sidecar(thread)? {
+            if !delete_sidecar(engine, thread)? {
                 return Err(format!(
                     "thread {}'s old sidecar is left on a runner that's off, pushing where its bottle would: \
                      turn the runner on, then try again",
@@ -501,7 +503,7 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
                 ));
             }
         }
-        Some(sidecar) => match make_sidecar(repo, thread, &repos_) {
+        Some(sidecar) => match make_sidecar(engine, repo, thread, &repos_) {
             // The thread is what's wanted: it goes on without, as when its sidecar doesn't start.
             Err(e) => crate::log::say!(
                 "threads",
@@ -523,19 +525,20 @@ fn make_bottle(repo: &Repo, thread: &Thread) -> Result<(), String> {
     let mut labelled = spec.clone();
     labelled.labels = BTreeMap::from([("thread".into(), thread.name.clone())]);
     let runner = runner_of(repo, thread)?;
-    let made = engine::new(
-        &directory(repo, &thread.name),
-        &thread.bottle,
-        &labelled,
-        &repos_,
-        &advice(&thread.name, &repo.name, &mounts(thread), &told),
-        runner.as_deref(),
-        sidecar_bottle.as_deref(),
-    )
-    .map_err(|e| elsewhere(thread, runner.as_deref(), e));
+    let made = engine
+        .create(&Order {
+            owner: &directory(repo, &thread.name),
+            name: &thread.bottle,
+            spec: &labelled,
+            mounts: &repos_,
+            context: &advice(&thread.name, &repo.name, &mounts(thread), &told),
+            runner: runner.as_deref(),
+            sidecar: sidecar_bottle.as_deref(),
+        })
+        .map_err(|e| elsewhere(thread, runner.as_deref(), e));
     if let Err(e) = made {
         if thread.sidecar.is_some()
-            && let Err(cleanup) = crate::interrupt::shielded(|| delete_sidecar(thread))
+            && let Err(cleanup) = crate::interrupt::shielded(|| delete_sidecar(engine, thread))
         {
             // What went wrong is the bottle's: this is said beside it.
             crate::log::say!("threads", "folio: {cleanup}");
@@ -562,36 +565,41 @@ fn elsewhere(thread: &Thread, runner: Option<&str>, e: String) -> String {
 
 /// Make the thread's sidecar afresh, from its spec as it is now: the thread's repos and remotes,
 /// pushes included, which bottle allows as the thread's bottle may ssh to it.
-fn make_sidecar(repo: &Repo, thread: &Thread, repos_: &[Mount]) -> Result<(), String> {
+fn make_sidecar(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    repos_: &[Mount],
+) -> Result<(), String> {
     let sidecar = thread.sidecar.as_ref().unwrap();
     // Scratch: whatever's left of one is no use.
     let runner = sidecar.runner.as_deref();
-    if !delete_sidecar(thread)? {
+    if !delete_sidecar(engine, thread)? {
         return Err(format!(
             "its old one is on runner {}, which is off",
             runner.unwrap_or_default()
         ));
     }
     let spec = check_repo_spec(engine::validate_spec(&sidecar.over(&sidecar_base()))?, true)?;
-    engine::new(
-        &directory(repo, &thread.name),
-        &thread.sidecar_bottle(),
-        &spec,
-        repos_,
-        &sidecar_itself(&thread.name, &repo.name),
+    engine.create(&Order {
+        owner: &directory(repo, &thread.name),
+        name: &thread.sidecar_bottle(),
+        spec: &spec,
+        mounts: repos_,
+        context: &sidecar_itself(&thread.name, &repo.name),
         runner,
-        None,
-    )
+        sidecar: None,
+    })
 }
 
 /// Delete the thread's sidecar, if it has one; false if its runner is off, which leaves it to be
 /// deleted when the thread next gets one.
-fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
+fn delete_sidecar(engine: &Engine, thread: &Thread) -> Result<bool, String> {
     if thread.broker {
         return Ok(true);
     }
     let name = thread.sidecar_bottle();
-    let row = &engine::status(std::slice::from_ref(&name))?[&name];
+    let row = &engine.status(std::slice::from_ref(&name))?[&name];
     if row.state.runner_off() {
         crate::log::say!(
             "threads",
@@ -603,16 +611,16 @@ fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
         return Ok(false);
     }
     if row.state != State::Missing {
-        engine::delete(&name)?;
+        engine.delete(&name)?;
     }
     Ok(true)
 }
 
 /// Whether the thread's bottle was made with its sidecar (it went on without, else), its sidecar's
 /// state, from one status of both.
-fn sidecar_state(thread: &Thread) -> Result<(State, bool), String> {
+fn sidecar_state(engine: &Engine, thread: &Thread) -> Result<(State, bool), String> {
     let names = [thread.bottle.clone(), thread.sidecar_bottle()];
-    let rows = engine::status(&names)?;
+    let rows = engine.status(&names)?;
     let state = rows[&names[1]].state;
     let granted = rows[&names[0]]
         .bottle
@@ -623,11 +631,11 @@ fn sidecar_state(thread: &Thread) -> Result<(State, bool), String> {
 
 /// Start the thread's sidecar with its bottle, if it has one that's stopped: bottle starts only the
 /// one asked.
-fn start_sidecar(thread: &Thread) -> Result<(), String> {
+fn start_sidecar(engine: &Engine, thread: &Thread) -> Result<(), String> {
     if thread.sidecar.is_none() {
         return Ok(());
     }
-    let (state, granted) = sidecar_state(thread)?;
+    let (state, granted) = sidecar_state(engine, thread)?;
     // One the thread's bottle wasn't made with (it went on without) is no use to it, if it's there
     // at all.
     if state == State::Missing || !granted {
@@ -638,7 +646,7 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
             name = thread.name
         );
     } else if state != State::Running
-        && let Err(e) = engine::start(&thread.sidecar_bottle())
+        && let Err(e) = engine.start(&thread.sidecar_bottle())
     {
         crate::log::say!(
             "threads",
@@ -652,9 +660,13 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
 /// Replace folio with a login shell in the thread's sidecar, at its first mount: only while the
 /// thread is running, which is what the sidecar is for. Nothing keeps it: closing the terminal ends
 /// it.
-pub fn sidecar_shell(repo: &Repo, thread: &Thread) -> Result<std::convert::Infallible, String> {
-    engine::attach(
-        &running_sidecar(repo, thread)?,
+pub fn sidecar_shell(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+) -> Result<std::convert::Infallible, String> {
+    engine.attach(
+        &running_sidecar(engine, repo, thread)?,
         &["bash".into(), "-l".into()],
         None,
     )
@@ -662,21 +674,21 @@ pub fn sidecar_shell(repo: &Repo, thread: &Thread) -> Result<std::convert::Infal
 
 /// The thread's sidecar's bottle, while the thread runs, which is what it's for; refused, saying
 /// why, else.
-fn running_sidecar(repo: &Repo, thread: &Thread) -> Result<String, String> {
+fn running_sidecar(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<String, String> {
     if thread.sidecar.is_none() {
         return Err(format!(
             "thread {name} has no sidecar; give it one with `folio sidecar configure {name} --runner RUNNER ...`",
             name = thread.name
         ));
     }
-    let state = state_of(repo, thread)?;
+    let state = state_of(engine, repo, thread)?;
     if state != State::Running {
         return Err(format!(
             "thread {name} is {state}: its sidecar is there while it runs (`folio claude {name}` or `folio shell {name}`)",
             name = thread.name
         ));
     }
-    let (state, granted) = sidecar_state(thread)?;
+    let (state, granted) = sidecar_state(engine, thread)?;
     if state == State::Missing || !granted {
         return Err(format!(
             "thread {name}'s sidecar comes with its next bottle: pause and resume it \
@@ -690,41 +702,52 @@ fn running_sidecar(repo: &Repo, thread: &Thread) -> Result<String, String> {
 /// The bottle a command for the thread runs in: its own, the thread brought to running first
 /// (resumed, if it's paused), as attach does; or, with `sidecar`, its sidecar, while the thread
 /// runs.
-fn bottle_for(repo: &Repo, thread: &Thread, sidecar: bool) -> Result<String, String> {
+fn bottle_for(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    sidecar: bool,
+) -> Result<String, String> {
     if sidecar {
-        return running_sidecar(repo, thread);
+        return running_sidecar(engine, repo, thread);
     }
     if !thread.broker {
         lanes::register(&repo.path, &thread.name)?;
     }
-    ensure_running(repo, thread)?;
+    ensure_running(engine, repo, thread)?;
     Ok(thread.bottle.clone())
 }
 
 /// Replace folio with `argv` in the thread's bottle (or its sidecar), at its first mount, as genie:
 /// its stdin, stdout and exit status this process's, and a terminal, if `tty`.
 pub fn exec(
+    engine: &Engine,
     repo: &Repo,
     thread: &Thread,
     argv: &[String],
     sidecar: bool,
     tty: bool,
 ) -> Result<std::convert::Infallible, String> {
-    engine::attach(&bottle_for(repo, thread, sidecar)?, argv, Some(tty))
+    engine.attach(&bottle_for(engine, repo, thread, sidecar)?, argv, Some(tty))
 }
 
 /// Copy as `cp -r` would, between here and threads' bottles (or their sidecars): each side a thread
 /// and a path in its bottle, a relative one from its first mount, or None and a path here. Where it
 /// went.
 pub fn copy(
+    engine: &Engine,
     repo: &Repo,
     src: (Option<&Thread>, &str),
     dst: (Option<&Thread>, &str),
     sidecar: bool,
 ) -> Result<String, String> {
-    let bottle = |thread: Option<&Thread>| thread.map(|t| bottle_for(repo, t, sidecar)).transpose();
+    let bottle = |thread: Option<&Thread>| {
+        thread
+            .map(|t| bottle_for(engine, repo, t, sidecar))
+            .transpose()
+    };
     let (src_bottle, dst_bottle) = (bottle(src.0)?, bottle(dst.0)?);
-    engine::copy(
+    engine.copy(
         (src_bottle.as_deref(), src.1),
         (dst_bottle.as_deref(), dst.1),
     )
@@ -763,7 +786,12 @@ pub fn runner_of(repo: &Repo, thread: &Thread) -> Result<Option<String>, String>
 ///
 /// A paused thread resumes on the runner they come to. One with a bottle elsewhere is refused: its
 /// work is in that bottle, and pausing it is what brings it back here, to go on.
-pub fn set_settings(repo: &Repo, thread: &Thread, settings: Settings) -> Result<Thread, String> {
+pub fn set_settings(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    settings: Settings,
+) -> Result<Thread, String> {
     if thread.broker {
         return Err(
             "the broker's bottle is folio's: it runs on this machine, from folio's spec".into(),
@@ -774,7 +802,7 @@ pub fn set_settings(repo: &Repo, thread: &Thread, settings: Settings) -> Result<
     }
     let runner = settings.runner(repo)?;
     let runner = runner.as_deref().unwrap_or(runners::LOCAL);
-    let row = states(repo, std::slice::from_ref(thread))?
+    let row = states(engine, repo, std::slice::from_ref(thread))?
         .remove(&thread.name)
         .unwrap();
     let place = row
@@ -801,8 +829,8 @@ pub fn set_settings(repo: &Repo, thread: &Thread, settings: Settings) -> Result<
 }
 
 /// What create did, undone, as far as it got.
-fn undo(repo: &Repo, thread: &Thread) {
-    let _ = engine::delete(&thread.bottle);
+fn undo(engine: &Engine, repo: &Repo, thread: &Thread) {
+    let _ = engine.delete(&thread.bottle);
     if !thread.broker {
         let _ = lanes::forget(&repo.path, &thread.name);
     }
@@ -818,7 +846,11 @@ pub struct Row {
 }
 
 /// Each thread's state, by thread name.
-pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Row>, String> {
+pub fn states(
+    engine: &Engine,
+    repo: &Repo,
+    threads: &[Thread],
+) -> Result<BTreeMap<String, Row>, String> {
     let mut names: Vec<String> = threads.iter().map(|t| t.bottle.clone()).collect();
     names.extend(
         threads
@@ -826,7 +858,7 @@ pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Row>, 
             .filter(|t| t.sidecar.is_some())
             .map(Thread::sidecar_bottle),
     );
-    let rows = engine::status(&names)?;
+    let rows = engine.status(&names)?;
     let mut result = BTreeMap::new();
     for t in threads {
         let mut status = rows.get(&t.bottle).cloned().unwrap_or_else(|| Status {
@@ -846,14 +878,17 @@ pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Row>, 
     Ok(result)
 }
 
-fn state_of(repo: &Repo, thread: &Thread) -> Result<State, String> {
-    Ok(states(repo, std::slice::from_ref(thread))?[&thread.name]
-        .status
-        .state)
+fn state_of(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<State, String> {
+    Ok(
+        states(engine, repo, std::slice::from_ref(thread))?[&thread.name]
+            .status
+            .state,
+    )
 }
 
 /// Attach this terminal to one of the thread's sessions, bringing the thread to running first.
 pub fn attach(
+    engine: &Engine,
     repo: &Repo,
     thread: &Thread,
     session: &str,
@@ -861,9 +896,9 @@ pub fn attach(
     if !thread.broker {
         lanes::register(&repo.path, &thread.name)?; // brings its remote up to this folio's
     }
-    ensure_running(repo, thread)?;
-    ensure_session(thread, session)?;
-    engine::touch(&thread.bottle)?;
+    ensure_running(engine, repo, thread)?;
+    ensure_session(engine, thread, session)?;
+    engine.touch(&thread.bottle)?;
     // The bottle has the work now, so a snapshot would only be out of date.
     if snapshot(repo, thread).is_some() {
         save(
@@ -883,17 +918,17 @@ pub fn attach(
         "attach".into(),
         session.into(),
         session_command(session),
-        workdir(thread)?,
+        workdir(engine, thread)?,
     ];
-    engine::attach(&thread.bottle, &argv, None)
+    engine.attach(&thread.bottle, &argv, None)
 }
 
-fn ensure_running(repo: &Repo, thread: &Thread) -> Result<(), String> {
-    let state = state_of(repo, thread)?;
+fn ensure_running(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+    let state = state_of(engine, repo, thread)?;
     match state {
         State::Paused => {
             crate::log::say!("threads", "Resuming thread {}...", thread.name);
-            resume(repo, thread)?;
+            resume(engine, repo, thread)?;
         }
         State::Missing => {
             return Err(format!(
@@ -905,9 +940,9 @@ fn ensure_running(repo: &Repo, thread: &Thread) -> Result<(), String> {
             ));
         }
         State::Running => {}
-        _ => engine::start(&thread.bottle)?,
+        _ => engine.start(&thread.bottle)?,
     }
-    start_sidecar(thread)
+    start_sidecar(engine, thread)
 }
 
 fn sh(script: impl Into<String>) -> Vec<String> {
@@ -919,8 +954,8 @@ fn sh(script: impl Into<String>) -> Vec<String> {
 /// The sessions are stopped first, and waited for, so Claude has written its conversation out.
 /// Nothing is deleted until both archives are in the thread's slot and read back whole; if anything
 /// fails before that, the bottle is left as it is.
-pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
-    let state = state_of(repo, thread)?;
+pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+    let state = state_of(engine, repo, thread)?;
     if state == State::Paused {
         return Err(format!(
             "thread {name} is already paused; `folio claude {name}` resumes it",
@@ -934,9 +969,9 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
         ));
     }
     if state != State::Running {
-        engine::start(&thread.bottle)?;
+        engine.start(&thread.bottle)?;
     }
-    stop_sessions(thread)?;
+    stop_sessions(engine, thread)?;
     let staging = store::staging(&directory(repo, &thread.name))?;
     let saved = (|| -> Result<(), String> {
         // None left from an older snapshot.
@@ -944,12 +979,12 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
             (snapshots::WORKSPACE_ARCHIVE, Content::Leave),
             (snapshots::NOTES_ARCHIVE, Content::Leave),
         ];
-        for path in bottle_mounts(thread)? {
+        for path in bottle_mounts(engine, thread)? {
             let Some(name) = archive_of(&path) else {
                 continue;
             };
             let archive = staging.join(name);
-            engine::run_to_file(
+            engine.run_to_file(
                 &thread.bottle,
                 &sh(snapshots::workspace_out(&path)),
                 &archive,
@@ -961,8 +996,12 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
         }
         let claude = staging.join(snapshots::CLAUDE_ARCHIVE);
         let work = staging.join(snapshots::WORK);
-        engine::run_to_file(&thread.bottle, &sh(snapshots::claude_out()), &claude)?;
-        engine::run_to_file(&thread.bottle, &sh(work_script(&workdir(thread)?)), &work)?;
+        engine.run_to_file(&thread.bottle, &sh(snapshots::claude_out()), &claude)?;
+        engine.run_to_file(
+            &thread.bottle,
+            &sh(work_script(&workdir(engine, thread)?)),
+            &work,
+        )?;
         snapshots::check(&claude)?;
         archived.push((snapshots::CLAUDE_ARCHIVE, Content::Move(claude)));
         archived.push((snapshots::WORK, Content::Move(work)));
@@ -972,8 +1011,8 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
     saved?;
     // Snapshotted: the pause is made, and what's left of it is done, interrupted or not.
     crate::interrupt::shielded(|| -> Result<(), String> {
-        engine::delete(&thread.bottle)?;
-        delete_sidecar(thread)?;
+        engine.delete(&thread.bottle)?;
+        delete_sidecar(engine, thread)?;
         Ok(())
     })?;
     crate::log::log!("threads", "{}: paused", thread.name);
@@ -984,16 +1023,16 @@ pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
 ///
 /// The hangup is folio's own: `shpool kill` follows its SIGHUP with a SIGKILL half a second later,
 /// too soon for Claude to have written its conversation out.
-fn stop_sessions(thread: &Thread) -> Result<(), String> {
-    let pids: Vec<String> = sessions(thread)?
+fn stop_sessions(engine: &Engine, thread: &Thread) -> Result<(), String> {
+    let pids: Vec<String> = sessions(engine, thread)?
         .iter()
         .map(|s| s["shell_pid"].to_string())
         .collect();
     if !pids.is_empty() {
         let mut kill = vec!["kill".to_string(), "-HUP".into()];
         kill.extend(pids.iter().cloned());
-        engine::run(&thread.bottle, &kill, None, false)?;
-        engine::run(
+        engine.run(&thread.bottle, &kill, None, false)?;
+        engine.run(
             &thread.bottle,
             &sh(format!(
                 "for i in $(seq 50); do alive=; for p in {}; do kill -0 $p 2>/dev/null && alive=1; done; \
@@ -1008,19 +1047,19 @@ fn stop_sessions(thread: &Thread) -> Result<(), String> {
 }
 
 /// A new bottle for a paused thread, with its snapshot restored; on any failure, still paused.
-fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
+fn resume(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
     let slot = snapshot(repo, thread).unwrap();
     if !thread.broker {
         lanes::register(&repo.path, &thread.name)?; // repairs it, if it was edited meanwhile
     }
-    make_bottle(repo, thread)?;
+    make_bottle(engine, repo, thread)?;
     let restored = (|| -> Result<(), String> {
         for path in mounts(thread) {
             let archive = slot.join(archive_of(path).unwrap());
             // A snapshot of a bottle that hadn't the mount (one from before notes) has nothing of
             // it to restore: it's checked out afresh.
             if archive.exists() {
-                engine::run_from_file(
+                engine.run_from_file(
                     &thread.bottle,
                     &sh(snapshots::workspace_in(path)),
                     &archive,
@@ -1029,7 +1068,8 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
         }
         // Where this bottle has each mount's objects and remotes: an older snapshot's checkout had
         // them elsewhere.
-        let row = engine::status(std::slice::from_ref(&thread.bottle))?
+        let row = engine
+            .status(std::slice::from_ref(&thread.bottle))?
             .remove(&thread.bottle)
             .unwrap();
         for mount in row.bottle.iter().flat_map(|b| &b.mounts) {
@@ -1039,9 +1079,9 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
                 .map(|r| (r.name.clone(), mount.url(&r.name)))
                 .collect();
             let script = snapshots::repoint(&mount.path, &mount.objects, &urls);
-            engine::run(&thread.bottle, &sh(script), None, true)?;
+            engine.run(&thread.bottle, &sh(script), None, true)?;
         }
-        engine::run_from_file(
+        engine.run_from_file(
             &thread.bottle,
             &sh(snapshots::CLAUDE_IN),
             &slot.join(snapshots::CLAUDE_ARCHIVE),
@@ -1050,8 +1090,8 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
     })();
     if let Err(e) = restored {
         crate::interrupt::shielded(|| {
-            let _ = engine::delete(&thread.bottle);
-            let _ = delete_sidecar(thread);
+            let _ = engine.delete(&thread.bottle);
+            let _ = delete_sidecar(engine, thread);
         });
         return Err(e);
     }
@@ -1060,8 +1100,8 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
 }
 
 /// The bottle's shpool sessions, as `shpool list --json` has them.
-fn sessions(thread: &Thread) -> Result<Vec<Value>, String> {
-    let listed = engine::run(
+fn sessions(engine: &Engine, thread: &Thread) -> Result<Vec<Value>, String> {
+    let listed = engine.run(
         &thread.bottle,
         &["shpool".into(), "list".into(), "--json".into()],
         None,
@@ -1075,9 +1115,12 @@ fn sessions(thread: &Thread) -> Result<Vec<Value>, String> {
     Ok(said["sessions"].as_array().cloned().unwrap_or_default())
 }
 
-fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
-    if let Some(listed) = sessions(thread)?.into_iter().find(|s| s["name"] == session) {
-        let alive = engine::run(
+fn ensure_session(engine: &Engine, thread: &Thread, session: &str) -> Result<(), String> {
+    if let Some(listed) = sessions(engine, thread)?
+        .into_iter()
+        .find(|s| s["name"] == session)
+    {
+        let alive = engine.run(
             &thread.bottle,
             &["kill".into(), "-0".into(), listed["shell_pid"].to_string()],
             None,
@@ -1088,7 +1131,7 @@ fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
         }
         // Its program exited, but shpool keeps the session, and attaching to it would start a
         // plain shell in its place.
-        engine::run(
+        engine.run(
             &thread.bottle,
             &["shpool".into(), "kill".into(), session.into()],
             None,
@@ -1102,12 +1145,12 @@ fn ensure_session(thread: &Thread, session: &str) -> Result<(), String> {
         "attach".into(),
         "--background".into(),
         "--dir".into(),
-        workdir(thread)?,
+        workdir(engine, thread)?,
         "--cmd".into(),
         session_command(session),
         session.into(),
     ];
-    engine::run(&thread.bottle, &argv, None, true).map(|_| ())
+    engine.run(&thread.bottle, &argv, None, true).map(|_| ())
 }
 
 /// What a session runs, as shpool's --cmd takes it.
@@ -1124,7 +1167,7 @@ pub fn session_command(session: &str) -> String {
 /// Branches in the lane that aren't on the user's branches or origin's, and work that never reached
 /// the lane: read from the bottle, which is started if it's stopped, or from a paused thread's
 /// snapshot.
-pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
+pub fn losses(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
     if thread.broker {
         return Ok(Vec::new()); // no lane in a repo of yours, and its notes stay where they are
     }
@@ -1132,7 +1175,7 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
         .into_iter()
         .map(|branch| format!("{branch}: pushed, but not on your branches or origin's"))
         .collect();
-    let state = state_of(repo, thread)?;
+    let state = state_of(engine, repo, thread)?;
     if state == State::Missing {
         return Ok(lost);
     }
@@ -1147,12 +1190,12 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
         let asked = if state == State::Running {
             Ok(())
         } else {
-            engine::start(&thread.bottle)
+            engine.start(&thread.bottle)
         }
         .and_then(|()| {
-            engine::run(
+            engine.run(
                 &thread.bottle,
-                &sh(work_script(&workdir(thread)?)),
+                &sh(work_script(&workdir(engine, thread)?)),
                 None,
                 true,
             )
@@ -1198,7 +1241,7 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
 /// Only without a bottle: a bottle's name is its thread's, and can't change, so a running or
 /// stopped thread is paused first. Its branches keep their names; the addresses other bottles had
 /// for it stop working, as its bottle's name changes.
-pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String> {
+pub fn rename(engine: &Engine, repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String> {
     if !is_name(new) {
         return Err(format!(
             "invalid thread name {}: use lowercase letters and digits, in words joined by '-'",
@@ -1211,7 +1254,7 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
     if thread.broker {
         return Err("the broker is called the broker".into());
     }
-    let state = state_of(repo, thread)?;
+    let state = state_of(engine, repo, thread)?;
     if !matches!(state, State::Paused | State::Missing) {
         return Err(format!(
             "thread {name} has a bottle, whose name can't change: pause it first (`folio pause {name}`), then rename it",
@@ -1232,12 +1275,15 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
 
 /// Delete the thread: its bottle, its lane and remote, and its record and snapshot. Not its notes:
 /// they stay where they are, and a new thread of the same name finds them.
-pub fn delete(repo: &Repo, thread: &Thread) -> Result<(), String> {
-    if !matches!(state_of(repo, thread)?, State::Missing | State::Paused) {
-        engine::delete(&thread.bottle)?;
+pub fn delete(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+    if !matches!(
+        state_of(engine, repo, thread)?,
+        State::Missing | State::Paused
+    ) {
+        engine.delete(&thread.bottle)?;
     }
     if !thread.broker {
-        delete_sidecar(thread)?;
+        delete_sidecar(engine, thread)?;
         lanes::forget(&repo.path, &thread.name)?;
     }
     let dir = directory(repo, &thread.name);
