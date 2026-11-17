@@ -38,6 +38,11 @@
 //! Every distribution has a manifest of its files (MANIFEST): each one's sha256 and name, as
 //! sha256sum writes them, which is what a runner's copy is compared with (bottle-cli's runner.rs).
 
+use kernel::kernel;
+use linux::{LinuxC, linux_dists};
+use mac::mac_dist;
+use mke2fs::mke2fs;
+
 mod builder;
 
 use std::env;
@@ -50,11 +55,6 @@ mod kernel;
 mod linux;
 mod mac;
 mod mke2fs;
-
-use kernel::*;
-use linux::*;
-use mac::*;
-use mke2fs::*;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -416,6 +416,7 @@ fn same_time(from: &Path, to: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::kernel::{KERNEL_X86_64_SIZE, elf_symbol};
     use super::*;
 
     #[test]

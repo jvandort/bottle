@@ -1,6 +1,12 @@
 //! The kernel a distribution's VMs boot: libkrunfw's, out of its release, as an Image (arm64) or an ELF (x86_64).
 
-use super::*;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use super::{copy, fetch, run, step};
+
+use super::Result;
 
 /// libkrunfw's release the VMs boot, for each architecture: where it is, and its sha256.
 pub(super) const KERNEL_AARCH64: (&str, &str) = (

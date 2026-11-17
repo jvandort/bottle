@@ -1,6 +1,12 @@
 //! Linux's distributions, built on Linux: static, with musl, their C built by LinuxC.
 
-use super::*;
+use std::env;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use super::{Profile, agents, beside_cli, cargo, copy, step, target};
+
+use super::Result;
 
 /// Linux's distributions, each target's into its directory, built on Linux: static, with musl,
 /// their C built by `LinuxC`. One cargo builds the agent for all of them, then one bottle-cli for

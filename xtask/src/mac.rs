@@ -1,6 +1,12 @@
 //! The Mac's distribution, built on a Mac: bottle-cli, signed with the hypervisor entitlement.
 
-use super::*;
+use std::env;
+use std::path::Path;
+use std::process::Command;
+
+use super::{Profile, agents, beside_cli, cargo, copy, root, run, same_time, step, target};
+
+use super::Result;
 
 /// The Mac's distribution, built on a Mac. mke2fs and the kernel, while cargo builds.
 pub(super) fn mac_dist(profile: Profile, out: &Path) -> Result<()> {

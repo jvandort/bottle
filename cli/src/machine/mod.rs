@@ -33,20 +33,15 @@
 //! that has its policy. `configure` gives a stopped machine another policy. `info` is this
 //! machine's: its memory and cores, what machines here can have, and its $BOTTLE_HOME.
 
-use std::env;
-use std::fs;
-use std::io::{self, Write};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use commands::{configure, create, delete, exec, rename, start, status};
+use lifecycle::Machine;
+use ls::ls;
 
-use bottle_agent_client::policy::Decide as _;
-use bottle_agent_client::wait_for_agent;
-use bottle_disk::build::Store;
-use bottle_formats::listing::{self, State};
+use std::io::{self};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::FAILED;
@@ -55,9 +50,7 @@ mod commands;
 mod lifecycle;
 mod ls;
 
-pub use commands::*;
-use lifecycle::*;
-use ls::*;
+pub use commands::{disks_in_use, info};
 
 pub const USAGE: &str = "create NAME --image IMAGE [OPTION]... | start NAME [--net-direct] \
     | stop NAME | status NAME [--json] | exec NAME [-t] [-u USER] [-w DIR] [-e NAME=VALUE]... [--] COMMAND [ARG]... \
@@ -168,6 +161,7 @@ type Image = (Vec<PathBuf>, Vec<(String, String)>, Option<Vec<String>>);
 
 #[cfg(test)]
 mod tests {
+    use super::lifecycle::Machine;
     use super::*;
 
     #[test]

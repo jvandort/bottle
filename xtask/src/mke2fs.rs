@@ -1,6 +1,13 @@
 //! mke2fs, built from e2fsprogs' release: what a distribution has to make disks with.
 
-use super::*;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::{env, fs};
+
+use super::linux::LinuxC;
+use super::{copy, fetch, run, step};
+
+use super::Result;
 
 /// e2fsprogs' release bottle builds mke2fs from: where it is, and its sha256 (from the signed
 /// sha256sums.asc beside it).

@@ -1,6 +1,13 @@
 //! `ls`: every machine, and what it was made with.
 
-use super::*;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
+
+use bottle_disk::build::Store;
+use bottle_formats::listing;
+
+use super::lifecycle::Machine;
+use super::machines;
 
 pub(super) fn ls(args: &[String]) -> io::Result<()> {
     let json = args.iter().any(|a| a == "--json");

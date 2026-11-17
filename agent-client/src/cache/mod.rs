@@ -523,8 +523,8 @@ mod tests {
 #[cfg(test)]
 mod online {
     use super::*;
-    use rustls::ClientConnection;
     use crate::ca::{certificate, in_home};
+    use rustls::ClientConnection;
 
     #[test]
     #[ignore]

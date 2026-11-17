@@ -1,6 +1,19 @@
 //! A machine: its directory, config and disk, and its VM started (the pid file's lock held) and stopped.
 
-use super::*;
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use std::{env, fs, io, thread};
+
+use bottle_agent_client::policy::Decide as _;
+use bottle_agent_client::wait_for_agent;
+use bottle_formats::listing::State;
+
+use super::{Config, STOP_TIMEOUT, machines, other};
 
 pub(super) struct Machine {
     pub(super) name: String,
