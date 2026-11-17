@@ -1,6 +1,23 @@
 //! One connection's requests, answered from the store where they can be, else from the host (kept, where they may be).
 
-use super::*;
+use std::io::Write;
+
+use crate::policy::CacheRule;
+
+use std::io::{self, BufReader};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::sync::Arc;
+
+use rustls::pki_types::ServerName;
+use rustls::{ClientConnection, StreamOwned};
+
+use crate::policy::Cached;
+
+use super::http::{
+    Head, Length, Refused, Response, bad_gateway, bad_request, body, body_length, host_of,
+    read_response, split_target, split_target_with, to_client, to_server, tokens, upstream_head,
+};
+use super::{CONNECT_TIMEOUT, Context, Duplex, IDLE, MAX_REDIRECTS, PERSONAL_HEADERS, REDIRECTS};
 
 /// Whether the response to a GET can be kept: a whole 200 of a file as it is, which the server
 /// doesn't say not to keep (or check first), unless what's at its path is `immutable`.

@@ -15,27 +15,24 @@
 //! repository's packages are), fetched by a request of its own, following redirects, so a file is
 //! the same whoever asked first. A cached host's cookies are never passed on.
 
+use http::{Refused, read_head, respond};
+use server::Server;
+
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::io::{self, BufReader, Read, Write};
+use std::net::IpAddr;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
-use rustls::{
-    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
-};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 use crate::ca::Authority;
-use crate::policy::{CacheRule, Cached};
+use crate::policy::Cached;
 use crate::store::Store;
 
 mod http;
 mod server;
-
-use http::*;
-use server::*;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// How long a connection waits for its next request, or for anything, before it's closed.
@@ -260,8 +257,11 @@ pub fn serve(
 
 #[cfg(test)]
 mod tests {
+    use super::http::{body, body_length, read_head, read_response};
+    use super::server::follow;
     use super::*;
     use crate::ca::{Authority, certificate, in_home};
+    use rustls::ClientConnection;
     use std::fs;
     use std::net::{Ipv4Addr, TcpListener};
 
@@ -523,6 +523,7 @@ mod tests {
 #[cfg(test)]
 mod online {
     use super::*;
+    use rustls::ClientConnection;
     use crate::ca::{certificate, in_home};
 
     #[test]

@@ -1,6 +1,9 @@
 //! HTTP/1.1 as the cache reads and writes it: heads, bodies by their framing, and what's passed on each way.
 
-use super::*;
+use std::collections::HashMap;
+use std::io::{self, BufRead, Read, Write};
+
+use super::{HOP_HEADERS, MAX_HEADER_BYTES, ROUTING_HEADERS};
 
 /// Why a request couldn't be served: what to answer (status, reason), if anything can be.
 pub(super) struct Refused(pub(super) Option<(u16, &'static str)>, pub(super) String);
