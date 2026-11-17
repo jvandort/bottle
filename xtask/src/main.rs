@@ -1,6 +1,6 @@
 //! `cargo xtask`: bottle's build steps past cargo's own, in one place.
 //!
-//!     cargo xtask dist [--target TRIPLE]... [--out DIR]
+//!     cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]
 //!
 //! Builds a distribution for each TRIPLE (this machine's own, if none is given) into
 //! $CARGO_TARGET_DIR's dist for this machine's own, or dist-TRIPLE for another (target/, if it isn't
@@ -27,6 +27,12 @@
 //! signed) only when what it's copied from has. One build of a distribution at a time: another
 //! waits for it. Whether one is needed at all, without starting cargo, is bin/bottle-build's, which
 //! builds every distribution this machine builds.
+//!
+//! With --release, a release's (by default, of every TRIPLE this machine builds): the same files, built with cargo's `distribution` profile (no
+//! symbols, optimized across crates: smaller, and slower to build) and Linux's mke2fs stripped,
+//! into $CARGO_TARGET_DIR's release-dists, as dist and dist-TRIPLE there (so a release's
+//! bottle-cli finds the other distributions it copies to runners among the release's, beside it).
+//! Without it, cargo's release profile, which the dev shims build, quickly.
 //! Every distribution has a manifest of its files (MANIFEST): each one's sha256 and name, as
 //! sha256sum writes them, which is what a runner's copy is compared with (bottle-cli's runner.rs).
 
@@ -41,8 +47,10 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("dist") => parse_dist(&args[1..]).and_then(|(targets, out)| dist(targets, out)),
-        _ => Err("usage: cargo xtask dist [--target TRIPLE]... [--out DIR]".into()),
+        Some("dist") => {
+            parse_dist(&args[1..]).and_then(|(profile, targets, out)| dist(profile, targets, out))
+        }
+        _ => Err("usage: cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -55,17 +63,61 @@ fn main() -> ExitCode {
 
 type Result<T> = std::result::Result<T, String>;
 
-fn parse_dist(args: &[String]) -> Result<(Vec<String>, Option<PathBuf>)> {
-    let (mut targets, mut out) = (vec![], None);
+/// How a distribution's built: as the dev shims have it, or as a release.
+#[derive(Clone, Copy, PartialEq)]
+enum Profile {
+    /// Cargo's release profile: quick to build.
+    Dev,
+    /// Cargo's distribution profile, and mke2fs stripped: small.
+    Release,
+}
+
+impl Profile {
+    /// How cargo's told to build with it.
+    fn cargo_args(self) -> &'static [&'static str] {
+        match self {
+            Profile::Dev => &["--release"],
+            Profile::Release => &["--profile", "distribution"],
+        }
+    }
+
+    /// The directory of cargo's target directory (or a target's in it) its builds are in.
+    fn dir(self) -> &'static str {
+        match self {
+            Profile::Dev => "release",
+            Profile::Release => "distribution",
+        }
+    }
+
+    /// Where its distributions go, in `target_dir`, by default (see out_of).
+    fn dists(self, target_dir: &Path) -> PathBuf {
+        match self {
+            Profile::Dev => target_dir.to_path_buf(),
+            Profile::Release => target_dir.join("release-dists"),
+        }
+    }
+
+    /// How `cargo xtask dist` is told to build with it.
+    fn flag(self) -> &'static str {
+        match self {
+            Profile::Dev => "",
+            Profile::Release => " --release",
+        }
+    }
+}
+
+fn parse_dist(args: &[String]) -> Result<(Profile, Vec<String>, Option<PathBuf>)> {
+    let (mut profile, mut targets, mut out) = (Profile::Dev, vec![], None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--release" => profile = Profile::Release,
             "--target" => targets.push(args.next().ok_or("--target needs a value")?.clone()),
             "--out" => out = Some(args.next().ok_or("--out needs a value")?.into()),
             _ => return Err(format!("unknown option {arg}")),
         }
     }
-    Ok((targets, out))
+    Ok((profile, targets, out))
 }
 
 /// What a distribution is built for.
@@ -108,10 +160,20 @@ fn out_of(target: &str, host: &str, target_dir: &Path) -> PathBuf {
     }
 }
 
-fn dist(mut targets: Vec<String>, out: Option<PathBuf>) -> Result<()> {
+fn dist(profile: Profile, mut targets: Vec<String>, out: Option<PathBuf>) -> Result<()> {
     let host = host();
+    // By default, this machine's own; a release, every one this machine builds (a Mac's, on a
+    // Mac, and Linux's, either way).
     if targets.is_empty() {
-        targets.push(host.clone());
+        match profile {
+            Profile::Dev => targets.push(host.clone()),
+            Profile::Release => targets.extend(
+                TARGETS
+                    .iter()
+                    .filter(|t| cfg!(target_os = "macos") || !t.ends_with("-apple-darwin"))
+                    .map(|t| t.to_string()),
+            ),
+        }
     }
     targets.dedup();
     if out.is_some() && targets.len() > 1 {
@@ -126,7 +188,8 @@ fn dist(mut targets: Vec<String>, out: Option<PathBuf>) -> Result<()> {
     let outs: Vec<(String, PathBuf)> = targets
         .iter()
         .map(|t| {
-            let out = out.clone().unwrap_or_else(|| out_of(t, &host, &target()));
+            let dists = profile.dists(&target());
+            let out = out.clone().unwrap_or_else(|| out_of(t, &host, &dists));
             (t.clone(), out)
         })
         .collect();
@@ -143,7 +206,15 @@ fn dist(mut targets: Vec<String>, out: Option<PathBuf>) -> Result<()> {
             .map_err(|e| format!("locking {}: {e}", out.display()))?;
         locks.push(lock);
     }
-    eprintln!("xtask: building bottle-cli for {}...", targets.join(", "));
+    let release = if profile == Profile::Release {
+        "a release of "
+    } else {
+        ""
+    };
+    eprintln!(
+        "xtask: building {release}bottle-cli for {}...",
+        targets.join(", ")
+    );
     let (mac, linux): (Vec<_>, Vec<_>) = outs
         .iter()
         .cloned()
@@ -152,12 +223,12 @@ fn dist(mut targets: Vec<String>, out: Option<PathBuf>) -> Result<()> {
         if !cfg!(target_os = "macos") {
             return Err(format!("{target}'s dist is built on a Mac"));
         }
-        mac_dist(out)?;
+        mac_dist(profile, out)?;
     }
     if !linux.is_empty() {
         match cfg!(target_os = "macos") {
-            true => builder::dist(&linux)?,
-            false => linux_dists(&linux)?,
+            true => builder::dist(profile, &linux)?,
+            false => linux_dists(profile, &linux)?,
         }
     }
     for (_, out) in &outs {
@@ -189,13 +260,14 @@ fn manifest(out: &Path) -> Result<()> {
 }
 
 /// The agent, a static Linux build for each of `arches` (the VMs' architectures), by one cargo.
-fn agents(arches: &[&str]) -> Result<Vec<PathBuf>> {
+fn agents(profile: Profile, arches: &[&str]) -> Result<Vec<PathBuf>> {
     let guests: Vec<String> = arches
         .iter()
         .map(|arch| format!("{arch}-unknown-linux-musl"))
         .collect();
     step(&format!("the agent, for {}", guests.join(", ")));
-    let mut args = vec!["build", "--release", "-p", "bottle-agent"];
+    let mut args = vec!["build", "-p", "bottle-agent"];
+    args.extend(profile.cargo_args());
     for guest in &guests {
         args.extend(["--target", guest]);
     }
@@ -207,16 +279,28 @@ fn agents(arches: &[&str]) -> Result<Vec<PathBuf>> {
     })?;
     Ok(guests
         .iter()
-        .map(|guest| target().join(guest).join("release/bottle-agent"))
+        .map(|guest| {
+            target()
+                .join(guest)
+                .join(profile.dir())
+                .join("bottle-agent")
+        })
         .collect())
 }
 
 /// The Mac's distribution, built on a Mac. mke2fs and the kernel, while cargo builds.
-fn mac_dist(out: &Path) -> Result<()> {
+fn mac_dist(profile: Profile, out: &Path) -> Result<()> {
     std::thread::scope(|scope| {
-        let beside =
-            scope.spawn(|| beside_cli("aarch64-apple-darwin", env::consts::ARCH, None, out));
-        let built = mac_cli(out);
+        let beside = scope.spawn(|| {
+            beside_cli(
+                profile,
+                "aarch64-apple-darwin",
+                env::consts::ARCH,
+                None,
+                out,
+            )
+        });
+        let built = mac_cli(profile, out);
         let beside = beside
             .join()
             .map_err(|_| "building mke2fs or the kernel panicked")?;
@@ -225,14 +309,13 @@ fn mac_dist(out: &Path) -> Result<()> {
 }
 
 /// The Mac's bottle-cli, the agent built in, signed.
-fn mac_cli(out: &Path) -> Result<()> {
-    let agent = agents(&[env::consts::ARCH])?.remove(0);
+fn mac_cli(profile: Profile, out: &Path) -> Result<()> {
+    let agent = agents(profile, &[env::consts::ARCH])?.remove(0);
     step("bottle-cli, the agent built in");
-    cargo(
-        &["build", "--release", "-p", "bottle-cli"],
-        &[("BOTTLE_EMBED_AGENT".into(), agent.into())],
-    )?;
-    let built = target().join("release/bottle-cli");
+    let mut args = vec!["build", "-p", "bottle-cli"];
+    args.extend(profile.cargo_args());
+    cargo(&args, &[("BOTTLE_EMBED_AGENT".into(), agent.into())])?;
+    let built = target().join(profile.dir()).join("bottle-cli");
     let cli = out.join("bottle-cli");
     if copy(&built, &cli)? {
         step("signing bottle-cli");
@@ -248,10 +331,26 @@ fn mac_cli(out: &Path) -> Result<()> {
 }
 
 /// What a distribution has beside bottle-cli, none of it cargo's: mke2fs, built for `triple`, and
-/// the kernel for `arch`, the VMs' architecture.
-fn beside_cli(triple: &str, arch: &str, c: Option<&LinuxC>, out: &Path) -> Result<()> {
+/// the kernel for `arch`, the VMs' architecture. A release's Linux mke2fs is stripped (static, it
+/// carries musl's symbols too); a Mac's links libSystem, and is left as the linker signed it.
+fn beside_cli(
+    profile: Profile,
+    triple: &str,
+    arch: &str,
+    c: Option<&LinuxC>,
+    out: &Path,
+) -> Result<()> {
     let mke2fs = mke2fs(&target().join("mke2fs"), triple, c)?;
-    copy(&mke2fs, &out.join("mke2fs"))?;
+    let copied = out.join("mke2fs");
+    if copy(&mke2fs, &copied)?
+        && profile == Profile::Release
+        && let Some(c) = c
+    {
+        step(&format!("stripping {triple}'s mke2fs"));
+        run(Command::new(&c.strip).arg(&copied))?;
+        // Stripping changed it: its time says again what it's a copy of (see copy).
+        same_time(&mke2fs, &copied)?;
+    }
     kernel(arch, &target().join("kernel"), out)
 }
 
@@ -260,7 +359,7 @@ fn beside_cli(triple: &str, arch: &str, c: Option<&LinuxC>, out: &Path) -> Resul
 /// all of them, so what they share (build scripts, proc macros, for this machine) is built once and
 /// the rest in parallel, as cargo sees fit; each's mke2fs and kernel meanwhile, on threads of their
 /// own.
-fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
+fn linux_dists(profile: Profile, dists: &[(String, PathBuf)]) -> Result<()> {
     let arches: Vec<&str> = dists
         .iter()
         .map(|(t, _)| t.split('-').next().unwrap())
@@ -275,10 +374,10 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
             .zip(&cs)
             .zip(&arches)
             .map(|(((triple, out), c), arch)| {
-                scope.spawn(move || beside_cli(triple, arch, Some(c), out))
+                scope.spawn(move || beside_cli(profile, triple, arch, Some(c), out))
             })
             .collect();
-        let built = linux_clis(dists, &arches, &cs);
+        let built = linux_clis(profile, dists, &arches, &cs);
         let beside = beside
             .into_iter()
             .map(|b| {
@@ -291,14 +390,20 @@ fn linux_dists(dists: &[(String, PathBuf)]) -> Result<()> {
 }
 
 /// Linux's bottle-clis, for each of `dists`' targets, by one cargo, each with its agent built in.
-fn linux_clis(dists: &[(String, PathBuf)], arches: &[&str], cs: &[LinuxC]) -> Result<()> {
-    let agents = agents(arches)?;
+fn linux_clis(
+    profile: Profile,
+    dists: &[(String, PathBuf)],
+    arches: &[&str],
+    cs: &[LinuxC],
+) -> Result<()> {
+    let agents = agents(profile, arches)?;
     let triples: Vec<&str> = dists.iter().map(|(t, _)| t.as_str()).collect();
     step(&format!(
         "bottle-cli, for {}, the agent built in",
         triples.join(", ")
     ));
-    let mut args = vec!["build", "--release", "-p", "bottle-cli"];
+    let mut args = vec!["build", "-p", "bottle-cli"];
+    args.extend(profile.cargo_args());
     let mut env: Vec<(String, OsString)> = vec![];
     for ((triple, c), agent) in triples.iter().zip(cs).zip(&agents) {
         args.extend(["--target", triple]);
@@ -315,7 +420,7 @@ fn linux_clis(dists: &[(String, PathBuf)], arches: &[&str], cs: &[LinuxC]) -> Re
     cargo(&args, &env)?;
     for (triple, out) in dists {
         copy(
-            &target().join(triple).join("release/bottle-cli"),
+            &target().join(triple).join(profile.dir()).join("bottle-cli"),
             &out.join("bottle-cli"),
         )?;
     }
@@ -328,6 +433,7 @@ fn linux_clis(dists: &[(String, PathBuf)], arches: &[&str], cs: &[LinuxC]) -> Re
 struct LinuxC {
     gcc: String,
     ar: String,
+    strip: String,
     /// musl's specs for gcc.
     specs: PathBuf,
     /// Where the kernel's headers are: linux/, asm-generic/ and asm/.
@@ -344,16 +450,18 @@ impl LinuxC {
             _ => "arm64",
         };
         let cross = arch != env::consts::ARCH;
-        let (gcc, ar, include, asm) = match cross {
+        let (gcc, ar, strip, include, asm) = match cross {
             true => (
                 format!("{gnu}-gcc"),
                 format!("{gnu}-ar"),
+                format!("{gnu}-strip"),
                 PathBuf::from(format!("/usr/{gnu}/include")),
                 PathBuf::from(format!("/usr/{gnu}/include/asm")),
             ),
             false => (
                 "gcc".into(),
                 "ar".into(),
+                "strip".into(),
                 PathBuf::from("/usr/include"),
                 PathBuf::from(format!("/usr/include/{gnu}/asm")),
             ),
@@ -376,6 +484,7 @@ impl LinuxC {
         Ok(LinuxC {
             gcc,
             ar,
+            strip,
             specs,
             headers: [include.join("linux"), include.join("asm-generic"), asm],
             host: cross.then(|| format!("{arch}-linux-musl")),

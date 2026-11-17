@@ -27,7 +27,7 @@ use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
-use crate::{Result, mac_dist, out_of, root, run, step, target};
+use crate::{Profile, Result, mac_dist, out_of, root, run, step, target};
 
 /// The builder's distribution of Debian.
 const DEBIAN: &str = "debian:trixie-slim";
@@ -43,10 +43,11 @@ const MEM_MIB: &str = "4096";
 /// Linux's targets, all built in the builder.
 const ARCHES: [&str; 2] = ["aarch64", "x86_64"];
 
-/// Linux's distributions, each target's into its directory, built in the builder.
-pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
+/// Linux's distributions, each target's into its directory, built in the builder, as `profile`
+/// has them. The builder's run by this Mac's dev distribution, whichever: it's quick to build.
+pub fn dist(profile: Profile, dists: &[(String, PathBuf)]) -> Result<()> {
     let mac = root().join("target/dist");
-    mac_dist(&mac)?;
+    mac_dist(Profile::Dev, &mac)?;
     let cli = mac.join("bottle-cli");
     // Its own home, so its images are in its own default store.
     let home = target().join("builder");
@@ -103,7 +104,7 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
         ]))?;
     }
     run(&mut bottle_cli(&["start", &machine, "--net-direct"]))?;
-    let built = build_in(&bottle_cli, &machine, dists);
+    let built = build_in(profile, &bottle_cli, &machine, dists);
     let stopped = run(&mut bottle_cli(&["stop", &machine]));
     built.and(stopped)?;
     // The stages the builder's machine isn't made of.
@@ -113,6 +114,7 @@ pub fn dist(dists: &[(String, PathBuf)]) -> Result<()> {
 /// One `cargo xtask dist` in the builder, for every target of `dists`; each distribution, out of
 /// it, into its directory.
 fn build_in(
+    profile: Profile,
     bottle_cli: &dyn Fn(&[&str]) -> Command,
     machine: &str,
     dists: &[(String, PathBuf)],
@@ -139,15 +141,17 @@ fn build_in(
     };
     let targets: String = triples.iter().map(|t| format!(" --target {t}")).collect();
     // Its progress on stderr: stdout is the tars, after.
-    run(
-        exec(&["sh", "-c", &format!("cargo xtask dist{targets} 1>&2")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null()),
-    )?;
+    run(exec(&[
+        "sh",
+        "-c",
+        &format!("cargo xtask dist{}{targets} 1>&2", profile.flag()),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null()))?;
     // Where that put each: as this Mac's xtask would, the VM's architecture being this Mac's.
     let vm = format!("{}-unknown-linux-musl", env::consts::ARCH);
     for (triple, out) in dists {
-        let there = out_of(triple, &vm, &work);
+        let there = out_of(triple, &vm, &profile.dists(&work));
         take_out(&exec, &there, out)?;
     }
     Ok(())
