@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -35,15 +35,27 @@ const CGI_DROP: [&str; 4] = [
 ];
 
 /// Answers a request for `remote` of `repo`; an outcome for the log.
+/// A request for a remote: the path under it, its head, query and body.
+pub struct Asked<'a> {
+    pub path_info: &'a str,
+    pub head: &'a Head,
+    pub query: &'a str,
+    pub body: &'a [u8],
+}
+
 pub fn serve(
+    pulls: &PullThroughs,
     repo: &Served,
     remote: &Remote,
-    path_info: &str,
-    head: &Head,
-    query: &str,
-    body: &[u8],
+    asked: &Asked,
     writer: &mut impl Write,
 ) -> String {
+    let Asked {
+        path_info,
+        head,
+        query,
+        body,
+    } = *asked;
     let git_dir = repo.git_dir.as_ref().expect("routed only with a repo");
     let push = path_info.contains("git-receive-pack") || query.contains("service=git-receive-pack");
     if push && remote.push.is_none() {
@@ -72,7 +84,7 @@ pub fn serve(
     } else {
         if path_info.contains("info/refs") && remote.fetch == UPSTREAM {
             // Once per fetch, at its start.
-            pull_through(git_dir);
+            pull_through(pulls, git_dir);
         }
         if remote.fetch == UPSTREAM {
             match write_view(git_dir, &default_view_dir(git_dir)) {
@@ -390,13 +402,16 @@ struct Pulls {
     changed: Condvar,
 }
 
-static PULLS: LazyLock<Mutex<HashMap<PathBuf, Arc<Pulls>>>> = LazyLock::new(Default::default);
+/// Every repo's pull-through fetches, by its git dir: folio serve's (Server's).
+#[derive(Default)]
+pub struct PullThroughs(Mutex<HashMap<PathBuf, Arc<Pulls>>>);
 
 /// `git fetch origin` in the hub, one that starts after this was asked for: fetches of one repo
 /// share, so each sees origin as it was when it asked, and a repo has at most one fetch running and
 /// one waiting, however many bottles fetch at once.
-pub fn pull_through(git_dir: &Path) {
-    let pulls = PULLS
+pub fn pull_through(pulls: &PullThroughs, git_dir: &Path) {
+    let pulls = pulls
+        .0
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(git_dir.to_path_buf())

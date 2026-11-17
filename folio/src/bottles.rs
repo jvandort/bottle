@@ -159,6 +159,8 @@ pub struct Status {
 pub struct Known {
     statuses: RefCell<BTreeMap<String, Status>>,
     running: RefCell<BTreeSet<String>>,
+    /// folio serve, as this command has seen it.
+    pub serve: daemon::Serve,
 }
 
 impl Known {
@@ -733,7 +735,7 @@ fn run_machine(
     )?;
     bottle.network_version = NETWORK;
     save(&bottle, None)?;
-    start_machine(&bottle)?;
+    start_machine(known, &bottle)?;
     verify_contract(&bottle)?;
     point_at_host(&bottle)?;
     init_mounts(&bottle)?;
@@ -800,8 +802,8 @@ fn let_in(known: &Known, bottle: &Bottle, grant: &SshGrant) -> Result<(), String
 /// Start the bottle's machine, folio serve answering what it routes there as this bottle's, its
 /// credentials read now. bottle-cli makes the machine's caching CA as it starts, for its policy's
 /// hosts, and gives it to the bottle to trust (the base image's entrypoint does).
-fn start_machine(bottle: &Bottle) -> Result<(), String> {
-    daemon::bind(binding(bottle))?;
+fn start_machine(known: &Known, bottle: &Bottle) -> Result<(), String> {
+    known.serve.bind(binding(bottle))?;
     runner_of(bottle)?.start(bottle.machine())
 }
 
@@ -1159,7 +1161,7 @@ pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
     let mut bottle = get(name)?;
     if known.running(name) {
         // Running: folio serve, if it had stopped, binds it again as it starts.
-        daemon::start()?;
+        known.serve.start()?;
         return Ok(bottle);
     }
     if bottle.status != Made::Ready {
@@ -1183,7 +1185,7 @@ pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
             bottle.network_version = NETWORK;
             save(&bottle, None)?;
         }
-        start_machine(&bottle)?;
+        start_machine(known, &bottle)?;
         crate::log::log!("bottles", "{}: started", bottle.name);
         if given {
             // What's set up in it for its policy, again; one made with this policy has all it needs
@@ -1193,7 +1195,7 @@ pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
         }
     } else {
         // Running: folio serve, if it had stopped, binds it again as it starts.
-        daemon::start()?;
+        known.serve.start()?;
     }
     known.started(name);
     Ok(bottle)
@@ -1361,7 +1363,7 @@ pub fn delete(known: &Known, name: &str) -> Result<(), String> {
     // The registry says the machine is the bottle's: a machine has no labels to ask.
     let runner = runner_of(&bottle)?;
     let mut failures = Vec::new();
-    if let Err(e) = daemon::release(&bottle.name) {
+    if let Err(e) = known.serve.release(&bottle.name) {
         failures.push(format!("egress: {e}"));
     }
     if let Err(e) = runner.delete(bottle.machine()) {

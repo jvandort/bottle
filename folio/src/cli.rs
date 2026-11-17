@@ -1270,7 +1270,7 @@ fn serve_start(matches: &ArgMatches) -> Outcome {
     if !flag(matches, "foreground") {
         println!(
             "{}",
-            if daemon::start()? {
+            if daemon::Serve::default().start()? {
                 "Started folio serve"
             } else {
                 "folio serve is already running"

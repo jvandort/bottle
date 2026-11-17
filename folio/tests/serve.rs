@@ -266,7 +266,10 @@ fn its_control_socket_says_its_code_binds_restores_and_shuts_it_down() {
     let unknown = serve.control(json!({"op": "nope"})).unwrap();
     assert_eq!(unknown["ok"], false);
     assert!(
-        unknown["error"].as_str().unwrap().contains("unknown variant `nope`"),
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown variant `nope`"),
         "{unknown}"
     );
     let refused = serve

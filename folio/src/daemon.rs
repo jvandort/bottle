@@ -11,13 +11,13 @@
 //! (bottles::bind_messages), to answer before anyone else. A command finds it running this
 //! program, or restarts it first: one running another may not know what's asked of it.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,7 @@ pub enum Request {
     /// What code it runs: Reply's code.
     Ping,
     /// Answer a bottle's machine.
-    Bind(Bind),
+    Bind(Box<Bind>),
     /// Stop answering a bottle's machine: with none left, folio serve stops.
     Release {
         bottle: String,
@@ -158,39 +158,49 @@ pub fn bind_message(mut bind: Bind) -> Result<Request, String> {
     if bind.runner != crate::runners::LOCAL {
         bind.forwards = crate::runners::get(&bind.runner)?.forwards()?;
     }
-    Ok(Request::Bind(bind))
+    Ok(Request::Bind(Box::new(bind)))
 }
 
-/// Have folio serve answer a bottle's machine, starting folio serve if it isn't running. Its
-/// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
-/// folio serve is.
-pub fn bind(bind: Bind) -> Result<(), String> {
-    request(&bind_message(bind)?, true).map(|_| ())
+/// folio serve, as a command talks to it: whether the command has seen it running this program
+/// (asked once a command, see ensure_current). Made by each command, as part of what it knows of
+/// bottles (bottles::Known), or for `folio serve start`.
+#[derive(Default)]
+pub struct Serve {
+    current: Cell<bool>,
 }
 
-/// Stop answering `bottle`'s machine, if folio serve is running at all.
-pub fn release(bottle: &str) -> Result<(), String> {
-    let release = Request::Release {
-        bottle: bottle.into(),
-    };
-    request(&release, false).map(|_| ())
-}
+impl Serve {
+    /// Have folio serve answer a bottle's machine, starting folio serve if it isn't running. Its
+    /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
+    /// folio serve is.
+    pub fn bind(&self, bind: Bind) -> Result<(), String> {
+        self.request(&bind_message(bind)?, true).map(|_| ())
+    }
 
-/// Start folio serve in the background. False if it was already running this program.
-pub fn start() -> Result<bool, String> {
-    match send(&Request::Ping, DEFAULT_TIMEOUT) {
-        Err(Failure::NotRunning) => {
-            start_daemon()?;
-            Ok(true)
+    /// Stop answering `bottle`'s machine, if folio serve is running at all.
+    pub fn release(&self, bottle: &str) -> Result<(), String> {
+        let release = Request::Release {
+            bottle: bottle.into(),
+        };
+        self.request(&release, false).map(|_| ())
+    }
+
+    /// Start folio serve in the background. False if it was already running this program.
+    pub fn start(&self) -> Result<bool, String> {
+        match send(&Request::Ping, DEFAULT_TIMEOUT) {
+            Err(Failure::NotRunning) => {
+                start_daemon()?;
+                Ok(true)
+            }
+            // On its way out: this one starts once it's gone.
+            Err(Failure::Closed) => {
+                wait_gone();
+                start_daemon()?;
+                Ok(true)
+            }
+            Err(Failure::Other(e)) => Err(e),
+            Ok(_) => self.ensure_current(),
         }
-        // On its way out: this one starts once it's gone.
-        Err(Failure::Closed) => {
-            wait_gone();
-            start_daemon()?;
-            Ok(true)
-        }
-        Err(Failure::Other(e)) => Err(e),
-        Ok(_) => ensure_current(),
     }
 }
 
@@ -216,37 +226,36 @@ pub fn stop() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Whether this process has seen folio serve running this program: asked once a command.
-static CURRENT: AtomicBool = AtomicBool::new(false);
-
 /// folio serve running this program, if it's running: one running another is restarted first.
 /// Running bottles keep their tokens, and the new folio serve binds them again as it starts, so
 /// they lose only the connections they open in between. Returns whether it restarted it.
-fn ensure_current() -> Result<bool, String> {
-    if CURRENT.load(Ordering::Relaxed) {
-        return Ok(false);
-    }
-    let reply = match send(&Request::Ping, DEFAULT_TIMEOUT) {
-        Err(Failure::NotRunning) => return Ok(false), // not running: whoever starts it starts this one
-        Err(Failure::Closed) => {
-            wait_gone(); // on its way out: whoever starts it next starts this one
+impl Serve {
+    fn ensure_current(&self) -> Result<bool, String> {
+        if self.current.get() {
             return Ok(false);
         }
-        Err(Failure::Other(e)) => return Err(e),
-        Ok(reply) => reply,
-    };
-    CURRENT.store(true, Ordering::Relaxed);
-    if reply.code.as_deref() == Some(code_hash().as_str()) {
-        return Ok(false);
+        let reply = match send(&Request::Ping, DEFAULT_TIMEOUT) {
+            Err(Failure::NotRunning) => return Ok(false), // not running: whoever starts it starts this one
+            Err(Failure::Closed) => {
+                wait_gone(); // on its way out: whoever starts it next starts this one
+                return Ok(false);
+            }
+            Err(Failure::Other(e)) => return Err(e),
+            Ok(reply) => reply,
+        };
+        self.current.set(true);
+        if reply.code.as_deref() == Some(code_hash().as_str()) {
+            return Ok(false);
+        }
+        crate::log::say!(
+            "daemon",
+            "folio: folio serve was running other code; restarting it"
+        );
+        stop()?;
+        wait_gone();
+        start_daemon()?;
+        Ok(true)
     }
-    crate::log::say!(
-        "daemon",
-        "folio: folio serve was running other code; restarting it"
-    );
-    stop()?;
-    wait_gone();
-    start_daemon()?;
-    Ok(true)
 }
 
 /// Until the folio serve that's stopping is gone, or would the new one find it and leave. Until
@@ -263,43 +272,45 @@ fn wait_gone() {
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn request(message: &Request, start: bool) -> Result<Reply, String> {
-    ensure_current()?;
-    let op = match message {
-        Request::Ping => "ping",
-        Request::Bind(_) => "bind",
-        Request::Release { .. } => "release",
-        Request::Shutdown => "shutdown",
-    };
-    let reply = match send(message, DEFAULT_TIMEOUT) {
-        Err(Failure::NotRunning) if !start => return Ok(Reply::ok()),
-        Err(Failure::NotRunning) => {
-            start_daemon()?;
-            send(message, DEFAULT_TIMEOUT)
+impl Serve {
+    fn request(&self, message: &Request, start: bool) -> Result<Reply, String> {
+        self.ensure_current()?;
+        let op = match message {
+            Request::Ping => "ping",
+            Request::Bind(_) => "bind",
+            Request::Release { .. } => "release",
+            Request::Shutdown => "shutdown",
+        };
+        let reply = match send(message, DEFAULT_TIMEOUT) {
+            Err(Failure::NotRunning) if !start => return Ok(Reply::ok()),
+            Err(Failure::NotRunning) => {
+                start_daemon()?;
+                send(message, DEFAULT_TIMEOUT)
+            }
+            other => other,
+        };
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(Failure::Closed) => {
+                return Err(format!(
+                    "folio serve closed the connection without answering {op}: is it stopping? See {}",
+                    log_path().display()
+                ));
+            }
+            Err(Failure::NotRunning) => {
+                return Err(format!(
+                    "folio serve didn't start; see {}",
+                    log_path().display()
+                ));
+            }
+            Err(Failure::Other(e)) => return Err(e),
+        };
+        if !reply.ok {
+            let error = reply.error.as_deref().unwrap_or("request failed");
+            return Err(format!("folio serve: {error}"));
         }
-        other => other,
-    };
-    let reply = match reply {
-        Ok(reply) => reply,
-        Err(Failure::Closed) => {
-            return Err(format!(
-                "folio serve closed the connection without answering {op}: is it stopping? See {}",
-                log_path().display()
-            ));
-        }
-        Err(Failure::NotRunning) => {
-            return Err(format!(
-                "folio serve didn't start; see {}",
-                log_path().display()
-            ));
-        }
-        Err(Failure::Other(e)) => return Err(e),
-    };
-    if !reply.ok {
-        let error = reply.error.as_deref().unwrap_or("request failed");
-        return Err(format!("folio serve: {error}"));
+        Ok(reply)
     }
-    Ok(reply)
 }
 
 enum Failure {

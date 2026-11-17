@@ -182,6 +182,8 @@ pub struct Server {
     control: PathBuf,
     services: Vec<(String, PathBuf)>,
     code: String,
+    /// Its repos' pull-through fetches.
+    pulls: git::PullThroughs,
 }
 
 impl Server {
@@ -316,7 +318,7 @@ impl Server {
                     code: Some(self.code.clone()),
                     ..Reply::ok()
                 },
-                Request::Bind(bind) => match Bottle::from_bind(bind) {
+                Request::Bind(bind) => match Bottle::from_bind(*bind) {
                     Ok(bottle) => {
                         self.bind(bottle);
                         Reply::ok()
@@ -490,6 +492,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         control: control.clone(),
         services: services.clone(),
         code: code(),
+        pulls: git::PullThroughs::default(),
     });
     let mut routed = Vec::new();
     for (_, path) in &services {
@@ -527,7 +530,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
                 continue;
             };
             let name = bind.bottle.clone();
-            match Bottle::from_bind(bind) {
+            match Bottle::from_bind(*bind) {
                 Ok(bottle) => server.bind(bottle),
                 Err(e) => log!(
                     "bottle.daemon",

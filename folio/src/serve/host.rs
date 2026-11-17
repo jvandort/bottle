@@ -178,7 +178,13 @@ pub fn serve(
     let _ = writer.set_read_timeout(None);
     let (path, query) = head.path_and_query();
     let outcome = if let Some((repo, remote, path_info)) = route(&bottle.repos, path) {
-        git::serve(repo, remote, &path_info, &head, query, &body, &mut writer)
+        let asked = git::Asked {
+            path_info: &path_info,
+            head: &head,
+            query,
+            body: &body,
+        };
+        git::serve(&server.pulls, repo, remote, &asked, &mut writer)
     } else if path == MESSAGES_PATH {
         message(server, bottle, &head, &body, &mut writer)
     } else if path == BOTTLES_PATH {
