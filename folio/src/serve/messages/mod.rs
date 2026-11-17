@@ -53,7 +53,21 @@ impl Service for Messages {
             Ok(request) => request,
             Err(outcome) => return Flow::new("messages", outcome),
         };
-        if head.method != "POST" || head.path_and_query().0 != "/" {
+        self.answer(caller, &head, head.path_and_query().0, &body, &mut writer)
+    }
+}
+
+impl Messages {
+    /// Answers a request read whole, for `path`.
+    pub fn answer(
+        &self,
+        caller: &Caller,
+        head: &http::Head,
+        path: &str,
+        body: &[u8],
+        mut writer: &mut UnixStream,
+    ) -> Flow {
+        if head.method != "POST" || path != "/" {
             http::respond(
                 &mut writer,
                 405,
@@ -63,7 +77,7 @@ impl Service for Messages {
             );
             return Flow::new("messages", "bad-message");
         }
-        let message = match parse_message(&body) {
+        let message = match parse_message(body) {
             Ok(message) => message,
             Err(problem) => {
                 http::respond(

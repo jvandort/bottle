@@ -101,6 +101,34 @@ fn its_services_answer_a_bottle_each_on_its_socket_and_it_stops_with_its_last() 
             .flow("git", [192, 0, 2, 1], 80, None, false, "stranger", fetch)
             .is_empty()
     );
+    // A bottle made before its services had names reaches them at bottle.host, as it did.
+    let old = b"GET /git/workspace/origin/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: bottle.host\r\n\r\n";
+    let answer = String::from_utf8_lossy(&serve.flow(
+        "host",
+        [192, 0, 2, 1],
+        80,
+        Some("bottle.host"),
+        false,
+        "m1",
+        old,
+    ))
+    .into_owned();
+    assert!(
+        answer.starts_with("HTTP/1.1 200") && answer.contains(&format!("{head} refs/heads/main")),
+        "{answer}"
+    );
+    let list = String::from_utf8_lossy(&serve.flow(
+        "host",
+        [192, 0, 2, 1],
+        80,
+        None,
+        false,
+        "m1",
+        b"GET /bottles HTTP/1.1\r\n\r\n",
+    ))
+    .into_owned();
+    assert!(list.starts_with("HTTP/1.1 403"), "{list}");
+
     // A request for no remote of its own is answered so.
     let answer = String::from_utf8_lossy(&serve.flow(
         "git",

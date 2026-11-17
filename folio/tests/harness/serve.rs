@@ -28,7 +28,7 @@ impl Serve {
             .arg("--control")
             .arg(dir.join("serve.sock"))
             .args(
-                ["git", "messages", "bottles", "ssh", "credentials"]
+                ["git", "messages", "bottles", "ssh", "credentials", "host"]
                     .iter()
                     .flat_map(|s| {
                         [

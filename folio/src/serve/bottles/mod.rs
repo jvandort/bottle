@@ -18,7 +18,20 @@ impl Service for Bottles {
             Ok(request) => request,
             Err(outcome) => return Flow::new("bottles", outcome),
         };
-        if head.method != "GET" || head.path_and_query().0 != "/" {
+        self.answer(caller, &head, head.path_and_query().0, &mut writer)
+    }
+}
+
+impl Bottles {
+    /// Answers a request read whole, for `path`.
+    pub fn answer(
+        &self,
+        caller: &Caller,
+        head: &http::Head,
+        path: &str,
+        mut writer: &mut UnixStream,
+    ) -> Flow {
+        if head.method != "GET" || path != "/" {
             http::respond(
                 &mut writer,
                 405,

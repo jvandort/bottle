@@ -42,10 +42,10 @@ const CGI_DROP: [&str; 4] = [
 /// The most of a request's body read: a push's pack.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
-/// The git service, and its repos' pull-through fetches.
-#[derive(Default)]
+/// The git service, and its repos' pull-through fetches (one set, however many share the service).
+#[derive(Clone, Default)]
 pub struct Git {
-    pulls: PullThroughs,
+    pulls: Arc<PullThroughs>,
 }
 
 impl Service for Git {
@@ -55,26 +55,32 @@ impl Service for Git {
             Err(outcome) => return Flow::new("git", outcome),
         };
         let (path, query) = head.path_and_query();
+        self.answer(caller, &head, path, query, &body, &mut writer)
+    }
+}
+
+impl Git {
+    /// Answers a request read whole, for `path`.
+    pub fn answer(
+        &self,
+        caller: &Caller,
+        head: &Head,
+        path: &str,
+        query: &str,
+        body: &[u8],
+        writer: &mut UnixStream,
+    ) -> Flow {
         let Some((repo, remote, path_info)) = route(&caller.bottle.repos, path) else {
-            http::respond(
-                &mut writer,
-                404,
-                "Not Found",
-                b"no such remote\n",
-                "text/plain",
-            );
+            http::respond(writer, 404, "Not Found", b"no such remote\n", "text/plain");
             return Flow::new("git", "not-found");
         };
         let asked = Asked {
             path_info: &path_info,
-            head: &head,
+            head,
             query,
-            body: &body,
+            body,
         };
-        Flow::new(
-            "git",
-            answer(&self.pulls, repo, remote, &asked, &mut writer),
-        )
+        Flow::new("git", answer(&self.pulls, repo, remote, &asked, writer))
     }
 }
 

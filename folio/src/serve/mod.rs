@@ -26,6 +26,7 @@
 mod bottles;
 pub(crate) mod credentials;
 mod git;
+mod host;
 mod http;
 mod messages;
 mod proxy;
@@ -398,10 +399,12 @@ impl Bound for Server {
     }
 }
 
-/// The service named `name` (the name of a --service), if there's one.
-fn service_named(name: &str) -> Option<Box<dyn Service>> {
+/// The service named `name` (the name of a --service), if there's one; `git`, the git service,
+/// shared with bottle.host's (host.rs).
+fn service_named(name: &str, git: &git::Git) -> Option<Box<dyn Service>> {
     Some(match name {
-        "git" => Box::new(git::Git::default()),
+        "git" => Box::new(git.clone()),
+        "host" => Box::new(host::Host { git: git.clone() }),
         "messages" => Box::new(messages::Messages),
         "bottles" => Box::new(bottles::Bottles),
         "ssh" => Box::new(ssh::Ssh),
@@ -510,8 +513,9 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         code: crate::control::code(),
     });
     let mut routed = Vec::new();
+    let git = git::Git::default();
     for (name, path) in &services {
-        let service: Arc<dyn Service> = service_named(name)
+        let service: Arc<dyn Service> = service_named(name, &git)
             .ok_or_else(|| io::Error::other(format!("no service {name}")))?
             .into();
         let listener = listen(path)?;

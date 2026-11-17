@@ -30,7 +30,8 @@ const MAX_SOCKET_PATH: usize = 100;
 /// Its log, in folio's home.
 const LOG: &str = "serve";
 /// What it serves, each on a socket of its own, which a machine's routes name (services::network).
-const SERVICES: [&str; 5] = ["git", "messages", "bottles", "ssh", "credentials"];
+/// (host: bottle.host, for bottles made with a policy before 4, until they're next started.)
+const SERVICES: [&str; 6] = ["git", "messages", "bottles", "ssh", "credentials", "host"];
 
 pub fn socket_path(name: &str) -> PathBuf {
     let path = crate::home().join(name);
