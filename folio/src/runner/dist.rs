@@ -1,6 +1,10 @@
 //! Which of bottle-cli's distributions a runner gets, and what one has (its manifest).
 
-use super::*;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::{env, fs, io};
+
+use super::other;
 
 /// sha256sum's lines (a sha256, two spaces, a name), by name.
 pub(super) fn sums<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {

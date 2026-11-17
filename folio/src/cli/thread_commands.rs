@@ -1,6 +1,18 @@
 //! The thread commands: new, claude/shell, exec, cp, pause, notes, broker, rename, list, delete.
 
-use super::*;
+use std::io::{IsTerminal, Write};
+use std::path::Path;
+
+use clap::ArgMatches;
+
+use crate::bottles::State;
+use crate::engine::Engine;
+use crate::repos::Repo;
+use crate::threads::{self, Settings, Thread};
+use crate::{broker, notes, obsidian, picker, prompt};
+
+use super::output::{ago, human_size, table};
+use super::{Outcome, arg, args, current, flag};
 
 pub(super) fn exec(engine: &Engine, matches: &ArgMatches, sidecar: bool, command: &str) -> Outcome {
     let repo = current()?;

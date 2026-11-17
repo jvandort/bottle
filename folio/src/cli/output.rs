@@ -1,6 +1,6 @@
 //! How folio shows things: tables, sizes, times.
 
-use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn human_size(size: u64) -> String {
     for (unit, scale) in [("G", 1u64 << 30), ("M", 1 << 20), ("K", 1 << 10)] {

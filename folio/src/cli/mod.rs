@@ -1,30 +1,25 @@
 //! What you can type, and what happens when you do.
 
-use std::io::{IsTerminal, Write};
-use std::path::Path;
+use admin::{auth_list, auth_remove, auth_set, repo_list, runner_command, serve_start, serve_stop};
+use commands::command;
+use configure::{configure, sidecar_configure, sidecar_remove, sidecar_shell};
+use thread_commands::{
+    attach, broker_command, cp, delete, exec, list, new, notes_command, pause, rename,
+};
+
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::ArgMatches;
 
-use crate::bottles::{self, State};
 use crate::engine::Engine;
 use crate::repos::{self, Repo};
-use crate::specs::Spec;
-use crate::threads::{self, Settings, Thread};
-use crate::{auth, broker, daemon, engine, features, notes, obsidian, picker, prompt, runners};
+use crate::threads::{self};
 
 mod admin;
 mod commands;
 mod configure;
 mod output;
 mod thread_commands;
-
-use admin::*;
-use commands::*;
-use configure::*;
-use output::*;
-use thread_commands::*;
 
 const PICK: &str = "choose one from a list";
 const DISK_HELP: &str = "the disk it writes to, in G, e.g. 50G (default: 20G)";
@@ -146,7 +141,10 @@ fn usage_error(command: &str, message: &str) -> ! {
 
 #[cfg(test)]
 mod tests {
+    use super::commands::command;
+    use super::output::{ago, human_size};
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn sizes_and_ages_as_folio_said_them() {

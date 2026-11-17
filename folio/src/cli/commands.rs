@@ -1,6 +1,10 @@
 //! folio's command line, as clap parses it.
 
-use super::*;
+use clap::{Arg, ArgAction, Command};
+
+use crate::repos;
+
+use super::{DISK_HELP, PICK, RUNNER_HELP};
 
 pub(super) fn thread_arg(optional: bool) -> Arg {
     let arg = Arg::new("thread").value_name("THREAD");

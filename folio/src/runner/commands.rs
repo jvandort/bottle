@@ -1,6 +1,16 @@
 //! `runner add|ls|rm|check|detach|attach|home|ssh|forward`.
 
-use super::*;
+use std::io::Write;
+use std::os::unix::process::CommandExt;
+
+use std::io;
+use std::process::{ExitCode, Stdio};
+
+use crate::FAILED;
+
+use super::forward::forward;
+use super::ssh::Runner;
+use super::{Entry, USAGE, home, other, registered, registry, write_registry};
 
 /// Runs `runner COMMAND ...` with `args`; `bottles_on` says which of folio's bottles are on a
 /// runner, by name.

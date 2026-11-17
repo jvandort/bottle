@@ -1,6 +1,16 @@
 //! The host a credential is for: reached (public addresses only), over TLS, and relayed to.
 
-use super::*;
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, LazyLock};
+
+use rustix::event::{PollFd, PollFlags, poll};
+
+use crate::serve::http::Refused;
+
+use super::encoding::base64_decode;
+use super::{A_MINUTE, CONNECT_TIMEOUT, STATUS_PEEK};
 
 /// Whether a credential's host may be reached at `ip`: anywhere but this machine itself and its
 /// link. A private address is expected: naming the host is what configuring the credential means.

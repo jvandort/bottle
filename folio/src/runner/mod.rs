@@ -39,19 +39,15 @@
 //! DESTINATION, "home": PATH, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an
 //! entry says is kept as it is.
 
+use ssh::Runner;
+
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::process::CommandExt;
+use std::io::{self};
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-
-use crate::FAILED;
 
 mod commands;
 mod dist;
@@ -59,11 +55,9 @@ mod forward;
 mod on;
 mod ssh;
 
-pub use commands::*;
-use dist::*;
-pub use forward::*;
-pub use on::*;
-use ssh::*;
+pub use commands::main;
+pub use forward::forward_until;
+pub use on::on;
 
 const USAGE: &str = "runner add NAME --ssh DESTINATION | runner ls [--json] | runner rm NAME \
                      | runner ssh NAME [COMMAND]... | runner check NAME|DESTINATION [--json] \

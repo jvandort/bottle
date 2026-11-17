@@ -1,6 +1,14 @@
 //! What isn't a thread's: runners, folio serve, credentials, repos.
 
-use super::*;
+use std::io::IsTerminal;
+use std::process::ExitCode;
+
+use clap::ArgMatches;
+
+use crate::{auth, bottles, broker, daemon, features, prompt, repos, threads};
+
+use super::output::table;
+use super::{Outcome, arg, args, flag};
 
 /// folio's runner commands: runner.rs's.
 pub(super) fn runner_command(matches: &ArgMatches) -> ExitCode {

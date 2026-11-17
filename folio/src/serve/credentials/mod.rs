@@ -19,23 +19,17 @@
 //! credential goes only on those (and rewrites'), and a request on another that presents the
 //! stand-in is refused, saying why, to whoever reads it: often an agent.
 
+use encoding::{base64, base64_decode, fnmatch};
+
 use std::collections::BTreeMap;
-use std::io::{self, BufReader, ErrorKind, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use serde_json::{Value, json};
+use rustix::event::Timespec;
 
-use super::Bottle;
-use super::http::{self, Refused};
-use super::proxy::Header;
 use super::service::{Caller, Flow, Service};
 use crate::auth::{self, STANDIN, destination};
 use crate::features::{self, Credential, Rewrite};
-use crate::log::log;
 use crate::routes::Route;
 
 /// The credentials service: a bottle's flow to one of its credentials' hosts, over TLS bottle-cli
@@ -65,9 +59,7 @@ mod encoding;
 mod flow;
 mod upstream;
 
-use encoding::*;
-pub use flow::*;
-use upstream::*;
+pub use flow::serve;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most of a request's body read here, to put the credential in it.
@@ -284,6 +276,8 @@ fn injections_of(
 
 #[cfg(test)]
 mod tests {
+    use super::encoding::{base64, base64_decode};
+    use super::upstream::status_of;
     use super::*;
 
     fn injection() -> Injection {

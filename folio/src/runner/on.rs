@@ -1,6 +1,16 @@
 //! `on NAME COMMAND...`: bottle-cli's COMMAND there; an image build's recipe and what it mounts sent with it.
 
-use super::*;
+use std::io::Write;
+use std::os::unix::process::CommandExt;
+
+use std::path::PathBuf;
+use std::process::{Command, ExitCode, Stdio};
+use std::{env, fs, io, thread};
+
+use crate::FAILED;
+
+use super::ssh::Runner;
+use super::{CONNECT_TIMEOUT, DIST, USAGE, other};
 
 /// `on [--connect-timeout SECONDS] NAME COMMAND [ARG]...`: bottle-cli's COMMAND on runner NAME
 /// (see the module's doc): its exit status.

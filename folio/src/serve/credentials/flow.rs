@@ -1,6 +1,24 @@
 //! A bottle's request to a credential's host: read, checked against its rules, its credential put in, sent on.
 
-use super::*;
+use std::io::Write;
+
+use std::collections::BTreeMap;
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
+
+use serde_json::{Value, json};
+
+use crate::features::Rewrite;
+use crate::log::log;
+use crate::serve::Bottle;
+use crate::serve::http::{self, Refused};
+use crate::serve::proxy::Header;
+use crate::serve::service::Flow;
+
+use super::upstream::{allowed, open, relay_tls, status_of};
+use super::{
+    ECHOING_METHODS, HOP_HEADERS, Injection, MAX_BODY_BYTES, ROUTING_HEADERS, encoded, presents,
+};
 
 /// A request inside a credential's host's TLS, made ready for the host.
 pub(super) struct Request {

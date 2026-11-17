@@ -1,6 +1,16 @@
 //! configure and sidecar: a repo's spec and runner, a thread's settings, its sidecar.
 
-use super::*;
+use clap::ArgMatches;
+
+use crate::bottles::State;
+use crate::engine::{self, Engine};
+use crate::repos::{self, Repo};
+use crate::runners;
+use crate::specs::Spec;
+use crate::threads::{self, Settings, Thread};
+
+use super::thread_commands::thread_of;
+use super::{Outcome, arg, args, current, flag, usage_error};
 
 pub(super) fn changes_spec(matches: &ArgMatches) -> bool {
     !args(matches, "feature").is_empty()
