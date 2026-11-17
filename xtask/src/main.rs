@@ -29,7 +29,9 @@
 //! builds every distribution this machine builds.
 //!
 //! With --release, a release's (by default, of every TRIPLE this machine builds): the same files, built with cargo's `distribution` profile (no
-//! symbols, optimized across crates: smaller, and slower to build) and Linux's mke2fs stripped,
+//! symbols, optimized across crates: smaller, and slower to build), with folio, built so too, beside
+//! bottle-cli (copied to runners with the rest; the dev shims build their own), and Linux's mke2fs
+//! stripped,
 //! into $CARGO_TARGET_DIR's release-dists, as dist and dist-TRIPLE there (so a release's
 //! bottle-cli finds the other distributions it copies to runners among the release's, beside it).
 //! Without it, cargo's release profile, which the dev shims build, quickly.
@@ -94,6 +96,15 @@ impl Profile {
         match self {
             Profile::Dev => target_dir.to_path_buf(),
             Profile::Release => target_dir.join("release-dists"),
+        }
+    }
+
+    /// What cargo builds for a distribution: bottle-cli, and for a release, folio too (the dev
+    /// shims build their own folio).
+    fn packages(self) -> &'static [&'static str] {
+        match self {
+            Profile::Dev => &["-p", "bottle-cli"],
+            Profile::Release => &["-p", "bottle-cli", "-p", "folio"],
         }
     }
 
@@ -312,7 +323,8 @@ fn mac_dist(profile: Profile, out: &Path) -> Result<()> {
 fn mac_cli(profile: Profile, out: &Path) -> Result<()> {
     let agent = agents(profile, &[env::consts::ARCH])?.remove(0);
     step("bottle-cli, the agent built in");
-    let mut args = vec!["build", "-p", "bottle-cli"];
+    let mut args = vec!["build"];
+    args.extend(profile.packages());
     args.extend(profile.cargo_args());
     cargo(&args, &[("BOTTLE_EMBED_AGENT".into(), agent.into())])?;
     let built = target().join(profile.dir()).join("bottle-cli");
@@ -326,6 +338,18 @@ fn mac_cli(profile: Profile, out: &Path) -> Result<()> {
             .arg(&cli))?;
         // Signing changed it: its time says again what it's a copy of (see copy).
         same_time(&built, &cli)?;
+    }
+    if profile == Profile::Release {
+        let built = target().join(profile.dir()).join("folio");
+        let folio = out.join("folio");
+        if copy(&built, &folio)? {
+            // Signed afresh, as stripping it may have left its signature behind.
+            step("signing folio");
+            run(Command::new("codesign")
+                .args(["--force", "-s", "-"])
+                .arg(&folio))?;
+            same_time(&built, &folio)?;
+        }
     }
     Ok(())
 }
@@ -402,13 +426,14 @@ fn linux_clis(
         "bottle-cli, for {}, the agent built in",
         triples.join(", ")
     ));
-    let mut args = vec!["build", "-p", "bottle-cli"];
+    let mut args = vec!["build"];
+    args.extend(profile.packages());
     args.extend(profile.cargo_args());
     let mut env: Vec<(String, OsString)> = vec![];
     for ((triple, c), agent) in triples.iter().zip(cs).zip(&agents) {
         args.extend(["--target", triple]);
-        // Its agent; and what cc-rs builds for libkrun (its x86_64 kernel decoders' C) with
-        // musl's headers.
+        // Its agent; and what cc-rs builds (libkrun's x86_64 kernel decoders, a release's folio's
+        // ring) with musl's headers.
         let key = triple.replace('-', "_");
         env.extend([
             (format!("BOTTLE_EMBED_AGENT_{key}"), agent.into()),
@@ -418,11 +443,17 @@ fn linux_clis(
         ]);
     }
     cargo(&args, &env)?;
+    let programs: &[&str] = match profile {
+        Profile::Dev => &["bottle-cli"],
+        Profile::Release => &["bottle-cli", "folio"],
+    };
     for (triple, out) in dists {
-        copy(
-            &target().join(triple).join(profile.dir()).join("bottle-cli"),
-            &out.join("bottle-cli"),
-        )?;
+        for program in programs {
+            copy(
+                &target().join(triple).join(profile.dir()).join(program),
+                &out.join(program),
+            )?;
+        }
     }
     Ok(())
 }
