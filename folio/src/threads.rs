@@ -35,12 +35,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
 use crate::bottles::{State, Status};
-use crate::engine::{self, Mount};
-use crate::engine::{Engine, Order};
+use crate::engine::{self, Engine, Mount, Order};
 use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::specs::Spec;
 use crate::store::{self, Content};
@@ -1026,7 +1024,7 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String
 fn stop_sessions(engine: &Engine, thread: &Thread) -> Result<(), String> {
     let pids: Vec<String> = sessions(engine, thread)?
         .iter()
-        .map(|s| s["shell_pid"].to_string())
+        .map(|s| s.shell_pid.to_string())
         .collect();
     if !pids.is_empty() {
         let mut kill = vec!["kill".to_string(), "-HUP".into()];
@@ -1099,8 +1097,15 @@ fn resume(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
     Ok(())
 }
 
-/// The bottle's shpool sessions, as `shpool list --json` has them.
-fn sessions(engine: &Engine, thread: &Thread) -> Result<Vec<Value>, String> {
+/// A shpool session, as `shpool list --json` has it.
+#[derive(Deserialize)]
+struct Session {
+    name: String,
+    shell_pid: i64,
+}
+
+/// The bottle's shpool sessions.
+fn sessions(engine: &Engine, thread: &Thread) -> Result<Vec<Session>, String> {
     let listed = engine.run(
         &thread.bottle,
         &["shpool".into(), "list".into(), "--json".into()],
@@ -1110,19 +1115,23 @@ fn sessions(engine: &Engine, thread: &Thread) -> Result<Vec<Value>, String> {
     if listed.code != 0 {
         return Ok(Vec::new());
     }
-    let said: Value =
+    #[derive(Deserialize)]
+    struct Listed {
+        sessions: Vec<Session>,
+    }
+    let said: Listed =
         serde_json::from_str(&listed.stdout).map_err(|e| format!("shpool list: {e}"))?;
-    Ok(said["sessions"].as_array().cloned().unwrap_or_default())
+    Ok(said.sessions)
 }
 
 fn ensure_session(engine: &Engine, thread: &Thread, session: &str) -> Result<(), String> {
     if let Some(listed) = sessions(engine, thread)?
         .into_iter()
-        .find(|s| s["name"] == session)
+        .find(|s| s.name == session)
     {
         let alive = engine.run(
             &thread.bottle,
-            &["kill".into(), "-0".into(), listed["shell_pid"].to_string()],
+            &["kill".into(), "-0".into(), listed.shell_pid.to_string()],
             None,
             false,
         )?;

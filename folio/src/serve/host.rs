@@ -6,12 +6,14 @@
 //! list-bottles permission, GET /bottles, the other running bottles: each one's name, repo and
 //! labels.
 
+use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 
 use super::http::{self, Refused};
 use super::{Bottle, Server, git, messages};
@@ -317,17 +319,29 @@ fn bottles(
         );
         return "refused".into();
     }
-    let peers: Vec<Value> = server
-        .all()
+    /// A running bottle, as another with list-bottles sees it.
+    #[derive(Serialize)]
+    struct Peer<'a> {
+        labels: &'a BTreeMap<String, String>,
+        name: &'a str,
+        repo: &'a Option<String>,
+    }
+    let all = server.all();
+    let peers: Vec<Peer> = all
         .iter()
         .filter(|b| b.name != bottle.name)
-        .map(|b| json!({"name": b.name, "repo": b.repo, "labels": b.labels}))
+        .map(|b| Peer {
+            name: &b.name,
+            repo: &b.repo,
+            labels: &b.labels,
+        })
         .collect();
+    let peers = serde_json::to_string(&peers).expect("bottles are JSON");
     http::respond(
         writer,
         200,
         "OK",
-        format!("{}\n", Value::Array(peers)).as_bytes(),
+        format!("{peers}\n").as_bytes(),
         "application/json",
     );
     "bottles".into()

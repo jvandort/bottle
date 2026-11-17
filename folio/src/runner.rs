@@ -665,12 +665,12 @@ fn running(runner: &Runner) -> io::Result<Vec<String>> {
     if !output.status.success() {
         return Err(other(String::from_utf8_lossy(&output.stderr).trim()));
     }
-    let listed: Vec<serde_json::Value> =
+    let listed: Vec<bottle_formats::listing::Machine> =
         serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
     Ok(listed
-        .iter()
-        .filter(|m| m["state"] == "running")
-        .filter_map(|m| m["name"].as_str().map(String::from))
+        .into_iter()
+        .filter(|m| m.state == bottle_formats::listing::State::Running)
+        .map(|m| m.name)
         .collect())
 }
 
@@ -1022,17 +1022,15 @@ fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<
     let recipe_path = args
         .get(2)
         .ok_or_else(|| other("image build needs RECIPE"))?;
-    let mut recipe: serde_json::Value = serde_json::from_slice(&fs::read(recipe_path)?)
-        .map_err(|e| other(format!("{recipe_path}: {e}")))?;
+    let mut recipe: bottle_formats::recipe::Recipe =
+        serde_json::from_slice(&fs::read(recipe_path)?)
+            .map_err(|e| other(format!("{recipe_path}: {e}")))?;
     let staged = env::temp_dir().join(format!("folio-on-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staged);
     fs::create_dir_all(&staged)?;
     let made = (|| -> io::Result<Vec<u8>> {
-        if let Some(source) = recipe
-            .pointer("/mount/source")
-            .and_then(|s| s.as_str())
-            .map(PathBuf::from)
-        {
+        if let Some(mount) = &mut recipe.mount {
+            let source = mount.source.clone();
             let source = if source.is_relative() {
                 PathBuf::from(recipe_path)
                     .parent()
@@ -1050,7 +1048,7 @@ fn build_there(runner: &Runner, args: &[String]) -> io::Result<(Command, Option<
             if !copied.success() {
                 return Err(other(format!("copying {} failed", source.display())));
             }
-            recipe["mount"]["source"] = "context".into();
+            mount.source = "context".into();
         }
         fs::write(
             staged.join("recipe.json"),
