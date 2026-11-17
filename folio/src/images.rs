@@ -8,11 +8,14 @@
 //! What's kept of what bottles download (the HTTP cache bottle-cli keeps): the hosts features name,
 //! and every apt repository an image has, its packages, the .deb files under its URI.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use bottle_formats::policy::{Cached, HTTP_PORT, HTTPS_PORT};
+use bottle_formats::recipe::{Recipe, Step};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::features::{self, BASE, Feature, Repository};
@@ -37,9 +40,6 @@ pub const BUILD_CA: &str = "BOTTLE_BUILD_CA";
 pub const FEATURES_LABEL: &str = "bottle.features";
 /// Who the container's user is, as a feature's install.sh is told.
 const REMOTE_USER: &str = "genie";
-/// Where an apt repository is asked, by its URI's scheme.
-const HTTP_PORT: u16 = 80;
-const HTTPS_PORT: u16 = 443;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -143,17 +143,17 @@ pub fn inputs_hash(features: &[Feature]) -> Result<String> {
     Ok(hex(&digest.finalize()))
 }
 
-fn step_env() -> serde_json::Map<String, Value> {
-    let mut env = serde_json::Map::new();
-    env.insert("HOME".into(), "/root".into());
-    env.insert("DEBIAN_FRONTEND".into(), "noninteractive".into());
-    env
+fn step_env() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("HOME".into(), "/root".into()),
+        ("DEBIAN_FRONTEND".into(), "noninteractive".into()),
+    ])
 }
 
 /// What installs `features`, in order: what they install with apt, together; then each one's
 /// install.sh, in its own directory; then its containerEnv, mirrored to /etc/environment, which is
 /// all SSH sessions see.
-fn steps(features: &[Feature]) -> Result<Vec<Value>> {
+fn steps(features: &[Feature]) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     let repositories: Vec<(String, &Repository)> = features
         .iter()
@@ -175,32 +175,38 @@ fn steps(features: &[Feature]) -> Result<Vec<Value>> {
     if !repositories.is_empty() || !packages.is_empty() {
         let mut env = step_env();
         env.insert(BUILD_CA.into(), "".into());
-        steps.push(
-            json!({"run": ["/bin/sh", "-c", install_script(&repositories, &packages)], "env": env}),
-        );
+        steps.push(Step::Run {
+            run: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                install_script(&repositories, &packages),
+            ],
+            env,
+            cwd: None,
+        });
     }
     for f in features {
         let mut env = step_env();
         env.insert("_REMOTE_USER".into(), REMOTE_USER.into());
         env.insert(
             "_REMOTE_USER_HOME".into(),
-            format!("/home/{REMOTE_USER}").into(),
+            format!("/home/{REMOTE_USER}"),
         );
         env.insert("_CONTAINER_USER".into(), REMOTE_USER.into());
         env.insert(
             "_CONTAINER_USER_HOME".into(),
-            format!("/home/{REMOTE_USER}").into(),
+            format!("/home/{REMOTE_USER}"),
         );
-        for (k, v) in f.option_env() {
-            env.insert(k, v.into());
-        }
-        steps.push(json!({
-            "run": interpreter(&f.path.join("install.sh"))?,
-            "env": env,
-            "cwd": format!("{MOUNT}/{}", f.id),
-        }));
+        env.extend(f.option_env());
+        steps.push(Step::Run {
+            run: interpreter(&f.path.join("install.sh"))?,
+            env,
+            cwd: Some(format!("{MOUNT}/{}", f.id)),
+        });
         if !f.container_env.is_empty() {
-            steps.push(json!({"env": f.container_env}));
+            steps.push(Step::Env {
+                env: f.container_env.clone(),
+            });
             let mirror: Vec<String> = f
                 .container_env
                 .keys()
@@ -208,40 +214,39 @@ fn steps(features: &[Feature]) -> Result<Vec<Value>> {
                     format!("sed -i '/^{k}=/d' /etc/environment && printf '%s\\n' \"{k}=${k}\" >> /etc/environment")
                 })
                 .collect();
-            steps.push(json!({"run": ["sh", "-c", mirror.join(" && ")]}));
+            steps.push(Step::Run {
+                run: vec!["sh".into(), "-c".into(), mirror.join(" && ")],
+                env: BTreeMap::new(),
+                cwd: None,
+            });
         }
     }
     Ok(steps)
 }
 
-/// What builds the base image: its tag, inputs and recipe.
-pub fn base() -> Result<Value> {
+/// What builds the base image (tagged `tag(BASE)`, built from `base_inputs()`).
+pub fn base() -> Result<Recipe> {
     let base = features::load(BASE)?;
-    Ok(json!({
-        "tag": tag(BASE),
-        "inputs": base_inputs()?,
-        "recipe": {
-            "pull": DEBIAN, "entrypoint": ENTRYPOINT, "cmd": CMD, "labels": {},
-            "steps": steps(std::slice::from_ref(&base))?,
-        },
-    }))
+    Ok(Recipe {
+        pull: Some(DEBIAN.into()),
+        entrypoint: Some(ENTRYPOINT.map(String::from).to_vec()),
+        cmd: Some(CMD.map(String::from).to_vec()),
+        steps: steps(std::slice::from_ref(&base))?,
+        ..Recipe::default()
+    })
 }
 
-/// What builds the base image with `features`: its tag, inputs and recipe.
-pub fn image(features: &[Feature]) -> Result<Value> {
-    let installed: Vec<String> = features.iter().map(Feature::spec).collect();
-    let mut specs = installed.clone();
+/// What builds the base image with `features` (tagged `image_tag(features)`, built from
+/// `inputs_hash(features)`).
+pub fn image(features: &[Feature]) -> Result<Recipe> {
+    let mut specs: Vec<String> = features.iter().map(Feature::spec).collect();
     specs.sort();
-    Ok(json!({
-        "tag": image_tag(features),
-        "inputs": inputs_hash(features)?,
-        "recipe": {
-            "from": tag(BASE),
-            "steps": steps(features)?,
-            "features": installed,
-            "labels": {FEATURES_LABEL: specs.join(" ")},
-        },
-    }))
+    Ok(Recipe {
+        from: Some(tag(BASE)),
+        steps: steps(features)?,
+        labels: BTreeMap::from([(FEATURES_LABEL.into(), specs.join(" "))]),
+        ..Recipe::default()
+    })
 }
 
 // --- apt ------------------------------------------------------------------------
@@ -347,7 +352,7 @@ fn list_name(r: &Repository) -> String {
 
 /// How `repositories`' downloads are kept: their packages, the .deb files under each one's URI, on
 /// its scheme's port; one entry a host and port, its repositories' paths together.
-fn apt_cached(repositories: &[Repository]) -> Vec<Value> {
+fn apt_cached(repositories: &[Repository]) -> Vec<Cached> {
     let mut merged: Vec<(String, u16, Vec<String>)> = Vec::new();
     for r in repositories {
         let (scheme, host, path) = split(&r.uri);
@@ -364,40 +369,47 @@ fn apt_cached(repositories: &[Repository]) -> Vec<Value> {
     }
     merged
         .into_iter()
-        .map(|(host, port, include)| {
-            json!({"host": host, "exclude": [], "include": include, "ports": [port], "immutable": true})
+        .map(|(host, port, include)| Cached {
+            host,
+            exclude: vec![],
+            include,
+            ports: vec![port],
+            immutable: true,
         })
         .collect()
 }
 
 /// The hosts a bottle with `features` has its downloads kept for: those its features name, and the
 /// apt repositories its image has.
-pub fn cached_for(features: &[Feature]) -> Value {
-    let mut cached: Vec<Value> = features
+pub fn cached_for(features: &[Feature]) -> Vec<Cached> {
+    let mut cached: Vec<Cached> = features
         .iter()
         .filter_map(|f| f.cache.as_ref())
         .flat_map(|c| {
-            c.hosts.iter().map(|h| {
-                json!({"host": h.to_lowercase(), "exclude": c.exclude, "include": [],
-                       "ports": [HTTPS_PORT], "immutable": false})
+            c.hosts.iter().map(|h| Cached {
+                host: h.to_lowercase(),
+                exclude: c.exclude.clone(),
+                include: vec![],
+                ports: vec![HTTPS_PORT],
+                immutable: false,
             })
         })
         .collect();
     let mut repositories = debian();
     repositories.extend(features.iter().flat_map(|f| f.apt.repositories.clone()));
     cached.extend(apt_cached(&repositories));
-    Value::Array(cached)
+    cached
 }
 
 /// What a build keeps of what it downloads: every apt repository, Debian's and every feature's, so
 /// every build's policy is the same, and so is the caching CA bottle-cli answers its https ones
 /// with.
-pub fn build_cached() -> Result<Value> {
+pub fn build_cached() -> Result<Vec<Cached>> {
     let mut repositories = debian();
     for id in std::iter::once(BASE.to_string()).chain(features::available()) {
         repositories.extend(features::load(&id)?.apt.repositories);
     }
-    Ok(Value::Array(apt_cached(&repositories)))
+    Ok(apt_cached(&repositories))
 }
 
 #[cfg(test)]
@@ -416,37 +428,20 @@ mod tests {
     #[test]
     fn every_bottle_keeps_debians_packages_and_a_build_apts_alone() {
         let cached = cached_for(&[]);
-        let debian = cached
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["host"] == "deb.debian.org")
-            .unwrap();
-        let mut include: Vec<&str> = debian["include"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i.as_str().unwrap())
-            .collect();
+        let debian = cached.iter().find(|c| c.host == "deb.debian.org").unwrap();
+        let mut include = debian.include.clone();
         include.sort();
         assert_eq!(include, ["/debian-security/*.deb", "/debian/*.deb"]);
         assert_eq!(
-            (&debian["ports"], &debian["immutable"]),
-            (&json!([HTTP_PORT]), &json!(true))
+            (&debian.ports[..], debian.immutable),
+            (&[HTTP_PORT][..], true)
         );
         // Maven's hosts are the jvm feature's to cache in a bottle; in a build only apt trusts the
         // builds' CA.
-        let hosts = |cached: &Value| {
-            cached
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|c| c["host"].as_str().unwrap().to_string())
-                .collect::<Vec<_>>()
-        };
+        let hosts = |cached: Vec<Cached>| cached.into_iter().map(|c| c.host).collect::<Vec<_>>();
         let jvm = features::resolve(&["jvm".to_string()]).unwrap();
-        assert!(hosts(&cached_for(&jvm)).contains(&"repo.maven.apache.org".to_string()));
-        let built = hosts(&build_cached().unwrap());
+        assert!(hosts(cached_for(&jvm)).contains(&"repo.maven.apache.org".to_string()));
+        let built = hosts(build_cached().unwrap());
         assert!(
             !built.contains(&"repo.maven.apache.org".to_string())
                 && built.contains(&"deb.debian.org".to_string())
@@ -456,7 +451,7 @@ mod tests {
     #[test]
     fn images_are_named_in_full_and_base_is_the_base_feature_on_debian() {
         assert_eq!(tag("base"), "localhost/bottle/base:latest");
-        let recipe = base().unwrap()["recipe"].clone();
+        let recipe = serde_json::to_value(base().unwrap()).unwrap();
         assert_eq!(recipe["pull"], DEBIAN);
         let steps = recipe["steps"].as_array().unwrap();
         assert!(steps[0]["run"][2].as_str().unwrap().contains(
@@ -507,24 +502,24 @@ mod tests {
         let kept = apt_cached(&[repository("https://downloads.example/claude/apt/stable/")]);
         assert_eq!(
             kept,
-            [
-                json!({"host": "downloads.example", "exclude": [], "include": ["/claude/apt/stable/*.deb"],
-                    "ports": [443], "immutable": true})
-            ]
+            [Cached {
+                host: "downloads.example".into(),
+                exclude: vec![],
+                include: vec!["/claude/apt/stable/*.deb".into()],
+                ports: vec![443],
+                immutable: true,
+            }]
         );
         assert_eq!(
-            apt_cached(&[repository("http://deb.debian.org/debian")])[0]["ports"],
-            json!([80])
+            apt_cached(&[repository("http://deb.debian.org/debian")])[0].ports,
+            [80]
         );
     }
 
     #[test]
     fn a_hosts_repositories_are_one_entry() {
         let [debian] = apt_cached(&debian()).try_into().unwrap();
-        assert_eq!(
-            debian["include"],
-            json!(["/debian/*.deb", "/debian-security/*.deb"])
-        );
+        assert_eq!(debian.include, ["/debian/*.deb", "/debian-security/*.deb"]);
     }
 
     #[test]

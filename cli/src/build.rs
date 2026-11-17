@@ -34,7 +34,7 @@ use std::thread;
 
 use bottle_agent_client::policy::Decide as _;
 use bottle_disk::Archive;
-use bottle_disk::build::{Launch, Mount, Recipe, Store, Vm, wait_for_agent};
+use bottle_disk::build::{Launch, Mount, Recipe, Step, Store, Vm, wait_for_agent};
 use bottle_disk::registry::{Reference, Registry};
 use bottle_formats::listing::Image;
 
@@ -164,35 +164,23 @@ fn image_build(args: Vec<String>) -> ExitCode {
     report((|| {
         let store = store_at(&store)?;
         let json = fs::read(&recipe).map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
-        let mut value: serde_json::Value = serde_json::from_slice(&json)
-            .map_err(|e| io::Error::other(format!("{recipe}: {e}")))?;
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| io::Error::other(format!("{recipe}: not an object")))?;
-        let base = match (object.remove("pull"), object.remove("from")) {
+        let path = recipe;
+        let mut recipe: Recipe =
+            serde_json::from_slice(&json).map_err(|e| io::Error::other(format!("{path}: {e}")))?;
+        let base = match (recipe.pull.take(), recipe.from.take()) {
             (Some(_), Some(_)) => {
-                return Err(io::Error::other(format!(
-                    "{recipe}: pull or from, not both"
-                )));
+                return Err(io::Error::other(format!("{path}: pull or from, not both")));
             }
-            (Some(serde_json::Value::String(reference)), None) => {
+            (Some(reference), None) => {
                 let mut registry =
                     Registry::new(Reference::parse(&reference)?, &store.dir.join("registry"));
                 let image = registry.image()?;
                 Some(store.import(&image, |l| registry.layer(l), &Boot { net: net.clone() })?)
             }
-            (None, Some(serde_json::Value::String(image))) => Some(store.resolve(&image)?),
+            (None, Some(image)) => Some(store.resolve(&image)?),
             (None, None) => None,
-            _ => {
-                return Err(io::Error::other(format!(
-                    "{recipe}: pull and from are strings"
-                )));
-            }
         };
-        give_builds_ca(&mut value, &net)?;
-        let path = recipe;
-        let mut recipe: Recipe =
-            serde_json::from_value(value).map_err(|e| io::Error::other(format!("{path}: {e}")))?;
+        give_builds_ca(&mut recipe, &net)?;
         recipe.from = base;
         // A mount's relative source is beside the recipe: a recipe sent with what it mounts.
         if let Some(mount) = &mut recipe.mount
@@ -213,15 +201,12 @@ fn image_build(args: Vec<String>) -> ExitCode {
 
 /// The certificate of the builds' caching CA, for the hosts `net`'s policy terminates, in each of
 /// the recipe's steps that asks for it (BUILD_CA in its environment).
-fn give_builds_ca(recipe: &mut serde_json::Value, net: &Net) -> io::Result<()> {
-    let Some(steps) = recipe.get_mut("steps").and_then(|s| s.as_array_mut()) else {
-        return Ok(());
-    };
-    let asking: Vec<&mut serde_json::Value> = steps
+fn give_builds_ca(recipe: &mut Recipe, net: &Net) -> io::Result<()> {
+    let mut asking: Vec<&mut String> = recipe
+        .steps
         .iter_mut()
-        .filter_map(|step| {
-            step.get_mut("env")
-                .filter(|env| env.get(BUILD_CA).is_some())
+        .filter_map(|step| match step {
+            Step::Run { env, .. } | Step::Env { env } => env.get_mut(BUILD_CA),
         })
         .collect();
     if asking.is_empty() {
@@ -232,8 +217,8 @@ fn give_builds_ca(recipe: &mut serde_json::Value, net: &Net) -> io::Result<()> {
         _ => vec![],
     };
     let certificate = bottle_agent_client::ca::certificate(BUILDS_CA, &hosts)?.unwrap_or_default();
-    for env in asking {
-        env[BUILD_CA] = certificate.clone().into();
+    for env in &mut asking {
+        **env = certificate.clone();
     }
     Ok(())
 }

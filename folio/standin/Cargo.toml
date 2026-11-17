@@ -8,4 +8,6 @@ publish.workspace = true
 # What folio's tests run where folio runs bottle-cli, ssh and macOS's `security`: one program,
 # which is each of them by the name it's run as (a test links it as each).
 [dependencies]
+bottle-formats.workspace = true
+serde.workspace = true
 serde_json.workspace = true

@@ -29,6 +29,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+use bottle_formats::listing;
+use bottle_formats::policy::Policy;
+use bottle_formats::recipe::Recipe;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 /// Where a thread's machine has its repos, and its user's home.
@@ -95,6 +99,15 @@ impl State {
 
     fn machine(&mut self, name: &str) -> Option<&mut Value> {
         self.value["machines"].get_mut(name)
+    }
+}
+
+/// `text`, from `path`, if it's what bottle-cli takes as a `T` (bottle-formats': refused as
+/// bottle-cli would refuse it, a key it doesn't know too); kept as it was given.
+fn taken<T: DeserializeOwned>(path: &str, text: &str) -> Result<Value, ExitCode> {
+    match serde_json::from_str::<T>(text) {
+        Ok(_) => Ok(serde_json::from_str(text).unwrap()),
+        Err(e) => Err(fail(&format!("{path}: {e}"))),
     }
 }
 
@@ -194,21 +207,43 @@ pub fn main(args: Vec<String>) -> ExitCode {
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(16384);
             let home = state_path().parent().unwrap().join("bottle-home");
-            println!("{}", json!({"memory_mib": memory, "cpus": 8, "home": home}));
+            let info = listing::Info {
+                memory_mib: memory,
+                cpus: 8,
+                home,
+            };
+            println!("{}", serde_json::to_string(&info).unwrap());
             ExitCode::SUCCESS
         }
         ["images", "--json"] => {
-            println!("{}", State::open().value["images"]);
+            let state = State::open();
+            let images: Vec<listing::Image> = state.value["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| listing::Image {
+                    tag: i["tag"].as_str().unwrap().into(),
+                    name: i["stage"].as_str().unwrap_or_default().into(),
+                    disks: serde_json::from_value(i["disks"].clone()).unwrap_or_default(),
+                    labels: serde_json::from_value(i["labels"].clone()).unwrap_or_default(),
+                })
+                .collect();
+            println!("{}", serde_json::to_string(&images).unwrap());
             ExitCode::SUCCESS
         }
         ["image", "build", recipe, "--tag", tag, "--network", network] => {
             if failing("build") {
                 return fail("image build failed");
             }
-            let read = |path: &str| -> Value {
-                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+            let read = |path: &str| fs::read_to_string(path).unwrap();
+            let recipe = match taken::<Recipe>(recipe, &read(recipe)) {
+                Ok(recipe) => recipe,
+                Err(code) => return code,
             };
-            let (recipe, network) = (read(recipe), read(network));
+            let network = match taken::<Policy>(network, &read(network)) {
+                Ok(network) => network,
+                Err(code) => return code,
+            };
             let mut state = State::open();
             let builds = state.value["builds"].as_array_mut().unwrap();
             builds.push(json!({"tag": tag, "recipe": recipe, "network": network}));
@@ -236,7 +271,10 @@ pub fn main(args: Vec<String>) -> ExitCode {
             if failing("configure") {
                 return fail("configure failed");
             }
-            let network: Value = serde_json::from_str(&stdin_text()).unwrap();
+            let network = match taken::<Policy>("-", &stdin_text()) {
+                Ok(network) => network,
+                Err(code) => return code,
+            };
             let mut state = State::open();
             let Some(machine) = state.machine(name) else {
                 return fail(&format!("no machine {name}"));
@@ -289,18 +327,26 @@ pub fn main(args: Vec<String>) -> ExitCode {
             let Some(machine) = state.machine(name) else {
                 return fail(&format!("no machine {name}"));
             };
-            println!("{}", json!({"name": name, "state": machine["state"]}));
+            let status = listing::Status {
+                name: name.to_string(),
+                state: serde_json::from_value(machine["state"].clone()).unwrap(),
+            };
+            println!("{}", serde_json::to_string(&status).unwrap());
             ExitCode::SUCCESS
         }
         ["ls", "--json"] => {
             let state = State::open();
-            let rows: Vec<Value> = state.value["machines"]
+            let rows: Vec<listing::Machine> = state.value["machines"]
                 .as_object()
                 .unwrap()
                 .iter()
-                .map(|(n, m)| json!({"name": n, "state": m["state"]}))
+                .map(|(n, m)| listing::Machine {
+                    name: n.clone(),
+                    state: serde_json::from_value(m["state"].clone()).unwrap(),
+                    made: None,
+                })
                 .collect();
-            println!("{}", json!(rows));
+            println!("{}", serde_json::to_string(&rows).unwrap());
             ExitCode::SUCCESS
         }
         ["exec", name, ..] => exec(name, &args[2..]),
@@ -334,7 +380,10 @@ fn create(name: &str, rest: &[String]) -> ExitCode {
         ],
     );
     let network: Value = if values(&given, "--network") == ["-"] {
-        serde_json::from_str(&stdin_text()).unwrap()
+        match taken::<Policy>("-", &stdin_text()) {
+            Ok(network) => network,
+            Err(code) => return code,
+        }
     } else {
         Value::Null
     };

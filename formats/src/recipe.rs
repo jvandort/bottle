@@ -9,20 +9,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
-    /// The stage it's built on, by name in the store; on nothing if None.
-    #[serde(default)]
+    /// A registry's image it's built on (`debian:trixie-slim`, `name@sha256:...`), imported first:
+    /// instead of `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<String>,
+    /// The image it's built on: a tag in the store, or a stage's name; on nothing if None (and no
+    /// `pull`). Once bottle-cli has it, always the stage's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// A directory of the host's, read-only in the build's VM at its target, for its steps: what
     /// they install from. Not in the stage.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<Mount>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmd: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }
 

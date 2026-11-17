@@ -17,11 +17,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use serde_json::Value;
+use bottle_formats::listing::{Info, State};
 use sha2::{Digest, Sha256};
 
 use crate::bottle_cli::{self, Cli, Create, Exec, Mount};
 use crate::repos::{self, Repo};
+use crate::services::Network;
 use crate::shell::quote as shell_quote;
 use crate::{daemon, services};
 
@@ -41,7 +42,7 @@ pub const LIST_TIMEOUT: u32 = 3;
 pub struct Runner {
     pub name: String,
     pub cli: Cli,
-    info: OnceCell<Value>,
+    info: OnceCell<Info>,
 }
 
 impl Runner {
@@ -57,7 +58,7 @@ impl Runner {
         }
     }
 
-    fn host(&self) -> Result<&Value, String> {
+    fn host(&self) -> Result<&Info, String> {
         if let Some(info) = self.info.get() {
             return Ok(info);
         }
@@ -70,10 +71,7 @@ impl Runner {
         if self.name == LOCAL {
             return crate::specs::host_memory_mib();
         }
-        self.host()?
-            .get("memory_mib")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("runner {}: bottle-cli info says no memory", self.name))
+        Ok(self.host()?.memory_mib)
     }
 
     pub fn cpus(&self) -> Result<u64, String> {
@@ -81,10 +79,7 @@ impl Runner {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
             return Ok(cpus as u64);
         }
-        self.host()?
-            .get("cpus")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("runner {}: bottle-cli info says no cpus", self.name))
+        Ok(self.host()?.cpus)
     }
 
     /// Where a machine on it reaches folio serve's services, by service: folio serve's sockets,
@@ -192,20 +187,18 @@ impl Runner {
 
     /// A stopped machine, with all its cores; its policy's routes to folio serve's services where
     /// it is (services_sockets).
-    pub fn create(&self, mut machine: Create) -> Result<(), String> {
+    pub fn create(&self, mut machine: Create, network: Option<&Network>) -> Result<(), String> {
         machine.cpus = self.cpus()?;
-        if let Some(network) = machine.network.take() {
-            machine.network = Some(services::with_sockets(&network, &self.services_sockets()?));
-        }
-        bottle_cli::create(&machine, &self.cli)
+        let policy = match network {
+            Some(network) => Some(services::with_sockets(network, &self.services_sockets()?)?),
+            None => None,
+        };
+        bottle_cli::create(&machine, policy.as_ref(), &self.cli)
     }
 
-    pub fn configure(&self, machine: &str, network: &Value) -> Result<(), String> {
-        bottle_cli::configure(
-            machine,
-            &services::with_sockets(network, &self.services_sockets()?),
-            &self.cli,
-        )
+    pub fn configure(&self, machine: &str, network: &Network) -> Result<(), String> {
+        let policy = services::with_sockets(network, &self.services_sockets()?)?;
+        bottle_cli::configure(machine, &policy, &self.cli)
     }
 
     pub fn start(&self, machine: &str) -> Result<(), String> {
@@ -216,13 +209,13 @@ impl Runner {
         bottle_cli::delete(machine, &self.cli)
     }
 
-    pub fn state(&self, machine: &str) -> Result<Option<String>, String> {
+    pub fn state(&self, machine: &str) -> Result<Option<State>, String> {
         bottle_cli::state(machine, &self.cli)
     }
 
     /// Every machine there, by name: its state. A runner is given LIST_TIMEOUT seconds to answer,
     /// not the usual: a list doesn't wait long for one that's off.
-    pub fn states(&self) -> Result<BTreeMap<String, String>, String> {
+    pub fn states(&self) -> Result<BTreeMap<String, State>, String> {
         let cli = match &self.cli {
             Cli::Local => Cli::Local,
             Cli::Runner { name, .. } => Cli::Runner {

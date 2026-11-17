@@ -35,6 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bottle_formats::listing::State;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
@@ -44,7 +45,7 @@ use crate::git::bottle_git;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
 use crate::serve::host::{HEADS, Remote, UPSTREAM};
-use crate::services::{self, HOST, HOST_ADDRESS};
+use crate::services::{self, HOST, HOST_ADDRESS, Network};
 use crate::shell::quote as q;
 use crate::{auth, builds, features, images, specs, store};
 
@@ -579,20 +580,22 @@ fn run_machine(mut bottle: Bottle, mounted: &[Repo], tag: &str) -> Result<Bottle
     for (repo, mount) in mounted.iter().zip(&bottle.mounts) {
         mounts.push(runner.mount(repo, &mount.objects)?);
     }
-    runner.create(Create {
-        name: bottle.machine(),
-        image: tag,
-        mounts,
-        env: machine_env(&bottle.features, &bottle.permissions(), bottle.workdir())?,
-        memory_mib: Some(memory_mib(bottle.memory())?),
-        cpus: 0,
-        disk_gib: specs::disk_gib(&bottle.spec),
-        // What bottle-cli's exec and shell use unless told, and what its ls shows.
-        user: Some(USER),
-        workdir: Some(bottle.workdir()),
-        labels: specs::labels(&bottle.spec),
-        network: Some(network(&bottle)?),
-    })?;
+    runner.create(
+        Create {
+            name: bottle.machine(),
+            image: tag,
+            mounts,
+            env: machine_env(&bottle.features, &bottle.permissions(), bottle.workdir())?,
+            memory_mib: Some(memory_mib(bottle.memory())?),
+            cpus: 0,
+            disk_gib: specs::disk_gib(&bottle.spec),
+            // What bottle-cli's exec and shell use unless told, and what its ls shows.
+            user: Some(USER),
+            workdir: Some(bottle.workdir()),
+            labels: specs::labels(&bottle.spec),
+        },
+        Some(&network(&bottle)?),
+    )?;
     bottle.network_version = NETWORK;
     save(&bottle, None)?;
     start_machine(&bottle)?;
@@ -670,11 +673,11 @@ fn start_machine(bottle: &Bottle) -> Result<(), String> {
 /// The policy the bottle's machine decides its connections by (services::network): what its
 /// features cache, and what it routes to folio serve: bottle.host, ssh to bottles, and its
 /// credentials' hosts, logged in or not.
-fn network(bottle: &Bottle) -> Result<Value, String> {
+fn network(bottle: &Bottle) -> Result<Network, String> {
     let resolved = features::resolve(&bottle.features)?;
     Ok(services::network(
         &auth::credential_destinations(&bottle.features)?,
-        &images::cached_for(&resolved),
+        images::cached_for(&resolved),
     ))
 }
 
@@ -1048,7 +1051,7 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
             bottle.name
         ));
     };
-    if state != "running" {
+    if state != State::Running {
         let given = bottle.network_version < NETWORK;
         if given {
             // Made with another policy than this one: given it now.
@@ -1154,7 +1157,12 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
                 scope.spawn(move || {
                     // The runner's machines' states; None if it can't be reached (this machine
                     // always can).
-                    let states = runners::get(&name).and_then(|r| r.states());
+                    let states = runners::get(&name).and_then(|r| r.states()).map(|states| {
+                        states
+                            .into_iter()
+                            .map(|(machine, state)| (machine, state.to_string()))
+                            .collect()
+                    });
                     let result = match states {
                         Ok(states) => Ok(Some(states)),
                         Err(e) if name == runners::LOCAL => Err(e),

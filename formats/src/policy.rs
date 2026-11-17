@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     /// Names (globs) by which the bottle may reach a private address.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_private: Vec<String>,
     /// The hosts whose downloads are kept on the host.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache: Vec<Cached>,
     /// The connections a service answers, on its unix socket.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
 }
 

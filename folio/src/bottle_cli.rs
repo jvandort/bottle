@@ -17,7 +17,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use serde_json::Value;
+use bottle_formats::listing::{self, State};
+use bottle_formats::policy::Policy;
+use bottle_formats::recipe::{self, Recipe};
 
 /// Where bottle-cli runs: on this machine, or a runner's (reached through this program's `on`).
 #[derive(Debug, Clone, PartialEq)]
@@ -125,13 +127,15 @@ impl Cli {
         Ok(output)
     }
 
-    /// `bottle-cli image build` of `recipe`, mounting `context`, by `network`'s policy, tagged
-    /// `tag`: its progress on this process's stderr, the disks it made on stdout.
+    /// `bottle-cli image build` of `recipe`, `context` mounted where its mount says, by
+    /// `network`'s policy, tagged `tag`: its progress on this process's stderr, the disks it made
+    /// on stdout.
     pub fn build(
         &self,
-        recipe: &Value,
-        network: &Value,
+        recipe: &Recipe,
+        network: &Policy,
         context: &Path,
+        mount: &str,
         tag: &str,
     ) -> Result<Output, String> {
         let here = tempdir()?;
@@ -139,12 +143,18 @@ impl Cli {
         let source = context
             .canonicalize()
             .unwrap_or_else(|_| context.to_path_buf());
-        made["mount"]["source"] = source.display().to_string().into();
-        let write = |name: &str, value: &Value| {
-            std::fs::write(here.join(name), value.to_string()).map_err(|e| e.to_string())
+        made.mount = Some(recipe::Mount {
+            source,
+            target: mount.into(),
+        });
+        let write = |name: &str, json: String| {
+            std::fs::write(here.join(name), json).map_err(|e| e.to_string())
         };
-        write("recipe.json", &made)?;
-        write("network.json", network)?;
+        write(
+            "recipe.json",
+            serde_json::to_string(&made).expect("a recipe is JSON"),
+        )?;
+        write("network.json", policy_json(network))?;
         let args: Vec<String> = [
             "image",
             "build",
@@ -242,14 +252,13 @@ pub struct Create<'a> {
     pub user: Option<&'a str>,
     pub workdir: Option<&'a str>,
     pub labels: BTreeMap<String, String>,
-    pub network: Option<Value>,
 }
 
 /// Create a stopped machine from `image` (a tag in bottle-cli's store where the machine is), its
 /// mounts read-only. The disk is its own, sparse, where what the machine writes goes. `user` and
 /// `workdir` are who and where its commands run unless they say; `labels`, what `bottle-cli ls`
 /// shows of it; `network`, the policy every connection it makes is decided by, kept with it.
-pub fn create(machine: &Create, cli: &Cli) -> Result<(), String> {
+pub fn create(machine: &Create, network: Option<&Policy>, cli: &Cli) -> Result<(), String> {
     let mut args = strings(&["create", machine.name, "--image", machine.image, "--cpus"]);
     args.push(machine.cpus.to_string());
     if let Some(mib) = machine.memory_mib {
@@ -276,9 +285,9 @@ pub fn create(machine: &Create, cli: &Cli) -> Result<(), String> {
     for (key, value) in &machine.env {
         args.extend(["-e".into(), format!("{key}={value}")]);
     }
-    let input = machine.network.as_ref().map(|n| {
+    let input = network.map(|n| {
         args.extend(["--network".into(), "-".into()]);
-        n.to_string()
+        policy_json(n)
     });
     run(cli, &args, input.as_deref().map(str::as_bytes))?;
     Ok(())
@@ -286,13 +295,17 @@ pub fn create(machine: &Create, cli: &Cli) -> Result<(), String> {
 
 /// Give a stopped machine the policy its connections are decided by (one made before it had one,
 /// say).
-pub fn configure(machine: &str, network: &Value, cli: &Cli) -> Result<(), String> {
+pub fn configure(machine: &str, network: &Policy, cli: &Cli) -> Result<(), String> {
     run(
         cli,
         &strings(&["configure", machine, "--network", "-"]),
-        Some(network.to_string().as_bytes()),
+        Some(policy_json(network).as_bytes()),
     )?;
     Ok(())
+}
+
+fn policy_json(policy: &Policy) -> String {
+    serde_json::to_string(policy).expect("a policy is JSON")
 }
 
 /// Start a machine: by the policy it was made with, nothing else needed.
@@ -310,37 +323,24 @@ pub fn delete(machine: &str, cli: &Cli) -> Result<(), String> {
 }
 
 /// Every machine there, whoever made them, by name: its state, as state says it.
-pub fn states(cli: &Cli) -> Result<BTreeMap<String, String>, String> {
+pub fn states(cli: &Cli) -> Result<BTreeMap<String, State>, String> {
     let listed = run(cli, &strings(&["ls", "--json"]), None)?;
-    let machines: Value = serde_json::from_str(if listed.trim().is_empty() {
+    let machines: Vec<listing::Machine> = serde_json::from_str(if listed.trim().is_empty() {
         "[]"
     } else {
         &listed
     })
     .map_err(|e| format!("bottle-cli ls: {e}"))?;
-    Ok(machines
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            Some((
-                m.get("name")?.as_str()?.to_string(),
-                m.get("state")?.as_str()?.to_string(),
-            ))
-        })
-        .collect())
+    Ok(machines.into_iter().map(|m| (m.name, m.state)).collect())
 }
 
-/// "running", "stopped", "created", or None if there's no such machine.
-pub fn state(machine: &str, cli: &Cli) -> Result<Option<String>, String> {
+/// Where `machine` is; None if there's no such machine.
+pub fn state(machine: &str, cli: &Cli) -> Result<Option<State>, String> {
     match run(cli, &strings(&["status", machine, "--json"]), None) {
         Ok(said) => {
-            let status: Value =
+            let status: listing::Status =
                 serde_json::from_str(&said).map_err(|e| format!("bottle-cli status: {e}"))?;
-            Ok(status
-                .get("state")
-                .and_then(Value::as_str)
-                .map(String::from))
+            Ok(Some(status.state))
         }
         Err(Error::Missing(_)) => Ok(None),
         Err(Error::Failed(m)) => Err(m),
@@ -398,7 +398,7 @@ pub fn exec_command(machine: &str, argv: &[String], how: &Exec, cli: &Cli) -> Ve
 }
 
 /// The machine's memory (memory_mib) and cores (cpus), as bottle-cli there sees them.
-pub fn info(cli: &Cli) -> Result<Value, String> {
+pub fn info(cli: &Cli) -> Result<listing::Info, String> {
     let said = run(cli, &strings(&["info", "--json"]), None)?;
     serde_json::from_str(&said).map_err(|e| format!("bottle-cli info: {e}"))
 }

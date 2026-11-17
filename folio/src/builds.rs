@@ -20,14 +20,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use bottle_formats::listing::Image;
+use bottle_formats::policy::Policy;
+use bottle_formats::recipe::Recipe;
 
 use crate::bottle_cli::{Cli, images_cli};
 use crate::features::BASE;
 use crate::features::{self, Feature};
 use crate::images::{self, REPOSITORY};
 use crate::runners::Runner;
-use crate::services;
 
 /// Every image bottle builds records a hash of what it was built from. An image whose inputs have
 /// changed since is stale: it's rebuilt when next needed, and deleted once no machine uses it.
@@ -55,7 +56,7 @@ pub fn ensure_built(specs: &[String], runner: &Runner) -> Result<String, String>
         let inputs = inputs_of(&features)?;
         if !is_current(&tag, &inputs, &runner.cli)? {
             crate::log::say!("images", "Building {tag}{}...", place(runner));
-            let recipe = images::image(&features)?["recipe"].clone();
+            let recipe = images::image(&features)?;
             build_recipe(&features::dir(), &tag, &inputs, &recipe, &runner.cli)?;
             built = true;
         }
@@ -84,7 +85,7 @@ fn ensure_base(runner: &Runner) -> Result<bool, String> {
         return Ok(false);
     }
     crate::log::say!("images", "Building {tag}{}...", place(runner));
-    let recipe = images::base()?["recipe"].clone();
+    let recipe = images::base()?;
     build_recipe(&features::dir(), &tag, &inputs, &recipe, &runner.cli)?;
     Ok(true)
 }
@@ -138,36 +139,28 @@ fn build_recipe(
     context: &Path,
     image: &str,
     inputs: &str,
-    recipe: &Value,
+    recipe: &Recipe,
     cli: &Cli,
 ) -> Result<PathBuf, String> {
-    if let Some(pull) = recipe.get("pull").and_then(Value::as_str) {
-        crate::log::say!("images", "Pulling {pull}...");
-    } else if built_labels(recipe["from"].as_str().unwrap_or_default(), cli)?.is_none() {
-        return Err(format!(
-            "{} isn't built",
-            recipe["from"].as_str().unwrap_or_default()
-        ));
-    }
-    let mut labels = recipe.get("labels").cloned().unwrap_or_else(|| json!({}));
-    labels[INPUTS_LABEL] = inputs.into();
-    let mut made = serde_json::Map::new();
-    for key in ["pull", "from", "entrypoint", "cmd"] {
-        if let Some(value) = recipe.get(key) {
-            made.insert(key.into(), value.clone());
+    match (&recipe.pull, &recipe.from) {
+        (Some(pull), _) => crate::log::say!("images", "Pulling {pull}..."),
+        (None, from) => {
+            let from = from.as_deref().unwrap_or_default();
+            if built_labels(from, cli)?.is_none() {
+                return Err(format!("{from} isn't built"));
+            }
         }
     }
-    made.insert("mount".into(), json!({"target": MOUNT}));
-    made.insert(
-        "steps".into(),
-        recipe.get("steps").cloned().unwrap_or_else(|| json!([])),
-    );
-    made.insert("labels".into(), labels);
+    let mut made = recipe.clone();
+    made.labels.insert(INPUTS_LABEL.into(), inputs.into());
     // The public network, with none of its features' credentials, nothing routed to folio serve;
     // apt repositories kept.
-    let network = json!({"cache": services::cache_rules(&images::build_cached()?)});
+    let network = Policy {
+        cache: images::build_cached()?,
+        ..Policy::default()
+    };
     // Its progress on stderr; the disk of the stage it made, the last line of its stdout.
-    let result = cli.build(&Value::Object(made), &network, context, image)?;
+    let result = cli.build(&made, &network, context, MOUNT, image)?;
     let stdout = String::from_utf8_lossy(&result.stdout);
     match stdout.split_whitespace().last() {
         Some(disk) if result.status.success() => Ok(PathBuf::from(disk)),
@@ -176,46 +169,30 @@ fn build_recipe(
 }
 
 /// bottle-cli's images: each tag, its stage, disks and labels.
-fn images_of(cli: &Cli) -> Result<Vec<Value>, String> {
+fn images_of(cli: &Cli) -> Result<Vec<Image>, String> {
     let listed = images_cli(cli, &["images", "--json"])?;
-    let images: Value =
-        serde_json::from_str(&listed).map_err(|e| format!("bottle-cli images: {e}"))?;
-    Ok(images.as_array().cloned().unwrap_or_default())
-}
-
-fn labels_of(image: &Value) -> BTreeMap<String, String> {
-    image["labels"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-        .collect()
+    serde_json::from_str(&listed).map_err(|e| format!("bottle-cli images: {e}"))
 }
 
 /// The labels `image` was last built with, or None if it's not built.
 fn built_labels(image: &str, cli: &Cli) -> Result<Option<BTreeMap<String, String>>, String> {
     Ok(images_of(cli)?
-        .iter()
-        .find(|i| i["tag"] == image && i["disks"].as_array().is_some_and(|d| !d.is_empty()))
-        .map(labels_of))
+        .into_iter()
+        .find(|i| i.tag == image && !i.disks.is_empty())
+        .map(|i| i.labels))
 }
 
 /// Every built tag, with its labels.
 fn built(cli: &Cli) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
     Ok(images_of(cli)?
-        .iter()
-        .map(|i| {
-            (
-                i["tag"].as_str().unwrap_or_default().to_string(),
-                labels_of(i),
-            )
-        })
+        .into_iter()
+        .map(|i| (i.tag, i.labels))
         .collect())
 }
 
 /// Untag `image`; its stages go once nothing uses them (gc).
 fn forget(image: &str, cli: &Cli) -> Result<(), String> {
-    if images_of(cli)?.iter().any(|i| i["tag"] == image) {
+    if images_of(cli)?.iter().any(|i| i.tag == image) {
         images_cli(cli, &["image", "rm", image])?;
     }
     Ok(())

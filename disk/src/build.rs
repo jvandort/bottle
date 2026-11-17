@@ -178,6 +178,11 @@ impl Store {
 
     /// Builds `recipe`, or finds it built: the new stage's name.
     pub fn build(&self, recipe: &Recipe, launch: &dyn Launch) -> io::Result<String> {
+        if let Some(reference) = &recipe.pull {
+            return Err(io::Error::other(format!(
+                "{reference} isn't in the store: a pulled image is imported first, and built from"
+            )));
+        }
         let parent = match &recipe.from {
             Some(name) => Some((name.clone(), self.stage(name)?)),
             None => None,

@@ -124,12 +124,24 @@ fn ids(features: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// What builds the image of the features SPECS resolve to (the base image, for none).
+/// What builds the image of the features SPECS resolve to (the base image, for none): its tag,
+/// inputs and recipe, as JSON.
 fn image(specs: &[&str]) -> Value {
-    if specs.is_empty() {
-        return images::base().unwrap();
-    }
-    images::image(&resolve(&strings(specs)).unwrap()).unwrap()
+    let (tag, inputs, recipe) = if specs.is_empty() {
+        (
+            images::tag(crate::features::BASE),
+            images::base_inputs().unwrap(),
+            images::base().unwrap(),
+        )
+    } else {
+        let features = resolve(&strings(specs)).unwrap();
+        (
+            images::image_tag(&features),
+            images::inputs_hash(&features).unwrap(),
+            images::image(&features).unwrap(),
+        )
+    };
+    json!({"tag": tag, "inputs": inputs, "recipe": recipe})
 }
 
 /// What folio serve does with a request for `path` by `method` to SPEC's credential's hosts.
@@ -1585,26 +1597,10 @@ fn its_repositories_are_kept_for_its_bottles_and_builds() {
         images::cached_for(&resolve(&strings(&["claude"])).unwrap()),
         images::build_cached().unwrap(),
     ] {
-        let by_host = |host: &str| {
-            kept.as_array()
-                .unwrap()
-                .iter()
-                .find(|c| c["host"] == host)
-                .cloned()
-        };
-        assert_eq!(
-            by_host("apt.example").unwrap()["include"],
-            json!(["/stable/*.deb"])
-        );
+        let by_host = |host: &str| kept.iter().find(|c| c.host == host).cloned();
+        assert_eq!(by_host("apt.example").unwrap().include, ["/stable/*.deb"]);
         assert!(by_host("deb.debian.org").is_some());
     }
-}
-
-#[test]
-fn the_recipe_says_its_features_for_the_build() {
-    let f = Features::empty();
-    f.feature("tools", json!({}));
-    assert_eq!(image(&["tools"])["recipe"]["features"], json!(["tools"]));
 }
 
 #[test]
