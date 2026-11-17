@@ -4,11 +4,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use bottle_formats::listing;
-use serde::{Deserialize, Serialize};
 
 use crate::{daemon, runners};
 
 use super::bind::bindings;
+use super::record::Made;
 use super::{Bottle, load};
 
 /// Where a bottle is, as folio sees it: its machine's state, once it's made; else how far its
@@ -66,27 +66,6 @@ impl From<listing::State> for State {
             listing::State::Running => State::Running,
             listing::State::Stopped => State::Stopped,
         }
-    }
-}
-
-/// How far a bottle's making got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Made {
-    /// Its setup hasn't finished.
-    Creating,
-    Ready,
-    /// Deleting it left parts behind.
-    Broken,
-}
-
-impl std::fmt::Display for Made {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Made::Creating => "creating",
-            Made::Ready => "ready",
-            Made::Broken => "broken",
-        })
     }
 }
 

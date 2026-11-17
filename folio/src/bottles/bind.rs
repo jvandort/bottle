@@ -6,7 +6,7 @@ use crate::control::{self, Bind, Served};
 use crate::repos::{self, Repo};
 use crate::runners;
 
-use super::state::Made;
+use super::record::Made;
 use super::{Bottle, Mount, load};
 
 /// The git dir of a mount's repo, which its remotes are served from; None if it's gone.

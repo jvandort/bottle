@@ -1,5 +1,7 @@
 //! A bottle's machine, once made: started (with its contract checked), commands run in it, and deleted.
 
+use crate::runners::{self, Runner};
+
 use bottle_formats::listing;
 
 use crate::bottle_cli::Exec;
@@ -8,8 +10,10 @@ use crate::shell::quote as q;
 use crate::{auth, builds, features, images};
 
 use super::bind::binding;
-use super::state::{Known, Made};
-use super::{Bottle, NETWORK, USER, forget, get, runner_of, save};
+use super::record::Made;
+use super::record::{forget, save};
+use super::state::Known;
+use super::{Bottle, NETWORK, USER, get};
 
 /// What bottle relies on inside every bottle, checked (as genie) whenever one starts. Documented in
 /// folio/features/base/install.sh; keep them in sync.
@@ -276,4 +280,8 @@ pub fn delete(known: &Known, name: &str) -> Result<(), String> {
         crate::log::say!("bottles", "folio: couldn't remove stale images: {e}");
     }
     Ok(())
+}
+
+pub fn runner_of(bottle: &Bottle) -> Result<Runner, String> {
+    runners::get(&bottle.runner)
 }

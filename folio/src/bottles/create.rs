@@ -13,14 +13,15 @@ use crate::specs::Spec;
 use crate::{auth, builds, features, runners, services};
 
 use super::context::{context, machine_env};
+use super::machine::runner_of;
 use super::machine::{
     delete, ensure_running, exec, in_bottle, memory_mib, network, point_at_host, sh, start_machine,
     verify_contract,
 };
-use super::state::{Known, Made};
-use super::{
-    Bottle, CONTEXT_FILE, Mount, NETWORK, ORIGIN, SshGrant, USER, load, now, runner_of, save,
-};
+use super::record::Made;
+use super::record::{now, save};
+use super::state::Known;
+use super::{Bottle, CONTEXT_FILE, Mount, NETWORK, ORIGIN, SshGrant, USER, load};
 
 /// A bottle to make: named `name`, from `spec`, with `mounts`, its creator's `context` for
 /// ~/BOTTLE.md, on `runner` (None: this machine), that may ssh to its `sidecar`, if it's given one;
