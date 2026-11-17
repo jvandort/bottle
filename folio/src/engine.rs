@@ -11,10 +11,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde_json::Value;
-
 use crate::bottle_cli::Cli;
-use crate::bottles::{self, MountRequest};
+use crate::bottles::{self, MountRequest, State, Status};
 use crate::runners;
 use crate::specs::Spec;
 
@@ -131,9 +129,9 @@ pub fn new(
 /// not once a step (each asks every runner the bottles are on), and changed as the command changes
 /// the bottle: gone when it makes or deletes one, running when it starts one or runs something in
 /// it (which starts it).
-static KNOWN: std::sync::Mutex<BTreeMap<String, Value>> = std::sync::Mutex::new(BTreeMap::new());
+static KNOWN: std::sync::Mutex<BTreeMap<String, Status>> = std::sync::Mutex::new(BTreeMap::new());
 
-fn known() -> std::sync::MutexGuard<'static, BTreeMap<String, Value>> {
+fn known() -> std::sync::MutexGuard<'static, BTreeMap<String, Status>> {
     KNOWN.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -145,13 +143,13 @@ fn forget(name: &str) {
 /// `name` is running now (what's known of it, if anything is, says so).
 fn running(name: &str) {
     if let Some(row) = known().get_mut(name) {
-        row["state"] = "running".into();
+        row.state = State::Running;
     }
 }
 
-/// Each named bottle's status row (bottles::status); state "missing" if there's no such bottle.
-/// Asked once a command (KNOWN).
-pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
+/// Each named bottle's status (bottles::status); Missing if there's no such bottle. Asked once a
+/// command (KNOWN).
+pub fn status(names: &[String]) -> Result<BTreeMap<String, Status>, String> {
     let unknown: Vec<String> = names
         .iter()
         .filter(|n| !known().contains_key(*n))
@@ -161,7 +159,7 @@ pub fn status(names: &[String]) -> Result<BTreeMap<String, Value>, String> {
         let rows = bottles::status(&unknown)?;
         let mut known = known();
         for row in rows {
-            known.insert(row["name"].as_str().unwrap_or_default().to_string(), row);
+            known.insert(row.name.clone(), row);
         }
     }
     let known = known();

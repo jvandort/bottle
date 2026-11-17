@@ -35,9 +35,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::advice::{advice, durable, sidecar as sidecar_advice, sidecar_itself};
+use crate::bottles::{State, Status};
 use crate::engine::{self, Mount};
 use crate::repos::{Repo, check_repo_spec, default_spec};
 use crate::specs::Spec;
@@ -53,7 +54,6 @@ pub const SHELL: &str = "shell";
 const TERM: &str = "xterm-256color";
 /// A bottle's state when its runner is off, as bottle says it: unreachable, or detached to be
 /// turned off.
-const RUNNER_OFF: [&str; 2] = ["unreachable", "detached"];
 const SNAPSHOT: [&str; 4] = [
     snapshots::WORKSPACE_ARCHIVE,
     snapshots::NOTES_ARCHIVE,
@@ -294,10 +294,12 @@ fn now() -> f64 {
 
 /// When the thread was last used, its state row (states) saying: its bottle's last use; a paused
 /// thread's, when it was paused; else when it was made.
-pub fn last_active(repo: &Repo, thread: &Thread, row: &Value) -> f64 {
+pub fn last_active(repo: &Repo, thread: &Thread, row: &Row) -> f64 {
     if let Some(when) = row
-        .get("last_active")
-        .and_then(Value::as_f64)
+        .status
+        .bottle
+        .as_ref()
+        .map(|b| b.last_active)
         .filter(|w| *w != 0.0)
     {
         return when;
@@ -312,7 +314,7 @@ pub fn last_active(repo: &Repo, thread: &Thread, row: &Value) -> f64 {
 pub fn recent(
     repo: &Repo,
     mut threads: Vec<Thread>,
-    states: &BTreeMap<String, Value>,
+    states: &BTreeMap<String, Row>,
 ) -> Vec<Thread> {
     let when = |t: &Thread| last_active(repo, t, &states[&t.name]);
     threads.sort_by(|a, b| when(b).total_cmp(&when(a)));
@@ -364,11 +366,10 @@ fn mounts(thread: &Thread) -> Vec<&'static str> {
 fn bottle_mounts(thread: &Thread) -> Result<Vec<String>, String> {
     let row = &engine::status(std::slice::from_ref(&thread.bottle))?[&thread.bottle];
     let paths: Vec<String> = row
-        .get("mounts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m["path"].as_str().map(String::from))
+        .bottle
+        .iter()
+        .flat_map(|b| &b.mounts)
+        .map(|m| m.path.clone())
         .collect();
     Ok(if paths.is_empty() {
         mounts(thread).into_iter().map(String::from).collect()
@@ -591,18 +592,17 @@ fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
     }
     let name = thread.sidecar_bottle();
     let row = &engine::status(std::slice::from_ref(&name))?[&name];
-    let state = row["state"].as_str().unwrap_or_default();
-    if RUNNER_OFF.contains(&state) {
+    if row.state.runner_off() {
         crate::log::say!(
             "threads",
             "folio: thread {t}'s sidecar, {name}, is left on runner {r}, which is off: it's deleted, its record \
              with it, when the runner's on again and the thread next gets a bottle (or `folio delete {t}`)",
             t = thread.name,
-            r = row["runner"].as_str().unwrap_or_default()
+            r = row.bottle.as_ref().map_or("", |b| b.runner.as_str())
         );
         return Ok(false);
     }
-    if state != "missing" {
+    if row.state != State::Missing {
         engine::delete(&name)?;
     }
     Ok(true)
@@ -610,17 +610,14 @@ fn delete_sidecar(thread: &Thread) -> Result<bool, String> {
 
 /// Whether the thread's bottle was made with its sidecar (it went on without, else), its sidecar's
 /// state, from one status of both.
-fn sidecar_state(thread: &Thread) -> Result<(String, bool), String> {
+fn sidecar_state(thread: &Thread) -> Result<(State, bool), String> {
     let names = [thread.bottle.clone(), thread.sidecar_bottle()];
     let rows = engine::status(&names)?;
-    let state = rows[&names[1]]["state"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let state = rows[&names[1]].state;
     let granted = rows[&names[0]]
-        .get("ssh")
-        .and_then(Value::as_object)
-        .is_some_and(|ssh| ssh.values().any(|b| b.as_str() == Some(names[1].as_str())));
+        .bottle
+        .as_ref()
+        .is_some_and(|b| b.ssh.iter().any(|g| g.bottle == names[1]));
     Ok((state, granted))
 }
 
@@ -633,14 +630,14 @@ fn start_sidecar(thread: &Thread) -> Result<(), String> {
     let (state, granted) = sidecar_state(thread)?;
     // One the thread's bottle wasn't made with (it went on without) is no use to it, if it's there
     // at all.
-    if state == "missing" || !granted {
+    if state == State::Missing || !granted {
         crate::log::say!(
             "threads",
             "folio: thread {name}'s sidecar comes with its next bottle: pause and resume it \
              (`folio pause {name}`, then `folio claude {name}`)",
             name = thread.name
         );
-    } else if state != "running"
+    } else if state != State::Running
         && let Err(e) = engine::start(&thread.sidecar_bottle())
     {
         crate::log::say!(
@@ -673,14 +670,14 @@ fn running_sidecar(repo: &Repo, thread: &Thread) -> Result<String, String> {
         ));
     }
     let state = state_of(repo, thread)?;
-    if state != "running" {
+    if state != State::Running {
         return Err(format!(
             "thread {name} is {state}: its sidecar is there while it runs (`folio claude {name}` or `folio shell {name}`)",
             name = thread.name
         ));
     }
     let (state, granted) = sidecar_state(thread)?;
-    if state == "missing" || !granted {
+    if state == State::Missing || !granted {
         return Err(format!(
             "thread {name}'s sidecar comes with its next bottle: pause and resume it \
              (`folio pause {name}`, then `folio claude {name}`)",
@@ -781,11 +778,12 @@ pub fn set_settings(repo: &Repo, thread: &Thread, settings: Settings) -> Result<
         .remove(&thread.name)
         .unwrap();
     let place = row
-        .get("runner")
-        .and_then(Value::as_str)
-        .unwrap_or(runners::LOCAL);
-    let state = row["state"].as_str().unwrap_or_default();
-    if !matches!(state, "paused" | "missing") && place != runner {
+        .status
+        .bottle
+        .as_ref()
+        .map_or(runners::LOCAL, |b| b.runner.as_str());
+    let state = row.status.state;
+    if !matches!(state, State::Paused | State::Missing) && place != runner {
         return Err(format!(
             "thread {name}'s bottle is on {place}; pause it first (`folio pause {name}`), and it resumes on {runner}",
             name = thread.name
@@ -811,9 +809,16 @@ fn undo(repo: &Repo, thread: &Thread) {
     let _ = fs::remove_dir_all(directory(repo, &thread.name));
 }
 
-/// Each thread's bottle's status row, by thread name; a missing bottle with a snapshot is paused.
-/// One with a sidecar has its sidecar's state too, as "sidecar".
-pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Value>, String> {
+/// A thread's state: its bottle's (Paused, for one with a snapshot and no bottle), and its
+/// sidecar's, if it has one.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub status: Status,
+    pub sidecar: Option<State>,
+}
+
+/// Each thread's state, by thread name.
+pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Row>, String> {
     let mut names: Vec<String> = threads.iter().map(|t| t.bottle.clone()).collect();
     names.extend(
         threads
@@ -824,33 +829,27 @@ pub fn states(repo: &Repo, threads: &[Thread]) -> Result<BTreeMap<String, Value>
     let rows = engine::status(&names)?;
     let mut result = BTreeMap::new();
     for t in threads {
-        let mut row = rows
-            .get(&t.bottle)
-            .cloned()
-            .unwrap_or_else(|| json!({"name": t.bottle, "state": "missing"}));
-        if row["state"] == "missing" && snapshot(repo, t).is_some() {
-            row["state"] = "paused".into();
+        let mut status = rows.get(&t.bottle).cloned().unwrap_or_else(|| Status {
+            name: t.bottle.clone(),
+            state: State::Missing,
+            bottle: None,
+        });
+        if status.state == State::Missing && snapshot(repo, t).is_some() {
+            status.state = State::Paused;
         }
-        if t.sidecar.is_some() {
-            let sidecar = rows
-                .get(&t.sidecar_bottle())
-                .and_then(|r| r["state"].as_str())
-                .unwrap_or("missing")
-                .to_string();
-            row["sidecar"] = sidecar.into();
-        }
-        result.insert(t.name.clone(), row);
+        let sidecar = t.sidecar.is_some().then(|| {
+            rows.get(&t.sidecar_bottle())
+                .map_or(State::Missing, |r| r.state)
+        });
+        result.insert(t.name.clone(), Row { status, sidecar });
     }
     Ok(result)
 }
 
-fn state_of(repo: &Repo, thread: &Thread) -> Result<String, String> {
-    Ok(
-        states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-    )
+fn state_of(repo: &Repo, thread: &Thread) -> Result<State, String> {
+    Ok(states(repo, std::slice::from_ref(thread))?[&thread.name]
+        .status
+        .state)
 }
 
 /// Attach this terminal to one of the thread's sessions, bringing the thread to running first.
@@ -891,12 +890,12 @@ pub fn attach(
 
 fn ensure_running(repo: &Repo, thread: &Thread) -> Result<(), String> {
     let state = state_of(repo, thread)?;
-    match state.as_str() {
-        "paused" => {
+    match state {
+        State::Paused => {
             crate::log::say!("threads", "Resuming thread {}...", thread.name);
             resume(repo, thread)?;
         }
-        "missing" => {
+        State::Missing => {
             return Err(format!(
                 "thread {name}'s bottle, {bottle}, is gone, and with it everything that wasn't pushed. What was \
                  pushed is in your repo: `git fetch bottle/{name}`. `folio delete {name}` removes what's left of \
@@ -905,7 +904,7 @@ fn ensure_running(repo: &Repo, thread: &Thread) -> Result<(), String> {
                 bottle = thread.bottle
             ));
         }
-        "running" => {}
+        State::Running => {}
         _ => engine::start(&thread.bottle)?,
     }
     start_sidecar(thread)
@@ -922,19 +921,19 @@ fn sh(script: impl Into<String>) -> Vec<String> {
 /// fails before that, the bottle is left as it is.
 pub fn pause(repo: &Repo, thread: &Thread) -> Result<(), String> {
     let state = state_of(repo, thread)?;
-    if state == "paused" {
+    if state == State::Paused {
         return Err(format!(
             "thread {name} is already paused; `folio claude {name}` resumes it",
             name = thread.name
         ));
     }
-    if state == "missing" {
+    if state == State::Missing {
         return Err(format!(
             "thread {}'s bottle, {}, is gone; there's nothing to pause",
             thread.name, thread.bottle
         ));
     }
-    if state != "running" {
+    if state != State::Running {
         engine::start(&thread.bottle)?;
     }
     stop_sessions(thread)?;
@@ -1033,23 +1032,13 @@ fn resume(repo: &Repo, thread: &Thread) -> Result<(), String> {
         let row = engine::status(std::slice::from_ref(&thread.bottle))?
             .remove(&thread.bottle)
             .unwrap();
-        for mount in row
-            .get("mounts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let urls: BTreeMap<String, String> = mount["urls"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+        for mount in row.bottle.iter().flat_map(|b| &b.mounts) {
+            let urls: BTreeMap<String, String> = mount
+                .remotes
+                .iter()
+                .map(|r| (r.name.clone(), mount.url(&r.name)))
                 .collect();
-            let script = snapshots::repoint(
-                mount["path"].as_str().unwrap_or_default(),
-                mount["objects"].as_str().unwrap_or_default(),
-                &urls,
-            );
+            let script = snapshots::repoint(&mount.path, &mount.objects, &urls);
             engine::run(&thread.bottle, &sh(script), None, true)?;
         }
         engine::run_from_file(
@@ -1144,10 +1133,10 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
         .map(|branch| format!("{branch}: pushed, but not on your branches or origin's"))
         .collect();
     let state = state_of(repo, thread)?;
-    if state == "missing" {
+    if state == State::Missing {
         return Ok(lost);
     }
-    let work = if state == "paused" {
+    let work = if state == State::Paused {
         // As the bottle saw it at pause: the snapshot itself is never opened here (see
         // snapshots.rs).
         let path = snapshot(repo, thread).unwrap().join(snapshots::WORK);
@@ -1155,7 +1144,7 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
     } else {
         // A bottle that can't say what's in it (one broken from inside, say) is no reason to keep it:
         // that it couldn't is what's said to lose.
-        let asked = if state == "running" {
+        let asked = if state == State::Running {
             Ok(())
         } else {
             engine::start(&thread.bottle)
@@ -1188,7 +1177,7 @@ pub fn losses(repo: &Repo, thread: &Thread) -> Result<Vec<String>, String> {
             tips.insert(name.to_string(), commit.to_string());
         }
     }
-    let place = if state == "paused" {
+    let place = if state == State::Paused {
         "the snapshot"
     } else {
         "the bottle"
@@ -1223,7 +1212,7 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
         return Err("the broker is called the broker".into());
     }
     let state = state_of(repo, thread)?;
-    if !matches!(state.as_str(), "paused" | "missing") {
+    if !matches!(state, State::Paused | State::Missing) {
         return Err(format!(
             "thread {name} has a bottle, whose name can't change: pause it first (`folio pause {name}`), then rename it",
             name = thread.name
@@ -1244,7 +1233,7 @@ pub fn rename(repo: &Repo, thread: &Thread, new: &str) -> Result<Thread, String>
 /// Delete the thread: its bottle, its lane and remote, and its record and snapshot. Not its notes:
 /// they stay where they are, and a new thread of the same name finds them.
 pub fn delete(repo: &Repo, thread: &Thread) -> Result<(), String> {
-    if !matches!(state_of(repo, thread)?.as_str(), "missing" | "paused") {
+    if !matches!(state_of(repo, thread)?, State::Missing | State::Paused) {
         engine::delete(&thread.bottle)?;
     }
     if !thread.broker {
@@ -1279,6 +1268,7 @@ pub fn delete(repo: &Repo, thread: &Thread) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn names_are_kebab_case() {

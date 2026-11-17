@@ -35,7 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bottle_formats::listing::State;
+use bottle_formats::listing;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
@@ -64,9 +64,92 @@ const RECORDS: &str = "bottles";
 /// serve's, by service; 3, on a runner, to folio serve's forwarded there (services_sockets), not
 /// bottle-cli's.
 const NETWORK: u32 = 3;
-/// The state of a bottle on a runner that can't be reached; and on one detached, which isn't asked.
-pub const UNREACHABLE: &str = "unreachable";
-pub const DETACHED: &str = "detached";
+/// Where a bottle is, as folio sees it: its machine's state, once it's made; else how far its
+/// making got; or why its state can't be told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Created,
+    Running,
+    Stopped,
+    /// Its making hasn't finished.
+    Creating,
+    /// Deleting it left parts behind.
+    Broken,
+    /// There's no such bottle, or its machine is gone.
+    Missing,
+    /// Its runner can't be reached.
+    Unreachable,
+    /// Its runner is detached: not asked.
+    Detached,
+    /// Its thread's paused: it has a snapshot, and no bottle (threads::states).
+    Paused,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Created => "created",
+            State::Running => "running",
+            State::Stopped => "stopped",
+            State::Creating => "creating",
+            State::Broken => "broken",
+            State::Missing => "missing",
+            State::Unreachable => "unreachable",
+            State::Detached => "detached",
+            State::Paused => "paused",
+        }
+    }
+
+    /// Whether it's on a runner that's off: unreachable, or detached.
+    pub fn runner_off(self) -> bool {
+        matches!(self, State::Unreachable | State::Detached)
+    }
+}
+
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<listing::State> for State {
+    fn from(state: listing::State) -> State {
+        match state {
+            listing::State::Created => State::Created,
+            listing::State::Running => State::Running,
+            listing::State::Stopped => State::Stopped,
+        }
+    }
+}
+
+/// How far a bottle's making got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Made {
+    /// Its setup hasn't finished.
+    Creating,
+    Ready,
+    /// Deleting it left parts behind.
+    Broken,
+}
+
+impl std::fmt::Display for Made {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Made::Creating => "creating",
+            Made::Ready => "ready",
+            Made::Broken => "broken",
+        })
+    }
+}
+
+/// A bottle's state, and its record if it has one.
+#[derive(Clone, Debug)]
+pub struct Status {
+    pub name: String,
+    pub state: State,
+    pub bottle: Option<Bottle>,
+}
 
 /// What bottle relies on inside every bottle, checked (as genie) whenever one starts. Documented in
 /// folio/features/base/install.sh; keep them in sync.
@@ -199,18 +282,14 @@ pub struct MountRequest {
     pub remotes: Vec<String>,
 }
 
-fn default_status() -> String {
-    "creating".into()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bottle {
     pub name: String,
     pub id: String,
     pub image: String,
     pub created: f64,
-    /// "creating" until setup finishes, "ready" after; "broken" if cleanup failed.
-    pub status: String,
+    /// Creating until setup finishes, Ready after; Broken if cleanup failed.
+    pub status: Made,
     /// Features installed on top of the image, as specs (e.g. jvm:version=17), including
     /// dependencies.
     pub features: Vec<String>,
@@ -255,15 +334,6 @@ impl Bottle {
     /// Its memory, as its spec says.
     fn memory(&self) -> Option<&str> {
         Some(&self.spec.memory)
-    }
-
-    /// Its machine and where it is, as folio shows it: RUNNER/NAME for one on a runner.
-    fn qualified(&self) -> String {
-        if self.runner == runners::LOCAL {
-            self.machine().to_string()
-        } else {
-            format!("{}/{}", self.runner, self.machine())
-        }
     }
 
     fn permissions(&self) -> Vec<String> {
@@ -397,7 +467,7 @@ pub fn create(
         id: uuid(),
         image: features::BASE.into(),
         created: now,
-        status: default_status(),
+        status: Made::Creating,
         features: installed,
         spec,
         mounts: planned.iter().map(|(m, _)| m.clone()).collect(),
@@ -490,7 +560,7 @@ fn plan_sidecar(
     let Some(there) = existing.get(target) else {
         return Err(format!("no sidecar named {}", crate::quoted(target)));
     };
-    if there.status != "ready" {
+    if there.status != Made::Ready {
         return Err(format!("its sidecar, {target}, is {}", there.status));
     }
     Ok(vec![SshGrant {
@@ -526,7 +596,7 @@ fn bring_up(bottle: Bottle, mounted: &[Repo], tag: &str, owner: &Path) -> Result
             return Err(failure);
         }
     };
-    bottle.status = "ready".into();
+    bottle.status = Made::Ready;
     save(&bottle, None)?;
     Ok(bottle)
 }
@@ -782,7 +852,7 @@ pub fn bind_messages() -> Result<Vec<Value>, String> {
     for bottle in load()?.values() {
         let off = bottle.runner != runners::LOCAL
             && detached.get(&bottle.runner).copied().unwrap_or(false);
-        if bottle.status != "ready" || off {
+        if bottle.status != Made::Ready || off {
             continue;
         }
         match daemon::bind_message(&binding(bottle)) {
@@ -1031,7 +1101,7 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
         daemon::start()?;
         return Ok(bottle);
     }
-    if bottle.status != "ready" {
+    if bottle.status != Made::Ready {
         return Err(format!(
             "{name} is {}; delete its thread to remove it (`folio delete`)",
             bottle.status
@@ -1044,7 +1114,7 @@ pub fn ensure_running(name: &str) -> Result<Bottle, String> {
             bottle.name
         ));
     };
-    if state != State::Running {
+    if state != listing::State::Running {
         let given = bottle.network_version < NETWORK;
         if given {
             // Made with another policy than this one: given it now.
@@ -1118,7 +1188,7 @@ pub fn exec_command(name: &str, argv: &[String], tty: bool) -> Result<Vec<String
 /// finished, or its runner can't be reached or is detached. Only the runners these bottles are on
 /// are asked, each once, all at once: a runner that's off costs what it takes to say so
 /// (runners::LIST_TIMEOUT), however many there are.
-pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, String> {
+pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, State)>, String> {
     let mut chosen: Vec<Bottle> = load()?
         .into_values()
         .filter(|b| names.is_none_or(|n| n.contains(&b.name)))
@@ -1126,7 +1196,7 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
     chosen.sort_by(|a, b| a.created.total_cmp(&b.created));
     let asked: BTreeSet<String> = chosen
         .iter()
-        .filter(|b| b.status == "ready")
+        .filter(|b| b.status == Made::Ready)
         .map(|b| b.runner.clone())
         .collect();
     let remote = if asked.iter().any(|r| r != runners::LOCAL) {
@@ -1141,7 +1211,10 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
         .collect();
     let to_ask: Vec<String> = asked.difference(&detached).cloned().collect();
     // Each runner asked, and its machines' states; None if it couldn't be reached.
-    type Found = (String, Result<Option<BTreeMap<String, String>>, String>);
+    type Found = (
+        String,
+        Result<Option<BTreeMap<String, listing::State>>, String>,
+    );
     let found: Vec<Found> = std::thread::scope(|scope| {
         let handles: Vec<_> = to_ask
             .iter()
@@ -1150,12 +1223,7 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
                 scope.spawn(move || {
                     // The runner's machines' states; None if it can't be reached (this machine
                     // always can).
-                    let states = runners::get(&name).and_then(|r| r.states()).map(|states| {
-                        states
-                            .into_iter()
-                            .map(|(machine, state)| (machine, state.to_string()))
-                            .collect()
-                    });
+                    let states = runners::get(&name).and_then(|r| r.states());
                     let result = match states {
                         Ok(states) => Ok(Some(states)),
                         Err(e) if name == runners::LOCAL => Err(e),
@@ -1167,27 +1235,25 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let mut states: BTreeMap<String, Option<BTreeMap<String, String>>> = BTreeMap::new();
+    let mut states: BTreeMap<String, Option<BTreeMap<String, listing::State>>> = BTreeMap::new();
     for (name, result) in found {
         states.insert(name, result?);
     }
     Ok(chosen
         .into_iter()
         .map(|bottle| {
-            let state = if bottle.status != "ready" {
-                bottle.status.clone()
-            } else if detached.contains(&bottle.runner) {
-                DETACHED.into()
-            } else {
-                match &states[&bottle.runner] {
-                    None => UNREACHABLE.into(),
+            let state = match bottle.status {
+                Made::Creating => State::Creating,
+                Made::Broken => State::Broken,
+                Made::Ready if detached.contains(&bottle.runner) => State::Detached,
+                Made::Ready => match &states[&bottle.runner] {
+                    None => State::Unreachable,
                     Some(machines) => machines
                         .get(bottle.machine())
-                        .cloned()
-                        .unwrap_or_else(|| "missing".into()),
-                }
+                        .map_or(State::Missing, |&s| s.into()),
+                },
             };
-            if state == "running" {
+            if state == State::Running {
                 RUNNING
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -1198,51 +1264,32 @@ pub fn list_all(names: Option<&[String]>) -> Result<Vec<(Bottle, String)>, Strin
         .collect())
 }
 
-/// Every bottle's state and what it was made from, or just those `names`. A name with no bottle
-/// gets a row with state "missing", so a caller can tell a bottle that's gone from a command that
-/// failed.
-pub fn status(names: &[String]) -> Result<Vec<Value>, String> {
+/// Every bottle's state and record, or just those `names`. A name with no bottle is Missing, so a
+/// caller can tell a bottle that's gone from a command that failed.
+pub fn status(names: &[String]) -> Result<Vec<Status>, String> {
     let listed = list_all(if names.is_empty() { None } else { Some(names) })?;
     let order: Vec<String> = if names.is_empty() {
         listed.iter().map(|(b, _)| b.name.clone()).collect()
     } else {
         names.to_vec()
     };
-    let states: BTreeMap<String, (Bottle, String)> = listed
+    let mut states: BTreeMap<String, (Bottle, State)> = listed
         .into_iter()
         .map(|(b, s)| (b.name.clone(), (b, s)))
         .collect();
     Ok(order
-        .iter()
-        .map(|name| {
-            let Some((bottle, state)) = states.get(name) else {
-                return json!({"name": name, "state": "missing"});
-            };
-            let mut features = bottle.features.clone();
-            features.sort();
-            let ssh: serde_json::Map<String, Value> =
-                bottle.ssh.iter().map(|g| (g.name.clone(), g.bottle.clone().into())).collect();
-            let mounts: Vec<Value> = bottle
-                .mounts
-                .iter()
-                .map(|m| {
-                    let urls: serde_json::Map<String, Value> =
-                        m.remotes.iter().map(|r| (r.name.clone(), m.url(&r.name).into())).collect();
-                    json!({"path": m.path, "repo": m.repo, "branch": m.branch, "commit": m.commit,
-                           "remotes": m.remotes.iter().map(remote_spec).collect::<Vec<_>>(),
-                           "objects": m.objects, "urls": urls})
-                })
-                .collect();
-            json!({
-                "name": bottle.name, "state": state, "created": bottle.created, "last_active": bottle.last_active,
-                "runner": bottle.runner,
-                // Its machine, as bottle-cli here names it (`bottle shell MACHINE`).
-                "machine": bottle.qualified(),
-                "features": features, "memory": bottle.memory(), "spec": bottle.spec,
-                "ssh": ssh,
-                // Where its objects and remotes are, as a checkout restored into it has to point.
-                "mounts": mounts,
-            })
+        .into_iter()
+        .map(|name| match states.remove(&name) {
+            Some((bottle, state)) => Status {
+                name,
+                state,
+                bottle: Some(bottle),
+            },
+            None => Status {
+                name,
+                state: State::Missing,
+                bottle: None,
+            },
         })
         .collect())
 }
@@ -1272,7 +1319,7 @@ pub fn delete(name: &str) -> Result<(), String> {
             "{name}: deleting left parts behind: {}",
             failures.join("; ")
         );
-        bottle.status = "broken".into();
+        bottle.status = Made::Broken;
         save(&bottle, None)?;
         return Err(format!(
             "couldn't fully delete {name} ({}); try again, and what's left is deleted",
@@ -1354,7 +1401,7 @@ mod tests {
             id: "id".into(),
             image: "base".into(),
             created: 0.0,
-            status: "ready".into(),
+            status: Made::Ready,
             features: features.iter().map(|f| f.to_string()).collect(),
             spec: Spec::of(
                 json!({"memory": "2G", "permissions": spec["permissions"].clone()

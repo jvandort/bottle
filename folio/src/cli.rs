@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use serde_json::Value;
 
+use crate::bottles::State;
 use crate::repos::{self, Repo};
 use crate::specs::Spec;
 use crate::threads::{self, Settings, Thread};
@@ -640,7 +640,7 @@ fn thread_of(
             label: format!(
                 "{:<width$}  {:<8}  {}",
                 t.name,
-                row["state"].as_str().unwrap_or_default(),
+                row.status.state.as_str(),
                 ago(threads::last_active(repo, t, row))
             ),
             thread: Some(t.name.clone()),
@@ -787,18 +787,15 @@ fn list() -> Outcome {
     ];
     for thread in &all {
         let row = &states[&thread.name];
-        let state = row["state"].as_str().unwrap_or_default();
-        let size = if state == "paused" {
+        let state = row.status.state;
+        let size = if state == State::Paused {
             threads::snapshot_size(&repo, thread)
         } else {
             None
         };
         // Where its bottle is; for one without, where its next is made.
-        let runner = match row
-            .get("runner")
-            .and_then(Value::as_str)
-            .filter(|r| !r.is_empty())
-        {
+        let bottle = row.status.bottle.as_ref();
+        let runner = match bottle.map(|b| b.runner.as_str()).filter(|r| !r.is_empty()) {
             Some(runner) => runner.to_string(),
             None => threads::runner_of(&repo, thread)?.unwrap_or_else(|| "local".into()),
         };
@@ -807,19 +804,18 @@ fn list() -> Outcome {
             None => "-".to_string(),
             Some(s) => {
                 let runner = s.runner.clone().unwrap_or_default();
-                match row["sidecar"].as_str() {
-                    Some("missing") | None => runner,
+                match row.sidecar {
+                    Some(State::Missing) | None => runner,
                     Some(state) => format!("{runner} ({state})"),
                 }
             }
         };
-        let features: Vec<&str> = row
-            .get("features")
-            .and_then(Value::as_array)
+        let mut features: Vec<&str> = bottle
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
+            .flat_map(|b| &b.features)
+            .map(String::as_str)
             .collect();
+        features.sort();
         rows.push(vec![
             thread.name.clone(),
             state.to_string(),
@@ -1141,10 +1137,9 @@ fn sidecar_text(sidecar: &Settings) -> String {
 
 fn thread_configure(matches: &ArgMatches, repo: &Repo, thread: &Thread) -> Outcome {
     if !changes(matches) {
-        let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]
+            .status
+            .state;
         println!(
             "{}; thread {}, {state}",
             thread_text(repo, &thread.settings)?,
@@ -1176,10 +1171,7 @@ fn sidecar_configure(matches: &ArgMatches) -> Outcome {
             return Ok(0);
         };
         let name = thread.sidecar_bottle();
-        let state = engine::status(std::slice::from_ref(&name))?[&name]["state"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let state = engine::status(std::slice::from_ref(&name))?[&name].state;
         println!("{}; bottle {name}, {state}", sidecar_text(sidecar));
         return Ok(0);
     }
@@ -1235,11 +1227,10 @@ fn sidecar_shell(matches: &ArgMatches) -> Outcome {
 
 /// When a change to it or its sidecar reaches the thread: at once, for one with no bottle.
 fn when(repo: &Repo, thread: &Thread) -> Result<String, String> {
-    let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]["state"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    if matches!(state.as_str(), "paused" | "missing") {
+    let state = threads::states(repo, std::slice::from_ref(thread))?[&thread.name]
+        .status
+        .state;
+    if matches!(state, State::Paused | State::Missing) {
         return Ok(String::new());
     }
     Ok(format!(
