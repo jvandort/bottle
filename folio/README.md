@@ -628,7 +628,7 @@ folio configure fix-it                 # shows it
 ## Development
 
 ```sh
-cargo test -p folio
+cargo xtask test -- -p folio
 ```
 
 folio is a Rust program (this directory, in bottle's Cargo workspace; `bin/folio` builds and runs it from a
@@ -639,7 +639,8 @@ serve, `src/serve/`'s; features, `src/features.rs`'s (which says what a feature'
 `devcontainer-feature.json` may hold; `features_tests.rs` checks it) and `images.rs`'s (what builds
 their images).
 
-`cargo test -p folio` has the unit tests, and folio driven as a person drives it, from outside
+`cargo test -p folio` has the unit tests and those that need nothing else; `cargo xtask test`
+adds the rest, folio driven as a person drives it, from outside
 (`tests/`, sharing `tests/harness/`): each test runs `folio` in a directory of its own,
 with a repo to work in and a folio home of its own (so a folio serve of its own), against
 stand-ins for what folio runs, in `standin/` (folio-standin, one program that's each by the name
@@ -652,9 +653,8 @@ it's run as):
   thread's bottle on a runner is tested end to end (`drone.rs`).
 - **security**: the Keychain, as files.
 
-On a Mac, `FOLIO_VM_TESTS=1` adds two that run real machines, on this checkout's bottle-cli (built
-first if it's changed, by `bin/bottle-build`, unless `BOTTLE_CLI` names one), and take minutes the
-first time, while they pull and build images:
+On a Mac, `cargo xtask test --vm` adds two that run real machines, on this checkout's bottle-cli
+(its distribution, built first), and take minutes the first time, while they pull and build images:
 
 - `tests/krun_contract.rs`: what folio relies on bottle-cli for, asked as folio asks it.
   Run it after changing bottle-cli, the agent or libkrun.

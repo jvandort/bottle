@@ -14,10 +14,18 @@ sha2.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
-test-cargo.workspace = true
 bottle-agent-client.workspace = true
 rustix.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
+
+# The tests that run another package's program (see `cargo xtask test`, which builds them and
+# turns this on): without it, `cargo test` has none of them.
+[features]
+integration = []
+
+[[test]]
+name = "build"
+required-features = ["integration"]

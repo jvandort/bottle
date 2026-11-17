@@ -24,6 +24,74 @@ signal-hook.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-test-cargo.workspace = true
 libc.workspace = true
 rcgen.workspace = true
+
+# The tests that run another package's program (see `cargo xtask test`, which builds them and
+# turns this on): without it, `cargo test` has none of them.
+[features]
+integration = []
+
+[[test]]
+name = "broker"
+required-features = ["integration"]
+
+[[test]]
+name = "credentials"
+required-features = ["integration"]
+
+[[test]]
+name = "drone"
+required-features = ["integration"]
+
+[[test]]
+name = "end_to_end"
+required-features = ["integration"]
+
+[[test]]
+name = "exec_cp"
+required-features = ["integration"]
+
+[[test]]
+name = "git"
+required-features = ["integration"]
+
+[[test]]
+name = "krun_contract"
+required-features = ["integration"]
+
+[[test]]
+name = "machines"
+required-features = ["integration"]
+
+[[test]]
+name = "notes"
+required-features = ["integration"]
+
+[[test]]
+name = "pause"
+required-features = ["integration"]
+
+[[test]]
+name = "picker"
+required-features = ["integration"]
+
+[[test]]
+name = "rename"
+required-features = ["integration"]
+
+[[test]]
+name = "runner"
+required-features = ["integration"]
+
+[[test]]
+name = "serve"
+required-features = ["integration"]
+
+[[test]]
+name = "sidecar"
+required-features = ["integration"]
+
+[[test]]
+name = "threads"
+required-features = ["integration"]

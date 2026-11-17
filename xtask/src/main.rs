@@ -1,6 +1,9 @@
 //! `cargo xtask`: bottle's build steps past cargo's own, in one place.
 //!
 //!     cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]
+//!     cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]
+//!
+//! `test` is the workspace's tests, with the programs they run built for them (see test.rs).
 //!
 //! Builds a distribution for each TRIPLE (this machine's own, if none is given) into
 //! $CARGO_TARGET_DIR's dist for this machine's own, or dist-TRIPLE for another (target/, if it isn't
@@ -55,6 +58,7 @@ mod kernel;
 mod linux;
 mod mac;
 mod mke2fs;
+mod test;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -62,7 +66,12 @@ fn main() -> ExitCode {
         Some("dist") => {
             parse_dist(&args[1..]).and_then(|(profile, targets, out)| dist(profile, targets, out))
         }
-        _ => Err("usage: cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]".into()),
+        Some("test") => test::test(&args[1..]),
+        _ => Err(
+            "usage: cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]\n       \
+                  cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

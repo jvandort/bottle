@@ -4,12 +4,10 @@
 //! the stand-in takes to be this machine's own root.
 //!
 //! Needs root, loop devices, mke2fs and python3, so it's skipped otherwise; to run it, as root but
-//! built as you:
-//!
-//!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-cli --test machine
+//! built as you: `cargo xtask test --root`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 /// boot's arguments taken, the agent run in namespaces in a VM's place.
@@ -62,20 +60,19 @@ fn root() -> bool {
     rustix::process::geteuid().is_root()
 }
 
-/// bottle-agent, built here: another package's binary, which cargo doesn't hand this test.
+/// bottle-agent, as `cargo xtask test` built it: another package's binary, which cargo doesn't hand
+/// this test.
 fn agent() -> PathBuf {
-    // Where cargo put bottle-cli: target/<profile>, whatever its build directory's layout.
-    let profile = Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let mut command = test_cargo::cargo();
-    command.args(["build", "-q", "-p", "bottle-agent"]);
-    if profile.ends_with("release") {
-        command.arg("--release");
-    }
-    assert!(command.status().unwrap().success(), "building bottle-agent");
-    profile.join("bottle-agent")
+    given("XTASK_BOTTLE_AGENT")
+}
+
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`.
+fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
+    })
 }
 
 struct Fixture {

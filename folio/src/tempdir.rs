@@ -76,39 +76,29 @@ pub fn set(_: &Isolated, key: &str, value: &str) {
     unsafe { std::env::set_var(key, value) };
 }
 
-/// This crate's folio, built: what a test runs where folio runs itself (a hook, say), the test
-/// being another program.
-pub fn folio() -> PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")));
-    let built = target.join("debug").join("folio");
-    static BUILT: std::sync::Once = std::sync::Once::new();
-    BUILT.call_once(|| {
-        let status = test_cargo::cargo()
-            .args(["build", "-q", "-p", "folio"])
-            .status()
-            .unwrap();
-        assert!(status.success(), "building folio");
-    });
-    built
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`: the tests
+/// that run one are folio's `integration` feature's.
+#[cfg(feature = "integration")]
+fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
+    })
 }
 
-/// folio-standin, built: the stand-ins for what folio runs, each by the name it's run as (a
-/// link to it named bottle-cli, ssh or security).
+/// folio, as `cargo xtask test` built it: what a test runs where folio runs itself (a hook, say),
+/// the test being another program.
+#[cfg(feature = "integration")]
+pub fn folio() -> PathBuf {
+    given("XTASK_FOLIO")
+}
+
+/// folio-standin, as `cargo xtask test` built it: the stand-ins for what folio runs, each by the
+/// name it's run as (a link to it named bottle-cli, ssh or security).
+#[cfg(feature = "integration")]
 pub fn standin() -> PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")));
-    static BUILT: std::sync::Once = std::sync::Once::new();
-    BUILT.call_once(|| {
-        let status = test_cargo::cargo()
-            .args(["build", "-q", "-p", "folio-standin"])
-            .status()
-            .unwrap();
-        assert!(status.success(), "building folio-standin");
-    });
-    target.join("debug").join("folio-standin")
+    given("XTASK_FOLIO_STANDIN")
 }
 
 /// git `args`, which must succeed; its stdout, trimmed.

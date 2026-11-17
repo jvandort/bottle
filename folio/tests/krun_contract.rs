@@ -1,5 +1,5 @@
 //! What folio relies on bottle-cli for (bottle_cli.rs says), against a real bottle-cli: only where
-//! it can run VMs, a Mac, and only with FOLIO_VM_TESTS=1 (harness::real_bottle_cli). Checks it as
+//! it can run VMs, a Mac, and only with `cargo xtask test --vm` (harness::real_bottle_cli). Checks it as
 //! folio drives it, word for word, with a stand-in for folio serve's services socket, on one alpine
 //! machine made for the test and deleted after, its BOTTLE_HOME a temporary directory. Run it
 //! after changing bottle-cli, the agent or libkrun.

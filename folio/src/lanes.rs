@@ -262,10 +262,13 @@ pub fn unsaved(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "integration")]
     use crate::tempdir::{self, git as g};
+    #[cfg(feature = "integration")]
     use std::process::Command;
 
     /// Real git: the lane's namespaces in a repo, and the remote that reads and writes them.
+    #[cfg(feature = "integration")]
     struct Lane {
         _env: tempdir::Isolated,
         _tmp: tempdir::Dir,
@@ -273,6 +276,7 @@ mod tests {
         head: String,
     }
 
+    #[cfg(feature = "integration")]
     impl Lane {
         fn new() -> Lane {
             let env = tempdir::isolated();
@@ -325,6 +329,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "integration")]
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -345,6 +350,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn fetching_the_remote_reads_the_out_lane() {
         let lane = Lane::new();
@@ -359,6 +365,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn pushing_to_the_remote_writes_the_in_lane() {
         let lane = Lane::new();
@@ -370,6 +377,7 @@ mod tests {
         assert_eq!(lane.lane(), map(&[]));
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn registering_twice_leaves_one_of_each() {
         let lane = Lane::new();
@@ -380,6 +388,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn unintegrated_is_by_reachability() {
         let lane = Lane::new();
@@ -392,6 +401,7 @@ mod tests {
         assert!(unintegrated(&lane.repo, "t").unwrap().is_empty());
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn unsaved_is_whats_neither_in_the_lane_nor_the_repo() {
         let lane = Lane::new();
@@ -406,6 +416,7 @@ mod tests {
         assert_eq!(unsaved(&lane.repo, "t", &tips).unwrap(), ["local"]);
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn forget_removes_both_lanes_and_the_remote() {
         let lane = Lane::new();
@@ -422,6 +433,7 @@ mod tests {
         forget(&lane.repo, "t").unwrap(); // and again, with nothing left: fine
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn another_threads_lane_is_left_alone() {
         let lane = Lane::new();
@@ -439,6 +451,7 @@ mod tests {
         assert_eq!(lane.git(&["remote"]), "bottle/t-2");
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn renaming_moves_both_lanes_and_the_remote() {
         let lane = Lane::new();
@@ -462,6 +475,7 @@ mod tests {
 
     /// A delete pushed to the lane remote: the agent's branch goes too, if it's still what was
     /// fetched.
+    #[cfg(feature = "integration")]
     fn fetched() -> (Lane, String) {
         let lane = Lane::new();
         let work = lane.new_commit("agent work");
@@ -470,6 +484,7 @@ mod tests {
         (lane, work)
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn a_deleted_branch_goes_from_the_agents_lane_with_its_tracking_ref() {
         let (lane, _) = fetched();
@@ -491,6 +506,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn one_the_agent_pushed_to_since_is_kept_and_the_push_refused() {
         let (lane, _) = fetched();
@@ -506,6 +522,7 @@ mod tests {
         assert_eq!(lane.lane(), map(&[("genie/t-1", &later)]));
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn one_alongside_a_handover_goes_too() {
         let (lane, _) = fetched();
@@ -523,6 +540,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn curate_integrating_it_deletes_it() {
         let (lane, _) = fetched();

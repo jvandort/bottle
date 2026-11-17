@@ -19,5 +19,19 @@ signal-hook.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-[dev-dependencies]
-test-cargo.workspace = true
+# The tests that run another package's program (see `cargo xtask test`, which builds them and
+# turns this on): without it, `cargo test` has none of them.
+[features]
+integration = []
+
+[[test]]
+name = "copy"
+required-features = ["integration"]
+
+[[test]]
+name = "exec"
+required-features = ["integration"]
+
+[[test]]
+name = "machine"
+required-features = ["integration"]

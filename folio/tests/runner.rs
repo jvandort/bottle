@@ -123,24 +123,13 @@ impl Drop for Fixture {
     }
 }
 
-/// A program of bottle's, built in this workspace: run, as folio runs bottle's code.
+/// A program of bottle's, as `cargo xtask test` built it: run, as folio runs bottle's code.
 fn built(program: &str) -> PathBuf {
-    let profile = Path::new(env!("CARGO_BIN_EXE_folio"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let package = if program == "bottle-cli" {
-        "bottle-cli"
+    harness::given(if program == "bottle-cli" {
+        "XTASK_BOTTLE_CLI"
     } else {
-        "bottle-agent"
-    };
-    let mut build = test_cargo::cargo();
-    build.args(["build", "-q", "-p", package]);
-    if profile.ends_with("release") {
-        build.arg("--release");
-    }
-    assert!(build.status().unwrap().success(), "building {package}");
-    profile.join(program)
+        "XTASK_BOTTLE_AGENT"
+    })
 }
 
 #[test]

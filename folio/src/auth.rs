@@ -375,11 +375,13 @@ mod tests {
     use crate::tempdir;
 
     /// The Keychain, as folio-standin's `security` keeps it, first on PATH.
+    #[cfg(feature = "integration")]
     struct Keychain {
         _env: tempdir::Isolated,
         tmp: tempdir::Dir,
     }
 
+    #[cfg(feature = "integration")]
     impl Keychain {
         fn new() -> Keychain {
             let env = tempdir::isolated();
@@ -408,6 +410,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn put_get_delete() {
         let _keychain = Keychain::new();
@@ -419,6 +422,7 @@ mod tests {
         assert_eq!(get("claude"), None);
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn values_never_go_on_a_command_line() {
         let keychain = Keychain::new();
@@ -426,6 +430,7 @@ mod tests {
         assert!(!keychain.argv().contains("tok-secret"));
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn rejects_values_it_cant_store_safely() {
         let keychain = Keychain::new();
@@ -435,6 +440,7 @@ mod tests {
         assert_eq!(keychain.argv(), "");
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn the_default_home_has_the_plain_service_and_others_their_own() {
         let keychain = Keychain::new();
@@ -449,6 +455,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[test]
     fn set_and_remove_are_for_declared_credentials_only() {
         let _keychain = Keychain::new();

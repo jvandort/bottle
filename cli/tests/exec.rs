@@ -15,28 +15,23 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::termios::LocalModes;
 
-fn agent_binary() -> &'static PathBuf {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        // Where cargo put bottle-cli: target/<profile>, whatever its build directory's layout.
-        let profile = std::path::Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let mut cargo = test_cargo::cargo();
-        cargo.args(["build", "-q", "-p", "bottle-agent"]);
-        if profile.ends_with("release") {
-            cargo.arg("--release");
-        }
-        assert!(cargo.status().unwrap().success(), "building bottle-agent");
-        profile.join("bottle-agent")
+/// bottle-agent, as `cargo xtask test` built it.
+fn agent_binary() -> PathBuf {
+    given("XTASK_BOTTLE_AGENT")
+}
+
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`.
+fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
     })
 }
 

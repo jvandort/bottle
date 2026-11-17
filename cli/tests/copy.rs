@@ -90,19 +90,18 @@ impl Drop for Fixture {
     }
 }
 
-/// bottle-agent, built here.
+/// bottle-agent, as `cargo xtask test` built it.
 fn agent() -> PathBuf {
-    let profile = Path::new(env!("CARGO_BIN_EXE_bottle-cli"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let mut build = test_cargo::cargo();
-    build.args(["build", "-q", "-p", "bottle-agent"]);
-    if profile.ends_with("release") {
-        build.arg("--release");
-    }
-    assert!(build.status().unwrap().success(), "building bottle-agent");
-    profile.join("bottle-agent")
+    given("XTASK_BOTTLE_AGENT")
+}
+
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`.
+fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
+    })
 }
 
 #[test]

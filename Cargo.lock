@@ -203,7 +203,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "signal-hook 0.4.6",
- "test-cargo",
 ]
 
 [[package]]
@@ -218,7 +217,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
- "test-cargo",
 ]
 
 [[package]]
@@ -548,7 +546,6 @@ dependencies = [
  "sha2",
  "signal-hook 0.4.6",
  "tar",
- "test-cargo",
  "time",
 ]
 
@@ -1640,13 +1637,6 @@ checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
 dependencies = [
  "filetime",
  "libc",
-]
-
-[[package]]
-name = "test-cargo"
-version = "0.1.0"
-dependencies = [
- "rustix",
 ]
 
 [[package]]

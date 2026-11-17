@@ -3,16 +3,13 @@
 //! for this machine's own root, so a build has something to run on.
 //!
 //! Needs root, loop devices and mke2fs, so it's skipped otherwise; to run it, as root but built
-//! as you:
-//!
-//!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-disk --test build
+//! as you, with the static agent it runs: `cargo xtask test --root`.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use bottle_agent_client::{Start, wait_for_agent};
@@ -36,34 +33,17 @@ fn run(command: &mut Command) -> String {
 }
 
 /// bottle-agent as a VM gets it, a static Linux build (a stage made on nothing has no dynamic
-/// loader to run anything else): another package's binary, which cargo doesn't hand this test,
-/// so built here, as whoever owns the target directory rather than root.
-fn agent() -> &'static PathBuf {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        // The target directory (CARGO_TARGET_TMPDIR is its tmp/, whatever the build directory's
-        // layout), and the profile's directory in it.
-        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
-        let profile = target.join(if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        });
-        let triple = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
-        let mut args = vec!["build", "-q", "-p", "bottle-agent", "--target", &triple];
-        if profile.ends_with("release") {
-            args.push("--release");
-        }
-        let mut command = test_cargo::cargo();
-        command.args(&args);
-        assert!(
-            command.status().unwrap().success(),
-            "building bottle-agent for {triple}"
-        );
-        target
-            .join(&triple)
-            .join(profile.file_name().unwrap())
-            .join("bottle-agent")
+/// loader to run anything else), as `cargo xtask test --root` built it.
+fn agent() -> PathBuf {
+    given("XTASK_BOTTLE_GUEST_AGENT")
+}
+
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`.
+fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
     })
 }
 

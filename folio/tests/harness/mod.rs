@@ -29,24 +29,18 @@ pub use serve::{Serve, bind, header};
 pub const FOLIO: &str = env!("CARGO_BIN_EXE_folio");
 pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
 
-/// This workspace's target directory.
-fn target() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")))
+/// A program `cargo xtask test` built for these tests, at the path it gave in `var`.
+pub fn given(var: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        panic!(
+            "${var} isn't set: these tests run with `cargo xtask test`, which builds what they run"
+        )
+    })
 }
 
-/// folio-standin, built (once a test binary).
+/// folio-standin, as `cargo xtask test` built it.
 pub fn standin() -> PathBuf {
-    static BUILT: std::sync::Once = std::sync::Once::new();
-    BUILT.call_once(|| {
-        let status = test_cargo::cargo()
-            .args(["build", "-q", "-p", "folio-standin"])
-            .status()
-            .unwrap();
-        assert!(status.success(), "building folio-standin");
-    });
-    target().join("debug").join("folio-standin")
+    given("XTASK_FOLIO_STANDIN")
 }
 
 /// git `args`, which must succeed; its stdout, trimmed.
@@ -918,27 +912,19 @@ pub fn proxy_header(machine: &str) -> Vec<u8> {
     )
 }
 
-/// The bottle-cli the tests with real VMs run: $BOTTLE_CLI, else this checkout's, built first if
-/// its sources have changed (bin/bottle-build), so they never run an old one. None, said why, unless
-/// asked for, with FOLIO_VM_TESTS=1, on a Mac: they boot VMs, and the first build takes minutes.
+/// The bottle-cli the tests with real VMs run: this checkout's distribution, as `cargo xtask test
+/// --vm` built it. None, said why, without --vm, or but on a Mac: they boot VMs, and the first build
+/// takes minutes.
 pub fn real_bottle_cli() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         eprintln!("skipped: boots VMs, which a Mac's bottle-cli does");
         return None;
     }
-    if std::env::var("FOLIO_VM_TESTS").as_deref() != Ok("1") {
-        eprintln!("skipped: boots VMs; run with FOLIO_VM_TESTS=1");
+    if std::env::var_os("XTASK_VM_BOTTLE_CLI").is_none() {
+        eprintln!("skipped: boots VMs; run with `cargo xtask test --vm`");
         return None;
     }
-    if let Some(cli) = std::env::var_os("BOTTLE_CLI").filter(|c| !c.is_empty()) {
-        return Some(PathBuf::from(cli));
-    }
-    let repo = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
-    let status = Command::new(repo.join("bin/bottle-build"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "bin/bottle-build");
-    Some(target().join("dist").join("bottle-cli"))
+    Some(given("XTASK_VM_BOTTLE_CLI"))
 }
 
 /// A terminal of `rows` by `cols`, as a person would run folio in: its master side, for the test,

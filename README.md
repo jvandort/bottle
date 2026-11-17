@@ -195,12 +195,17 @@ CA for them, as for any cached host.
 
 ## Development
 
-bottle-cli's tests are Rust's: `cargo test`. Those that need root (they
-stack disks with loop devices, in namespaces) skip without it; to run them,
-as root but built as you:
+The tests are Rust's. `cargo test` runs those that need nothing but their own
+package. The rest run another package's program (the agent, bottle-cli, folio,
+folio's stand-ins), which cargo doesn't hand a test; `cargo xtask test` builds
+those first and runs them all:
 
 ```sh
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test
+cargo xtask test                  # everything that runs here
+cargo xtask test --root           # Linux: and those that need root (they stack disks
+                                  # with loop devices, in namespaces), as root, built as you
+cargo xtask test --vm             # a Mac: and folio's with real VMs (minutes, the first time)
+cargo xtask test -- -p folio      # cargo test's own arguments, after --
 ```
 
 `bin/bottle` and `bin/folio`, shell scripts, build bottle-cli from the

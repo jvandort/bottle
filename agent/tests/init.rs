@@ -4,11 +4,7 @@
 //! clean, and stack on the root as a stage would.
 //!
 //! Needs root, loop devices and mke2fs, so it's skipped otherwise; to run it, as root but built
-//! as you:
-//!
-//!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-agent --test init
-//!
-//! (x86_64's variable, on x86_64.)
+//! as you: `cargo xtask test --root`.
 //!
 //! Linux's, as the agent is.
 #![cfg(target_os = "linux")]

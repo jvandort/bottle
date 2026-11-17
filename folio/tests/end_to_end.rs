@@ -1,7 +1,7 @@
 //! A real thread, end to end: made by folio, as you make one, on bottle-cli's machines, with folio
 //! serve answering what its machine routes to it; run in through `folio exec`, and bin/bottle for
-//! its machine. Only where bottle-cli can run VMs, a Mac, and only with FOLIO_VM_TESTS=1
-//! (harness::real_bottle_cli).
+//! its machine. Only where bottle-cli can run VMs, a Mac, and only with `cargo xtask test
+//! --vm` (harness::real_bottle_cli).
 //!
 //! Makes one thread, `e2e`, from a clone of this repo, its spec `tools` and 8G, and deletes it after.
 //! Its BOTTLE_HOME is $BOTTLE_E2E_HOME (default /tmp/bottle-e2e), kept between runs so the images it

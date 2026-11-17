@@ -5,9 +5,7 @@
 //! leads to).
 //!
 //! Needs root, loop devices, mke2fs and python3, so it's skipped otherwise; to run it, as root but
-//! built as you:
-//!
-//!     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test -p bottle-agent --test net
+//! built as you: `cargo xtask test --root`.
 //!
 //! Linux's, as the agent is.
 #![cfg(target_os = "linux")]
