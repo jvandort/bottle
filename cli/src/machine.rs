@@ -549,7 +549,7 @@ fn disk_of(image: &str) -> io::Result<PathBuf> {
     if Path::new(image).is_file() {
         return Ok(image.into());
     }
-    let dir = crate::build::store();
+    let dir = crate::store();
     let store = Store {
         dir: dir.clone(),
         mke2fs: PathBuf::new(),

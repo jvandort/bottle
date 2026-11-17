@@ -39,8 +39,8 @@ use bottle_disk::build::{Launch, Mount, Recipe, Run, Step, Store, Vm};
 use bottle_disk::registry::{Reference, Registry};
 use bottle_formats::listing::Image;
 
-use crate::FAILED;
 use crate::boot::Net;
+use crate::{FAILED, store};
 
 /// The caching CA builds' cached hosts are answered with.
 const BUILDS_CA: &str = "bottle-builds";
@@ -50,11 +50,6 @@ const BUILD_CA: &str = "BOTTLE_BUILD_CA";
 pub const USAGE: &str = "image build RECIPE [--tag TAG] [--network FILE | --net-direct] \
     | image import ARCHIVE [...] | image pull REFERENCE [...] | image tag IMAGE TAG | image rm TAG \
     | images [--json] | gc [IMAGE]...";
-
-/// The store: $BOTTLE_HOME/stages.
-pub fn store() -> PathBuf {
-    crate::home().join("stages")
-}
 
 /// A build VM's size: builds compile things.
 const CPUS: &str = "4";

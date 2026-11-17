@@ -71,6 +71,11 @@ pub fn home() -> std::path::PathBuf {
         })
 }
 
+/// The store of images' stages: $BOTTLE_HOME/stages.
+fn store() -> std::path::PathBuf {
+    home().join("stages")
+}
+
 /// `tar`, to pack an archive for a Linux machine: on a Mac, bsdtar without the extended attributes
 /// and Mac metadata it adds (com.apple.provenance, say), which GNU tar there warns of, file by file.
 fn packing_tar() -> std::process::Command {
