@@ -41,11 +41,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::bottle_cli::{Create, Exec};
 use crate::control::{self, Bind, Served};
+use crate::control::{HEADS, Remote, UPSTREAM};
 use crate::daemon;
 use crate::git::bottle_git;
 use crate::repos::{self, Repo};
 use crate::runners::{self, Runner};
-use crate::serve::host::{HEADS, Remote, UPSTREAM};
 use crate::services::{self, HOST, HOST_ADDRESS, Network};
 use crate::shell::quote as q;
 use crate::specs::Spec;
@@ -265,14 +265,6 @@ fn remotes_to<S: serde::Serializer>(remotes: &[Remote], s: S) -> Result<S::Ok, S
         })
         .collect();
     records.serialize(s)
-}
-
-fn remote_spec(r: &Remote) -> String {
-    format!("{}:fetch={}", r.name, r.fetch)
-        + &r.push
-            .as_ref()
-            .map(|p| format!(",push={p}"))
-            .unwrap_or_default()
 }
 
 /// A repo in the bottle: its objects mounted read-only, checked out at `path` borrowing them, and
@@ -813,7 +805,7 @@ fn let_in(known: &Known, bottle: &Bottle, grant: &SshGrant) -> Result<(), String
 /// credentials read now. bottle-cli makes the machine's caching CA as it starts, for its policy's
 /// hosts, and gives it to the bottle to trust (the base image's entrypoint does).
 fn start_machine(known: &Known, bottle: &Bottle) -> Result<(), String> {
-    known.serve.bind(binding(bottle))?;
+    known.serve.bind(binding(bottle)?)?;
     runner_of(bottle)?.start(bottle.machine())
 }
 
@@ -893,9 +885,15 @@ pub fn git_dir(mount: &Mount) -> Option<PathBuf> {
         .and_then(|o| o.parent().map(Path::to_path_buf))
 }
 
-/// What folio serve is told of the bottle: all it needs of it.
-fn binding(bottle: &Bottle) -> Bind {
-    Bind {
+/// What folio serve is told of the bottle: all it needs of it, and on a runner, what to forward
+/// there with it.
+fn binding(bottle: &Bottle) -> Result<Bind, String> {
+    let forwards = if bottle.runner == runners::LOCAL {
+        vec![]
+    } else {
+        runners::get(&bottle.runner)?.forwards()?
+    };
+    Ok(Bind {
         bottle: bottle.name.clone(),
         machine: bottle.machine().into(),
         runner: bottle.runner.clone(),
@@ -905,7 +903,7 @@ fn binding(bottle: &Bottle) -> Bind {
             .iter()
             .map(|m| Served {
                 git_dir: git_dir(m),
-                remotes: m.remotes.iter().map(remote_spec).collect(),
+                remotes: m.remotes.clone(),
                 at: m.at.clone(),
             })
             .collect(),
@@ -929,8 +927,8 @@ fn binding(bottle: &Bottle) -> Bind {
                 address: g.address.clone(),
             })
             .collect(),
-        forwards: vec![],
-    }
+        forwards,
+    })
 }
 
 /// What folio serve is told of every ready bottle as it starts (daemon::Restore), to answer them
@@ -944,7 +942,17 @@ pub fn bindings() -> Result<Vec<Bind>, String> {
                 && detached.get(&bottle.runner).copied().unwrap_or(false);
             bottle.status == Made::Ready && !off
         })
-        .map(binding)
+        .filter_map(|bottle| {
+            binding(bottle)
+                .inspect_err(|e| {
+                    crate::log::say!(
+                        "bottles",
+                        "{}: folio serve won't answer it: {e}",
+                        bottle.name
+                    )
+                })
+                .ok()
+        })
         .collect())
 }
 
@@ -1431,10 +1439,7 @@ mod tests {
     fn a_bottle_gets_stand_ins_and_its_permissions_and_where_a_login_starts() {
         let _env = tempdir::isolated();
         let env = machine_env(&["claude".into()], &[], "/workspace").unwrap();
-        assert_eq!(
-            env["CLAUDE_CODE_OAUTH_TOKEN"],
-            crate::serve::credentials::STANDIN
-        );
+        assert_eq!(env["CLAUDE_CODE_OAUTH_TOKEN"], crate::auth::STANDIN);
         assert_eq!(
             env["BOTTLE_MIRROR_ENV"],
             "BOTTLE_WORKDIR CLAUDE_CODE_OAUTH_TOKEN"

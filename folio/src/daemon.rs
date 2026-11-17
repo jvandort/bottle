@@ -71,15 +71,7 @@ pub fn log_path() -> PathBuf {
 
 /// This program, by a hash of it: what folio serve says it's running when asked (ping).
 pub fn code_hash() -> String {
-    crate::serve::code()
-}
-
-/// `bind`, told to folio serve: on a runner, what to forward there with it.
-pub fn bind_message(mut bind: Bind) -> Result<Request, String> {
-    if bind.runner != crate::runners::LOCAL {
-        bind.forwards = crate::runners::get(&bind.runner)?.forwards()?;
-    }
-    Ok(Request::Bind(Box::new(bind)))
+    crate::control::code()
 }
 
 /// What folio serve is to answer as it starts: every bottle there is to answer.
@@ -106,7 +98,8 @@ impl Serve {
     /// credentials are read as it's bound: a login reaches a bottle when it's next started, or when
     /// folio serve is.
     pub fn bind(&self, bind: Bind) -> Result<(), String> {
-        self.request(&bind_message(bind)?, true).map(|_| ())
+        self.request(&Request::Bind(Box::new(bind)), true)
+            .map(|_| ())
     }
 
     /// Stop answering `bottle`'s machine, if folio serve is running at all.
@@ -286,14 +279,7 @@ fn send(message: &Request, timeout: Duration) -> Result<Reply, Failure> {
 fn launch(restore: Restore, background: bool) -> Result<Child, String> {
     let restore: Vec<Request> = restore()?
         .into_iter()
-        .filter_map(|bind| {
-            let name = bind.bottle.clone();
-            bind_message(bind)
-                .inspect_err(|e| {
-                    crate::log::say!("daemon", "{name}: folio serve won't answer it: {e}")
-                })
-                .ok()
-        })
+        .map(|bind| Request::Bind(Box::new(bind)))
         .collect();
     let restore = serde_json::to_string(&restore).unwrap();
     let mut command = Command::new(crate::bottle_cli::me());

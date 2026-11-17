@@ -45,8 +45,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::control::{Bind, Grant, Reply, Request};
 use crate::log::log;
 
@@ -67,7 +65,7 @@ pub struct Bottle {
     pub machine: String,
     pub runner: String,
     pub id: String,
-    pub repos: Vec<host::Served>,
+    pub repos: Vec<crate::control::Served>,
     pub permissions: Vec<String>,
     pub labels: BTreeMap<String, String>,
     /// Its first repo's name, as the list of bottles has it.
@@ -81,12 +79,8 @@ pub struct Bottle {
 impl Bottle {
     fn from_bind(bind: Bind) -> Result<Bottle, String> {
         Ok(Bottle {
-            injections: credentials::injections_for(&bind.features)?,
-            repos: bind
-                .repos
-                .into_iter()
-                .map(host::Served::from_bind)
-                .collect::<Result<_, _>>()?,
+            injections: credentials::injections_for(&bind.features, &crate::auth::keychain)?,
+            repos: bind.repos,
             name: bind.bottle,
             machine: bind.machine,
             runner: bind.runner,
@@ -422,18 +416,6 @@ fn raised(soft: u64, hard: Option<u64>, mut set: impl FnMut(u64) -> bool) -> u64
     soft
 }
 
-/// This program's code, as ping says it: a hash of the program itself.
-pub fn code() -> String {
-    let exe = std::env::current_exe()
-        .and_then(fs::read)
-        .unwrap_or_default();
-    Sha256::digest(&exe)
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut args = args.peekable();
     let (mut control, mut services, mut restore) = (None, Vec::new(), false);
@@ -490,7 +472,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         done: AtomicBool::new(false),
         control: control.clone(),
         services: services.clone(),
-        code: code(),
+        code: crate::control::code(),
         pulls: git::PullThroughs::default(),
     });
     let mut routed = Vec::new();

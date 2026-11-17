@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -17,6 +16,7 @@ use serde_json::Value;
 
 use super::http::{self, Refused};
 use super::{Bottle, Server, git, messages};
+use crate::control::{Remote, Served};
 
 const GIT_PATH: &str = "/git";
 const MESSAGES_PATH: &str = "/messages";
@@ -25,97 +25,6 @@ const BOTTLES_PATH: &str = "/bottles";
 const MAX_BODY: usize = 64 * 1024 * 1024;
 /// The most of a message.
 const MAX_MESSAGE: usize = 1024 * 1024;
-
-/// What a remote's fetch can see: the upstream (served as origin is), the repo's own branches (as
-/// host is), or one namespace, NS + its name.
-pub const UPSTREAM: &str = "upstream";
-pub const HEADS: &str = "heads";
-pub const NS: &str = "ns/";
-
-/// A remote and namespace name: one path segment.
-fn is_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-}
-
-/// One remote a bottle is served: http://bottle.host/git/<mount>/<name>.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Remote {
-    pub name: String,
-    /// UPSTREAM, HEADS, or NS + a namespace.
-    pub fetch: String,
-    /// NS + the namespace pushes go into; None: read-only.
-    pub push: Option<String>,
-}
-
-impl Remote {
-    /// A remote from its spec: NAME:fetch=VIEW[,push=ns/NAMESPACE].
-    pub fn parse(spec: &str) -> Result<Remote, String> {
-        let usage = format!(
-            "invalid remote '{spec}': use NAME:fetch=VIEW[,push=ns/NAMESPACE], VIEW being {UPSTREAM}, {HEADS} or ns/NAMESPACE"
-        );
-        let (name, rest) = spec.split_once(':').ok_or(&usage)?;
-        if !is_name(name) {
-            return Err(usage);
-        }
-        let (mut fetch, mut push) = (None, None);
-        for item in rest.split(',') {
-            match item.split_once('=') {
-                Some(("fetch", v)) if fetch.is_none() => fetch = Some(v.to_string()),
-                Some(("push", v)) if push.is_none() => push = Some(v.to_string()),
-                _ => return Err(usage),
-            }
-        }
-        let namespace = |v: &str| v.strip_prefix(NS).is_some_and(is_name);
-        let fetch = fetch
-            .filter(|f| f == UPSTREAM || f == HEADS || namespace(f))
-            .ok_or(&usage)?;
-        if push.as_deref().is_some_and(|p| !namespace(p)) {
-            return Err(format!(
-                "invalid remote '{spec}': push takes ns/NAMESPACE, the namespace pushes go into"
-            ));
-        }
-        Ok(Remote {
-            name: name.into(),
-            fetch,
-            push,
-        })
-    }
-
-    pub fn fetch_namespace(&self) -> Option<&str> {
-        self.fetch.strip_prefix(NS)
-    }
-
-    pub fn push_namespace(&self) -> Option<&str> {
-        self.push.as_deref().and_then(|p| p.strip_prefix(NS))
-    }
-}
-
-/// One repo a bottle is served (a mount's), with its remotes, at http://bottle.host/git/<at>/<remote>.
-#[derive(Debug, Clone)]
-pub struct Served {
-    /// The repo its remotes are served from; None: it's gone.
-    pub git_dir: Option<PathBuf>,
-    pub remotes: Vec<Remote>,
-    /// Where under /git its remotes are: the mount's path without its leading /; "" for /git/<remote>.
-    pub at: String,
-}
-
-impl Served {
-    /// A repo as bind said it, its remotes parsed.
-    pub fn from_bind(repo: crate::control::Served) -> Result<Served, String> {
-        Ok(Served {
-            git_dir: repo.git_dir,
-            remotes: repo
-                .remotes
-                .iter()
-                .map(|r| Remote::parse(r))
-                .collect::<Result<_, _>>()?,
-            at: repo.at,
-        })
-    }
-}
 
 /// The repo, remote and rest of path a /git/... request is for; None if none is served there.
 fn route<'a>(repos: &'a [Served], path: &str) -> Option<(&'a Served, &'a Remote, String)> {
@@ -350,74 +259,6 @@ fn bottles(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_remote_is_a_name_a_view_and_maybe_a_namespace_to_push_into() {
-        let r = Remote::parse("agent:fetch=ns/t-out,push=ns/t-out").unwrap();
-        assert_eq!(
-            (r.fetch_namespace(), r.push_namespace()),
-            (Some("t-out"), Some("t-out"))
-        );
-        assert_eq!(Remote::parse("origin:fetch=upstream").unwrap().push, None);
-        for bad in [
-            "x",
-            "x:fetch=nope",
-            "x:push=ns/a",
-            "x:fetch=heads,push=heads",
-            "-x:fetch=heads",
-        ] {
-            assert!(Remote::parse(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_remote_parses_from_its_spec_and_refuses_what_isnt_one() {
-        let remote = |name: &str, fetch: &str, push: Option<&str>| Remote {
-            name: name.into(),
-            fetch: fetch.into(),
-            push: push.map(String::from),
-        };
-        for (spec, expected) in [
-            ("origin:fetch=upstream", remote("origin", UPSTREAM, None)),
-            ("host:fetch=heads", remote("host", HEADS, None)),
-            (
-                "work:fetch=ns/t-in,push=ns/t-out",
-                remote("work", "ns/t-in", Some("ns/t-out")),
-            ),
-            (
-                "mine:push=ns/x,fetch=ns/x",
-                remote("mine", "ns/x", Some("ns/x")),
-            ),
-            (
-                "up:fetch=upstream,push=ns/x",
-                remote("up", UPSTREAM, Some("ns/x")),
-            ),
-        ] {
-            assert_eq!(Remote::parse(spec).unwrap(), expected, "{spec}");
-        }
-        let origin = Remote::parse("origin:fetch=upstream").unwrap();
-        assert_eq!(
-            (origin.fetch_namespace(), origin.push_namespace()),
-            (None, None)
-        );
-        for spec in [
-            "origin",
-            "origin:",
-            ":fetch=heads",
-            "a/b:fetch=heads",
-            "x:push=ns/y",
-            "x:fetch=everything",
-            "x:fetch=ns/",
-            "x:fetch=ns/a/b",
-            "x:fetch=heads,push=heads",
-            "x:fetch=heads,fetch=heads",
-            "x:fetch=heads,pull=ns/y",
-            "x:fetch=heads,push=ns/-y",
-            "a:fetch=ns/x,push=ns/x,advance=main",
-        ] {
-            assert!(Remote::parse(spec).is_err(), "{spec}");
-        }
-    }
 
     #[test]
     fn a_request_is_routed_to_the_longest_mount_it_names() {

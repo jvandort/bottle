@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use super::host::{Remote, Served, UPSTREAM};
 use super::http::{self, Head};
+use crate::control::{Remote, Served, UPSTREAM};
 use crate::log::log;
 
 /// How long the hub's fetch of origin may take before a fetch goes on without it.

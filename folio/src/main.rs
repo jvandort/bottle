@@ -32,6 +32,7 @@ mod migrate;
 mod notes;
 mod obsidian;
 mod picker;
+mod prompt;
 mod repos;
 mod routes;
 mod runner;

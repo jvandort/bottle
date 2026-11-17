@@ -23,7 +23,6 @@ use std::collections::BTreeMap;
 use std::io::{self, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -33,12 +32,11 @@ use serde_json::{Value, json};
 use super::Bottle;
 use super::http::{self, Refused};
 use super::proxy::Header;
+use crate::auth::{self, STANDIN, destination};
 use crate::features::{self, Credential, Rewrite};
 use crate::log::log;
 use crate::routes::Route;
 
-/// What a bottle gets in place of a credential, where it needs one to believe it's logged in.
-pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most of a request's body read here, to put the credential in it.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -176,61 +174,6 @@ fn encoded(rewrite: &Rewrite, value: &str) -> String {
 
 // --- reading credentials ----------------------------------------------------------
 
-/// A Java properties file's `key=value` (or `key:value`) lines, by key; empty when there's no
-/// file. Comments (# and !) and blank lines are skipped, and a backslash escapes the character
-/// after it; a key ends at the first `=`, and only at a `:` on a line with no `=`, so a URL is a key
-/// as written.
-pub(crate) fn read_properties(path: &str) -> Result<BTreeMap<String, String>, String> {
-    let path = match path.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
-        None => PathBuf::from(path),
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
-    };
-    let mut result = BTreeMap::new();
-    for line in text.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with(['#', '!']) {
-            continue;
-        }
-        let separators: &[char] = if line.contains('=') { &['='] } else { &[':'] };
-        let (mut key, mut escaped, mut value) = (String::new(), false, None);
-        for (i, c) in line.char_indices() {
-            if escaped {
-                key.push(c);
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if separators.contains(&c) {
-                value = Some(line[i + 1..].trim().to_string());
-                break;
-            } else {
-                key.push(c);
-            }
-        }
-        if let Some(value) = value {
-            result.insert(key.trim().to_string(), value);
-        }
-    }
-    Ok(result)
-}
-
-/// One of inject.hosts as a host pattern and a port: always https, so 443 unless it says another.
-pub(crate) fn destination(host: &str) -> Result<(String, u16), String> {
-    match host.rsplit_once(':') {
-        None => Ok((host.to_string(), 443)),
-        Some((pattern, port)) => match port.parse::<u16>() {
-            Ok(port) if port > 0 && !pattern.is_empty() => Ok((pattern.to_string(), port)),
-            _ => Err(format!(
-                "{} isn't a host for a credential: a host or a host:port",
-                crate::quoted(host)
-            )),
-        },
-    }
-}
-
 /// What's attached to `host` for `credential`: its properties file's line for the host (by the
 /// host, or a URL of it; a host with a port its host:port line, else its bare host's), else the
 /// Keychain's (`keychain`).
@@ -239,40 +182,25 @@ fn value_for(
     host: &str,
     keychain: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<String>, String> {
-    if let Some(properties) = &credential.properties {
-        let mut keys = BTreeMap::new();
-        for (key, value) in read_properties(properties)? {
-            if !value.is_empty() {
-                let key = key.to_lowercase();
-                let key = key
-                    .strip_prefix("https://")
-                    .unwrap_or(&key)
-                    .trim_end_matches('/')
-                    .to_string();
-                keys.insert(key, value);
-            }
-        }
-        let (pattern, _) = destination(host)?;
-        if let Some(value) = keys
-            .get(&host.to_lowercase())
-            .or_else(|| keys.get(&pattern.to_lowercase()))
-        {
-            return Ok(Some(value.clone()));
-        }
+    match auth::from_properties(credential, host)? {
+        Some(value) => Ok(Some(value)),
+        None => Ok(keychain(&credential.name)),
     }
-    Ok(keychain(&credential.name))
 }
 
 /// What folio serve attaches for a bottle with these features: one per injected credential's host.
 /// A credential that isn't logged in is left out (the bottle then reaches the host
 /// unauthenticated, and the server says so); two credentials claiming a host is a mistake in the
 /// features, refused rather than resolved arbitrarily.
-pub fn injections_for(specs: &[String]) -> Result<Vec<Injection>, String> {
+pub fn injections_for(
+    specs: &[String],
+    keychain: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<Injection>, String> {
     let mut credentials = Vec::new();
     for feature in features::resolve(specs)? {
         credentials.extend(feature.resolved_credentials()?);
     }
-    injections_of(credentials, &crate::auth::keychain)
+    injections_of(credentials, keychain)
 }
 
 /// What's attached for `credentials`, their values from their properties files or `keychain`.
@@ -1150,7 +1078,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("keys.properties");
         std::fs::write(&file, "# c\nhttps\\://ge.example.com=one\nplain:two\n").unwrap();
-        let read = read_properties(file.to_str().unwrap()).unwrap();
+        let read = auth::read_properties(file.to_str().unwrap()).unwrap();
         assert_eq!(read["https://ge.example.com"], "one");
         assert_eq!(read["plain"], "two");
         std::fs::remove_dir_all(dir).unwrap();

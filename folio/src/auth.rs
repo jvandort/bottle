@@ -23,7 +23,7 @@
 //! A bottle picks up a credential set or removed, or a change to such a file, when it next starts.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -31,7 +31,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::features::{self, Credential};
-use crate::serve::credentials::{STANDIN, destination, read_properties};
 
 /// A credential, and a feature that declares it.
 pub struct Declared {
@@ -223,12 +222,72 @@ pub fn remove(name: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
+// --- what a credential is ----------------------------------------------------------
+
+/// What a bottle gets in place of a credential, where it needs one to believe it's logged in.
+pub const STANDIN: &str = "the-egress-proxy-holds-the-real-one";
+
+/// A Java properties file's `key=value` (or `key:value`) lines, by key; empty when there's no
+/// file. Comments (# and !) and blank lines are skipped, and a backslash escapes the character
+/// after it; a key ends at the first `=`, and only at a `:` on a line with no `=`, so a URL is a key
+/// as written.
+pub fn read_properties(path: &str) -> Result<BTreeMap<String, String>, String> {
+    let path = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+        None => PathBuf::from(path),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
+    };
+    let mut result = BTreeMap::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with(['#', '!']) {
+            continue;
+        }
+        let separators: &[char] = if line.contains('=') { &['='] } else { &[':'] };
+        let (mut key, mut escaped, mut value) = (String::new(), false, None);
+        for (i, c) in line.char_indices() {
+            if escaped {
+                key.push(c);
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if separators.contains(&c) {
+                value = Some(line[i + 1..].trim().to_string());
+                break;
+            } else {
+                key.push(c);
+            }
+        }
+        if let Some(value) = value {
+            result.insert(key.trim().to_string(), value);
+        }
+    }
+    Ok(result)
+}
+
+/// One of inject.hosts as a host pattern and a port: always https, so 443 unless it says another.
+pub fn destination(host: &str) -> Result<(String, u16), String> {
+    match host.rsplit_once(':') {
+        None => Ok((host.to_string(), 443)),
+        Some((pattern, port)) => match port.parse::<u16>() {
+            Ok(port) if port > 0 && !pattern.is_empty() => Ok((pattern.to_string(), port)),
+            _ => Err(format!(
+                "{} isn't a host for a credential: a host or a host:port",
+                crate::quoted(host)
+            )),
+        },
+    }
+}
+
 // --- injection ------------------------------------------------------------------
 
 /// The credential for `host`, one of its inject.hosts, from its properties file; None when the file
 /// has no line for it. A line's key may be the host or a URL of it; a host with a port matches its
 /// host:port line, else its bare host's.
-fn from_properties(credential: &Credential, host: &str) -> Result<Option<String>, String> {
+pub fn from_properties(credential: &Credential, host: &str) -> Result<Option<String>, String> {
     let Some(properties) = &credential.properties else {
         return Ok(None);
     };

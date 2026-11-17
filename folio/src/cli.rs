@@ -1,18 +1,18 @@
 //! What you can type, and what happens when you do.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::bottles::State;
+use crate::bottles::{self, State};
 use crate::engine::Engine;
 use crate::repos::{self, Repo};
 use crate::specs::Spec;
 use crate::threads::{self, Settings, Thread};
-use crate::{auth, broker, daemon, engine, features, notes, obsidian, picker, runners};
+use crate::{auth, broker, daemon, engine, features, notes, obsidian, picker, prompt, runners};
 
 const PICK: &str = "choose one from a list";
 const DISK_HELP: &str = "the disk it writes to, in G, e.g. 50G (default: 20G)";
@@ -503,7 +503,18 @@ fn cp(engine: &Engine, matches: &ArgMatches, sidecar: bool, command: &str) -> Ou
 
 /// folio's runner commands: runner.rs's.
 fn runner_command(matches: &ArgMatches) -> ExitCode {
-    crate::runner::main(args(matches, "arguments").into_iter())
+    crate::runner::main(args(matches, "arguments").into_iter(), &bottles_on)
+}
+
+/// The bottles on runner `name`, by name: what `runner rm` refuses to forget a runner while it has.
+fn bottles_on(name: &str) -> Result<Vec<String>, String> {
+    let mut there: Vec<String> = bottles::load()?
+        .into_values()
+        .filter(|b| b.runner == name)
+        .map(|b| b.name)
+        .collect();
+    there.sort();
+    Ok(there)
 }
 
 fn new(engine: &Engine, matches: &ArgMatches) -> Outcome {
@@ -546,55 +557,6 @@ fn start(
 
 fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
-}
-
-/// A line typed after `prompt`; None at the end of input, or if Ctrl-C ends it: a prompt interrupted
-/// is a prompt not answered.
-///
-/// Ctrl-C is recorded (interrupt::install, as every command but a runner's has it), not acted on
-/// by a read: stdin's polled, a while at a time, between looks at whether it came. One that ends
-/// a prompt is forgotten after: it ended the prompt, not the command.
-pub fn input(prompt: &str) -> Option<String> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    print!("{prompt}");
-    let _ = std::io::stdout().flush();
-    let before = crate::interrupt::happened();
-    let interrupted = || !before && crate::interrupt::happened();
-    let stdin = std::io::stdin();
-    let a_while = Timespec {
-        tv_sec: 0,
-        tv_nsec: 100_000_000,
-    };
-    let mut line = Vec::new();
-    let answered = loop {
-        if interrupted() {
-            break false;
-        }
-        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
-        match poll(&mut fds, Some(&a_while)) {
-            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
-            Ok(_) => {}
-            Err(_) => break false,
-        }
-        // Readable: a byte, or the end, there now. One at a time, from the descriptor itself, so
-        // nothing past the line is taken from whatever reads stdin next.
-        let mut byte = [0u8];
-        match rustix::io::read(&stdin, &mut byte) {
-            Ok(1) if byte[0] == b'\n' => break true,
-            Ok(1) => line.push(byte[0]),
-            Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => {}
-            _ => break false,
-        }
-    };
-    if interrupted() {
-        crate::interrupt::forget();
-    }
-    if !answered {
-        println!();
-        return None;
-    }
-    let line = String::from_utf8_lossy(&line).into_owned();
-    Some(line.trim_end_matches('\r').to_string())
 }
 
 /// The thread the command names (started, if it's new and the command may start one), else the
@@ -663,7 +625,7 @@ fn thread_of(
     if let Some(name) = choice.thread {
         return threads::load(repo, &name).map(Some);
     }
-    match input("The new thread's name: ").map(|n| n.trim().to_string()) {
+    match prompt::input("The new thread's name: ").map(|n| n.trim().to_string()) {
         Some(name) if !name.is_empty() => start(engine, repo, &name, None, None).map(Some),
         _ => Ok(None),
     }
@@ -873,8 +835,8 @@ fn delete(engine: &Engine, matches: &ArgMatches) -> Outcome {
                 println!("  {item}");
             }
         }
-        let typed =
-            input(&format!("Type {} to delete it: ", thread.name)).map(|t| t.trim().to_string());
+        let typed = prompt::input(&format!("Type {} to delete it: ", thread.name))
+            .map(|t| t.trim().to_string());
         if typed.as_deref() != Some(thread.name.as_str()) {
             println!("Not deleted.");
             return Ok(1);
@@ -1334,27 +1296,10 @@ fn credential_status(declared: &auth::Declared, set: bool) -> Result<String, Str
     Ok(format!("{path}, else {status}"))
 }
 
-/// A line from the terminal, unechoed, after `prompt`.
-fn getpass(prompt: &str) -> Result<String, String> {
-    use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
-    let stdin = std::io::stdin();
-    let saved = tcgetattr(&stdin).map_err(|_| "can't read the terminal's settings".to_string())?;
-    let mut quiet = saved.clone();
-    quiet.local_modes.remove(LocalModes::ECHO);
-    let _ = tcsetattr(&stdin, OptionalActions::Flush, &quiet);
-    eprint!("{prompt}");
-    let mut line = String::new();
-    let read = stdin.lock().read_line(&mut line);
-    let _ = tcsetattr(&stdin, OptionalActions::Flush, &saved);
-    eprintln!();
-    read.map_err(|e| e.to_string())?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_string())
-}
-
 fn auth_set(matches: &ArgMatches) -> Outcome {
     let name = arg(matches, "name").unwrap();
     let value = if std::io::stdin().is_terminal() {
-        getpass(&format!("{name}: "))?
+        prompt::getpass(&format!("{name}: "))?
     } else {
         let mut value = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut value)

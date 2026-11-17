@@ -527,14 +527,19 @@ impl Runner {
     }
 }
 
-pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
+/// Runs `runner COMMAND ...` with `args`; `bottles_on` says which of folio's bottles are on a
+/// runner, by name.
+pub fn main(
+    mut args: impl Iterator<Item = String>,
+    bottles_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
+) -> ExitCode {
     let command = args.next();
     let args: Vec<String> = args.collect();
     let result = match (command.as_deref(), args.as_slice()) {
         (Some("add"), [name, flag, destination]) if flag == "--ssh" => add(name, destination),
         (Some("ls" | "list"), []) => ls(false),
         (Some("ls" | "list"), [flag]) if flag == "--json" => ls(true),
-        (Some("rm"), [name]) => rm(name),
+        (Some("rm"), [name]) => rm(name, bottles_on),
         (Some("check"), [target]) => check(target, false),
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
         (Some("detach"), [name]) => detach(name, false),
@@ -823,14 +828,8 @@ pub fn home(name: &str) -> io::Result<String> {
 /// have deleted first.
 /// `runner rm NAME`: forgotten, but not while folio has bottles there (their threads are deleted
 /// first).
-fn rm(name: &str) -> io::Result<()> {
-    let mut there: Vec<String> = crate::bottles::load()
-        .map_err(other)?
-        .into_values()
-        .filter(|b| b.runner == name)
-        .map(|b| b.name)
-        .collect();
-    there.sort();
+fn rm(name: &str, bottles_on: &dyn Fn(&str) -> Result<Vec<String>, String>) -> io::Result<()> {
+    let there = bottles_on(name).map_err(other)?;
     if !there.is_empty() {
         return Err(other(format!(
             "runner {name} has bottles: {}; delete their threads first",

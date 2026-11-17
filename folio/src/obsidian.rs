@@ -146,7 +146,7 @@ fn confirm(question: &str) -> bool {
     if !std::io::stdin().is_terminal() {
         return false;
     }
-    crate::cli::input(&format!("{question} [y/N] "))
+    crate::prompt::input(&format!("{question} [y/N] "))
         .is_some_and(|answer| matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
