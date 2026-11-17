@@ -59,7 +59,8 @@ pub trait Decide {
         resolve: impl Fn(&str) -> Vec<IpAddr>,
         opened: bool,
     ) -> Local;
-    /// The hosts whose TLS is terminated here: those cached over https, and those routed by name.
+    /// The hosts whose TLS is terminated here: those cached over https, and those routed by name
+    /// to a port other than plain HTTP's.
     /// What a machine's caching CA is for.
     fn terminated_hosts(&self) -> Vec<String>;
     /// The addresses of `name` a connection may be made to from here, for a cached host's
