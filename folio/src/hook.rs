@@ -1,6 +1,9 @@
-//! bottle's hooks, for a push from a bottle to its hub: `git receive-pack`, which folio serve runs
-//! for the push (git.rs), runs them on this machine, never in the bottle, with core.hooksPath at
-//! scripts folio serve writes in folio's home that run this program's `hook` (hooks_dir). The repo's
+//! `folio hook`: the git hooks folio has git run: for a push from a bottle to its hub (folio
+//! serve's git service), and for a thread's lane remote in the repo (lanes.rs).
+//!
+//! The hub's, for a push from a bottle: `git receive-pack`, which folio serve runs for the push
+//! (serve/git.rs), runs them on this machine, never in the bottle, with core.hooksPath at scripts
+//! folio serve writes in folio's home that run this program's `hook` (hooks_dir). The repo's
 //! own hooks never run.
 //!
 //!     folio-cli hook pre-receive|post-receive

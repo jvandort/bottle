@@ -57,7 +57,7 @@ fn hooks() -> Result<PathBuf, String> {
     if written.as_ref() == Some(&dir) && dir.join("pre-receive").exists() {
         return Ok(dir);
     }
-    crate::serve::hook::write(&dir, &[("pre-receive", "lane-pre-receive")])
+    crate::hook::write(&dir, &[("pre-receive", "lane-pre-receive")])
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     *written = Some(dir.clone());
     Ok(dir)

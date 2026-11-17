@@ -135,7 +135,7 @@ fn receive(
     query: &str,
     body: &[u8],
 ) -> Option<Vec<u8>> {
-    let hooks = match super::hook::hooks_dir() {
+    let hooks = match crate::hook::hooks_dir() {
         Ok(dir) => dir.display().to_string(),
         Err(e) => {
             log!("bottle.egress", "can't write bottle's hooks: {e}");

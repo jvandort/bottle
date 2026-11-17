@@ -25,7 +25,6 @@
 pub(crate) mod credentials;
 mod gateway;
 mod git;
-pub mod hook;
 pub(crate) mod host;
 mod http;
 mod messages;

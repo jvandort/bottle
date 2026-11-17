@@ -24,6 +24,7 @@ mod daemon;
 mod engine;
 mod features;
 mod git;
+mod hook;
 mod images;
 mod interrupt;
 mod lanes;
@@ -68,7 +69,7 @@ fn main() -> ExitCode {
         {
             serve::main(args.by_ref().skip(1))
         }
-        Some("hook") => serve::hook::main(args.by_ref().skip(1)),
+        Some("hook") => hook::main(args.by_ref().skip(1)),
         _ => cli::main(all),
     }
 }
