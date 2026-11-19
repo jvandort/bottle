@@ -663,13 +663,7 @@ fn a_pause_doesnt_ask_an_agent_quiet_since_its_last_snapshot() {
     std::thread::sleep(Duration::from_secs(3));
     let out = f.folio(&["pause", "fix-it"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(
-        out.stderr.contains(
-            "fix-it's agent has done nothing since its last snapshot, so it isn't asked to get ready again"
-        ),
-        "{}",
-        out.stderr
-    );
+    assert!(!out.stderr.contains("agent"), "{}", out.stderr);
     assert_eq!(events(&f).len(), 1);
     assert_eq!(state(&f), "paused");
 }

@@ -68,9 +68,9 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result
         crate::activity::quiet_since(&thread.bottle, UNIX_EPOCH + Duration::from_secs_f64(t))
     });
     if ask && quiet {
-        crate::log::say!(
+        crate::log::log!(
             "threads",
-            "folio: {}'s agent has done nothing since its last snapshot, so it isn't asked to get ready again",
+            "{}: its agent's done nothing since its last snapshot: not asked again",
             thread.name
         );
     } else if ask {
