@@ -1,5 +1,6 @@
 //! The bottles service: for a bottle with the list-bottles permission, `GET http://bottle.internal/`,
-//! the other running bottles: each one's name, repo and labels.
+//! the other running bottles: each one's name, repo and labels; and for any, `POST
+//! http://bottle.internal/activity`, its agent at work (activity.rs), whatever the body says.
 
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
@@ -14,7 +15,8 @@ pub struct Bottles;
 
 impl Service for Bottles {
     fn serve(&self, caller: &Caller, stream: UnixStream) -> Flow {
-        let (head, _, mut writer) = match http::read_request(stream, 0) {
+        // An event's body is read past, unread: it says nothing that counts.
+        let (head, _, mut writer) = match http::read_request(stream, 64 * 1024) {
             Ok(request) => request,
             Err(outcome) => return Flow::new("bottles", outcome),
         };
@@ -31,12 +33,30 @@ impl Bottles {
         path: &str,
         mut writer: &mut UnixStream,
     ) -> Flow {
+        if head.method == "POST" && path == "/activity" {
+            return match crate::activity::record(&caller.bottle.name) {
+                Ok(()) => {
+                    http::respond(&mut writer, 204, "No Content", b"", "text/plain");
+                    Flow::new("bottles", "activity")
+                }
+                Err(e) => {
+                    http::respond(
+                        &mut writer,
+                        500,
+                        "Internal Server Error",
+                        format!("{e}\n").as_bytes(),
+                        "text/plain",
+                    );
+                    Flow::new("bottles", "activity-failed")
+                }
+            };
+        }
         if head.method != "GET" || path != "/" {
             http::respond(
                 &mut writer,
                 405,
                 "Method Not Allowed",
-                b"GET / for the running bottles\n",
+                b"GET / for the running bottles, or POST /activity\n",
                 "text/plain",
             );
             return Flow::new("bottles", "bad-request");

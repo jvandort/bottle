@@ -79,6 +79,25 @@ cat > "$home/.claude.json" <<JSON
 }
 JSON
 
+# Claude's hooks, in its managed settings, the system's: every session's, and
+# no snapshot's (a resume brings ~/.claude/settings.json back whole, from
+# whenever its thread began). On every prompt, tool use and stop, the agent is
+# said to be at work (bottle-event activity), for folio serve: a while without
+# that is the agent at rest.
+install -d /etc/claude-code
+command='{ "type": "command", "command": "/usr/local/bin/bottle-event activity", "timeout": 5 }'
+cat > /etc/claude-code/managed-settings.json <<JSON
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [$command] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [$command] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [$command] }],
+    "Stop": [{ "hooks": [$command] }],
+    "SubagentStop": [{ "hooks": [$command] }]
+  }
+}
+JSON
+
 # Claude's user instructions are bottle's context for the agent, which bottle
 # writes to ~/BOTTLE.md when it creates the bottle.
 ln -sfn "$home/BOTTLE.md" "$home/.claude/CLAUDE.md"

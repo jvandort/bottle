@@ -3,6 +3,7 @@
 #
 #   bottle-event send [-t SECONDS] [-f FROM] [TEXT]   send TEXT (or stdin) as an event, from FROM
 #   bottle-event serve                                the channel: Claude Code runs this as an MCP server
+#   bottle-event activity                             says the agent is at work: Claude Code's hooks run this
 #
 # serve also gives the agent a tool, send, for a message to another bottle,
 # which arrives there as an event from this one: to answer an event, the agent
@@ -188,13 +189,23 @@ send() {
   fi
 }
 
+# An event of the agent's own, for folio serve, which takes a while without
+# one for the agent at rest (and a snapshot due). What the hook was for isn't
+# said: any is the same. Quick, and never failing, whatever folio serve does:
+# Claude waits for a hook, and one that fails says so.
+activity() {
+  cat >/dev/null
+  curl -s -o /dev/null --max-time 2 -X POST "${BOTTLE_ACTIVITY_URL:-http://bottle.internal/activity}" || :
+}
+
 usage() {
-  echo "usage: bottle-event send [-t SECONDS] [-f FROM] [TEXT] | bottle-event serve" >&2
+  echo "usage: bottle-event send [-t SECONDS] [-f FROM] [TEXT] | bottle-event serve | bottle-event activity" >&2
   exit 2
 }
 
 case "${1:-}" in
   serve) serve ;;
   send) shift; send "$@" ;;
+  activity) activity ;;
   *) usage ;;
 esac

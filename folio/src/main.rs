@@ -12,6 +12,7 @@
 //! for the distributions beside it, and on a runner, over ssh. Its state is in folio's home,
 //! $FOLIO_HOME, else ~/.folio. Its own failures say why on stderr, a line starting `folio: error: `.
 
+mod activity;
 mod advice;
 mod asks;
 mod auth;

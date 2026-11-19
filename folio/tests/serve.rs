@@ -497,5 +497,20 @@ fn a_message_goes_to_the_bottle_its_address_names_as_an_event_from_the_sender() 
         json!([{"name": "app-bar", "repo": "app", "labels": {"thread": "bar"}},
                {"name": "app-foo", "repo": "app", "labels": {"thread": "foo"}}])
     );
+
+    // Any bottle's agent says it's at work, whatever it sends: the time of it, kept.
+    let said = String::from_utf8_lossy(&serve.flow(
+        "bottles",
+        [192, 0, 2, 1],
+        80,
+        None,
+        false,
+        "m-foo",
+        b"POST /activity HTTP/1.1\r\nContent-Length: 9\r\n\r\nanything!",
+    ))
+    .into_owned();
+    assert!(said.starts_with("HTTP/1.1 204"), "{said}");
+    assert!(serve.dir.join("home/activity/app-foo").exists());
+    assert!(!serve.dir.join("home/activity/app-bar").exists());
     let _ = fs::remove_dir_all(&dir);
 }
