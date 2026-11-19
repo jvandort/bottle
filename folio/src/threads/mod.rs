@@ -40,7 +40,7 @@ mod sidecar;
 mod state;
 
 pub use lifecycle::{create, delete, rename, set_settings};
-pub use pause::{losses, pause};
+pub use pause::{losses, pause, snapshot_idle};
 pub use record::{
     Settings, Thread, all, exists, is_name, load, notes_dir, sidecar_base, snapshot_size,
     snapshot_taken,

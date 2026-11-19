@@ -12,8 +12,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::{
-    Folio, NOTES_ARCHIVE, SNAPSHOT, WORKSPACE_ARCHIVE, argv, current_slot, read_json,
-    workspace_out, write_json,
+    CLAUDE_ARCHIVE, Folio, NOTES_ARCHIVE, SNAPSHOT, WORKSPACE_ARCHIVE, argv, current_slot,
+    read_json, workspace_out, write_json,
 };
 use serde_json::json;
 
@@ -570,6 +570,86 @@ fn ctrl_c_while_waiting_leaves_it_running() {
     assert_eq!(status.code(), Some(130), "{err}");
     assert!(err.contains("waiting for it to reply"), "{err}");
     assert_eq!(state(&f), "running");
+}
+
+// --- idle snapshots: folio serve's, of an agent at rest -------------------------------------
+
+/// A thread whose folio serve takes an agent quiet for 2s as at rest, its agent answering events
+/// as `answers` says (the stand-in's $FAKE_CLI_EVENT).
+fn idling(answers: &str) -> Folio {
+    let mut f = Folio::new();
+    f.set("FOLIO_IDLE_SECONDS", "2");
+    f.set("FAKE_CLI_EVENT", answers);
+    f.ok(&["new", "fix-it"]);
+    f
+}
+
+/// Its agent at work, now, as its hooks say.
+fn at_work(f: &Folio) {
+    let dir = f.home.join("activity");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(f.bottle("fix-it")), "").unwrap();
+}
+
+/// When its snapshot was taken, if it has one.
+fn taken(f: &Folio) -> Option<std::time::SystemTime> {
+    fs::metadata(slot(f).join(CLAUDE_ARCHIVE))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+fn within(seconds: u64, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[test]
+fn an_agent_at_rest_is_snapshotted_once_ready_and_again_only_after_more_work() {
+    let f = idling("snapshot");
+    // Never said it was at work: never asked.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(events(&f).is_empty());
+    assert_eq!(taken(&f), None);
+
+    at_work(&f);
+    assert!(within(30, || taken(&f).is_some()), "no snapshot");
+    assert_eq!(state(&f), "running");
+    let sent = events(&f);
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].1.starts_with("Automated snapshot interrupt."),
+        "{}",
+        sent[0].1
+    );
+    // Nothing done since: no other.
+    let first = taken(&f).unwrap();
+    std::thread::sleep(Duration::from_secs(6));
+    assert_eq!(events(&f).len(), 1);
+    assert_eq!(taken(&f), Some(first));
+    // More work, and at rest again: another.
+    at_work(&f);
+    assert!(within(30, || taken(&f) > Some(first)), "no second snapshot");
+    assert_eq!(events(&f).len(), 2);
+}
+
+#[test]
+fn one_put_off_is_asked_again_later_and_one_with_no_session_is_taken() {
+    // Taken, and never answered.
+    let f = idling("taken");
+    at_work(&f);
+    assert!(within(30, || events(&f).len() >= 2), "asked once at most");
+    assert_eq!(taken(&f), None);
+    assert_eq!(state(&f), "running");
+    // No session to take it: snapshotted as it is.
+    let f = idling("");
+    at_work(&f);
+    assert!(within(30, || taken(&f).is_some()), "no snapshot");
 }
 
 // --- failures ------------------------------------------------------------------------

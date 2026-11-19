@@ -19,6 +19,9 @@
 //! address, forwarded down the connection, `{"answer": TEXT}` a line, until it's closed). With --restore, before it answers anything, it binds the bottles a JSON
 //! array on stdin says: those whose machines were running when it last stopped.
 //!
+//! It also snapshots a thread whose agent has been at rest a while (idle.rs), as folio pause would,
+//! the bottle kept.
+//!
 //! For each runner its bottles are on, it forwards its services' sockets there while it answers
 //! one or more of them (runner.rs's forward, in a thread of its own). Once it's stopping it winds
 //! up while still taking connections, closing them unanswered (what says it's on its way out), and
@@ -29,6 +32,7 @@ pub(crate) mod credentials;
 mod git;
 mod host;
 mod http;
+mod idle;
 pub(crate) mod messages;
 mod proxy;
 mod service;
@@ -561,6 +565,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         services: services.clone(),
         code: crate::control::code(),
     });
+    idle::watch(server.clone());
     let mut routed = Vec::new();
     let git = git::Git::default();
     for (name, path) in &services {

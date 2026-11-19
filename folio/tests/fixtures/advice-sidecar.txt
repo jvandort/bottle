@@ -34,9 +34,12 @@ request. When one comes, finish or stop what you're doing, then:
 3. Reply with the send tool, to its from, the text `snapshot`. The snapshot is
    taken when you reply, so reply only once you're ready, and only once.
 
-If the user is pausing, the pause waits for your reply. If Claude isn't running,
-or the user forces it, folio snapshots without asking, so keep your notes and
-pushes current anyway.
+If the user is pausing, the pause waits for your reply. folio also snapshots on
+its own once you've been at rest a while ("Automated snapshot interrupt"), the
+bottle kept: if you're running background work that a snapshot would disturb,
+ignore it, and it's asked again later. If Claude isn't running, or the user
+forces it, folio snapshots without asking, so keep your notes and pushes
+current anyway.
 
 Keep only throwaway files outside them. Work in any other clone is committed
 and pushed to `agent` as you go, on a `genie/` branch like any other, or it's

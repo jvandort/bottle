@@ -96,6 +96,15 @@ meanwhile. Ctrl-C stops the pause and leaves the thread running; `folio pause
 --force` doesn't ask. One with no Claude session running isn't asked: there's
 no one to get ready.
 
+folio serve snapshots a running thread on its own, too, once its agent has
+been at rest a while: Claude's hooks tell it whenever the agent is at work
+(every prompt, tool use and stop), and after 15 minutes with none, and work
+since the thread's last snapshot, it asks the agent to get ready as a pause
+does, and snapshots the thread, its bottle kept, once the agent says it's ready.
+An agent that doesn't answer (busy with background work, say) is asked again 15
+minutes later. So a thread whose runner is turned off without a pause still has
+a recent snapshot here.
+
 ## Runners
 
 A thread's bottle can run on another machine of yours, a **runner** added with

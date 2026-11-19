@@ -15,6 +15,11 @@ fn path(bottle: &str) -> PathBuf {
     crate::home().join("activity").join(bottle)
 }
 
+/// When `bottle`'s agent last said it was at work; None if it never has.
+pub fn last(bottle: &str) -> Option<SystemTime> {
+    fs::metadata(path(bottle)).and_then(|m| m.modified()).ok()
+}
+
 /// `bottle`'s agent is at work, now.
 pub fn record(bottle: &str) -> io::Result<()> {
     let path = path(bottle);
@@ -30,10 +35,6 @@ pub fn record(bottle: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn last(bottle: &str) -> Option<SystemTime> {
-        fs::metadata(path(bottle)).and_then(|m| m.modified()).ok()
-    }
 
     #[test]
     fn the_last_event_is_when_it_came() {

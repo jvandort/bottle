@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::time::{Duration, Instant};
 
 use crate::bottles::State;
 use crate::engine::Engine;
@@ -63,9 +64,42 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result
         engine.start(&thread.bottle)?;
     }
     if ask {
-        interrupt(engine, repo, thread)?;
+        interrupt(engine, repo, thread, Interrupt::Pause)?;
     }
     stop_sessions(engine, thread)?;
+    take(engine, repo, thread)?;
+    // Snapshotted: the pause is made, and what's left of it is done, interrupted or not.
+    crate::interrupt::shielded(|| -> Result<(), String> {
+        engine.delete(&thread.bottle)?;
+        delete_sidecar(engine, thread)?;
+        Ok(())
+    })?;
+    crate::log::log!("threads", "{}: paused", thread.name);
+    Ok(())
+}
+
+/// Snapshot the running thread, its bottle kept, once its agent says it's ready, waiting `wait` for
+/// it to (folio serve's, when the agent's been quiet a while: serve/idle.rs): whether it was
+/// taken, or put off (the agent didn't say it was ready in time, or said something else). One with
+/// no session to ask is taken. Claude goes on running: its archive is taken last, so whatever it
+/// writes as it finishes its answer has the most time to be written.
+pub fn snapshot_idle(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    wait: Duration,
+) -> Result<bool, String> {
+    if !interrupt(engine, repo, thread, Interrupt::Idle(wait))? {
+        return Ok(false);
+    }
+    take(engine, repo, thread)?;
+    crate::log::log!("threads", "{}: snapshotted, idle", thread.name);
+    Ok(true)
+}
+
+/// Archive the thread's mounts, then what's unpushed, then Claude's, into a new slot of its, in
+/// place of the snapshot before only once all are read back whole.
+fn take(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
     let staging = store::staging(&directory(repo, &thread.name))?;
     let saved = (|| -> Result<(), String> {
         // None left from an older snapshot.
@@ -90,32 +124,33 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result
         }
         let claude = staging.join(snapshots::CLAUDE_ARCHIVE);
         let work = staging.join(snapshots::WORK);
-        engine.run_to_file(&thread.bottle, &sh(snapshots::claude_out()), &claude)?;
         engine.run_to_file(
             &thread.bottle,
             &sh(work_script(&workdir(engine, thread)?)),
             &work,
         )?;
+        engine.run_to_file(&thread.bottle, &sh(snapshots::claude_out()), &claude)?;
         snapshots::check(&claude)?;
         archived.push((snapshots::CLAUDE_ARCHIVE, Content::Move(claude)));
         archived.push((snapshots::WORK, Content::Move(work)));
         save(repo, thread, archived)
     })();
     let _ = fs::remove_dir_all(&staging);
-    saved?;
-    // Snapshotted: the pause is made, and what's left of it is done, interrupted or not.
-    crate::interrupt::shielded(|| -> Result<(), String> {
-        engine.delete(&thread.bottle)?;
-        delete_sidecar(engine, thread)?;
-        Ok(())
-    })?;
-    crate::log::log!("threads", "{}: paused", thread.name);
-    Ok(())
+    saved
 }
 
-/// What the agent is told when it's asked to get ready for a pause's snapshot (BOTTLE.md says what
-/// one is, and what to do).
-fn pause_interrupt(repo: &Repo, thread: &Thread) -> String {
+/// Why the agent's asked to get ready: a pause the user asked for, which waits as long as it
+/// takes; or folio serve's snapshot of an agent at rest, which it may put off by not answering
+/// within the wait, or by answering anything else.
+#[derive(Clone, Copy)]
+enum Interrupt {
+    Pause,
+    Idle(Duration),
+}
+
+/// What the agent is told when it's asked to get ready for a snapshot (BOTTLE.md says what one is,
+/// and what to do).
+fn interrupt_text(repo: &Repo, thread: &Thread, why: Interrupt) -> String {
     let kept: Vec<String> = mounts(thread).iter().map(|p| format!("`{p}`")).collect();
     let last = match super::snapshot_size(repo, thread) {
         Some(size) => format!(
@@ -124,20 +159,39 @@ fn pause_interrupt(repo: &Repo, thread: &Thread) -> String {
         ),
         None => "This thread has no snapshot yet.".into(),
     };
-    format!(
-        "Snapshot interrupt: the user is pausing this thread. Get ready for the snapshot (BOTTLE.md, \
-         \"Snapshots and pauses\"), then reply `snapshot` to this message's from: the pause waits for \
-         it. It keeps {}, all but ignored files, and your conversation and memory. {last}",
+    let kept = format!(
+        "It keeps {}, all but ignored files, and your conversation and memory. {last}",
         kept.join(" and ")
-    )
+    );
+    match why {
+        Interrupt::Pause => format!(
+            "Snapshot interrupt: the user is pausing this thread. Get ready for the snapshot \
+             (BOTTLE.md, \"Snapshots and pauses\"), then reply `snapshot` to this message's from: the \
+             pause waits for it. {kept}"
+        ),
+        Interrupt::Idle(_) => format!(
+            "Automated snapshot interrupt. Ignore if actively executing background work. Reply \
+             `snapshot` to this message's from after snapshot preparations (BOTTLE.md, \"Snapshots \
+             and pauses\"). Avoid large untracked files in the workspace. {kept}"
+        ),
+    }
 }
 
-/// Ask the thread's agent to get ready for a snapshot, and wait for it to answer `snapshot`, as
-/// long as it takes: Ctrl-C stops waiting, and the pause. Its answers come from folio serve, which
-/// forwards what the bottle says to the snapshot address while this listens, and refuses it
-/// otherwise; its other answers are shown, and waited past. One with no session to take the event
-/// (Claude isn't running), or no channel to send it by, isn't asked: there's no one to get ready.
-fn interrupt(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+/// Ask the thread's agent to get ready for a snapshot, and wait for it to answer `snapshot`:
+/// whether it did. Its answers come from folio serve, which forwards what the bottle says to the
+/// snapshot address while this listens, and refuses it otherwise. One with no session to take the
+/// event (Claude isn't running), or no channel to send it by, isn't asked: there's no one to get
+/// ready, and it's as good as ready.
+///
+/// A pause waits as long as it takes: Ctrl-C stops waiting, and the pause; the agent's other
+/// answers are shown, and waited past. An idle snapshot waits its while, and is put off by
+/// anything else.
+fn interrupt(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    why: Interrupt,
+) -> Result<bool, String> {
     // Listening before it's asked: an answer can't come too soon.
     let mut listening = engine.listen(&thread.bottle)?;
     let from = messages::address(messages::SNAPSHOT, &thread.bottle)
@@ -152,47 +206,77 @@ fn interrupt(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String
             "-f".into(),
             from,
         ],
-        Some(&pause_interrupt(repo, thread)),
+        Some(&interrupt_text(repo, thread, why)),
         false,
     )?;
     if sent.code != 0 {
+        let because = if sent.code == 75 {
+            "no Claude session took the message".to_string()
+        } else {
+            format!("its channel didn't take the message: exit {}", sent.code)
+        };
+        match why {
+            Interrupt::Pause => crate::log::say!(
+                "threads",
+                "folio: {}'s agent wasn't asked to get ready ({because}): snapshotting it as it is",
+                thread.name
+            ),
+            Interrupt::Idle(_) => crate::log::log!(
+                "threads",
+                "{}: its agent wasn't asked to get ready ({because})",
+                thread.name
+            ),
+        }
+        return Ok(true);
+    }
+    if let Interrupt::Pause = why {
         crate::log::say!(
             "threads",
-            "folio: {}'s agent wasn't asked to get ready ({}): snapshotting it as it is",
-            thread.name,
-            if sent.code == 75 {
-                "no Claude session took the message".to_string()
-            } else {
-                format!("its channel didn't take the message: exit {}", sent.code)
-            }
+            "Asked {}'s agent to get ready for the snapshot; waiting for it to reply (Ctrl-C stops \
+             the pause; `folio pause --force` doesn't ask)...",
+            thread.name
         );
-        return Ok(());
     }
-    crate::log::say!(
-        "threads",
-        "Asked {}'s agent to get ready for the snapshot; waiting for it to reply (Ctrl-C stops the \
-         pause; `folio pause --force` doesn't ask)...",
-        thread.name
-    );
+    let until = match why {
+        Interrupt::Idle(wait) => Some(Instant::now() + wait),
+        Interrupt::Pause => None,
+    };
     loop {
         crate::interrupt::check()?;
-        let Some(answer) = listening.next(std::time::Duration::from_millis(200))? else {
+        if until.is_some_and(|until| Instant::now() >= until) {
+            crate::log::log!("threads", "{}: its agent didn't answer", thread.name);
+            return Ok(false);
+        }
+        let Some(answer) = listening.next(Duration::from_millis(200))? else {
             continue;
         };
-        if answer
+        let ready = answer
             .trim()
             .trim_matches('`')
-            .eq_ignore_ascii_case("snapshot")
-        {
-            crate::log::say!("threads", "{}'s agent is ready.", thread.name);
-            return Ok(());
+            .eq_ignore_ascii_case("snapshot");
+        match why {
+            Interrupt::Pause if ready => {
+                crate::log::say!("threads", "{}'s agent is ready.", thread.name);
+                return Ok(true);
+            }
+            Interrupt::Pause => crate::log::say!(
+                "threads",
+                "{}'s agent says: {}\n(still waiting for `snapshot`)",
+                thread.name,
+                answer.trim()
+            ),
+            Interrupt::Idle(_) => {
+                if !ready {
+                    crate::log::log!(
+                        "threads",
+                        "{}: its agent put the snapshot off: {}",
+                        thread.name,
+                        answer.trim()
+                    );
+                }
+                return Ok(ready);
+            }
         }
-        crate::log::say!(
-            "threads",
-            "{}'s agent says: {}\n(still waiting for `snapshot`)",
-            thread.name,
-            answer.trim()
-        );
     }
 }
 
