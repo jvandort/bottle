@@ -73,9 +73,10 @@ request. When one comes, finish or stop what you're doing, then:
 
 1. Save what you'd want after a resume, above all what's only in your context:
    write it to `/notes`, commit and push, here and in `/notes`.
-2. Look at what the snapshot will hold: large untracked files you don't need
-   (data, downloads, builds outside ignored paths), delete or ignore them. The
-   event says how big the last snapshot was.
+2. Look at what the snapshot will hold: large untracked files in the
+   checkouts that you don't need (data, downloads, builds outside ignored
+   paths), delete or ignore them. The event says how big the last snapshot was.
+   Leave caches outside the checkouts as they are: they aren't snapshotted.
 3. Reply with the send tool, to its from, the text `snapshot`. The snapshot is
    taken when you reply, so reply only once you're ready, and only once.
 

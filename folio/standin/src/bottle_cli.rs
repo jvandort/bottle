@@ -729,8 +729,8 @@ fn pretended(name: &str, command: &[String]) -> Option<ExitCode> {
 
 /// An event sent to the machine's agent (its text is the exec's stdin, in the log): no session takes
 /// it (exit 75), but with $FAKE_CLI_EVENT: `taken`, one does and never answers; else its agent
-/// answers folio's ask (asks.rs) with each of the |-separated texts in turn, half a second apart, as
-/// folio serve writes an answer, by a process of its own that outlives this one.
+/// answers folio's asks (asks.rs) with each of the |-separated texts in turn, half a second apart,
+/// as folio serve writes an answer, by a process of its own that outlives this one.
 // The answering process outlives this one, which exits at once: nothing here is left to wait.
 #[allow(clippy::zombie_processes)]
 fn event(name: &str) -> ExitCode {
@@ -740,11 +740,11 @@ fn event(name: &str) -> ExitCode {
     }
     if answers != "taken" {
         let home = std::env::var("FOLIO_HOME").unwrap();
-        let script = r#"to=$1; shift; for a do sleep 0.5; printf %s "$a" > "$to.tmp" && mv "$to.tmp" "$to"; done"#;
+        let script = r#"d=$1; shift; for a do sleep 0.5; for ask in "$d"/*; do case $ask in *.answer) continue ;; esac; [ -e "$ask" ] && printf %s "$a" > "$ask.tmp" && mv "$ask.tmp" "$ask.answer"; done; done"#;
         let mut command = Command::new("sh");
         command
             .args(["-c", script, "sh"])
-            .arg(format!("{home}/asks/{name}.answer"))
+            .arg(format!("{home}/asks/{name}"))
             .args(answers.split('|'))
             .stdin(Stdio::null())
             .stdout(Stdio::null())

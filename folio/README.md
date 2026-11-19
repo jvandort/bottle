@@ -89,12 +89,12 @@ shows each thread's snapshot, how big and how old.
 
 Before the snapshot, folio asks the thread's agent to get ready: an event from
 its `snapshot` address, which the agent's instructions explain. It saves what
-only its context has to its notes, pushes, clears out large untracked files,
-and replies `snapshot` to that address; the pause waits for the reply, as long
-as it takes, and shows you anything else the agent replies meanwhile. Ctrl-C
-stops the pause and leaves the thread running; `folio pause --force` doesn't
-ask. One with no Claude session running isn't asked: there's no one to get
-ready.
+only its context has to its notes, pushes, clears large untracked files out of
+the checkouts, and replies `snapshot` to that address; the pause waits for the
+reply, as long as it takes, and shows you anything else the agent replies
+meanwhile. Ctrl-C stops the pause and leaves the thread running; `folio pause
+--force` doesn't ask. One with no Claude session running isn't asked: there's
+no one to get ready.
 
 ## Runners
 
