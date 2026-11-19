@@ -9,7 +9,7 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 fn path(bottle: &str) -> PathBuf {
     crate::home().join("activity").join(bottle)
@@ -18,6 +18,28 @@ fn path(bottle: &str) -> PathBuf {
 /// When `bottle`'s agent last said it was at work; None if it never has.
 pub fn last(bottle: &str) -> Option<SystemTime> {
     fs::metadata(path(bottle)).and_then(|m| m.modified()).ok()
+}
+
+/// How long an agent without an event is at rest, how long it has to answer, and how long what
+/// follows a snapshot is still its: 15 minutes, longer than a foreground command runs (10), or
+/// $FOLIO_IDLE_SECONDS (tests).
+pub fn idle() -> Duration {
+    Duration::from_secs(
+        std::env::var("FOLIO_IDLE_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15 * 60),
+    )
+}
+
+/// Whether `bottle`'s agent is at rest, and has done nothing since a snapshot `taken` then but in
+/// the IDLE after it (the rest of the turn that answered its ask, as serve/idle.rs has it); not if
+/// it never said it was at work, there being no telling.
+pub fn quiet_since(bottle: &str, taken: SystemTime) -> bool {
+    last(bottle).is_some_and(|last| {
+        SystemTime::now().duration_since(last).unwrap_or_default() >= idle()
+            && last <= taken + idle()
+    })
 }
 
 /// `bottle`'s agent is at work, now.

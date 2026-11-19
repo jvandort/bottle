@@ -23,17 +23,7 @@ use crate::log::log;
 use crate::repos::Repo;
 use crate::threads::{self, Thread};
 
-/// How long an agent without an event is at rest, how long it has to answer, and how long what
-/// follows a snapshot is still its: 15 minutes, longer than a foreground command runs (10), or
-/// $FOLIO_IDLE_SECONDS (tests).
-fn idle() -> Duration {
-    Duration::from_secs(
-        std::env::var("FOLIO_IDLE_SECONDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15 * 60),
-    )
-}
+use crate::activity::idle;
 
 /// How often each bottle is looked at: a minute at most.
 fn tick() -> Duration {

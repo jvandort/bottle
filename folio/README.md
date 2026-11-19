@@ -94,7 +94,9 @@ the checkouts, and replies `snapshot` to that address; the pause waits for the
 reply, as long as it takes, and shows you anything else the agent replies
 meanwhile. Ctrl-C stops the pause and leaves the thread running; `folio pause
 --force` doesn't ask. One with no Claude session running isn't asked: there's
-no one to get ready.
+no one to get ready. Nor is one that's done nothing since its last snapshot
+but finish the turn that answered it, and has been at rest 15 minutes since:
+it got ready then, and still is. The pause snapshots it all the same.
 
 folio serve snapshots a running thread on its own, too, once its agent has
 been at rest a while: Claude's hooks tell it whenever the agent is at work

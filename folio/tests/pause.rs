@@ -653,6 +653,44 @@ fn one_put_off_is_asked_again_later_and_one_with_no_session_is_taken() {
     assert!(within(30, || taken(&f).is_some()), "no snapshot");
 }
 
+#[test]
+fn a_pause_doesnt_ask_an_agent_quiet_since_its_last_snapshot() {
+    let f = idling("snapshot");
+    at_work(&f);
+    assert!(within(30, || taken(&f).is_some()), "no snapshot");
+    // The rest of its turn, then at rest.
+    at_work(&f);
+    std::thread::sleep(Duration::from_secs(3));
+    let out = f.folio(&["pause", "fix-it"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains(
+            "fix-it's agent has done nothing since its last snapshot, so it isn't asked to get ready again"
+        ),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(events(&f).len(), 1);
+    assert_eq!(state(&f), "paused");
+}
+
+#[test]
+fn a_pause_asks_one_at_work_since_or_still_at_it() {
+    let f = idling("snapshot");
+    at_work(&f);
+    assert!(within(30, || taken(&f).is_some()), "no snapshot");
+    // At work after the IDLE that follows it.
+    std::thread::sleep(Duration::from_secs(3));
+    at_work(&f);
+    f.ok(&["pause", "fix-it"]);
+    assert_eq!(events(&f).len(), 2);
+    // At work within the IDLE after one, and just now: maybe at it still.
+    f.ok(&["shell", "fix-it"]);
+    at_work(&f);
+    f.ok(&["pause", "fix-it"]);
+    assert_eq!(events(&f).len(), 3);
+}
+
 // --- failures ------------------------------------------------------------------------
 
 #[test]

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::bottles::State;
 use crate::engine::Engine;
@@ -43,7 +43,8 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
 /// Snapshot the thread and delete its bottle: everything but its running processes is kept.
 ///
 /// With `ask`, its agent is asked first to get ready, and the snapshot waits for it to say it is
-/// (interrupt). The sessions are stopped then, and waited for, so Claude has written its
+/// (interrupt); unless it's done nothing since its last snapshot (activity::quiet_since), when it
+/// was ready, and is still. The sessions are stopped then, and waited for, so Claude has written its
 /// conversation out. Nothing is deleted until both archives are in the thread's slot and read back
 /// whole; if anything fails before that, the bottle is left as it is.
 pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result<(), String> {
@@ -63,7 +64,16 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result
     if state != State::Running {
         engine.start(&thread.bottle)?;
     }
-    if ask {
+    let quiet = super::snapshot_taken(repo, thread).is_some_and(|t| {
+        crate::activity::quiet_since(&thread.bottle, UNIX_EPOCH + Duration::from_secs_f64(t))
+    });
+    if ask && quiet {
+        crate::log::say!(
+            "threads",
+            "folio: {}'s agent has done nothing since its last snapshot, so it isn't asked to get ready again",
+            thread.name
+        );
+    } else if ask {
         interrupt(engine, repo, thread, Interrupt::Pause)?;
     }
     stop_sessions(engine, thread)?;
