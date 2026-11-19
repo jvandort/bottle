@@ -282,6 +282,26 @@ pub fn delete(known: &Known, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Leave the bottle where it is, as folio's no longer: folio serve no longer answers it, and its
+/// record's gone, so nothing starts it or binds it again; its record, to put back (readopt) or to
+/// delete its machine by. For a bottle on a runner that's off, whose thread is taken over.
+pub fn abandon(known: &Known, name: &str) -> Result<Bottle, String> {
+    known.forget(name);
+    let bottle = get(name)?;
+    known.serve.release(&bottle.name)?;
+    forget(name);
+    crate::log::log!("bottles", "{name}: abandoned, on {}", bottle.runner);
+    Ok(bottle)
+}
+
+/// A bottle abandoned, folio's again, its record in thread directory `owner`.
+pub fn readopt(known: &Known, bottle: &Bottle, owner: &std::path::Path) -> Result<(), String> {
+    known.forget(&bottle.name);
+    save(bottle, Some(owner))?;
+    crate::log::log!("bottles", "{}: readopted", bottle.name);
+    Ok(())
+}
+
 pub fn runner_of(bottle: &Bottle) -> Result<Runner, String> {
     runners::get(&bottle.runner)
 }

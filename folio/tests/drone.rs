@@ -125,6 +125,21 @@ fn a_machine_no_bottle_is_gets_nothing() {
     assert_eq!(d.guest_connects(FETCH, Some("stranger")), b"");
 }
 
+#[test]
+fn its_machines_name_from_anywhere_but_its_runner_gets_nothing() {
+    let d = Drone::new();
+    assert!(has(&d.guest_connects(FETCH, None), b"HTTP/1.1 200"));
+    // A machine of the same name here (one left behind elsewhere, say): folio serve's own sockets
+    // are this machine's, and the bottle's on box.
+    let mut s = UnixStream::connect(d.f.home.join("services/git.sock")).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(&harness::proxy_header(&d.machine)).unwrap();
+    s.write_all(FETCH).unwrap();
+    let mut answer = Vec::new();
+    let _ = s.read_to_end(&mut answer);
+    assert_eq!(answer, b"");
+}
+
 // --- detached to be turned off, and attached again ----------------------------------------
 
 #[test]
@@ -234,4 +249,131 @@ fn a_paused_thread_it_cant_resume_on_is_told_it_can_resume_here() {
         out.stderr
     );
     assert!(d.f.ok(&["runner", "list"]).contains("(detached)"));
+}
+
+// --- taken over while it's off -------------------------------------------------------------
+
+/// A drone with a snapshot (paused, and resumed on box), and work since that the snapshot hasn't.
+fn snapshotted() -> Drone {
+    let d = Drone::new();
+    std::fs::write(d.box_.workspace("t").join("draft.txt"), "draft\n").unwrap();
+    d.f.ok(&["pause", "t"]);
+    d.f.ok(&["shell", "t"]);
+    std::fs::write(d.box_.workspace("t").join("since.txt"), "since\n").unwrap();
+    d
+}
+
+#[test]
+fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
+    let d = snapshotted();
+    d.box_.power(false);
+    assert_eq!(d.f.rows()["t"][0], "unreachable");
+    let out = d.f.folio(&["exec", "t", "--", "true"]);
+    assert!(out.stderr.contains("`folio takeover t`"), "{}", out.stderr);
+    // Never without a terminal to agree on, nor anything but its name typed.
+    let out = d.f.folio(&["takeover", "t"]);
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("needs a terminal"), "{}", out.stderr);
+    let (code, out) =
+        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"yes\r")]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Not taken over."), "{out}");
+    assert_eq!(d.f.rows()["t"][0], "unreachable");
+
+    let (code, out) =
+        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"t\r")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("on box, which is unreachable"), "{out}");
+    assert!(
+        out.contains("Took over thread t: it's on local now"),
+        "{out}"
+    );
+    // Here, from its snapshot: what the bottle on box did since is lost.
+    assert_eq!(d.f.rows()["t"][0], "running");
+    assert!(d.f.workspace("t").join("draft.txt").exists());
+    assert!(!d.f.workspace("t").join("since.txt").exists());
+    // box is detached: its coming back is an attach, which deletes what's left there.
+    assert!(d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.box_.machine("t").is_null());
+
+    d.box_.power(true);
+    let out = d.f.ok(&["runner", "attach", "box"]);
+    assert!(
+        out.contains(&format!(
+            "Deleting {}, left on box when thread t was taken over",
+            d.machine
+        )),
+        "{out}"
+    );
+    assert!(out.contains("uncommitted changes in"), "{out}");
+    assert!(d.box_.machine("t").is_null());
+    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    // Nothing's left to delete the next time.
+    assert!(!d.f.ok(&["runner", "attach", "box"]).contains("Deleting"));
+    assert!(d.f.workspace("t").join("draft.txt").exists());
+}
+
+#[test]
+fn only_a_thread_with_a_snapshot_on_a_runner_thats_off_is_taken_over() {
+    let d = Drone::new();
+    let refused = |want: &str| {
+        let out = d.f.folio(&["takeover", "t"]);
+        assert_eq!(out.code, 1);
+        assert!(out.stderr.contains(want), "{}", out.stderr);
+    };
+    refused("which answers: there's nothing to take over");
+    d.box_.power(false);
+    refused("has no snapshot to take it over from");
+    d.box_.power(true);
+    d.f.ok(&["pause", "t"]);
+    refused("`folio claude t --runner local` resumes it there");
+}
+
+#[test]
+fn coming_back_its_attached_before_its_used_again() {
+    let d = snapshotted();
+    d.box_.power(false);
+    let (code, out) =
+        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"t\r")]);
+    assert_eq!(code, 0, "{out}");
+    d.box_.power(true);
+    // The thread, here, goes on; box isn't used till what's left there is dealt with.
+    let out = d.f.folio(&["exec", "t", "--", "true"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let out = d.f.folio(&["new", "u", "--runner", "box"]);
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains(&format!(
+            "box is back, with {} left on it when their threads were taken over: `folio runner attach box`",
+            d.machine
+        )),
+        "{}",
+        out.stderr
+    );
+    d.f.ok(&["runner", "attach", "box"]);
+    d.f.ok(&["new", "u", "--runner", "box"]);
+}
+
+#[test]
+fn a_takeover_that_fails_leaves_the_thread_as_it_was() {
+    let d = snapshotted();
+    d.box_.power(false);
+    let (code, out) = d.f.on_terminal_in(
+        None,
+        &["takeover", "t"],
+        &[(b"to take it over: ", b"t\r")],
+        &[(
+            "FAKE_CLI_FAIL_EXEC",
+            "find . -mindepth 1 -maxdepth 1 -exec rm -rf",
+        )],
+    );
+    assert_eq!(code, 1, "{out}");
+    // Its bottle on box its own again, and nothing left there to delete.
+    assert_eq!(d.f.rows()["t"][0], "detached");
+    assert!(d.f.machine("t").is_null());
+    d.box_.power(true);
+    let out = d.f.ok(&["runner", "attach", "box"]);
+    assert!(!out.contains("Deleting"), "{out}");
+    assert!(d.box_.workspace("t").join("since.txt").exists());
+    d.f.ok(&["exec", "t", "--", "true"]);
 }

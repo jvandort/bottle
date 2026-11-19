@@ -181,6 +181,24 @@ pub(super) fn command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("takeover")
+                .about("resume a thread from its snapshot, its bottle's runner being off")
+                .long_about(
+                    "Resume a thread whose bottle is on a runner that's off (detached, or not answering) from its \
+                     latest snapshot, in a new bottle here (or on --runner), its runner from then on. Whatever the \
+                     bottle on the runner that's off did since the snapshot is thrown away: it says what that \
+                     is, as far as it can, and you type the thread's name to agree. The old bottle is left there, \
+                     answered by nothing, and deleted when the runner's attached again (`folio runner attach`).",
+                )
+                .arg(thread_arg(true))
+                .arg(
+                    Arg::new("runner")
+                        .long("runner")
+                        .value_name("RUNNER")
+                        .help("where its new bottle is made (default: this machine, local)"),
+                ),
+        )
+        .subcommand(
             Command::new("notes")
                 .about("open a thread's notes in Obsidian")
                 .long_about(

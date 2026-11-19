@@ -10,15 +10,16 @@ use crate::FAILED;
 
 use super::forward::forward;
 use super::ssh::Runner;
-use super::{Entry, USAGE, home, other, registered, registry, write_registry};
+use super::{Entry, USAGE, home, left, now, other, registered, registry, write_registry};
 
 /// Runs `runner COMMAND ...` with `args`; `bottles_on` says which of folio's bottles are on a
-/// runner, by name, and `pause_on` pauses the threads running there, asking their agents first:
-/// their names.
+/// runner, by name, `pause_on` pauses the threads running there, asking their agents first: their
+/// names; and `clear_left` deletes the machines left there (left), those it can.
 pub fn main(
     mut args: impl Iterator<Item = String>,
     bottles_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
     pause_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
+    clear_left: &dyn Fn(&str) -> Result<(), String>,
 ) -> ExitCode {
     let command = args.next();
     let args: Vec<String> = args.collect();
@@ -31,7 +32,7 @@ pub fn main(
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
         (Some("detach"), [name]) => detach(name, false, pause_on),
         (Some("detach"), [name, flag]) if flag == "--offline" => detach(name, true, pause_on),
-        (Some("attach"), [name]) => attach(name),
+        (Some("attach"), [name]) => attach(name, clear_left),
         (Some("home"), [name]) => home(name).map(|home| println!("{home}")),
         (Some("forward"), [name, forwards @ ..]) if !forwards.is_empty() => forward(name, forwards),
         (Some("ssh"), [name, command @ ..]) => {
@@ -132,12 +133,9 @@ pub(super) fn mark(name: &str, detached: Option<&[String]>) -> io::Result<()> {
         .ok_or_else(|| other(format!("no runner named {name}")))?;
     match detached {
         Some(stopped) => {
-            let at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
             entry.rest.insert(
                 "detached".into(),
-                serde_json::json!({"at": at, "stopped": stopped}),
+                serde_json::json!({"at": now(), "stopped": stopped}),
             );
         }
         None => {
@@ -254,7 +252,10 @@ pub(super) fn ask(question: &str) -> bool {
 }
 
 /// `runner attach NAME`: attached again, once it answers.
-pub(super) fn attach(name: &str) -> io::Result<()> {
+pub(super) fn attach(
+    name: &str,
+    clear_left: &dyn Fn(&str) -> Result<(), String>,
+) -> io::Result<()> {
     let entry = registered()?
         .remove(name)
         .ok_or_else(|| other(format!("no runner named {name}")))?;
@@ -268,6 +269,14 @@ pub(super) fn attach(name: &str) -> io::Result<()> {
         .collect();
     Runner::new(name, entry.ssh).found()?;
     mark(name, None)?;
+    // What's left there, deleted before anything else is asked of it; while any is, it's detached
+    // still, and nothing else is.
+    if !left(name)?.is_empty()
+        && let Err(e) = clear_left(name)
+    {
+        mark(name, Some(&stopped))?;
+        return Err(other(e));
+    }
     println!("Runner {name} attached");
     if !stopped.is_empty() {
         println!(

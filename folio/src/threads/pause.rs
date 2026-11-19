@@ -389,25 +389,36 @@ pub fn losses(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<Vec<Strin
             }
         }
     };
-    let (mut tips, mut dirty) = (BTreeMap::new(), false);
-    for line in work.lines() {
-        let (name, commit) = line.split_once('\t').unwrap_or((line, ""));
-        if name == "(uncommitted changes)" {
-            dirty = true;
-        } else if !commit.is_empty() {
-            tips.insert(name.to_string(), commit.to_string());
-        }
-    }
     let place = if state == State::Paused {
         "the snapshot"
     } else {
         "the bottle"
     };
-    lost.extend(
-        lanes::unsaved(&repo.path, &thread.name, &tips)?
-            .into_iter()
-            .map(|name| format!("{name}: in {place}, never pushed")),
-    );
+    lost.extend(unpushed(repo, &thread.name, &work, place)?);
+    Ok(lost)
+}
+
+/// What `work` (work_script's, of a bottle of thread `name`'s) has that the lane doesn't: its
+/// branches never pushed, and its uncommitted changes, said to be in `place`.
+pub(super) fn unpushed(
+    repo: &Repo,
+    name: &str,
+    work: &str,
+    place: &str,
+) -> Result<Vec<String>, String> {
+    let (mut tips, mut dirty) = (BTreeMap::new(), false);
+    for line in work.lines() {
+        let (branch, commit) = line.split_once('\t').unwrap_or((line, ""));
+        if branch == "(uncommitted changes)" {
+            dirty = true;
+        } else if !commit.is_empty() {
+            tips.insert(branch.to_string(), commit.to_string());
+        }
+    }
+    let mut lost: Vec<String> = lanes::unsaved(&repo.path, name, &tips)?
+        .into_iter()
+        .map(|branch| format!("{branch}: in {place}, never pushed"))
+        .collect();
     if dirty {
         lost.push(format!("uncommitted changes in {place}"));
     }

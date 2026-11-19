@@ -128,6 +128,16 @@ impl Engine {
         bottles::delete(&self.known, name)
     }
 
+    /// Leave the bottle where it is, as folio's no longer (bottles::abandon): its record.
+    pub fn abandon(&self, name: &str) -> Result<bottles::Bottle, String> {
+        bottles::abandon(&self.known, name)
+    }
+
+    /// A bottle abandoned, folio's again, its record in thread directory `owner`.
+    pub fn readopt(&self, bottle: &bottles::Bottle, owner: &Path) -> Result<(), String> {
+        bottles::readopt(&self.known, bottle, owner)
+    }
+
     /// What the bottle says to the snapshot address, until the Listening is dropped.
     pub fn listen(&self, name: &str) -> Result<crate::daemon::Listening, String> {
         self.known.serve.listen(name)

@@ -33,11 +33,15 @@
 //! marks it detached; `--offline` marks one that's off already, unasked. A detached runner isn't asked
 //! anything. Using one again (`on`, `runner ssh`) attaches it again if it answers, and says it's
 //! off if it doesn't; `runner attach` does that alone, and names the machines detaching it stopped.
+//! Machines left there as folio's no longer (`leave`: a thread's bottle, its thread taken over while
+//! the runner was off) are folio's CLI's to delete as `runner attach` attaches it (clear_left);
+//! while any is, using it doesn't attach it, but says to.
 //! `runner rm` forgets one, touching nothing there. `runner home` says its user's home there, which
 //! paths there (a forward's sockets, say) are under: asked once, and kept with it.
 //!
 //! Runners are listed in folio's home, runners.json, `{"version": 1, "runners": {NAME: {"ssh":
-//! DESTINATION, "home": PATH, "detached": {"at": SECONDS, "stopped": [MACHINE]...}}}}`; what else an
+//! DESTINATION, "home": PATH, "detached": {"at": SECONDS, "stopped": [MACHINE]...}, "left": {MACHINE:
+//! {...}}}}}`, what's said of a machine left its leaver's; what else an
 //! entry says is kept as it is.
 
 use ssh::Runner;
@@ -132,6 +136,61 @@ fn write_registry(registry: &Registry) -> io::Result<()> {
 /// Every runner added, by name.
 fn registered() -> io::Result<BTreeMap<String, Entry>> {
     Ok(registry()?.runners)
+}
+
+/// Machines left on runner `name` (`left`), each a JSON object of what's said of it, by machine.
+pub fn left(name: &str) -> io::Result<BTreeMap<String, serde_json::Value>> {
+    Ok(registered()?
+        .remove(name)
+        .and_then(|e| e.rest.get("left").and_then(|l| l.as_object()).cloned())
+        .map(|l| l.into_iter().collect())
+        .unwrap_or_default())
+}
+
+/// Machine `machine`, on runner `name`, left there as folio's no longer, `about` it saying what of: for
+/// whoever attaches the runner again to delete. One that's not detached is detached, unasked, as
+/// `runner detach --offline` does: that's what's answered by attaching it.
+pub fn leave(name: &str, machine: &str, about: serde_json::Value) -> io::Result<()> {
+    let mut registry = registry()?;
+    let entry = registry
+        .runners
+        .get_mut(name)
+        .ok_or_else(|| other(format!("no runner named {name}")))?;
+    if !entry.detached() {
+        entry.rest.insert(
+            "detached".into(),
+            serde_json::json!({"at": now(), "stopped": []}),
+        );
+    }
+    let left = entry
+        .rest
+        .entry("left")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(left) = left.as_object_mut() {
+        left.insert(machine.into(), about);
+    }
+    write_registry(&registry)
+}
+
+/// Machine `machine`, left on runner `name`, no longer: deleted, or folio's again.
+pub fn unleave(name: &str, machine: &str) -> io::Result<()> {
+    let mut registry = registry()?;
+    if let Some(entry) = registry.runners.get_mut(name)
+        && let Some(left) = entry.rest.get_mut("left").and_then(|l| l.as_object_mut())
+    {
+        left.remove(machine);
+        if left.is_empty() {
+            entry.rest.remove("left");
+        }
+    }
+    write_registry(&registry)
+}
+
+/// Now, in seconds, as an entry says when.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Every runner added, by name: whether it's detached.

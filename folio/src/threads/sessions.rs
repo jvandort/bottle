@@ -138,6 +138,16 @@ pub(super) fn ensure_running(engine: &Engine, repo: &Repo, thread: &Thread) -> R
             ));
         }
         State::Running => {}
+        // Its runner's off: its snapshot, if it has one, is where it can go on from.
+        s if s.runner_off() && super::snapshot_taken(repo, thread).is_some() => {
+            engine.start(&thread.bottle).map_err(|e| {
+                format!(
+                    "{e}; or take it over from its snapshot, throwing away what its bottle did since: \
+                     `folio takeover {}`",
+                    thread.name
+                )
+            })?
+        }
         _ => engine.start(&thread.bottle)?,
     }
     start_sidecar(engine, thread)

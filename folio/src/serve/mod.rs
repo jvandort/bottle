@@ -23,7 +23,10 @@
 //! the bottle kept.
 //!
 //! For each runner its bottles are on, it forwards its services' sockets there while it answers
-//! one or more of them (runner.rs's forward, in a thread of its own). Once it's stopping it winds
+//! one or more of them (runner.rs's forward, in a thread of its own), each to a socket here of that
+//! runner's own (services/RUNNER/), so a connection is answered only as a bottle bound on the runner
+//! it came from: a machine of the same name elsewhere (a thread's old bottle, left on a runner when
+//! it was taken over) is none. Once it's stopping it winds
 //! up while still taking connections, closing them unanswered (what says it's on its way out), and
 //! only then is it gone: what's routed here stops first, then its forwards.
 
@@ -167,10 +170,15 @@ fn pass(from: &mut impl Read, to: &mut impl Write) -> u64 {
     }
 }
 
-/// A runner's forward: a thread, told to stop by `stop`.
+/// A service, by its name.
+type Route = (String, Arc<dyn Service>);
+
+/// A runner's forward: a thread, told to stop by `stop`, and the sockets it forwards there, which
+/// are that runner's alone.
 struct Forward {
     stop: Arc<AtomicBool>,
     thread: thread::JoinHandle<()>,
+    sockets: Vec<PathBuf>,
 }
 
 pub struct Server {
@@ -179,6 +187,8 @@ pub struct Server {
     /// id of its own.
     listening: Mutex<HashMap<String, Vec<(u64, UnixStream)>>>,
     forwards: Mutex<HashMap<String, Forward>>,
+    /// Each service, by its socket here.
+    routes: Mutex<HashMap<PathBuf, Route>>,
     stopping: AtomicBool,
     /// Its wind-up is done: what's left is to go.
     done: AtomicBool,
@@ -188,13 +198,14 @@ pub struct Server {
 }
 
 impl Server {
-    /// The bottle `machine` was bound as.
-    fn bottle_of(&self, machine: &str) -> Option<Arc<Bottle>> {
+    /// The bottle `machine`, on `runner`, was bound as: a machine of the same name elsewhere (one
+    /// left on a runner that was off when its thread was taken over) is none.
+    fn bottle_of(&self, machine: &str, runner: &str) -> Option<Arc<Bottle>> {
         self.bottles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|b| b.machine == machine)
+            .find(|b| b.machine == machine && b.runner == runner)
             .cloned()
     }
 
@@ -242,14 +253,43 @@ impl Server {
             .is_empty()
     }
 
-    /// Forwards `forwards` to `runner`, unless that's under way already.
+    /// Forwards `forwards` to `runner`, unless that's under way already: each service's socket
+    /// there to one here of that runner's own, so what comes by it is known to be from there.
     fn forward(self: &Arc<Self>, runner: &str, forwards: Vec<String>) {
         let mut all = self.forwards.lock().unwrap_or_else(|e| e.into_inner());
         if all.get(runner).is_some_and(|f| !f.thread.is_finished()) {
             return;
         }
+        if let Some(old) = all.remove(runner) {
+            self.close(&old);
+        }
         log!("bottle.daemon", "forwarding to runner {runner}");
         let stop = Arc::new(AtomicBool::new(false));
+        let mut sockets = Vec::new();
+        let forwards: Vec<String> = forwards
+            .iter()
+            .filter_map(|pair| {
+                let (there, here) = pair.split_once('=')?;
+                let (name, service) = self
+                    .routes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(Path::new(here))
+                    .cloned()?;
+                let socket = crate::daemon::socket_path(&format!("services/{runner}/{name}.sock"));
+                match listen(&socket) {
+                    Ok(listener) => {
+                        self.accept(listener, service, runner, stop.clone());
+                        sockets.push(socket.clone());
+                        Some(format!("{there}={}", socket.display()))
+                    }
+                    Err(e) => {
+                        log!("bottle.daemon", "{}: {e}", socket.display());
+                        None
+                    }
+                }
+            })
+            .collect();
         let (told, name) = (stop.clone(), runner.to_string());
         let thread = thread::spawn(move || {
             if let Err(e) =
@@ -258,7 +298,47 @@ impl Server {
                 log!("bottle.daemon", "forward to runner {name}: {e}");
             }
         });
-        all.insert(runner.to_string(), Forward { stop, thread });
+        all.insert(
+            runner.to_string(),
+            Forward {
+                stop,
+                thread,
+                sockets,
+            },
+        );
+    }
+
+    /// Takes the connections to `listener`, `service`'s for machines on `runner`, until `stop`, or
+    /// folio serve's stopping.
+    fn accept(
+        self: &Arc<Self>,
+        listener: UnixListener,
+        service: Arc<dyn Service>,
+        runner: &str,
+        stop: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        let (server, runner) = (self.clone(), runner.to_string());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                if server.stopping.load(Ordering::SeqCst) || stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(stream) = stream {
+                    let (server, service, runner) =
+                        (server.clone(), service.clone(), runner.clone());
+                    thread::spawn(move || server.routed(service.as_ref(), stream, &runner));
+                }
+            }
+        })
+    }
+
+    /// A forward's sockets, closed: their loops woken to see they're done, and gone.
+    fn close(&self, forward: &Forward) {
+        forward.stop.store(true, Ordering::Relaxed);
+        for socket in &forward.sockets {
+            let _ = UnixStream::connect(socket);
+            let _ = fs::remove_file(socket);
+        }
     }
 
     fn end_forward(&self, runner: &str) {
@@ -269,7 +349,7 @@ impl Server {
             .remove(runner);
         if let Some(forward) = forward {
             log!("bottle.daemon", "no longer forwarding to runner {runner}");
-            forward.stop.store(true, Ordering::Relaxed);
+            self.close(&forward);
             let _ = forward.thread.join();
         }
     }
@@ -361,7 +441,7 @@ impl Server {
     /// A connection routed to `service`'s socket: answered by it as the bottle its header says it's
     /// from, or dropped; a line in the log for each: who, where, to what, how it ended, the bytes
     /// each way, and how long it took.
-    fn routed(self: &Arc<Self>, service: &dyn Service, mut stream: UnixStream) {
+    fn routed(self: &Arc<Self>, service: &dyn Service, mut stream: UnixStream, runner: &str) {
         let _ = stream.set_read_timeout(Some(HEADER_TIMEOUT));
         let header = match proxy::read(&mut stream) {
             Ok(header) => header,
@@ -380,10 +460,14 @@ impl Server {
                 .as_ref()
                 .map_or(String::new(), |n| format!(" ({n})"))
         );
-        let Some(bottle) = header.machine.as_deref().and_then(|m| self.bottle_of(m)) else {
+        let Some(bottle) = header
+            .machine
+            .as_deref()
+            .and_then(|m| self.bottle_of(m, runner))
+        else {
             log!(
                 "bottle.services",
-                "services: refused {target} from {}, which no bottle here is",
+                "services: refused {target} from {} on {runner}, which no bottle here is",
                 header.machine.as_deref().unwrap_or("None")
             );
             return;
@@ -559,6 +643,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
         bottles: Mutex::new(HashMap::new()),
         listening: Mutex::new(HashMap::new()),
         forwards: Mutex::new(HashMap::new()),
+        routes: Mutex::new(HashMap::new()),
         stopping: AtomicBool::new(false),
         done: AtomicBool::new(false),
         control: control.clone(),
@@ -573,18 +658,12 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
             .ok_or_else(|| io::Error::other(format!("no service {name}")))?
             .into();
         let listener = listen(path)?;
-        let server = server.clone();
-        routed.push(thread::spawn(move || {
-            for stream in listener.incoming() {
-                if server.stopping.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = stream {
-                    let (server, service) = (server.clone(), service.clone());
-                    thread::spawn(move || server.routed(service.as_ref(), stream));
-                }
-            }
-        }));
+        server
+            .routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.clone(), (name.clone(), service.clone()));
+        routed.push(server.accept(listener, service, LOCAL, Arc::new(AtomicBool::new(false))));
     }
     let paths: Vec<String> = services
         .iter()

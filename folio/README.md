@@ -102,8 +102,28 @@ been at rest a while: Claude's hooks tell it whenever the agent is at work
 since the thread's last snapshot, it asks the agent to get ready as a pause
 does, and snapshots the thread, its bottle kept, once the agent says it's ready.
 An agent that doesn't answer (busy with background work, say) is asked again 15
-minutes later. So a thread whose runner is turned off without a pause still has
-a recent snapshot here.
+minutes later. What the agent does in the 15 minutes after a snapshot (the rest
+of the turn that answered it) doesn't count as work since. So a thread whose
+runner is turned off without a pause still has a recent snapshot here.
+
+### Taking a thread over
+
+A thread whose bottle is on a runner that's off (turned off, or booted into
+something else, without `folio runner detach`) can go on here from its latest
+snapshot: `folio takeover fix-it` (`--runner` for another runner than this
+machine). Whatever its bottle did since the snapshot is thrown away, so it says
+what's at stake first: the runner, how old the snapshot is, and what it has that
+the lane doesn't. You type the thread's name to agree, and with no terminal to
+type on it's refused. It resumes the thread here, its runner this machine from
+then on, and attaches to its Claude.
+
+The old bottle is left on the runner, folio's no longer: nothing starts it, and
+folio serve answers a machine only on the runner its bottle is bound on, so even
+running it reaches nothing of the thread's. The runner is detached, and when
+it's back, `folio runner attach` says what that bottle has that the lane doesn't
+(its unpushed branches, uncommitted changes) and deletes it; until then folio
+won't use the runner. One whose thread has nothing newer than it (no bottle, and
+no snapshot since) is kept.
 
 ## Runners
 
@@ -165,7 +185,10 @@ bottle. (Untested on a real runner yet.)
   the like) attaches it again if it answers, and says it's still off if it
   doesn't. `--offline` marks one that's off already, unasked.
 - **`folio runner attach RUNNER`** attaches a detached runner again, once it
-  answers, and names the machines detaching it stopped.
+  answers, and names the machines detaching it stopped. Bottles left there when
+  their threads were taken over (see Taking a thread over) are deleted first,
+  each said with what it has that its lane doesn't; a runner with any left isn't
+  attached by being used again: it says to attach it.
 - **`folio runner rm RUNNER`** forgets a runner folio has no bottles on.
   Nothing on the machine is touched.
 
@@ -563,7 +586,7 @@ bottles' machines route to it. A machine decides each TCP connection the bottle 
 itself, by the network policy it was made with (`network.json` in its
 directory): public destinations go straight there; private addresses are
 refused, but for a name allowed private; folio serve's services are routed to its sockets, one per
-service (`~/.folio/services`): git (`git.bottle.internal`, the bottle's git remotes), messages
+service (`~/.folio/services`; a runner's machines', forwarded there, on sockets of that runner's own, so a machine is answered only as a bottle on the runner it's on): git (`git.bottle.internal`, the bottle's git remotes), messages
 (`messages.bottle.internal`), the bottles running (`bottle.internal`, with list-bottles), ssh to
 other bottles, and credentials' hosts. Each name is under `.internal`, which is kept for private
 use: no one else's. A refused
@@ -591,6 +614,7 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio exec [-t] THREAD [--] COMMAND...` | Run one command in a thread's bottle, wherever it runs, and exit with its status |
 | `folio cp SRC DST` | Copy into or out of a thread's bottle, wherever it runs: `THREAD:PATH`, or a path here |
 | `folio pause [THREAD] [--force]` | Ask its agent to get ready, snapshot the thread, and delete its bottle (--force: without asking) |
+| `folio takeover THREAD [--runner RUNNER]` | Resume a thread from its snapshot while its bottle's runner is off, throwing away what the bottle did since; you type its name to agree |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and its snapshot's size and age |

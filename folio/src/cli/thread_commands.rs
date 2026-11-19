@@ -219,6 +219,47 @@ pub(super) fn pause(engine: &Engine, matches: &ArgMatches) -> Outcome {
     Ok(0)
 }
 
+pub(super) fn takeover(engine: &Engine, matches: &ArgMatches) -> Outcome {
+    let repo = current()?;
+    let Some(thread) = thread_of(engine, matches, &repo, "takeover", false)? else {
+        return Ok(0);
+    };
+    let name = &thread.name;
+    let to = arg(matches, "runner").unwrap_or(crate::runners::LOCAL);
+    let plan = threads::takeover_plan(engine, &repo, &thread, to)?;
+    if !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "taking {name} over throws away what its bottle did since its snapshot: it needs a terminal to agree on"
+        ));
+    }
+    println!(
+        "Thread {name}'s bottle is on {runner}, which is {state}. Taking it over resumes it on {to} from its \
+         snapshot of {when}, its runner {to} from now on, and throws away whatever its bottle on {runner} \
+         did since: that bottle is deleted when {runner} is attached again.",
+        runner = plan.runner,
+        state = plan.state,
+        when = super::output::ago(plan.taken),
+    );
+    if plan.unpushed.is_empty() {
+        println!("The snapshot has nothing your lane lacks.");
+    } else {
+        println!("The snapshot has, beyond your lane:");
+        for item in &plan.unpushed {
+            println!("  {item}");
+        }
+    }
+    let typed =
+        prompt::input(&format!("Type {name} to take it over: ")).map(|t| t.trim().to_string());
+    if typed.as_deref() != Some(name.as_str()) {
+        println!("Not taken over.");
+        return Ok(1);
+    }
+    crate::log::say!("threads", "Taking over thread {name}...");
+    let thread = threads::takeover(engine, &repo, &thread, &plan, to)?;
+    println!("Took over thread {name}: it's on {to} now");
+    match threads::attach(engine, &repo, &thread, threads::CLAUDE)? {}
+}
+
 pub(super) fn broker_command(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let command = arg(matches, "command").unwrap_or("claude");
     let identity = broker::repo();

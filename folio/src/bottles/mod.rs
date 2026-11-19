@@ -39,7 +39,7 @@ mod state;
 
 pub use bind::bindings;
 pub use create::{MountRequest, Order, create};
-pub use machine::{delete, ensure_running, exec_command, runner_of, start};
+pub use machine::{abandon, delete, ensure_running, exec_command, readopt, runner_of, start};
 pub use state::{Known, State, Status, status};
 
 mod record;

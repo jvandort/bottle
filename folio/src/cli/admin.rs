@@ -16,6 +16,7 @@ pub(super) fn runner_command(matches: &ArgMatches) -> ExitCode {
         args(matches, "arguments").into_iter(),
         &bottles_on,
         &pause_on,
+        &threads::clear_left,
     )
 }
 

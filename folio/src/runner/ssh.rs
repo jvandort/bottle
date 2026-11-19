@@ -44,6 +44,15 @@ impl Runner {
                     "runner {name} is detached, and doesn't answer yet ({e}): turn it on, then try again"
                 ))
             })?;
+            // What's left there is deleted first, by an attach: there's what it has to say.
+            let left: Vec<String> = super::left(name)?.into_keys().collect();
+            if !left.is_empty() {
+                return Err(other(format!(
+                    "runner {name} is back, with {} left on it when their threads were taken over: \
+                     `folio runner attach {name}` says what each has that its lane doesn't, and deletes it",
+                    left.join(", ")
+                )));
+            }
             mark(name, None)?;
             eprintln!("folio: runner {name} is back, and attached again");
         }

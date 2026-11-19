@@ -11,7 +11,7 @@ pub(crate) fn human_size(size: u64) -> String {
     format!("{size}B")
 }
 
-pub(super) fn ago(when: f64) -> String {
+pub(crate) fn ago(when: f64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

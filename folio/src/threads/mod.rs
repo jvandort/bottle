@@ -38,6 +38,7 @@ mod record;
 mod sessions;
 mod sidecar;
 mod state;
+mod takeover;
 
 pub use lifecycle::{create, delete, rename, set_settings};
 pub use pause::{losses, pause, snapshot_idle};
@@ -49,6 +50,7 @@ use record::{directory, save, snapshot};
 pub use sessions::{attach, copy, exec};
 pub use sidecar::{set_sidecar, sidecar_shell};
 pub use state::{last_active, recent, states};
+pub use takeover::{clear_left, takeover, takeover_plan};
 
 pub const WORKSPACE: &str = "/workspace";
 pub const CLAUDE: &str = "claude";

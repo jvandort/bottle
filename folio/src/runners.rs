@@ -9,8 +9,9 @@
 //!
 //! What a machine routes to folio serve goes to its sockets here (services.rs); on a runner, to
 //! sockets there, under its user's home (services_sockets), which folio serve forwards here, over
-//! one ssh per runner, while it answers bottles there (forwards; `runner forward`). Those there are
-//! named for this machine (controller_key), so two machines folio runs on can share a runner.
+//! one ssh per runner, while it answers bottles there (forwards; `runner forward`), to sockets of
+//! that runner's own. Those there are named for this machine (controller_key), so two machines
+//! folio runs on can share a runner.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
