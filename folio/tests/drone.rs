@@ -157,7 +157,7 @@ fn with_its_bottles_running_and_no_one_to_ask_it_stops_nothing_and_stays_attache
         out.stderr
     );
     assert_eq!(d.box_.machine("t")["state"], "running");
-    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.f.ok(&["runner", "ls"]).contains("detached"));
 }
 
 #[test]
@@ -204,9 +204,9 @@ fn one_that_cant_be_reached_is_detached_only_offline() {
             .stderr
             .contains("--offline")
     );
-    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.f.ok(&["runner", "ls"]).contains("detached"));
     d.f.ok(&["runner", "detach", "box", "--offline"]);
-    assert!(d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(d.f.ok(&["runner", "ls"]).contains("detached"));
 }
 
 #[test]
@@ -223,11 +223,11 @@ fn using_it_again_attaches_it_once_its_back() {
         out.stderr
     );
     assert!(out.stderr.contains("turn it on"), "{}", out.stderr);
-    assert!(d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(d.f.ok(&["runner", "ls"]).contains("detached"));
     d.box_.power(true);
     let out = d.f.folio(&["exec", "t", "--", "true"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.f.ok(&["runner", "ls"]).contains("detached"));
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn a_paused_thread_it_cant_resume_on_is_told_it_can_resume_here() {
         "{}",
         out.stderr
     );
-    assert!(d.f.ok(&["runner", "list"]).contains("(detached)"));
+    assert!(d.f.ok(&["runner", "list"]).contains("detached"));
 }
 
 // --- taken over while it's off -------------------------------------------------------------
@@ -300,7 +300,14 @@ fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
     assert!(d.f.workspace("t").join("draft.txt").exists());
     assert!(!d.f.workspace("t").join("since.txt").exists());
     // box is detached: its coming back is an attach, which deletes what's left there.
-    assert!(d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    let listed = d.f.ok(&["runner", "ls"]);
+    assert!(
+        listed.ends_with(&format!(
+            "box     box  detached just now  -        {}\n",
+            d.machine
+        )),
+        "{listed}"
+    );
     assert!(!d.box_.machine("t").is_null());
 
     d.box_.power(true);
@@ -317,7 +324,7 @@ fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
     assert!(out.contains("uncommitted changes in"), "{out}");
     assert!(out.contains(&format!("Deleted {}", d.machine)), "{out}");
     assert!(d.box_.machine("t").is_null());
-    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.f.ok(&["runner", "ls"]).contains("detached"));
     // Nothing's left to ask about the next time.
     assert!(!d.f.ok(&["runner", "attach", "box"]).contains("has:"));
     assert!(d.f.workspace("t").join("draft.txt").exists());
@@ -346,7 +353,7 @@ fn whats_left_is_kept_unless_agreed_and_asked_about_again() {
         )),
         "{out}"
     );
-    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.f.ok(&["runner", "ls"]).contains("detached"));
     assert!(!d.box_.machine("t").is_null());
     // Said no to.
     let (code, out) =

@@ -137,7 +137,10 @@ fn a_runner_is_added_kept_up_to_date_and_asked_anything_bottle_cli_does() {
     let f = Fixture::new("r");
     f.ok(&["runner", "add", "box", "--ssh", "box"]);
     assert!(f.there().join(".bottle/dist/bottle-cli").exists());
-    assert!(f.ok(&["runner", "ls"]).starts_with("box  box"));
+    assert_eq!(
+        f.ok(&["runner", "ls"]),
+        "RUNNER  SSH  STATE     BOTTLES  LEFT\nbox     box  attached  -        -\n"
+    );
     // Copied again only what's changed, file by file; nothing, when nothing has.
     let dist = f.dist();
     let copied = |out: &Output| String::from_utf8_lossy(&out.stderr).contains("copying");
@@ -234,7 +237,7 @@ fn a_runner_is_added_kept_up_to_date_and_asked_anything_bottle_cli_does() {
         f.ok(&["runner", "detach", "box"])
             .contains("safe to turn off")
     );
-    assert!(f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(f.ok(&["runner", "ls"]).contains("detached"));
     let used = f.cli(&["on", "box", "status", "m"]);
     assert!(
         String::from_utf8_lossy(&used.stderr).contains("runner box is back, and attached again")
@@ -245,7 +248,7 @@ fn a_runner_is_added_kept_up_to_date_and_asked_anything_bottle_cli_does() {
         f.ok(&["runner", "attach", "box"])
             .contains("Runner box attached")
     );
-    assert!(!f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!f.ok(&["runner", "ls"]).contains("detached"));
 
     // Anything asked brings the runner's bottle-cli up to date first: an older one may not know
     // the command.

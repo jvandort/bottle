@@ -173,7 +173,8 @@ bottle. (Untested on a real runner yet.)
   sha256, from the manifest bottle-cli's build wrote beside it, against what
   the runner's `sha256sum` says of its copy, and only the files that differ
   are sent.
-- **`folio runner ls`** lists them; **`folio runner check RUNNER`** says
+- **`folio runner ls`** lists them: each one's state (attached, or detached
+  and since when), folio's bottles there, and what takeovers left there; **`folio runner check RUNNER`** says
   what one is and lacks; **`folio runner ssh RUNNER [COMMAND]`** is ssh there,
   on the connection folio shares for it.
 - **`folio runner detach RUNNER [--offline]`** is for turning a runner off:

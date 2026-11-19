@@ -25,8 +25,8 @@ pub fn main(
     let args: Vec<String> = args.collect();
     let result = match (command.as_deref(), args.as_slice()) {
         (Some("add"), [name, flag, destination]) if flag == "--ssh" => add(name, destination),
-        (Some("ls" | "list"), []) => ls(false),
-        (Some("ls" | "list"), [flag]) if flag == "--json" => ls(true),
+        (Some("ls" | "list"), []) => ls(false, bottles_on),
+        (Some("ls" | "list"), [flag]) if flag == "--json" => ls(true, bottles_on),
         (Some("rm"), [name]) => rm(name, bottles_on),
         (Some("check"), [target]) => check(target, false),
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
@@ -105,21 +105,52 @@ pub(super) fn add(name: &str, destination: &str) -> io::Result<()> {
     write_registry(&registry)
 }
 
-pub(super) fn ls(json: bool) -> io::Result<()> {
+/// `runner ls`: each runner, where it's reached, whether it's attached (and since when it's not),
+/// folio's bottles on it, and the machines left there when their threads were taken over.
+pub(super) fn ls(
+    json: bool,
+    bottles_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
+) -> io::Result<()> {
     let runners = registered()?;
+    let mut rows = vec![
+        ["RUNNER", "SSH", "STATE", "BOTTLES", "LEFT"]
+            .map(String::from)
+            .to_vec(),
+    ];
+    let mut listed = Vec::new();
+    for (name, e) in &runners {
+        let bottles = bottles_on(name).map_err(other)?;
+        let left: Vec<String> = left(name)?.into_keys().collect();
+        let since = e
+            .rest
+            .get("detached")
+            .map(|d| d["at"].as_f64().unwrap_or_default());
+        listed.push(
+            serde_json::json!({"name": name, "ssh": e.ssh, "detached": e.detached(),
+                                       "bottles": bottles, "left": left}),
+        );
+        let list = |names: &[String]| {
+            if names.is_empty() {
+                "-".to_string()
+            } else {
+                names.join(", ")
+            }
+        };
+        rows.push(vec![
+            name.clone(),
+            e.ssh.clone(),
+            match since {
+                Some(at) => format!("detached {}", crate::cli::output::ago(at)),
+                None => "attached".into(),
+            },
+            list(&bottles),
+            list(&left),
+        ]);
+    }
     if json {
-        let listed: Vec<serde_json::Value> = runners
-            .iter()
-            .map(|(name, e)| {
-                serde_json::json!({"name": name, "ssh": e.ssh, "detached": e.detached()})
-            })
-            .collect();
         println!("{}", serde_json::Value::Array(listed));
-    } else {
-        for (name, e) in &runners {
-            let detached = if e.detached() { "  (detached)" } else { "" };
-            println!("{name}  {}{detached}", e.ssh);
-        }
+    } else if !runners.is_empty() {
+        crate::cli::output::table(&rows);
     }
     Ok(())
 }

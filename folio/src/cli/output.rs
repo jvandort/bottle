@@ -25,7 +25,7 @@ pub(crate) fn ago(when: f64) -> String {
     "just now".into()
 }
 
-pub(super) fn table(rows: &[Vec<String>]) {
+pub(crate) fn table(rows: &[Vec<String>]) {
     let widths: Vec<usize> = (0..rows[0].len())
         .map(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0))
         .collect();
