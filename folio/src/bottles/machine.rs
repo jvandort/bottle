@@ -154,13 +154,23 @@ pub fn start(known: &Known, name: &str) -> Result<Bottle, String> {
     ensure_running(known, name)
 }
 
+/// A running bottle, folio serve answering it: one on a runner is bound again, whatever folio serve
+/// has of it, since one that started while the runner was detached (a thread there taken over,
+/// say) didn't bind it; one here, folio serve binds as it starts, if it had stopped.
+fn rebind(known: &Known, bottle: &Bottle) -> Result<(), String> {
+    if bottle.runner == runners::LOCAL {
+        known.serve.start().map(|_| ())
+    } else {
+        known.serve.bind(binding(bottle)?)
+    }
+}
+
 /// Start the bottle's machine if it isn't running, folio serve answering it; one `known` running
 /// isn't asked again.
 pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
     let mut bottle = get(name)?;
     if known.running(name) {
-        // Running: folio serve, if it had stopped, binds it again as it starts.
-        known.serve.start()?;
+        rebind(known, &bottle)?;
         return Ok(bottle);
     }
     if bottle.status != Made::Ready {
@@ -194,8 +204,7 @@ pub fn ensure_running(known: &Known, name: &str) -> Result<Bottle, String> {
             point_remotes(&bottle)?;
         }
     } else {
-        // Running: folio serve, if it had stopped, binds it again as it starts.
-        known.serve.start()?;
+        rebind(known, &bottle)?;
     }
     known.started(name);
     Ok(bottle)

@@ -143,7 +143,7 @@ pub(super) fn ensure_running(engine: &Engine, repo: &Repo, thread: &Thread) -> R
             engine.start(&thread.bottle).map_err(|e| {
                 format!(
                     "{e}; or take it over from its snapshot, throwing away what its bottle did since: \
-                     `folio takeover {}`",
+                     `folio claude {}`, on a terminal, offers to",
                     thread.name
                 )
             })?

@@ -195,6 +195,11 @@ pub(super) fn attach(
     let Some(mut thread) = thread_of(engine, matches, &repo, command, true)? else {
         return Ok(0);
     };
+    // Its runner off, it's taken over, if it's agreed, onto the one asked for, else this machine.
+    let to = arg(matches, "runner").unwrap_or(crate::runners::LOCAL);
+    if let Some(taken) = offer_takeover(engine, &repo, &thread, to)? {
+        match threads::attach(engine, &repo, &taken, session)? {}
+    }
     if let Some(runner) = arg(matches, "runner") {
         let settings = Settings {
             runner: Some(runner.into()),
@@ -219,19 +224,24 @@ pub(super) fn pause(engine: &Engine, matches: &ArgMatches) -> Outcome {
     Ok(0)
 }
 
-pub(super) fn takeover(engine: &Engine, matches: &ArgMatches) -> Outcome {
-    let repo = current()?;
-    let Some(thread) = thread_of(engine, matches, &repo, "takeover", false)? else {
-        return Ok(0);
+/// A thread whose bottle is on a runner that's off, with a snapshot to go on from, taken over onto
+/// runner `to` if the user, on a terminal, agrees (typing its name), having been told what's at
+/// stake: Some, the thread as it is then; None if it isn't such a thread, or there's no terminal to
+/// ask on (attaching then says why it can't be used, and that this is offered). Told no, it's
+/// refused.
+fn offer_takeover(
+    engine: &Engine,
+    repo: &Repo,
+    thread: &Thread,
+    to: &str,
+) -> Result<Option<Thread>, String> {
+    let Some(plan) = threads::takeover_plan(engine, repo, thread, to)? else {
+        return Ok(None);
     };
-    let name = &thread.name;
-    let to = arg(matches, "runner").unwrap_or(crate::runners::LOCAL);
-    let plan = threads::takeover_plan(engine, &repo, &thread, to)?;
     if !std::io::stdin().is_terminal() {
-        return Err(format!(
-            "taking {name} over throws away what its bottle did since its snapshot: it needs a terminal to agree on"
-        ));
+        return Ok(None);
     }
+    let name = &thread.name;
     println!(
         "Thread {name}'s bottle is on {runner}, which is {state}. Taking it over resumes it on {to} from its \
          snapshot of {when}, its runner {to} from now on, and throws away whatever its bottle on {runner} \
@@ -251,13 +261,15 @@ pub(super) fn takeover(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let typed =
         prompt::input(&format!("Type {name} to take it over: ")).map(|t| t.trim().to_string());
     if typed.as_deref() != Some(name.as_str()) {
-        println!("Not taken over.");
-        return Ok(1);
+        return Err(format!(
+            "not taken over: thread {name}'s bottle is on {}, which is {}",
+            plan.runner, plan.state
+        ));
     }
     crate::log::say!("threads", "Taking over thread {name}...");
-    let thread = threads::takeover(engine, &repo, &thread, &plan, to)?;
+    let thread = threads::takeover(engine, repo, thread, &plan, to)?;
     println!("Took over thread {name}: it's on {to} now");
-    match threads::attach(engine, &repo, &thread, threads::CLAUDE)? {}
+    Ok(Some(thread))
 }
 
 pub(super) fn broker_command(engine: &Engine, matches: &ArgMatches) -> Outcome {

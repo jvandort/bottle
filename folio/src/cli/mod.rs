@@ -4,7 +4,7 @@ use admin::{auth_list, auth_remove, auth_set, repo_list, runner_command, serve_s
 use commands::command;
 use configure::{configure, sidecar_configure, sidecar_remove, sidecar_shell};
 use thread_commands::{
-    attach, broker_command, cp, delete, exec, list, new, notes_command, pause, rename, takeover,
+    attach, broker_command, cp, delete, exec, list, new, notes_command, pause, rename,
 };
 
 use std::process::ExitCode;
@@ -57,7 +57,6 @@ pub fn main(args: Vec<String>) -> ExitCode {
         "exec" => exec(engine, sub, false, "exec"),
         "cp" => cp(engine, sub, false, "cp"),
         "pause" => pause(engine, sub),
-        "takeover" => takeover(engine, sub),
         "notes" => notes_command(engine, sub),
         "rename" => rename(engine, sub),
         "list" => list(engine),

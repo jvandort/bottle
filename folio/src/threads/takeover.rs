@@ -1,7 +1,7 @@
 //! Taking a thread over: resuming it from its latest snapshot, here (or on another runner), while
 //! its bottle is on a runner that's off, so a thread whose runner was turned off without a pause
 //! goes on from where its snapshot has it. Whatever the bottle did since is thrown away: the user
-//! agrees to that first (the CLI's to ask).
+//! agrees to that first (`folio claude` asks, when the runner is off).
 //!
 //! The bottle is left on its runner, folio's no longer (bottles::abandon): nothing starts it or
 //! answers it, and folio serve answers a machine only by the runner it's bound on, so one of the
@@ -33,66 +33,38 @@ pub struct Takeover {
     pub unpushed: Vec<String>,
 }
 
-/// What taking the thread over onto runner `to` would be; refused, saying why, if it can't be: its
-/// bottle isn't on a runner that's off, or it has no snapshot to go on from.
+/// What taking the thread over onto runner `to` would be; None if it can't be: its bottle isn't on
+/// a runner that's off (or it's on `to`), or it has no snapshot to go on from.
 pub fn takeover_plan(
     engine: &Engine,
     repo: &Repo,
     thread: &Thread,
     to: &str,
-) -> Result<Takeover, String> {
-    let name = &thread.name;
+) -> Result<Option<Takeover>, String> {
     if thread.broker {
-        return Err("the broker's bottle is on this machine: there's nothing to take over".into());
+        return Ok(None);
     }
     let row = states(engine, repo, std::slice::from_ref(thread))?
-        .remove(name)
+        .remove(&thread.name)
         .unwrap();
     let state = row.status.state;
-    let place = row
-        .status
-        .bottle
-        .as_ref()
-        .map_or(runners::LOCAL, |b| b.runner.as_str())
-        .to_string();
-    match state {
-        State::Paused => {
-            return Err(format!(
-                "thread {name} is paused, its snapshot here: `folio claude {name} --runner {to}` resumes it there"
-            ));
-        }
-        State::Missing => {
-            return Err(format!(
-                "thread {name} has no bottle and no snapshot: what was pushed is in your repo (`git fetch bottle/{name}`)"
-            ));
-        }
-        s if !s.runner_off() => {
-            return Err(format!(
-                "thread {name}'s bottle is on {place}, which answers: there's nothing to take over (pause it to move it: \
-                 `folio pause {name}`, then `folio claude {name} --runner {to}`)"
-            ));
-        }
-        _ => {}
-    }
-    if place == to {
-        return Err(format!(
-            "thread {name}'s bottle is on {to} already, which is {state}: take it over onto another runner"
-        ));
+    let Some(place) = row.status.bottle.as_ref().map(|b| b.runner.clone()) else {
+        return Ok(None);
+    };
+    if !state.runner_off() || place == to {
+        return Ok(None);
     }
     let Some(taken) = snapshot_taken(repo, thread) else {
-        return Err(format!(
-            "thread {name} has no snapshot to take it over from: what was pushed is in your repo (`git fetch \
-             bottle/{name}`), and the rest is on {place}, which is {state}"
-        ));
+        return Ok(None);
     };
     let path = snapshot(repo, thread).unwrap().join(snapshots::WORK);
     let work = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(Takeover {
+    Ok(Some(Takeover {
         runner: place,
         state,
         taken,
-        unpushed: unpushed(repo, name, &work, "the snapshot")?,
-    })
+        unpushed: unpushed(repo, &thread.name, &work, "the snapshot")?,
+    }))
 }
 
 /// Take the thread over onto runner `to`, as `plan` says, from its snapshot: its bottle left where

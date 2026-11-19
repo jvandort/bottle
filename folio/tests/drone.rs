@@ -268,20 +268,26 @@ fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
     let d = snapshotted();
     d.box_.power(false);
     assert_eq!(d.f.rows()["t"][0], "unreachable");
-    let out = d.f.folio(&["exec", "t", "--", "true"]);
-    assert!(out.stderr.contains("`folio takeover t`"), "{}", out.stderr);
     // Never without a terminal to agree on, nor anything but its name typed.
-    let out = d.f.folio(&["takeover", "t"]);
+    let out = d.f.folio(&["claude", "t"]);
     assert_eq!(out.code, 1);
-    assert!(out.stderr.contains("needs a terminal"), "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("`folio claude t`, on a terminal, offers to"),
+        "{}",
+        out.stderr
+    );
     let (code, out) =
-        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"yes\r")]);
+        d.f.on_terminal(&["claude", "t"], &[(b"to take it over: ", b"yes\r")]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("Not taken over."), "{out}");
+    assert!(
+        out.contains("not taken over: thread t's bottle is on box, which is unreachable"),
+        "{out}"
+    );
     assert_eq!(d.f.rows()["t"][0], "unreachable");
 
     let (code, out) =
-        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"t\r")]);
+        d.f.on_terminal(&["claude", "t"], &[(b"to take it over: ", b"t\r")]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("on box, which is unreachable"), "{out}");
     assert!(
@@ -314,19 +320,12 @@ fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
 }
 
 #[test]
-fn only_a_thread_with_a_snapshot_on_a_runner_thats_off_is_taken_over() {
+fn without_a_snapshot_its_not_offered() {
     let d = Drone::new();
-    let refused = |want: &str| {
-        let out = d.f.folio(&["takeover", "t"]);
-        assert_eq!(out.code, 1);
-        assert!(out.stderr.contains(want), "{}", out.stderr);
-    };
-    refused("which answers: there's nothing to take over");
     d.box_.power(false);
-    refused("has no snapshot to take it over from");
-    d.box_.power(true);
-    d.f.ok(&["pause", "t"]);
-    refused("`folio claude t --runner local` resumes it there");
+    let (code, out) = d.f.on_terminal(&["claude", "t"], &[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("take it over"), "{out}");
 }
 
 #[test]
@@ -334,7 +333,7 @@ fn coming_back_its_attached_before_its_used_again() {
     let d = snapshotted();
     d.box_.power(false);
     let (code, out) =
-        d.f.on_terminal(&["takeover", "t"], &[(b"to take it over: ", b"t\r")]);
+        d.f.on_terminal(&["claude", "t"], &[(b"to take it over: ", b"t\r")]);
     assert_eq!(code, 0, "{out}");
     d.box_.power(true);
     // The thread, here, goes on; box isn't used till what's left there is dealt with.
@@ -360,7 +359,7 @@ fn a_takeover_that_fails_leaves_the_thread_as_it_was() {
     d.box_.power(false);
     let (code, out) = d.f.on_terminal_in(
         None,
-        &["takeover", "t"],
+        &["claude", "t"],
         &[(b"to take it over: ", b"t\r")],
         &[(
             "FAKE_CLI_FAIL_EXEC",
@@ -376,4 +375,20 @@ fn a_takeover_that_fails_leaves_the_thread_as_it_was() {
     assert!(!out.contains("Deleting"), "{out}");
     assert!(d.box_.workspace("t").join("since.txt").exists());
     d.f.ok(&["exec", "t", "--", "true"]);
+}
+
+#[test]
+fn its_other_bottles_still_running_are_answered_once_its_attached_again() {
+    let d = Drone::new();
+    // t is still running on box, which was only out of reach while it was detached, and folio
+    // serve started again meanwhile, binding nothing on box.
+    d.box_.power(false);
+    d.f.ok(&["runner", "detach", "box", "--offline"]);
+    d.f.ok(&["serve", "stop"]);
+    harness::eventually("folio serve gone", || !d.f.home.join("serve.sock").exists());
+    d.f.ok(&["serve", "start"]);
+    d.box_.power(true);
+    d.f.ok(&["runner", "attach", "box"]);
+    d.f.ok(&["exec", "t", "--", "true"]);
+    assert!(has(&d.guest_connects(FETCH, None), b"HTTP/1.1 200"));
 }
