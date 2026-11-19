@@ -6,8 +6,8 @@
 //! The bottle is left on its runner, folio's no longer (bottles::abandon): nothing starts it or
 //! answers it, and folio serve answers a machine only by the runner it's bound on, so one of the
 //! same name there reaches nothing of the thread's. The runner keeps a note of it (runner::leave,
-//! which detaches it, so its coming back is an attach), and attaching it again deletes it, once
-//! the thread has something newer than it: a bottle, or a snapshot taken since (clear_left).
+//! which detaches it, so its coming back is an attach), and attaching it again asks to delete it,
+//! once the thread has something newer than it: a bottle, or a snapshot taken since (clear_left).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -112,37 +112,43 @@ pub fn takeover(
     Ok(moved)
 }
 
-/// Delete the machines left on runner `name` when their threads were taken over, each once its
-/// thread has something newer (a bottle, or a snapshot taken since), or is gone; saying first what
-/// each has that its thread's lane doesn't. One whose thread has nothing newer is kept, and said.
+/// Delete the machines left on runner `name` when their threads were taken over, each that the user
+/// agrees to, told first what it has that its thread's lane doesn't. One whose thread has nothing
+/// newer (no bottle, nor a snapshot taken since) is kept, unasked: it's the thread's latest. One
+/// whose thread isn't found (its repo moved, or it was deleted) is asked about as that. With no
+/// terminal to ask on, each is kept, and the next attach asks again.
 pub fn clear_left(name: &str) -> Result<(), String> {
     let on = runners::get(name)?;
     let mut failed = Vec::new();
     for (machine, about) in runner::left(name).map_err(|e| e.to_string())? {
-        let thread_name = about["thread"].as_str().unwrap_or_default();
-        let at = about["at"].as_f64().unwrap_or_default();
-        let found = repos::known()
-            .into_iter()
-            .find(|r| about["repo"].as_str() == r.path.to_str())
-            .and_then(|r| load(&r, thread_name).ok().map(|t| (r, t)));
-        if let Some((repo, thread)) = &found {
-            let engine = Engine::default();
-            let bottle = engine.status(std::slice::from_ref(&thread.bottle))?[&thread.bottle].state;
-            if bottle == State::Missing && !snapshot_taken(repo, thread).is_some_and(|t| t > at) {
-                println!(
-                    "Kept {machine} on {name}: thread {thread_name}, taken over from it, has nothing newer"
-                );
-                continue;
-            }
-        }
         if on.state(&machine)?.is_none() {
             runner::unleave(name, &machine).map_err(|e| e.to_string())?;
             continue;
         }
+        let thread_name = about["thread"].as_str().unwrap_or_default();
+        let repo_path = about["repo"].as_str().unwrap_or_default();
+        let at = about["at"].as_f64().unwrap_or_default();
+        let found = repos::known()
+            .into_iter()
+            .find(|r| r.path.to_str() == Some(repo_path))
+            .and_then(|r| load(&r, thread_name).ok().map(|t| (r, t)));
         let place = format!("{machine}, left on {name}");
         let lost = match &found {
-            None => vec![format!("nothing of a thread: {thread_name}'s deleted")],
+            None => vec![format!(
+                "what it has can't be told: there's no thread {thread_name} in a repo at {repo_path} \
+                 (moved, or deleted)"
+            )],
             Some((repo, thread)) => {
+                let engine = Engine::default();
+                let bottle =
+                    engine.status(std::slice::from_ref(&thread.bottle))?[&thread.bottle].state;
+                if bottle == State::Missing && !snapshot_taken(repo, thread).is_some_and(|t| t > at)
+                {
+                    println!(
+                        "Kept {machine} on {name}: thread {thread_name}, taken over from it, has nothing newer"
+                    );
+                    continue;
+                }
                 let workdir = about["workdir"].as_str().unwrap_or("/workspace");
                 let work = on.start(&machine).and_then(|()| {
                     on.exec(
@@ -159,7 +165,7 @@ pub fn clear_left(name: &str) -> Result<(), String> {
             }
         };
         println!(
-            "Deleting {place} when thread {thread_name} was taken over, {}:",
+            "{place} when thread {thread_name} was taken over, {}, has:",
             crate::cli::output::ago(at)
         );
         if lost.is_empty() {
@@ -168,8 +174,15 @@ pub fn clear_left(name: &str) -> Result<(), String> {
         for line in &lost {
             println!("  {line}");
         }
+        if !runner::ask(&format!("Delete {machine}? [y/N] ")) {
+            println!("Kept {machine} on {name}: `folio runner attach {name}` asks again");
+            continue;
+        }
         match on.delete(&machine) {
-            Ok(()) => runner::unleave(name, &machine).map_err(|e| e.to_string())?,
+            Ok(()) => {
+                runner::unleave(name, &machine).map_err(|e| e.to_string())?;
+                println!("Deleted {machine}");
+            }
             Err(e) => failed.push(format!("{machine}: {e}")),
         }
     }

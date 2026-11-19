@@ -49,7 +49,7 @@ impl Runner {
             if !left.is_empty() {
                 return Err(other(format!(
                     "runner {name} is back, with {} left on it when their threads were taken over: \
-                     `folio runner attach {name}` says what each has that its lane doesn't, and deletes it",
+                     `folio runner attach {name}` says what each has that its lane doesn't, and asks to delete it",
                     left.join(", ")
                 )));
             }

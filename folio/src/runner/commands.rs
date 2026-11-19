@@ -239,7 +239,7 @@ pub(super) fn detach(
 }
 
 /// Whether the user, asked `question` on a terminal, says yes; no, without one.
-pub(super) fn ask(question: &str) -> bool {
+pub fn ask(question: &str) -> bool {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() {
         return false;
@@ -269,8 +269,9 @@ pub(super) fn attach(
         .collect();
     Runner::new(name, entry.ssh).found()?;
     mark(name, None)?;
-    // What's left there, deleted before anything else is asked of it; while any is, it's detached
-    // still, and nothing else is.
+    // What's left there, asked about before anything else is asked of it: one kept stays fenced
+    // off (folio serve answers it nothing), and the next attach asks again. One that couldn't be
+    // deleted leaves it detached, and it's tried again.
     if !left(name)?.is_empty()
         && let Err(e) = clear_left(name)
     {

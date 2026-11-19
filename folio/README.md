@@ -121,9 +121,12 @@ The old bottle is left on the runner, folio's no longer: nothing starts it, and
 folio serve answers a machine only on the runner its bottle is bound on, so even
 running it reaches nothing of the thread's. The runner is detached, and when
 it's back, `folio runner attach` says what that bottle has that the lane doesn't
-(its unpushed branches, uncommitted changes) and deletes it; until then folio
-won't use the runner. One whose thread has nothing newer than it (no bottle, and
-no snapshot since) is kept.
+(its unpushed branches, uncommitted changes) and asks whether to delete it;
+until then folio won't use the runner. One you keep stays there, answered by
+nothing, and the next attach asks again; one whose thread has nothing newer than
+it (no bottle, and no snapshot since) is kept unasked, and one whose thread
+can't be found (its repo moved, or it was deleted) is asked about as that. The
+runner's other bottles are untouched: once it's attached they're used as before.
 
 ## Runners
 
@@ -186,9 +189,10 @@ bottle. (Untested on a real runner yet.)
   doesn't. `--offline` marks one that's off already, unasked.
 - **`folio runner attach RUNNER`** attaches a detached runner again, once it
   answers, and names the machines detaching it stopped. Bottles left there when
-  their threads were taken over (see Taking a thread over) are deleted first,
-  each said with what it has that its lane doesn't; a runner with any left isn't
-  attached by being used again: it says to attach it.
+  their threads were taken over (see Taking a thread over) are asked about
+  first, each said with what it has that its lane doesn't, and deleted if you
+  say so (kept, with no terminal); a runner with any left isn't attached by
+  being used again: it says to attach it.
 - **`folio runner rm RUNNER`** forgets a runner folio has no bottles on.
   Nothing on the machine is touched.
 

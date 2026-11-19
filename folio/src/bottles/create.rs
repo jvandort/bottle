@@ -209,7 +209,20 @@ pub(super) fn bring_up(
     owner: &Path,
 ) -> Result<Bottle, String> {
     // Never build on a name something else is using: rollback would then be cleaning up after it.
-    if runner_of(&bottle)?.state(bottle.machine())?.is_some() {
+    let runner = runner_of(&bottle)?;
+    if crate::runner::left(&runner.name)
+        .map_err(|e| e.to_string())?
+        .contains_key(bottle.machine())
+    {
+        return Err(format!(
+            "{} on runner {}, left there when its thread was taken over, is in the way: \
+             `folio runner attach {}` asks to delete it",
+            bottle.machine(),
+            runner.name,
+            runner.name
+        ));
+    }
+    if runner.state(bottle.machine())?.is_some() {
         return Err(format!(
             "a machine named {} already exists",
             bottle.machine()

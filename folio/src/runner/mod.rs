@@ -60,7 +60,7 @@ mod forward;
 mod on;
 mod ssh;
 
-pub use commands::main;
+pub use commands::{ask, main};
 pub use forward::forward_until;
 pub use on::on;
 

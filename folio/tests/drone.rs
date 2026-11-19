@@ -134,7 +134,8 @@ fn its_machines_name_from_anywhere_but_its_runner_gets_nothing() {
     let mut s = UnixStream::connect(d.f.home.join("services/git.sock")).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s.write_all(&harness::proxy_header(&d.machine)).unwrap();
-    s.write_all(FETCH).unwrap();
+    // Refused on the header, it may be closed before the rest is written.
+    let _ = s.write_all(FETCH);
     let mut answer = Vec::new();
     let _ = s.read_to_end(&mut answer);
     assert_eq!(answer, b"");
@@ -303,20 +304,89 @@ fn a_thread_whose_runner_is_off_is_taken_over_from_its_snapshot_once_agreed() {
     assert!(!d.box_.machine("t").is_null());
 
     d.box_.power(true);
-    let out = d.f.ok(&["runner", "attach", "box"]);
+    let (code, out) =
+        d.f.on_terminal(&["runner", "attach", "box"], &[(b"[y/N] ", b"y\r")]);
+    assert_eq!(code, 0, "{out}");
     assert!(
         out.contains(&format!(
-            "Deleting {}, left on box when thread t was taken over",
+            "{}, left on box when thread t was taken over, just now, has:",
             d.machine
         )),
         "{out}"
     );
     assert!(out.contains("uncommitted changes in"), "{out}");
+    assert!(out.contains(&format!("Deleted {}", d.machine)), "{out}");
     assert!(d.box_.machine("t").is_null());
     assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
-    // Nothing's left to delete the next time.
-    assert!(!d.f.ok(&["runner", "attach", "box"]).contains("Deleting"));
+    // Nothing's left to ask about the next time.
+    assert!(!d.f.ok(&["runner", "attach", "box"]).contains("has:"));
     assert!(d.f.workspace("t").join("draft.txt").exists());
+}
+
+/// A drone whose thread t was taken over from box, which is back but not yet attached.
+fn taken_over() -> Drone {
+    let d = snapshotted();
+    d.box_.power(false);
+    let (code, out) =
+        d.f.on_terminal(&["claude", "t"], &[(b"to take it over: ", b"t\r")]);
+    assert_eq!(code, 0, "{out}");
+    d.box_.power(true);
+    d
+}
+
+#[test]
+fn whats_left_is_kept_unless_agreed_and_asked_about_again() {
+    let d = taken_over();
+    // No terminal to ask on: kept, and box attached all the same.
+    let out = d.f.ok(&["runner", "attach", "box"]);
+    assert!(
+        out.contains(&format!(
+            "Kept {} on box: `folio runner attach box` asks again",
+            d.machine
+        )),
+        "{out}"
+    );
+    assert!(!d.f.ok(&["runner", "ls"]).contains("(detached)"));
+    assert!(!d.box_.machine("t").is_null());
+    // Said no to.
+    let (code, out) =
+        d.f.on_terminal(&["runner", "attach", "box"], &[(b"[y/N] ", b"n\r")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Kept"), "{out}");
+    assert!(d.box_.workspace("t").join("since.txt").exists());
+    // Kept, it's in the way of the thread's going back there.
+    d.f.ok(&["pause", "t"]);
+    let out = d.f.folio(&["shell", "t", "--runner", "box"]);
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains(&format!(
+            "{} on runner box, left there when its thread was taken over, is in the way: \
+             `folio runner attach box` asks to delete it",
+            d.machine
+        )),
+        "{}",
+        out.stderr
+    );
+    let (code, out) =
+        d.f.on_terminal(&["runner", "attach", "box"], &[(b"[y/N] ", b"y\r")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(d.box_.machine("t").is_null());
+    d.f.ok(&["shell", "t", "--runner", "box"]);
+    assert!(d.box_.workspace("t").join("draft.txt").exists());
+}
+
+#[test]
+fn one_whose_thread_isnt_found_is_asked_about_as_that() {
+    let d = taken_over();
+    d.f.ok(&["delete", "t", "--yes"]);
+    let (code, out) =
+        d.f.on_terminal(&["runner", "attach", "box"], &[(b"[y/N] ", b"n\r")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("what it has can't be told: there's no thread t in a repo at"),
+        "{out}"
+    );
+    assert!(!d.box_.machine("t").is_null());
 }
 
 #[test]
