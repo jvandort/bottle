@@ -13,10 +13,12 @@ use super::ssh::Runner;
 use super::{Entry, USAGE, home, other, registered, registry, write_registry};
 
 /// Runs `runner COMMAND ...` with `args`; `bottles_on` says which of folio's bottles are on a
-/// runner, by name.
+/// runner, by name, and `pause_on` pauses the threads running there, asking their agents first:
+/// their names.
 pub fn main(
     mut args: impl Iterator<Item = String>,
     bottles_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
+    pause_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
 ) -> ExitCode {
     let command = args.next();
     let args: Vec<String> = args.collect();
@@ -27,8 +29,8 @@ pub fn main(
         (Some("rm"), [name]) => rm(name, bottles_on),
         (Some("check"), [target]) => check(target, false),
         (Some("check"), [target, flag]) if flag == "--json" => check(target, true),
-        (Some("detach"), [name]) => detach(name, false),
-        (Some("detach"), [name, flag]) if flag == "--offline" => detach(name, true),
+        (Some("detach"), [name]) => detach(name, false, pause_on),
+        (Some("detach"), [name, flag]) if flag == "--offline" => detach(name, true, pause_on),
         (Some("attach"), [name]) => attach(name),
         (Some("home"), [name]) => home(name).map(|home| println!("{home}")),
         (Some("forward"), [name, forwards @ ..]) if !forwards.is_empty() => forward(name, forwards),
@@ -165,7 +167,11 @@ pub(super) fn running(runner: &Runner) -> io::Result<Vec<String>> {
 }
 
 /// `runner detach NAME [--offline]` (see the module's doc).
-pub(super) fn detach(name: &str, offline: bool) -> io::Result<()> {
+pub(super) fn detach(
+    name: &str,
+    offline: bool,
+    pause_on: &dyn Fn(&str) -> Result<Vec<String>, String>,
+) -> io::Result<()> {
     let entry = registered()?
         .remove(name)
         .ok_or_else(|| other(format!("no runner named {name}")))?;
@@ -185,8 +191,10 @@ pub(super) fn detach(name: &str, offline: bool) -> io::Result<()> {
         let up = running(&runner).map_err(off)?;
         if !up.is_empty() {
             if !ask(&format!(
-                "Running on {name}: {}. Stopping one ends whatever runs in it, its agent's work \
-                 included: tell them to wrap up first, if they're busy.\nStop them now? [y/N] ",
+                "Running on {name}: {}. Detaching pauses the threads among them, their snapshots \
+                 coming here, each one's agent asked to get ready first (the pause waits for its \
+                 reply), and stops the rest, ending whatever runs in them.\nPause and stop them now? \
+                 [y/N] ",
                 up.join(", ")
             )) {
                 return Err(other(format!(
@@ -195,6 +203,13 @@ pub(super) fn detach(name: &str, offline: bool) -> io::Result<()> {
                     up.join(", ")
                 )));
             }
+            // A thread not paused (Ctrl-C, say) leaves the runner attached, and the rest running.
+            let paused = pause_on(name)
+                .map_err(|e| other(format!("{e}; runner {name} is still attached")))?;
+            for thread in &paused {
+                println!("Paused thread {thread}");
+            }
+            let up = running(&runner).map_err(off)?;
             for machine in &up {
                 let out = runner
                     .cli(&["stop".into(), machine.clone()], Some(false))

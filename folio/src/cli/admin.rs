@@ -12,7 +12,51 @@ use super::{Outcome, arg, args, flag};
 
 /// folio's runner commands: runner.rs's.
 pub(super) fn runner_command(matches: &ArgMatches) -> ExitCode {
-    crate::runner::main(args(matches, "arguments").into_iter(), &bottles_on)
+    crate::runner::main(
+        args(matches, "arguments").into_iter(),
+        &bottles_on,
+        &pause_on,
+    )
+}
+
+/// Pause every thread running on runner `name`, of every repo folio knows and the broker's, each
+/// asking its agent first, all at once: their names. One that fails is said, and fails the whole,
+/// once all are done.
+pub(super) fn pause_on(name: &str) -> Result<Vec<String>, String> {
+    let there = bottles_on(name)?;
+    let mut running = Vec::new();
+    for repo in repos::known().into_iter().chain([broker::repo()]) {
+        let on: Vec<threads::Thread> = threads::all(&repo)?
+            .into_iter()
+            .filter(|t| there.contains(&t.bottle))
+            .collect();
+        let states = threads::states(&crate::engine::Engine::default(), &repo, &on)?;
+        running.extend(
+            on.into_iter()
+                .filter(|t| states[&t.name].status.state == bottles::State::Running)
+                .map(|t| (repo.clone(), t)),
+        );
+    }
+    let paused: Vec<Result<String, String>> = std::thread::scope(|scope| {
+        let pausing: Vec<_> = running
+            .iter()
+            .map(|(repo, thread)| {
+                scope.spawn(move || {
+                    // An engine of its own: one keeps what it learns in cells, for one thread.
+                    let engine = crate::engine::Engine::default();
+                    threads::pause(&engine, repo, thread, true)
+                        .map(|()| thread.name.clone())
+                        .map_err(|e| format!("couldn't pause thread {}: {e}", thread.name))
+                })
+            })
+            .collect();
+        pausing.into_iter().map(|p| p.join().unwrap()).collect()
+    });
+    let failed: Vec<String> = paused.iter().filter_map(|p| p.clone().err()).collect();
+    if !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    Ok(paused.into_iter().filter_map(Result::ok).collect())
 }
 
 /// The bottles on runner `name`, by name: what `runner rm` refuses to forget a runner while it has.

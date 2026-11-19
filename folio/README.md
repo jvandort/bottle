@@ -143,14 +143,18 @@ bottle. (Untested on a real runner yet.)
   what one is and lacks; **`folio runner ssh RUNNER [COMMAND]`** is ssh there,
   on the connection folio shares for it.
 - **`folio runner detach RUNNER [--offline]`** is for turning a runner off:
-  it names the machines running there and asks before stopping them (in a
-  terminal; told no, or with no one to ask, it stops nothing and leaves the
-  runner attached, so you can have their agents wrap up first), and lets it
-  go, then says it's safe to turn off. Until it's attached again, nothing
-  asks it anything: `folio list` shows its bottles as `detached`, at once.
-  Using one of them again (`folio claude`, `shell`, and the like) attaches it
-  again if it answers, and says it's still off if it doesn't. `--offline`
-  marks one that's off already, unasked.
+  it names the machines running there and asks before touching them (in a
+  terminal; told no, or with no one to ask, it touches nothing and leaves the
+  runner attached), then pauses the threads among them, all at once, each one's
+  agent asked to get ready first as `folio pause` asks it, so their snapshots
+  are here and they resume anywhere (`folio configure THREAD --runner local`,
+  say, while it's off); stops the rest (sidecars, say); and lets it go, then
+  says it's safe to turn off. A thread that isn't paused (Ctrl-C while its
+  agent is getting ready) leaves the runner attached. Until it's attached
+  again, nothing asks it anything: `folio list` shows its bottles as
+  `detached`, at once. Using one of them again (`folio claude`, `shell`, and
+  the like) attaches it again if it answers, and says it's still off if it
+  doesn't. `--offline` marks one that's off already, unasked.
 - **`folio runner attach RUNNER`** attaches a detached runner again, once it
   answers, and names the machines detaching it stopped.
 - **`folio runner rm RUNNER`** forgets a runner folio has no bottles on.

@@ -145,6 +145,30 @@ fn with_its_bottles_running_and_no_one_to_ask_it_stops_nothing_and_stays_attache
 }
 
 #[test]
+fn detaching_pauses_its_threads_so_they_resume_anywhere() {
+    let d = Drone::new();
+    std::fs::write(d.box_.workspace("t").join("draft.txt"), "draft\n").unwrap();
+    let (code, out) = d.f.on_terminal(
+        &["runner", "detach", "box"],
+        &[(b"Pause and stop them now? [y/N] ", b"y\r")],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Paused thread t"), "{out}");
+    assert!(out.contains("safe to turn off"), "{out}");
+    // Its bottle's gone from the runner; its snapshot is here.
+    assert!(d.box_.machine("t").is_null());
+    d.box_.power(false);
+    assert_eq!(d.f.rows()["t"][0], "paused");
+    // And it resumes here, the runner off.
+    d.f.ok(&["configure", "t", "--runner", "local"]);
+    d.f.ok(&["shell", "t"]);
+    assert_eq!(
+        std::fs::read_to_string(d.f.workspace("t").join("draft.txt")).unwrap(),
+        "draft\n"
+    );
+}
+
+#[test]
 fn detached_its_bottles_are_detached_and_it_isnt_asked() {
     let d = Drone::new();
     d.box_.set_machine("t", json!({"state": "stopped"}));

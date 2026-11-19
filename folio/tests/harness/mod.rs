@@ -616,6 +616,16 @@ impl Runner {
         write_json(&self.state_path(), &state);
     }
 
+    /// A thread's machine's workspace there.
+    pub fn workspace(&self, thread: &str) -> PathBuf {
+        self.state_path()
+            .parent()
+            .unwrap()
+            .join("machines")
+            .join(format!("{}-{thread}", self.key))
+            .join("workspace")
+    }
+
     /// Turned off, or on again.
     pub fn power(&self, on: bool) {
         if on {

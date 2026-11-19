@@ -27,9 +27,10 @@
 //! whoever started it has gone. folio serve runs one per runner its bottles are on, for its
 //! services' sockets.
 //!
-//! `runner detach` is for turning a runner off: it stops its running machines (asking first, on a
-//! terminal; told no, or with no one to ask, it stops nothing and stays attached), and marks it
-//! detached; `--offline` marks one that's off already, unasked. A detached runner isn't asked
+//! `runner detach` is for turning a runner off: it pauses the threads running there, so their
+//! snapshots are here and they can resume anywhere, and stops its other running machines (asking
+//! first, on a terminal; told no, or with no one to ask, it touches nothing and stays attached), and
+//! marks it detached; `--offline` marks one that's off already, unasked. A detached runner isn't asked
 //! anything. Using one again (`on`, `runner ssh`) attaches it again if it answers, and says it's
 //! off if it doesn't; `runner attach` does that alone, and names the machines detaching it stopped.
 //! `runner rm` forgets one, touching nothing there. `runner home` says its user's home there, which
