@@ -6,8 +6,9 @@ use std::fs;
 use crate::bottles::State;
 use crate::engine::Engine;
 use crate::repos::Repo;
+use crate::serve::messages;
 use crate::store::{self, Content};
-use crate::{lanes, notes, snapshots};
+use crate::{asks, lanes, notes, snapshots};
 
 use super::WORKSPACE;
 use super::lifecycle::{bottle_mounts, make_bottle, workdir};
@@ -40,10 +41,11 @@ git symbolic-ref -q HEAD >/dev/null || printf '(detached HEAD)\\t%s\\n' \"$(git 
 
 /// Snapshot the thread and delete its bottle: everything but its running processes is kept.
 ///
-/// The sessions are stopped first, and waited for, so Claude has written its conversation out.
-/// Nothing is deleted until both archives are in the thread's slot and read back whole; if anything
-/// fails before that, the bottle is left as it is.
-pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+/// With `ask`, its agent is asked first to get ready, and the snapshot waits for it to say it is
+/// (interrupt). The sessions are stopped then, and waited for, so Claude has written its
+/// conversation out. Nothing is deleted until both archives are in the thread's slot and read back
+/// whole; if anything fails before that, the bottle is left as it is.
+pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread, ask: bool) -> Result<(), String> {
     let state = state_of(engine, repo, thread)?;
     if state == State::Paused {
         return Err(format!(
@@ -59,6 +61,9 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String
     }
     if state != State::Running {
         engine.start(&thread.bottle)?;
+    }
+    if ask {
+        interrupt(engine, repo, thread)?;
     }
     stop_sessions(engine, thread)?;
     let staging = store::staging(&directory(repo, &thread.name))?;
@@ -106,6 +111,87 @@ pub fn pause(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String
     })?;
     crate::log::log!("threads", "{}: paused", thread.name);
     Ok(())
+}
+
+/// What the agent is told when it's asked to get ready for a pause's snapshot (BOTTLE.md says what
+/// one is, and what to do).
+fn pause_interrupt(repo: &Repo, thread: &Thread) -> String {
+    let kept: Vec<String> = mounts(thread).iter().map(|p| format!("`{p}`")).collect();
+    let last = match super::snapshot_size(repo, thread) {
+        Some(size) => format!(
+            "The last snapshot of this thread took {}.",
+            crate::cli::output::human_size(size)
+        ),
+        None => "This thread has no snapshot yet.".into(),
+    };
+    format!(
+        "Snapshot interrupt: the user is pausing this thread. Get ready for the snapshot (BOTTLE.md, \
+         \"Snapshots and pauses\"), then reply `snapshot` to this message's from: the pause waits for \
+         it. It keeps {}, all but ignored files, and your conversation and memory. {last}",
+        kept.join(" and ")
+    )
+}
+
+/// Ask the thread's agent to get ready for a snapshot, and wait for it to answer `snapshot`, as
+/// long as it takes: Ctrl-C stops waiting, and the pause. Its other answers are shown, and waited
+/// past. One with no session to take the event (Claude isn't running), or no channel to send it by,
+/// isn't asked: there's no one to get ready.
+fn interrupt(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
+    let ask = asks::Ask::new(&thread.bottle).map_err(|e| format!("couldn't ask: {e}"))?;
+    let from = messages::address(asks::ADDRESS, &thread.bottle)
+        .map_err(|e| format!("couldn't ask: {e}"))?;
+    let sent = engine.run(
+        &thread.bottle,
+        &[
+            messages::BOTTLE_EVENT.to_string(),
+            "send".into(),
+            "-t".into(),
+            "10".into(),
+            "-f".into(),
+            from,
+        ],
+        Some(&pause_interrupt(repo, thread)),
+        false,
+    )?;
+    if sent.code != 0 {
+        crate::log::say!(
+            "threads",
+            "folio: {}'s agent wasn't asked to get ready ({}): snapshotting it as it is",
+            thread.name,
+            if sent.code == 75 {
+                "no Claude session took the message".to_string()
+            } else {
+                format!("its channel didn't take the message: exit {}", sent.code)
+            }
+        );
+        return Ok(());
+    }
+    crate::log::say!(
+        "threads",
+        "Asked {}'s agent to get ready for the snapshot; waiting for it to reply (Ctrl-C stops the \
+         pause; `folio pause --force` doesn't ask)...",
+        thread.name
+    );
+    loop {
+        crate::interrupt::check()?;
+        if let Some(answer) = ask.take() {
+            if answer
+                .trim()
+                .trim_matches('`')
+                .eq_ignore_ascii_case("snapshot")
+            {
+                crate::log::say!("threads", "{}'s agent is ready.", thread.name);
+                return Ok(());
+            }
+            crate::log::say!(
+                "threads",
+                "{}'s agent says: {}\n(still waiting for `snapshot`)",
+                thread.name,
+                answer.trim()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// A new bottle for a paused thread, with its snapshot restored; on any failure, still paused.

@@ -101,7 +101,7 @@ fn its_context_is_the_brokers() {
         "**`For you.md`**, at the root, is the user's",
         "**Your most important job is the user's priorities.**",
         "this overrides any default of committing",
-        "## What survives a pause",
+        "## Snapshots and pauses",
     ] {
         assert!(context.contains(told), "{told}");
     }

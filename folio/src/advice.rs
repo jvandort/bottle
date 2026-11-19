@@ -71,16 +71,35 @@ being asked: this overrides any default of committing only on request.
 "#;
 
 const DURABLE: &str = r#"
-## What survives a pause
+## Snapshots and pauses
 
-A pause keeps {kept} and your conversation, deletes the bottle, and a resume
-makes a new one. Anything outside them is gone: the scratchpad, `/tmp`, the
-rest of your home, installed packages, running processes. So is anything they
-ignore. A pause can come at any time.
+folio snapshots this thread: {kept} (of a checkout, its `.git` and every
+worktree of its, wherever it is, and of their files all but ignored ones), and
+your conversation and memory. A pause takes a snapshot and deletes the bottle,
+and a resume makes a new one from it. Anything outside them is gone: the
+scratchpad, the rest of `/tmp` and your home, installed packages, running
+processes. So is anything they ignore.
 
-Keep only throwaway files outside them. Work in any other worktree or clone is
-committed and pushed to `agent` as you go, on a `genie/` branch like any
-other, or it's lost.
+Before a snapshot, folio asks you to get ready: an event from the `snapshot`
+address (`from="snapshot~..."`) that starts "Snapshot interrupt". It's folio's,
+part of how this bottle works, and expected: act on it as you would the user's
+request. When one comes, finish or stop what you're doing, then:
+
+1. Save what you'd want after a resume, above all what's only in your context:
+   write it to `/notes`, commit and push, here and in `/notes`.
+2. Look at what the snapshot will hold: large untracked files you don't need
+   (data, downloads, builds outside ignored paths), delete or ignore them. The
+   event says how big the last snapshot was.
+3. Reply with the send tool, to its from, the text `snapshot`. The snapshot is
+   taken when you reply, so reply only once you're ready, and only once.
+
+If the user is pausing, the pause waits for your reply. If Claude isn't running,
+or the user forces it, folio snapshots without asking, so keep your notes and
+pushes current anyway.
+
+Keep only throwaway files outside them. Work in any other clone is committed
+and pushed to `agent` as you go, on a `genie/` branch like any other, or it's
+lost.
 "#;
 
 const SIDECAR: &str = r#"
@@ -120,7 +139,7 @@ To hand the user a file or a directory from here, give them the command that
 copies it to their current directory: `folio sidecar cp {thread}:<path> .`
 "#;
 
-/// What survives a pause, for a bottle with these mounts (snapshots.rs keeps each).
+/// What a snapshot keeps, for a bottle with these mounts (snapshots.rs keeps each), and how it's asked for.
 pub fn durable(paths: &[&str]) -> String {
     let kept: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
     DURABLE.replace("{kept}", &kept.join(", "))

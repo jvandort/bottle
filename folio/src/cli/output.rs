@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) fn human_size(size: u64) -> String {
+pub(crate) fn human_size(size: u64) -> String {
     for (unit, scale) in [("G", 1u64 << 30), ("M", 1 << 20), ("K", 1 << 10)] {
         if size >= scale {
             return format!("{:.1}{unit}", size as f64 / scale as f64);

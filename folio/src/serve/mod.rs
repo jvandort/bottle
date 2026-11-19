@@ -28,7 +28,7 @@ pub(crate) mod credentials;
 mod git;
 mod host;
 mod http;
-mod messages;
+pub(crate) mod messages;
 mod proxy;
 mod service;
 mod ssh;

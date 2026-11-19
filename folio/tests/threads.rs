@@ -679,8 +679,9 @@ fn a_threads_context_says_what_a_pause_keeps() {
     let record = f.record("fix-it");
     let context = record["context"].as_str().unwrap();
     for told in [
-        "## What survives",
-        "A pause keeps `/workspace`, `/notes` and your conversation",
+        "## Snapshots and pauses",
+        "folio snapshots this thread: `/workspace`, `/notes`",
+        "an event from the `snapshot`",
         "## Your notes",
         "git -C /notes push agent main",
         "could resume this thread from them alone",

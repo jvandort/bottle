@@ -11,6 +11,10 @@
 //!
 //! A message is delivered by `bottle-event send` in the recipient (the claude feature's channel),
 //! which queues it and waits until its session takes it, or says none did in time (exit 75).
+//!
+//! An address can also be folio's own, for answering what folio asks: `snapshot`'s, issued with the
+//! event that asks for a snapshot (asks.rs). A message to it isn't delivered, but answers the ask, if
+//! there is one: else it's refused.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -36,7 +40,7 @@ const SIGNATURE_CHARS: usize = 26;
 /// waits is given.
 const DELIVERY_TIMEOUT: u64 = 10;
 const DELIVERY_GRACE: u64 = 15;
-const BOTTLE_EVENT: &str = "/usr/local/bin/bottle-event";
+pub const BOTTLE_EVENT: &str = "/usr/local/bin/bottle-event";
 /// What bottle-event exits when no session took the event in time (EX_TEMPFAIL).
 const NOT_TAKEN: i32 = 75;
 
@@ -264,6 +268,24 @@ pub fn deliver(
             .any(|p| p == "message-any")
             .then(|| to.to_string())
     };
+    if to.contains(MARK) && named.as_deref() == Some(crate::asks::ADDRESS) {
+        return match crate::asks::answer(&sender.name, text) {
+            Ok(true) => {
+                log!(
+                    "bottle.daemon",
+                    "{}: answered its snapshot ask",
+                    sender.name
+                );
+                Ok(())
+            }
+            Ok(false) => Err((
+                409,
+                "Conflict",
+                format!("{to} isn't asking anything of you now"),
+            )),
+            Err(e) => Err((502, "Bad Gateway", format!("couldn't answer {to}: {e}"))),
+        };
+    }
     if named.as_deref() == Some(sender.name.as_str()) {
         return Err((
             400,
@@ -386,6 +408,51 @@ mod tests {
         changed.push(if last == 'a' { 'b' } else { 'a' });
         assert_eq!(target_by(key, &changed, "foo"), None);
         assert_eq!(target_by(key, "broker", "foo"), None);
+    }
+
+    /// Bottles bound: none.
+    struct Nobody;
+
+    impl Bound for Nobody {
+        fn bound(&self, _: &str) -> Option<std::sync::Arc<Bottle>> {
+            None
+        }
+        fn all(&self) -> Vec<std::sync::Arc<Bottle>> {
+            Vec::new()
+        }
+    }
+
+    fn bottle(name: &str) -> Bottle {
+        Bottle {
+            name: name.into(),
+            machine: format!("m-{name}"),
+            runner: String::new(),
+            id: String::new(),
+            repos: Vec::new(),
+            permissions: Vec::new(),
+            labels: Default::default(),
+            repo: None,
+            ssh: Vec::new(),
+            injections: Vec::new(),
+            forwards: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_snapshot_address_answers_an_ask_of_its_holders_alone() {
+        let _home = crate::tempdir::isolated();
+        let (foo, bar) = (bottle("app-foo"), bottle("app-bar"));
+        let to_foo = address(crate::asks::ADDRESS, "app-foo").unwrap();
+        // Nothing asked: refused, and nothing waits to be taken by a later ask.
+        let refused = deliver(&Nobody, &foo, &to_foo, "snapshot").unwrap_err();
+        assert_eq!(refused.0, 409);
+        let ask = crate::asks::Ask::new("app-foo").unwrap();
+        assert_eq!(ask.take(), None);
+        // Another bottle can't answer by it: it isn't its address.
+        let refused = deliver(&Nobody, &bar, &to_foo, "snapshot").unwrap_err();
+        assert_eq!(refused.0, 404);
+        deliver(&Nobody, &foo, &to_foo, "snapshot").unwrap();
+        assert_eq!(ask.take().as_deref(), Some("snapshot"));
     }
 
     #[test]

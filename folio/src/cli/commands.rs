@@ -167,10 +167,18 @@ pub(super) fn command() -> Command {
                 .about("snapshot a thread and delete its bottle")
                 .long_about(
                     "Snapshot the thread -- its workspace, every branch and stash, uncommitted changes, and \
-                     Claude's conversation -- and delete its bottle. Only running processes are lost. `folio \
-                     claude` or `folio shell` resumes it, in a new bottle made from the repo's spec as it is then.",
+                     Claude's conversation -- and delete its bottle. Only running processes are lost. Its agent \
+                     is asked first to get ready, and the snapshot waits for it to say it is; --force doesn't \
+                     ask. `folio claude` or `folio shell` resumes it, in a new bottle made from the repo's spec \
+                     as it is then.",
                 )
-                .arg(thread_arg(true)),
+                .arg(thread_arg(true))
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("don't ask the agent to get ready: snapshot it as it is"),
+                ),
         )
         .subcommand(
             Command::new("notes")

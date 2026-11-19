@@ -11,9 +11,9 @@
 //! bottle contract would: the checks pass (or name what $FAKE_CLI_MISSING says is missing), the
 //! hosts and directories a bottle's set up with are taken as given, a key script says a key, and
 //! shpool is pretended, its sessions kept in the state (a session in a machine's "exited" is one
-//! whose program has, which shpool lists all the same). Anything else runs, its paths in the
-//! machine made its directory's. An image build records its recipe and policy, and the image is
-//! then built, with the recipe's labels.
+//! whose program has, which shpool lists all the same), as is an event sent to its agent (event).
+//! Anything else runs, its paths in the machine made its directory's. An image build records its
+//! recipe and policy, and the image is then built, with the recipe's labels.
 //!
 //! $FAKE_CLI_FAIL makes steps fail (a comma-separated list), as bottle-cli would: create,
 //! configure, start, delete, build, or an exec's contract, hosts, mkdir or workspace (create and
@@ -716,6 +716,7 @@ fn pretended(name: &str, command: &[String]) -> Option<ExitCode> {
         }
         // Attached: the call log is the evidence.
         ["sh", "-c", _, "attach", _, _, _] => return Some(ExitCode::SUCCESS),
+        ["/usr/local/bin/bottle-event", "send", ..] => return Some(event(name)),
         ["kill", "-HUP", ..] => {
             machine["sessions"] = json!({});
             ExitCode::SUCCESS
@@ -724,6 +725,34 @@ fn pretended(name: &str, command: &[String]) -> Option<ExitCode> {
     };
     state.save();
     Some(code)
+}
+
+/// An event sent to the machine's agent (its text is the exec's stdin, in the log): no session takes
+/// it (exit 75), but with $FAKE_CLI_EVENT: `taken`, one does and never answers; else its agent
+/// answers folio's ask (asks.rs) with each of the |-separated texts in turn, half a second apart, as
+/// folio serve writes an answer, by a process of its own that outlives this one.
+// The answering process outlives this one, which exits at once: nothing here is left to wait.
+#[allow(clippy::zombie_processes)]
+fn event(name: &str) -> ExitCode {
+    let answers = std::env::var("FAKE_CLI_EVENT").unwrap_or_default();
+    if answers.is_empty() {
+        return ExitCode::from(75);
+    }
+    if answers != "taken" {
+        let home = std::env::var("FOLIO_HOME").unwrap();
+        let script = r#"to=$1; shift; for a do sleep 0.5; printf %s "$a" > "$to.tmp" && mv "$to.tmp" "$to"; done"#;
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", script, "sh"])
+            .arg(format!("{home}/asks/{name}.answer"))
+            .args(answers.split('|'))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn().unwrap();
+    }
+    ExitCode::SUCCESS
 }
 
 /// `command` run here, as in the machine: in its working directory, with its environment and home,

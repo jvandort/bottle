@@ -87,6 +87,15 @@ then, so a resume is also how a thread gets features added since. The thread
 keeps the snapshot it resumed from until its next one replaces it: `folio list`
 shows each thread's snapshot, how big and how old.
 
+Before the snapshot, folio asks the thread's agent to get ready: an event from
+its `snapshot` address, which the agent's instructions explain. It saves what
+only its context has to its notes, pushes, clears out large untracked files,
+and replies `snapshot` to that address; the pause waits for the reply, as long
+as it takes, and shows you anything else the agent replies meanwhile. Ctrl-C
+stops the pause and leaves the thread running; `folio pause --force` doesn't
+ask. One with no Claude session running isn't asked: there's no one to get
+ready.
+
 ## Runners
 
 A thread's bottle can run on another machine of yours, a **runner** added with
@@ -568,7 +577,7 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio shell [THREAD] [--runner RUNNER]` | Attach to the thread's shell, starting the thread if it's new |
 | `folio exec [-t] THREAD [--] COMMAND...` | Run one command in a thread's bottle, wherever it runs, and exit with its status |
 | `folio cp SRC DST` | Copy into or out of a thread's bottle, wherever it runs: `THREAD:PATH`, or a path here |
-| `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
+| `folio pause [THREAD] [--force]` | Ask its agent to get ready, snapshot the thread, and delete its bottle (--force: without asking) |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
 | `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and its snapshot's size and age |

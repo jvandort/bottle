@@ -1,12 +1,15 @@
-//! Pausing a thread (its bottle snapshotted, then deleted) and resuming it (a new bottle, the
-//! snapshot restored), and deleting a paused one, on the stand-in bottle-cli, whose machines'
-//! workspaces are real checkouts.
+//! Pausing a thread (its agent asked to get ready, its bottle snapshotted, then deleted) and
+//! resuming it (a new bottle, the snapshot restored), and deleting a paused one, on the stand-in
+//! bottle-cli, whose machines' workspaces are real checkouts.
 
 mod harness;
 
 use std::fs;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use harness::{
     Folio, NOTES_ARCHIVE, SNAPSHOT, WORKSPACE_ARCHIVE, argv, current_slot, read_json,
@@ -440,6 +443,144 @@ fn a_bottle_from_before_notes_pauses_without_them_and_resumes_with_them() {
         .map(|m| m["path"].as_str().unwrap().to_string())
         .collect();
     assert!(paths.contains(&"/notes".to_string()), "{paths:?}");
+}
+
+// --- asking the agent first -----------------------------------------------------------
+
+/// The events sent to the thread's agent: each one's argv and text.
+fn events(f: &Folio) -> Vec<(Vec<String>, String)> {
+    f.execs("fix-it")
+        .iter()
+        .filter(|e| e["argv"][0] == "/usr/local/bin/bottle-event")
+        .map(|e| {
+            let argv = e["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_string())
+                .collect();
+            (argv, e["stdin"].as_str().unwrap().to_string())
+        })
+        .collect()
+}
+
+fn asks(f: &Folio) -> Vec<String> {
+    match fs::read_dir(f.home.join("asks")) {
+        Ok(dir) => dir
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[test]
+fn a_pause_asks_the_agent_to_get_ready_and_waits_for_it() {
+    let f = started();
+    f.ok(&["claude", "fix-it"]);
+    let out = f.with(
+        &["pause", "fix-it"],
+        &[("FAKE_CLI_EVENT", "a minute, pushing|snapshot")],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("fix-it's agent says: a minute, pushing"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("fix-it's agent is ready"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(state(&f), "paused");
+    let sent = events(&f);
+    assert_eq!(sent.len(), 1);
+    let (asked, text) = &sent[0];
+    assert_eq!(asked[1..5], argv(&["send", "-t", "10", "-f"]));
+    // An address of the snapshot ask's, for this bottle to answer.
+    assert!(asked[5].starts_with("snapshot~"), "{asked:?}");
+    assert!(text.starts_with("Snapshot interrupt: the user is pausing this thread."));
+    assert!(text.contains("This thread has no snapshot yet."), "{text}");
+    // Asked while its sessions ran, and only then were they stopped.
+    let ran = f.ran("fix-it");
+    let event = ran
+        .iter()
+        .position(|r| r[0] == "/usr/local/bin/bottle-event")
+        .unwrap();
+    let kill = ran
+        .iter()
+        .position(|r| r.get(..2) == Some(&argv(&["kill", "-HUP"])[..]))
+        .unwrap();
+    assert!(event < kill);
+    assert!(asks(&f).is_empty(), "{:?}", asks(&f));
+
+    // Resumed and paused again: told how big the last one was.
+    f.ok(&["shell", "fix-it"]);
+    f.ok(&["pause", "fix-it"]);
+    let sent = events(&f);
+    assert!(
+        sent.last()
+            .unwrap()
+            .1
+            .contains("The last snapshot of this thread took ")
+    );
+}
+
+#[test]
+fn with_no_session_to_ask_or_forced_it_snapshots_as_it_is() {
+    let f = started();
+    // The stand-in's machine has no session to take it.
+    let out = f.with(&["pause", "fix-it"], &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains(
+            "fix-it's agent wasn't asked to get ready (no Claude session took the message)"
+        ),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(state(&f), "paused");
+    f.ok(&["shell", "fix-it"]);
+    let before = events(&f).len();
+    f.ok(&["pause", "fix-it", "--force"]);
+    assert_eq!(events(&f).len(), before);
+    assert_eq!(state(&f), "paused");
+}
+
+#[test]
+fn ctrl_c_while_waiting_leaves_it_running() {
+    let f = started();
+    let mut command = Command::new(harness::FOLIO);
+    command
+        .args(["pause", "fix-it"])
+        .current_dir(&f.repo)
+        .envs(f.env.iter().cloned())
+        // Taken, and never answered.
+        .env("FAKE_CLI_EVENT", "taken")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut folio = command.spawn().unwrap();
+    let mut stderr = folio.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stderr.read_to_string(&mut text).unwrap();
+        text
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while events(&f).is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    harness::signal_group(folio.id(), rustix::process::Signal::INT);
+    let status = folio.wait().unwrap();
+    let err = reader.join().unwrap();
+    assert_eq!(status.code(), Some(130), "{err}");
+    assert!(err.contains("waiting for it to reply"), "{err}");
+    assert_eq!(state(&f), "running");
+    assert!(asks(&f).is_empty(), "{:?}", asks(&f));
 }
 
 // --- failures ------------------------------------------------------------------------

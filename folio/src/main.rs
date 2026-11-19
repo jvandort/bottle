@@ -13,6 +13,7 @@
 //! $FOLIO_HOME, else ~/.folio. Its own failures say why on stderr, a line starting `folio: error: `.
 
 mod advice;
+mod asks;
 mod auth;
 mod bottle_cli;
 mod bottles;

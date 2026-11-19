@@ -18,7 +18,7 @@ use crate::threads::{self};
 mod admin;
 mod commands;
 mod configure;
-mod output;
+pub(crate) mod output;
 mod thread_commands;
 
 const PICK: &str = "choose one from a list";

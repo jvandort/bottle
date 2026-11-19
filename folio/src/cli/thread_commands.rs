@@ -211,7 +211,7 @@ pub(super) fn pause(engine: &Engine, matches: &ArgMatches) -> Outcome {
         return Ok(0);
     };
     crate::log::say!("threads", "Pausing thread {}...", thread.name);
-    threads::pause(engine, &repo, &thread)?;
+    threads::pause(engine, &repo, &thread, !flag(matches, "force"))?;
     println!(
         "Paused thread {name}. Resume it with: folio claude {name}",
         name = thread.name
@@ -250,7 +250,7 @@ pub(super) fn broker_command(engine: &Engine, matches: &ArgMatches) -> Outcome {
     let thread = thread.unwrap();
     if command == "pause" {
         crate::log::say!("threads", "Pausing the broker...");
-        threads::pause(engine, &identity, &thread)?;
+        threads::pause(engine, &identity, &thread, true)?;
         println!("Paused the broker. Resume it with: folio broker");
         return Ok(0);
     }
