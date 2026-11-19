@@ -740,7 +740,7 @@ fn event(name: &str) -> ExitCode {
     }
     if answers != "taken" {
         let home = std::env::var("FOLIO_HOME").unwrap();
-        let script = r#"d=$1; shift; for a do sleep 0.5; for ask in "$d"/*; do case $ask in *.answer) continue ;; esac; [ -e "$ask" ] && printf %s "$a" > "$ask.tmp" && mv "$ask.tmp" "$ask.answer"; done; done"#;
+        let script = r#"ask=$1; shift; for a do sleep 0.5; [ -e "$ask" ] || continue; n=$(head -n 1 "$ask.answer" 2>/dev/null || echo 0); printf '%s\n%s' $((n + 1)) "$a" > "$ask.tmp" && mv "$ask.tmp" "$ask.answer"; done"#;
         let mut command = Command::new("sh");
         command
             .args(["-c", script, "sh"])
