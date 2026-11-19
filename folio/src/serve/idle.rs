@@ -3,8 +3,8 @@
 //!
 //! An agent at rest is one with no activity event (activity.rs) for IDLE: then its agent is asked
 //! to get ready, and the snapshot is taken once it says it is (threads::snapshot_idle), the bottle
-//! kept. What's asked while one is under way doesn't count, nor what comes in the GRACE after one's
-//! taken: the agent's answer, and the rest of its turn. After a snapshot, another needs activity
+//! kept. What's asked while one is under way doesn't count, nor what comes in the IDLE after one's
+//! taken: the agent's answer, and the rest of its turn, which may hold a foreground command too. After a snapshot, another needs activity
 //! since; one put off (the agent didn't answer, or answered anything else) is asked again IDLE
 //! later. An agent that never says it's at work (a bottle without the hooks) is never asked.
 //!
@@ -23,7 +23,8 @@ use crate::log::log;
 use crate::repos::Repo;
 use crate::threads::{self, Thread};
 
-/// How long an agent without an event is at rest, and how long it has to answer: 15 minutes, or
+/// How long an agent without an event is at rest, how long it has to answer, and how long what
+/// follows a snapshot is still its: 15 minutes, longer than a foreground command runs (10), or
 /// $FOLIO_IDLE_SECONDS (tests).
 fn idle() -> Duration {
     Duration::from_secs(
@@ -32,11 +33,6 @@ fn idle() -> Duration {
             .and_then(|s| s.parse().ok())
             .unwrap_or(15 * 60),
     )
-}
-
-/// What comes after a snapshot that's still its: two minutes at most.
-fn grace() -> Duration {
-    idle().min(Duration::from_secs(120))
 }
 
 /// How often each bottle is looked at: a minute at most.
@@ -124,7 +120,7 @@ fn look(bottle: &str, seen: &Arc<Mutex<HashMap<String, Seen>>>) {
         s.busy = false;
         let now = SystemTime::now();
         match taken {
-            Ok(true) => s.after = Some(now + grace()),
+            Ok(true) => s.after = Some(now + idle()),
             Ok(false) => s.not_before = Some(now + idle()),
             Err(e) => {
                 log!("bottle.daemon", "{bottle}: its snapshot failed: {e}");

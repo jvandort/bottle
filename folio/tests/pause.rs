@@ -627,8 +627,9 @@ fn an_agent_at_rest_is_snapshotted_once_ready_and_again_only_after_more_work() {
         "{}",
         sent[0].1
     );
-    // Nothing done since: no other.
+    // Nothing done since but in the IDLE after it (the rest of the agent's turn): no other.
     let first = taken(&f).unwrap();
+    at_work(&f);
     std::thread::sleep(Duration::from_secs(6));
     assert_eq!(events(&f).len(), 1);
     assert_eq!(taken(&f), Some(first));
