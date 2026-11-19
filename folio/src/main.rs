@@ -14,7 +14,6 @@
 
 mod activity;
 mod advice;
-mod asks;
 mod auth;
 mod bottle_cli;
 mod bottles;

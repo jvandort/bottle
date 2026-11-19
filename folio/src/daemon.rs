@@ -111,6 +111,29 @@ impl Serve {
         self.request(&release, false).map(|_| ())
     }
 
+    /// What `bottle` says to the snapshot address, from now until the Listening is dropped, starting
+    /// folio serve if it isn't running (and binding the bottle, as it starts, if its machine runs).
+    pub fn listen(&self, bottle: &str) -> Result<Listening, String> {
+        self.request(&Request::Ping, true)?;
+        let path = control();
+        let stream = UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let listen = Request::Listen {
+            bottle: bottle.into(),
+        };
+        (&stream)
+            .write_all(format!("{}\n", serde_json::to_string(&listen).unwrap()).as_bytes())
+            .map_err(|e| format!("folio serve: {e}"))?;
+        let mut listening = Listening {
+            reader: BufReader::new(stream),
+            line: String::new(),
+        };
+        let said = listening.line(DEFAULT_TIMEOUT)?;
+        match said.and_then(|line| serde_json::from_str::<Reply>(&line).ok()) {
+            Some(reply) if reply.ok => Ok(listening),
+            _ => Err("folio serve didn't listen for the bottle's answer".into()),
+        }
+    }
+
     /// Start folio serve in the background. False if it was already running this program.
     pub fn start(&self) -> Result<bool, String> {
         match send(&Request::Ping, DEFAULT_TIMEOUT) {
@@ -126,6 +149,47 @@ impl Serve {
             }
             Err(Failure::Other(e)) => Err(e),
             Ok(_) => self.ensure_current(),
+        }
+    }
+}
+
+/// Listening to what a bottle says to the snapshot address (Serve::listen); done when it's dropped.
+pub struct Listening {
+    reader: BufReader<UnixStream>,
+    /// A line read but not yet whole.
+    line: String,
+}
+
+impl Listening {
+    /// The next answer, if one comes within `wait`.
+    pub fn next(&mut self, wait: Duration) -> Result<Option<String>, String> {
+        let Some(line) = self.line(wait)? else {
+            return Ok(None);
+        };
+        serde_json::from_str::<crate::control::Answer>(&line)
+            .map(|a| Some(a.answer))
+            .map_err(|e| format!("folio serve said {line:?}: {e}"))
+    }
+
+    /// The next whole line, if one comes within `wait`; a part is kept for the next call.
+    fn line(&mut self, wait: Duration) -> Result<Option<String>, String> {
+        let _ = self.reader.get_ref().set_read_timeout(Some(wait));
+        match self.reader.read_line(&mut self.line) {
+            Ok(0) => Err(format!(
+                "folio serve stopped listening for the bottle's answer; see {}",
+                log_path().display()
+            )),
+            Ok(_) if self.line.ends_with('\n') => Ok(Some(std::mem::take(&mut self.line))),
+            Ok(_) => Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(format!("folio serve: {e}")),
         }
     }
 }
@@ -206,6 +270,7 @@ impl Serve {
             Request::Bind(_) => "bind",
             Request::Release { .. } => "release",
             Request::Shutdown => "shutdown",
+            Request::Listen { .. } => "listen",
         };
         let reply = match send(message, DEFAULT_TIMEOUT) {
             Err(Failure::NotRunning) if !start => return Ok(Reply::ok()),

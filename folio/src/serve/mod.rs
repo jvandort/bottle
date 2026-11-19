@@ -14,8 +14,9 @@
 //! `{"op": "ping"}` (it says the code it runs: a hash of this program), `{"op": "bind", ...}` (a
 //! bottle: its machine, runner, repos, features, permissions, labels and ssh grants, all it needs of
 //! the bottle, so folio serve reads no record of folio's; and, for one on a runner, what to forward
-//! there), `{"op": "release", "bottle": NAME}` (it's gone: with none left, folio serve stops), and
-//! `{"op": "shutdown"}`. With --restore, before it answers anything, it binds the bottles a JSON
+//! there), `{"op": "release", "bottle": NAME}` (it's gone: with none left, folio serve stops),
+//! `{"op": "shutdown"}`, and `{"op": "listen", "bottle": NAME}` (what the bottle says to the snapshot
+//! address, forwarded down the connection, `{"answer": TEXT}` a line, until it's closed). With --restore, before it answers anything, it binds the bottles a JSON
 //! array on stdin says: those whose machines were running when it last stopped.
 //!
 //! For each runner its bottles are on, it forwards its services' sockets there while it answers
@@ -170,6 +171,9 @@ struct Forward {
 
 pub struct Server {
     bottles: Mutex<HashMap<String, Arc<Bottle>>>,
+    /// Who's listening for what each bottle says to the snapshot address: a connection each, by an
+    /// id of its own.
+    listening: Mutex<HashMap<String, Vec<(u64, UnixStream)>>>,
     forwards: Mutex<HashMap<String, Forward>>,
     stopping: AtomicBool,
     /// Its wind-up is done: what's left is to go.
@@ -315,10 +319,39 @@ impl Server {
                     self.stop();
                     return;
                 }
+                Request::Listen { bottle } => return self.listen(&bottle, stream),
             },
         };
         let reply = serde_json::to_string(&reply).expect("a reply is JSON");
         let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
+    }
+
+    /// Forwards what `bottle` says to the snapshot address down `stream` until whoever listens
+    /// closes it (or goes): nothing's kept of it after.
+    fn listen(&self, bottle: &str, stream: UnixStream) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let Ok(writer) = stream.try_clone() else {
+            return;
+        };
+        let _ = (&stream).write_all(b"{\"ok\": true}\n");
+        self.listening
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(bottle.to_string())
+            .or_default()
+            .push((id, writer));
+        log!("bottle.daemon", "{bottle}: listened to");
+        // Nothing more comes from the listener: a read ends when it closes.
+        let _ = stream.set_read_timeout(None);
+        let _ = (&stream).read(&mut [0u8; 64]);
+        let mut listening = self.listening.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(those) = listening.get_mut(bottle) {
+            those.retain(|(i, _)| *i != id);
+            if those.is_empty() {
+                listening.remove(bottle);
+            }
+        }
     }
 
     /// A connection routed to `service`'s socket: answered by it as the bottle its header says it's
@@ -396,6 +429,21 @@ impl Bound for Server {
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
         all
+    }
+
+    fn answer(&self, name: &str, text: &str) -> bool {
+        let line = serde_json::to_string(&crate::control::Answer {
+            answer: text.to_string(),
+        })
+        .expect("an answer is JSON")
+            + "\n";
+        let mut listening = self.listening.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(those) = listening.get_mut(name) else {
+            return false;
+        };
+        // One gone without closing (a write fails) is no listener.
+        those.retain(|(_, s)| (&*s).write_all(line.as_bytes()).is_ok());
+        !those.is_empty()
     }
 }
 
@@ -505,6 +553,7 @@ fn run(control: PathBuf, services: Vec<(String, PathBuf)>, restore: bool) -> io:
     }
     let server = Arc::new(Server {
         bottles: Mutex::new(HashMap::new()),
+        listening: Mutex::new(HashMap::new()),
         forwards: Mutex::new(HashMap::new()),
         stopping: AtomicBool::new(false),
         done: AtomicBool::new(false),

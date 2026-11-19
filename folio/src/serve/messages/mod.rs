@@ -12,9 +12,10 @@
 //! A message is delivered by `bottle-event send` in the recipient (the claude feature's channel),
 //! which queues it and waits until its session takes it, or says none did in time (exit 75).
 //!
-//! An address can also be folio's own, for answering what folio asks: `snapshot`'s, issued with the
-//! event that asks for a snapshot (asks.rs). A message to it isn't delivered, but answers the ask, if
-//! there is one: else it's refused.
+//! An address can also be folio's own, for answering what folio asks: SNAPSHOT's, issued with the
+//! event that asks the agent to get ready for a snapshot (threads/pause.rs). A message to it isn't
+//! delivered, but goes to whoever is listening for the bottle's answer (control's Listen): with no
+//! one, it's refused.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -41,6 +42,8 @@ const SIGNATURE_CHARS: usize = 26;
 const DELIVERY_TIMEOUT: u64 = 10;
 const DELIVERY_GRACE: u64 = 15;
 pub const BOTTLE_EVENT: &str = "/usr/local/bin/bottle-event";
+/// The address a bottle is asked to get ready for a snapshot from, and answers.
+pub const SNAPSHOT: &str = "snapshot";
 /// What bottle-event exits when no session took the event in time (EX_TEMPFAIL).
 const NOT_TAKEN: i32 = 75;
 
@@ -268,23 +271,20 @@ pub fn deliver(
             .any(|p| p == "message-any")
             .then(|| to.to_string())
     };
-    if to.contains(MARK) && named.as_deref() == Some(crate::asks::ADDRESS) {
-        return match crate::asks::answer(&sender.name, text) {
-            Ok(true) => {
-                log!(
-                    "bottle.daemon",
-                    "{}: answered its snapshot ask",
-                    sender.name
-                );
-                Ok(())
-            }
-            Ok(false) => Err((
+    if to.contains(MARK) && named.as_deref() == Some(SNAPSHOT) {
+        if !bound.answer(&sender.name, text) {
+            return Err((
                 409,
                 "Conflict",
                 format!("{to} isn't asking anything of you now"),
-            )),
-            Err(e) => Err((502, "Bad Gateway", format!("couldn't answer {to}: {e}"))),
-        };
+            ));
+        }
+        log!(
+            "bottle.daemon",
+            "{}: answered the snapshot ask",
+            sender.name
+        );
+        return Ok(());
     }
     if named.as_deref() == Some(sender.name.as_str()) {
         return Err((
@@ -410,8 +410,8 @@ mod tests {
         assert_eq!(target_by(key, "broker", "foo"), None);
     }
 
-    /// Bottles bound: none.
-    struct Nobody;
+    /// Bottles bound: none; and who's listening for the snapshot address, the answers it's heard.
+    struct Nobody(Option<std::cell::RefCell<Vec<(String, String)>>>);
 
     impl Bound for Nobody {
         fn bound(&self, _: &str) -> Option<std::sync::Arc<Bottle>> {
@@ -419,6 +419,13 @@ mod tests {
         }
         fn all(&self) -> Vec<std::sync::Arc<Bottle>> {
             Vec::new()
+        }
+        fn answer(&self, name: &str, text: &str) -> bool {
+            let Some(heard) = &self.0 else {
+                return false;
+            };
+            heard.borrow_mut().push((name.into(), text.into()));
+            true
         }
     }
 
@@ -439,20 +446,22 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_address_answers_an_ask_of_its_holders_alone() {
+    fn the_snapshot_address_goes_to_whoever_listens_from_its_holder_alone() {
         let _home = crate::tempdir::isolated();
         let (foo, bar) = (bottle("app-foo"), bottle("app-bar"));
-        let to_foo = address(crate::asks::ADDRESS, "app-foo").unwrap();
-        // Nothing asked: refused, and nothing waits to be taken by a later ask.
-        let refused = deliver(&Nobody, &foo, &to_foo, "snapshot").unwrap_err();
+        let to_foo = address(SNAPSHOT, "app-foo").unwrap();
+        // No one listening: refused.
+        let refused = deliver(&Nobody(None), &foo, &to_foo, "snapshot").unwrap_err();
         assert_eq!(refused.0, 409);
-        let ask = crate::asks::Ask::new("app-foo").unwrap();
-        assert_eq!(ask.take(), None);
+        let listening = Nobody(Some(Default::default()));
         // Another bottle can't answer by it: it isn't its address.
-        let refused = deliver(&Nobody, &bar, &to_foo, "snapshot").unwrap_err();
+        let refused = deliver(&listening, &bar, &to_foo, "snapshot").unwrap_err();
         assert_eq!(refused.0, 404);
-        deliver(&Nobody, &foo, &to_foo, "snapshot").unwrap();
-        assert_eq!(ask.take().as_deref(), Some("snapshot"));
+        deliver(&listening, &foo, &to_foo, "snapshot").unwrap();
+        assert_eq!(
+            *listening.0.unwrap().borrow(),
+            [("app-foo".to_string(), "snapshot".to_string())]
+        );
     }
 
     #[test]

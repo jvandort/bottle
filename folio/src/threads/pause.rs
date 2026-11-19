@@ -8,7 +8,7 @@ use crate::engine::Engine;
 use crate::repos::Repo;
 use crate::serve::messages;
 use crate::store::{self, Content};
-use crate::{asks, lanes, notes, snapshots};
+use crate::{lanes, notes, snapshots};
 
 use super::WORKSPACE;
 use super::lifecycle::{bottle_mounts, make_bottle, workdir};
@@ -133,12 +133,14 @@ fn pause_interrupt(repo: &Repo, thread: &Thread) -> String {
 }
 
 /// Ask the thread's agent to get ready for a snapshot, and wait for it to answer `snapshot`, as
-/// long as it takes: Ctrl-C stops waiting, and the pause. Its other answers are shown, and waited
-/// past. One with no session to take the event (Claude isn't running), or no channel to send it by,
-/// isn't asked: there's no one to get ready.
+/// long as it takes: Ctrl-C stops waiting, and the pause. Its answers come from folio serve, which
+/// forwards what the bottle says to the snapshot address while this listens, and refuses it
+/// otherwise; its other answers are shown, and waited past. One with no session to take the event
+/// (Claude isn't running), or no channel to send it by, isn't asked: there's no one to get ready.
 fn interrupt(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String> {
-    let ask = asks::Ask::new(&thread.bottle).map_err(|e| format!("couldn't ask: {e}"))?;
-    let from = messages::address(asks::ADDRESS, &thread.bottle)
+    // Listening before it's asked: an answer can't come too soon.
+    let mut listening = engine.listen(&thread.bottle)?;
+    let from = messages::address(messages::SNAPSHOT, &thread.bottle)
         .map_err(|e| format!("couldn't ask: {e}"))?;
     let sent = engine.run(
         &thread.bottle,
@@ -174,23 +176,23 @@ fn interrupt(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<(), String
     );
     loop {
         crate::interrupt::check()?;
-        if let Some(answer) = ask.take() {
-            if answer
-                .trim()
-                .trim_matches('`')
-                .eq_ignore_ascii_case("snapshot")
-            {
-                crate::log::say!("threads", "{}'s agent is ready.", thread.name);
-                return Ok(());
-            }
-            crate::log::say!(
-                "threads",
-                "{}'s agent says: {}\n(still waiting for `snapshot`)",
-                thread.name,
-                answer.trim()
-            );
+        let Some(answer) = listening.next(std::time::Duration::from_millis(200))? else {
+            continue;
+        };
+        if answer
+            .trim()
+            .trim_matches('`')
+            .eq_ignore_ascii_case("snapshot")
+        {
+            crate::log::say!("threads", "{}'s agent is ready.", thread.name);
+            return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::log::say!(
+            "threads",
+            "{}'s agent says: {}\n(still waiting for `snapshot`)",
+            thread.name,
+            answer.trim()
+        );
     }
 }
 

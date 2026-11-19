@@ -25,7 +25,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -191,6 +191,13 @@ fn step_of(argv: &[String]) -> &'static str {
 }
 
 pub fn main(args: Vec<String>) -> ExitCode {
+    // Not bottle-cli's: the agent answering, as event() starts it.
+    if let [first, socket, machine, from, texts @ ..] = args.as_slice()
+        && first == ANSWER
+    {
+        answer(socket, machine, from, texts);
+        return ExitCode::SUCCESS;
+    }
     {
         let mut state = State::open();
         state.value["calls"]
@@ -716,7 +723,7 @@ fn pretended(name: &str, command: &[String]) -> Option<ExitCode> {
         }
         // Attached: the call log is the evidence.
         ["sh", "-c", _, "attach", _, _, _] => return Some(ExitCode::SUCCESS),
-        ["/usr/local/bin/bottle-event", "send", ..] => return Some(event(name)),
+        ["/usr/local/bin/bottle-event", "send", ..] => return Some(event(name, &c)),
         ["kill", "-HUP", ..] => {
             machine["sessions"] = json!({});
             ExitCode::SUCCESS
@@ -729,30 +736,86 @@ fn pretended(name: &str, command: &[String]) -> Option<ExitCode> {
 
 /// An event sent to the machine's agent (its text is the exec's stdin, in the log): no session takes
 /// it (exit 75), but with $FAKE_CLI_EVENT: `taken`, one does and never answers; else its agent
-/// answers folio's asks (asks.rs) with each of the |-separated texts in turn, half a second apart,
-/// as folio serve writes an answer, by a process of its own that outlives this one.
+/// answers the event's from with each of the |-separated texts in turn, half a second apart, as a
+/// bottle's agent does (answer), by a process of its own that outlives this one.
 // The answering process outlives this one, which exits at once: nothing here is left to wait.
 #[allow(clippy::zombie_processes)]
-fn event(name: &str) -> ExitCode {
+fn event(machine: &str, command: &[&str]) -> ExitCode {
     let answers = std::env::var("FAKE_CLI_EVENT").unwrap_or_default();
     if answers.is_empty() {
         return ExitCode::from(75);
     }
     if answers != "taken" {
-        let home = std::env::var("FOLIO_HOME").unwrap();
-        let script = r#"ask=$1; shift; for a do sleep 0.5; [ -e "$ask" ] || continue; n=$(head -n 1 "$ask.answer" 2>/dev/null || echo 0); printf '%s\n%s' $((n + 1)) "$a" > "$ask.tmp" && mv "$ask.tmp" "$ask.answer"; done"#;
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", script, "sh"])
-            .arg(format!("{home}/asks/{name}"))
+        let from = command
+            .iter()
+            .position(|a| *a == "-f")
+            .and_then(|i| command.get(i + 1))
+            .unwrap();
+        let socket = format!(
+            "{}/services/messages.sock",
+            std::env::var("FOLIO_HOME").unwrap()
+        );
+        let mut answering = Command::new(std::env::current_exe().unwrap());
+        answering
+            .arg0("bottle-cli")
+            .args([ANSWER, &socket, machine, from])
             .args(answers.split('|'))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn().unwrap();
+            .stderr(Stdio::null())
+            .process_group(0);
+        answering.spawn().unwrap();
     }
     ExitCode::SUCCESS
+}
+
+/// What event() starts the agent's answers as.
+const ANSWER: &str = "--standin-answer";
+
+/// The agent in `machine` sends each of `texts` to `to`, half a second apart: a message to folio
+/// serve's messages service, at `socket`, as the machine's routes give it one (a PROXY header saying
+/// whose it is first).
+fn answer(socket: &str, machine: &str, to: &str, texts: &[String]) {
+    for text in texts {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(socket) else {
+            continue;
+        };
+        let body = json!({"to": to, "text": text}).to_string();
+        let mut request = proxy_header(machine);
+        request.extend(
+            format!(
+                "POST / HTTP/1.1\r\nHost: messages.bottle.internal\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(&request);
+        let _ = stream.read_to_end(&mut Vec::new());
+    }
+}
+
+/// A PROXY protocol v2 header, as bottle-cli's router writes one for a flow from `machine`'s guest
+/// to messages.bottle.internal: its address and port, the name asked for, and the machine.
+fn proxy_header(machine: &str) -> Vec<u8> {
+    let mut fields = Vec::new();
+    for (kind, value) in [
+        (0x02u8, b"messages.bottle.internal".as_slice()),
+        (0xE0, machine.as_bytes()),
+    ] {
+        fields.push(kind);
+        fields.extend((value.len() as u16).to_be_bytes());
+        fields.extend(value);
+    }
+    let mut body = vec![10, 0, 0, 2, 192, 0, 2, 1];
+    body.extend(40000u16.to_be_bytes());
+    body.extend(80u16.to_be_bytes());
+    body.extend(fields);
+    let mut out = b"\r\n\r\n\x00\r\nQUIT\n".to_vec();
+    out.extend([0x21, 0x11]);
+    out.extend((body.len() as u16).to_be_bytes());
+    out.extend(body);
+    out
 }
 
 /// `command` run here, as in the machine: in its working directory, with its environment and home,

@@ -464,15 +464,6 @@ fn events(f: &Folio) -> Vec<(Vec<String>, String)> {
         .collect()
 }
 
-fn asks(f: &Folio) -> Vec<String> {
-    match fs::read_dir(f.home.join("asks")) {
-        Ok(dir) => dir
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[test]
 fn a_pause_asks_the_agent_to_get_ready_and_waits_for_it() {
     let f = started();
@@ -513,7 +504,6 @@ fn a_pause_asks_the_agent_to_get_ready_and_waits_for_it() {
         .position(|r| r.get(..2) == Some(&argv(&["kill", "-HUP"])[..]))
         .unwrap();
     assert!(event < kill);
-    assert!(asks(&f).is_empty(), "{:?}", asks(&f));
 
     // Resumed and paused again: told how big the last one was.
     f.ok(&["shell", "fix-it"]);
@@ -580,7 +570,6 @@ fn ctrl_c_while_waiting_leaves_it_running() {
     assert_eq!(status.code(), Some(130), "{err}");
     assert!(err.contains("waiting for it to reply"), "{err}");
     assert_eq!(state(&f), "running");
-    assert!(asks(&f).is_empty(), "{:?}", asks(&f));
 }
 
 // --- failures ------------------------------------------------------------------------

@@ -20,6 +20,17 @@ pub enum Request {
         bottle: String,
     },
     Shutdown,
+    /// Forward what the bottle says to the snapshot address down this connection, an Answer a line,
+    /// for as long as it's open: what a pause waits on (threads/pause.rs).
+    Listen {
+        bottle: String,
+    },
+}
+
+/// What a bottle said to the snapshot address, to whoever is listening.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Answer {
+    pub answer: String,
 }
 
 /// What folio serve answers a request: whether it did, why not, and to a ping, the code it runs.

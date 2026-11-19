@@ -14,6 +14,9 @@ pub trait Bound {
     fn bound(&self, name: &str) -> Option<Arc<Bottle>>;
     /// Every bottle bound, by name.
     fn all(&self) -> Vec<Arc<Bottle>>;
+    /// `text`, said to the snapshot address by the bottle `name`, to whoever is listening for it
+    /// (control's Listen); whether anyone was.
+    fn answer(&self, name: &str, text: &str) -> bool;
 }
 
 /// Who a connection is from (the bottle its machine was bound as), what it was for (its PROXY

@@ -128,6 +128,11 @@ impl Engine {
         bottles::delete(&self.known, name)
     }
 
+    /// What the bottle says to the snapshot address, until the Listening is dropped.
+    pub fn listen(&self, name: &str) -> Result<crate::daemon::Listening, String> {
+        self.known.serve.listen(name)
+    }
+
     /// Record that the bottle is being used now.
     pub fn touch(&self, name: &str) -> Result<(), String> {
         bottles::touch(name)
