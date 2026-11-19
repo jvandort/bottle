@@ -3,15 +3,16 @@
 //!
 //! An agent at rest is one with no activity event (activity.rs) for IDLE: then its agent is asked
 //! to get ready, and the snapshot is taken once it says it is (threads::snapshot_idle), the bottle
-//! kept. What's asked while one is under way doesn't count, nor what comes in the IDLE after one's
-//! taken: the agent's answer, and the rest of its turn, which may hold a foreground command too. After a snapshot, another needs activity
-//! since; one put off (the agent didn't answer, or answered anything else) is asked again IDLE
-//! later. An agent that never says it's at work (a bottle without the hooks) is never asked.
+//! kept. After a snapshot, another needs activity since, but for what comes in the IDLE after it's
+//! taken: the agent's answer, and the rest of its turn, which may hold a foreground command too.
+//! That's told from the thread's snapshot_taken and the agent's last event, both on disk, so a
+//! restart of folio serve tells it the same. One put off (the agent didn't answer, or answered
+//! anything else) is asked again IDLE later. An agent that never says it's at work (a bottle
+//! without the hooks) is never asked.
 //!
 //! A thread is found by its bottle among every repo folio knows, and the broker's: a bottle that's
-//! no thread's (a sidecar) has no snapshot of its own. What's kept of each is in this process
-//! alone; a restart starts afresh, and a snapshot taken since the agent's last event (thread's
-//! snapshot_taken) needs no other.
+//! no thread's (a sidecar) has no snapshot of its own. Which are under way, and put off, is in this
+//! process alone; a restart starts afresh.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,8 +36,6 @@ fn tick() -> Duration {
 struct Seen {
     /// A snapshot under way.
     busy: bool,
-    /// Events before this don't count: they were a snapshot's.
-    after: Option<SystemTime>,
     /// Not asked again before this: it put the last off.
     not_before: Option<SystemTime>,
 }
@@ -76,9 +75,7 @@ fn look(bottle: &str, seen: &Arc<Mutex<HashMap<String, Seen>>>) {
     {
         let all = seen.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = all.get(bottle)
-            && (s.busy
-                || s.after.is_some_and(|after| last <= after)
-                || s.not_before.is_some_and(|not_before| now < not_before))
+            && (s.busy || s.not_before.is_some_and(|not_before| now < not_before))
         {
             return;
         }
@@ -91,7 +88,7 @@ fn look(bottle: &str, seen: &Arc<Mutex<HashMap<String, Seen>>>) {
     };
     let taken = threads::snapshot_taken(&repo, &thread)
         .map(|t| SystemTime::UNIX_EPOCH + Duration::from_secs_f64(t));
-    if taken.is_some_and(|taken| taken >= last) {
+    if taken.is_some_and(|taken| crate::activity::quiet_since(bottle, taken)) {
         return;
     }
     seen.lock()
@@ -110,7 +107,7 @@ fn look(bottle: &str, seen: &Arc<Mutex<HashMap<String, Seen>>>) {
         s.busy = false;
         let now = SystemTime::now();
         match taken {
-            Ok(true) => s.after = Some(now + idle()),
+            Ok(true) => {}
             Ok(false) => s.not_before = Some(now + idle()),
             Err(e) => {
                 log!("bottle.daemon", "{bottle}: its snapshot failed: {e}");

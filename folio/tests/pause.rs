@@ -633,6 +633,13 @@ fn an_agent_at_rest_is_snapshotted_once_ready_and_again_only_after_more_work() {
     std::thread::sleep(Duration::from_secs(6));
     assert_eq!(events(&f).len(), 1);
     assert_eq!(taken(&f), Some(first));
+    // Nor once folio serve's started again: that's told from what's on disk.
+    f.ok(&["serve", "stop"]);
+    harness::eventually("folio serve gone", || !f.home.join("serve.sock").exists());
+    f.ok(&["serve", "start"]);
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(events(&f).len(), 1);
+    assert_eq!(taken(&f), Some(first));
     // More work, and at rest again: another.
     at_work(&f);
     assert!(within(30, || taken(&f) > Some(first)), "no second snapshot");
