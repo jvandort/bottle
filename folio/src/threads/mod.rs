@@ -10,13 +10,13 @@
 //!           work is all there
 //! paused    no bottle, and a snapshot of it (see snapshots.rs): attaching resumes it in a new
 //!           bottle, made from the repo's spec as it is now
-//! missing   no bottle, and no snapshot: only what's in the lane is left. Folio never leaves a
-//!           thread so (a snapshot exists exactly while there's no bottle); it's a bottle deleted
-//!           from under it.
+//! missing   no bottle, and no snapshot: only what's in the lane is left. A thread that has had a
+//!           snapshot is never so; one that hasn't is, when its bottle is deleted from under it.
 //! ```
 //!
-//! A thread has a snapshot only while it has no bottle: attaching to one drops it, since the bottle
-//! is where the work is from then on.
+//! A thread keeps its latest snapshot, bottle or not: a resume restores it and leaves it, and only
+//! the next snapshot, made whole, takes its place (store.rs's slots). With a bottle, it's what the
+//! thread was when it was taken, and the bottle has what's happened since.
 //!
 //! A thread can have a sidecar (`folio sidecar configure`): a bottle of a spec of its own, on a
 //! runner of its own, `<thread's bottle>-sidecar`, with the thread's repos, fetch-only, which the
@@ -41,10 +41,11 @@ mod state;
 
 pub use lifecycle::{create, delete, rename, set_settings};
 pub use pause::{losses, pause};
-use record::{SNAPSHOT, directory, save, snapshot};
 pub use record::{
     Settings, Thread, all, exists, is_name, load, notes_dir, sidecar_base, snapshot_size,
+    snapshot_taken,
 };
+use record::{directory, save, snapshot};
 pub use sessions::{attach, copy, exec};
 pub use sidecar::{set_sidecar, sidecar_shell};
 pub use state::{last_active, recent, states};

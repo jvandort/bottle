@@ -275,17 +275,35 @@ fn a_snapshot_from_before_resumes_as_it_was() {
 }
 
 #[test]
-fn a_resumed_thread_has_no_snapshot_left_to_go_stale() {
+fn a_resumed_thread_keeps_its_snapshot_till_the_next() {
     let f = started();
+    fs::write(f.workspace("fix-it").join("first.txt"), "first\n").unwrap();
     f.ok(&["pause", "fix-it"]);
-    assert!(slot(&f).join(WORKSPACE_ARCHIVE).exists());
+    let first = fs::read(slot(&f).join(WORKSPACE_ARCHIVE)).unwrap();
     f.ok(&["shell", "fix-it"]);
-    assert_eq!(names(&slot(&f)), ["thread.json"]);
+    assert_eq!(state(&f), "running");
+    assert_eq!(names(&slot(&f)), names_of(&SNAPSHOT, "thread.json"));
+    assert_eq!(fs::read(slot(&f).join(WORKSPACE_ARCHIVE)).unwrap(), first);
+    // A record saved meanwhile carries it into its slot.
+    f.ok(&["configure", "fix-it", "--memory", "4G"]);
+    assert_eq!(fs::read(slot(&f).join(WORKSPACE_ARCHIVE)).unwrap(), first);
+    // The next replaces it, whole.
+    fs::write(f.workspace("fix-it").join("second.txt"), "second\n").unwrap();
+    f.ok(&["pause", "fix-it"]);
+    assert!(archived(&f).contains(&"second.txt".to_string()));
     assert!(
         names(slot(&f).parent().unwrap())
             .iter()
             .all(|n| !n.starts_with('.'))
     );
+}
+
+/// `names`, and `more`, sorted: a slot's files.
+fn names_of(names: &[&str], more: &str) -> Vec<String> {
+    let mut all: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    all.push(more.to_string());
+    all.sort();
+    all
 }
 
 #[test]
@@ -338,7 +356,7 @@ fn a_resume_gets_the_advice_as_it_is_now() {
 }
 
 #[test]
-fn list_shows_what_a_paused_thread_takes_up() {
+fn list_shows_each_threads_snapshot_its_size_and_age() {
     let f = started();
     f.ok(&["new", "other"]);
     // Untracked: in the snapshot.
@@ -348,17 +366,19 @@ fn list_shows_what_a_paused_thread_takes_up() {
         .iter()
         .map(|n| fs::metadata(slot(&f).join(n)).unwrap().len())
         .sum();
+    let size = format!("{:.1}K", size as f64 / 1024.0);
     let rows = f.rows();
     assert_eq!(
-        rows["fix-it"][..4],
-        [
-            "paused",
-            "local",
-            "-",
-            &format!("{:.1}K", size as f64 / 1024.0)
-        ]
+        rows["fix-it"][..6],
+        ["paused", "local", "-", &size, "just", "now"]
     );
     assert_eq!(rows["other"][..4], ["running", "local", "-", "-"]);
+    // Resumed, it still has the one it came from.
+    f.ok(&["shell", "fix-it"]);
+    assert_eq!(
+        f.rows()["fix-it"][..6],
+        ["running", "local", "-", &size, "just", "now"]
+    );
 }
 
 #[test]

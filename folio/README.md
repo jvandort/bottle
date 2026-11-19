@@ -83,7 +83,9 @@ conversation and memory. Of the files, it holds only what git can't give back:
 those the index has as they are come back from it, so a snapshot is the size
 of the work, not of the checkout. `folio claude` or
 `folio shell` resumes it, in a new bottle made from the repo's spec as it is
-then, so a resume is also how a thread gets features added since.
+then, so a resume is also how a thread gets features added since. The thread
+keeps the snapshot it resumed from until its next one replaces it: `folio list`
+shows each thread's snapshot, how big and how old.
 
 ## Runners
 
@@ -569,7 +571,7 @@ checkout's, or this one's before it changed) restarts it first, and says so.
 | `folio pause [THREAD]` | Snapshot a thread, and delete its bottle |
 | `folio notes [THREAD]` | Open a thread's notes in Obsidian |
 | `folio rename THREAD NEW` | Rename a paused thread: its record, lane and remote (its branches keep their names) |
-| `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and the space a paused one's snapshot takes up |
+| `folio list` (`ls`, `status`) | The repo's threads, most recently active first, where each runs, its sidecar's state, and its snapshot's size and age |
 | `folio delete [THREAD] [--yes]` | Delete a thread: its bottle, its lane and its remote |
 | `folio configure [THREAD] [--feature F] [--no-feature F] [--memory M \| --no-memory] [--disk D \| --no-disk] [--runner R \| --no-runner]` | The repo's spec and runner, or a thread's: features, memory and disk, and where it runs; shown without options |
 | `folio sidecar configure` / `remove` / `shell` / `exec` / `cp` | A thread's sidecar (see Sidecars): `shell`, `exec` and `cp` as for its bottle |

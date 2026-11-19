@@ -181,7 +181,7 @@ pub(super) const SNAPSHOT: [&str; 4] = [
     snapshots::WORK,
 ];
 
-/// The bytes a paused thread's snapshot takes up; None if it has none.
+/// The bytes the thread's snapshot takes up; None if it has none.
 pub fn snapshot_size(repo: &Repo, thread: &Thread) -> Option<u64> {
     let slot = snapshot(repo, thread)?;
     Some(
@@ -190,6 +190,20 @@ pub fn snapshot_size(repo: &Repo, thread: &Thread) -> Option<u64> {
             .filter_map(|name| fs::metadata(slot.join(name)).ok())
             .map(|m| m.len())
             .sum(),
+    )
+}
+
+/// When the thread's snapshot was taken (its Claude archive written, the last of it); None if it
+/// has none.
+pub fn snapshot_taken(repo: &Repo, thread: &Thread) -> Option<f64> {
+    let written = fs::metadata(snapshot(repo, thread)?.join(snapshots::CLAUDE_ARCHIVE))
+        .and_then(|m| m.modified())
+        .ok()?;
+    Some(
+        written
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs_f64(),
     )
 }
 

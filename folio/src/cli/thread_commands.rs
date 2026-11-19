@@ -324,11 +324,10 @@ pub(super) fn list(engine: &Engine) -> Outcome {
     for thread in &all {
         let row = &states[&thread.name];
         let state = row.status.state;
-        let size = if state == State::Paused {
-            threads::snapshot_size(&repo, thread)
-        } else {
-            None
-        };
+        // Its snapshot's size and age, paused or not: a resumed thread keeps the one it came from.
+        let snapshot = threads::snapshot_size(&repo, thread)
+            .zip(threads::snapshot_taken(&repo, thread))
+            .map(|(size, taken)| format!("{} {}", human_size(size), ago(taken)));
         // Where its bottle is; for one without, where its next is made.
         let bottle = row.status.bottle.as_ref();
         let runner = match bottle.map(|b| b.runner.as_str()).filter(|r| !r.is_empty()) {
@@ -357,7 +356,7 @@ pub(super) fn list(engine: &Engine) -> Outcome {
             state.to_string(),
             runner,
             sidecar,
-            size.map_or("-".into(), human_size),
+            snapshot.unwrap_or_else(|| "-".into()),
             ago(threads::last_active(&repo, thread, row)),
             if features.is_empty() {
                 "-".into()

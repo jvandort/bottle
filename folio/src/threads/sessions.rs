@@ -6,14 +6,13 @@ use crate::bottles::State;
 use crate::engine::Engine;
 use crate::lanes;
 use crate::repos::Repo;
-use crate::store::Content;
 
 use super::CLAUDE;
 use super::lifecycle::{bottle_for, workdir};
 use super::pause::resume;
 use super::sidecar::start_sidecar;
 use super::state::state_of;
-use super::{SNAPSHOT, TERM, Thread, save, snapshot};
+use super::{TERM, Thread};
 
 /// What each session runs. Claude carries on with the thread's conversation if it has one, and
 /// runs the claude feature's channel, bottle-event, if the bottle has it, so events and other
@@ -109,17 +108,6 @@ pub fn attach(
     ensure_running(engine, repo, thread)?;
     ensure_session(engine, thread, session)?;
     engine.touch(&thread.bottle)?;
-    // The bottle has the work now, so a snapshot would only be out of date.
-    if snapshot(repo, thread).is_some() {
-        save(
-            repo,
-            thread,
-            SNAPSHOT
-                .iter()
-                .map(|name| (*name, Content::Leave))
-                .collect(),
-        )?;
-    }
     // -f detaches anything else on it: closing a terminal doesn't hang up its attach inside the VM.
     let argv: Vec<String> = vec![
         "sh".into(),
