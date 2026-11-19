@@ -3,11 +3,17 @@
 //! Each mount is archived the same way: `workspace.tar.gz` is /workspace, and `notes.tar.gz` /notes
 //! (a snapshot from before notes has none, and a resume then checks the notes out afresh). An
 //! archive holds the checkout's `.git` (config, HEAD, the index, every ref, the stash, the reflog,
-//! and the objects the bottle made itself -- the ones it borrows from the repo through alternates
-//! aren't copied) and every tracked and untracked file that isn't ignored. Ignored files (build
-//! outputs, node_modules) are left out: they can be huge, and rebuilding them is cheaper than
-//! carrying them. The new bottle mounts the same repo at the same path, so the alternates file still
-//! points at the objects it borrows.
+//! the worktrees' own, and the objects the bottle made itself -- the ones it borrows from the repo
+//! through alternates aren't copied), and of the checkout and each of its worktrees, wherever it
+//! is, only what git can't give back: files changed from the index, and untracked ones that aren't
+//! ignored, a repo of another's among them, whole. A worktree in the checkout is a root of its own,
+//! not untracked files of the checkout's. Ignored files (build outputs, node_modules) are left out:
+//! they can be huge, and rebuilding them is cheaper than carrying them. The files the index has as
+//! they are come back from the index (rebuild), as do the deleted ones, deleted again from a list
+//! each root's git directory keeps in the archive, `folio-deleted`; a snapshot from before has no
+//! list, and every file in its archive, so it's rebuilt from nothing. The new bottle mounts the same
+//! repo at the same path, so the alternates file still points at the objects it borrows. A worktree
+//! outside the checkout is archived by its path, and comes back there.
 //!
 //! `claude.tar.gz` is ~/.claude, less what's only cache: the conversation, its subagents and
 //! memory, /rewind's file history, the prompt history, and settings.json, with the choices made in
@@ -56,17 +62,70 @@ const CLAUDE_LEFT_OUT: [&str; 7] = [
 
 /// Writes `workspace`'s archive to stdout. Tracked files since deleted are skipped.
 pub fn workspace_out(workspace: &str) -> String {
-    format!(
-        "cd {workspace} && {{ printf '.git\\0'; git ls-files -z -co --exclude-standard | \
-         xargs -0 sh -c 'for f do if [ -e \"$f\" ] || [ -L \"$f\" ]; then printf \"%s\\0\" \"$f\"; fi; done' sh; }} \
-         | tar -czf - --null -T -"
-    )
+    format!("p={}\n{WORKSPACE_OUT}", q(workspace))
 }
 
-/// Replaces `workspace` with the archive on stdin.
-pub fn workspace_in(workspace: &str) -> String {
-    format!("cd {workspace} && find . -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + && tar -xzf -")
+/// The checkout at $p's archive: its .git, and each root's files that git can't give back (see the
+/// module's doc), a worktree's in the checkout by their paths in it, and one's elsewhere by its own.
+/// tar is given no directory but .git and a repo of another's, so nothing ignored comes along.
+const WORKSPACE_OUT: &str = r#"t=$(mktemp -d) || exit 1
+trap 'rm -rf "$t"' EXIT
+cd "$p" || exit 1
+git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r r; do
+  if [ "$r" != "$p" ] && [ -e "$r/.git" ]; then printf '%s\n' "$r"; fi
+done > "$t/roots"
+root() {
+  ( cd "$1" || exit 0
+    d=$(git rev-parse --absolute-git-dir) || exit 0
+    printf '%s\n' "$d" >> "$t/dirs"
+    git update-index -q --refresh >/dev/null 2>&1
+    git ls-files -z -d > "$d/folio-deleted"
+    git ls-files -z -mo --exclude-standard | xargs -0 sh -c '
+      r=$1 x=$2 roots=$3; shift 3
+      for f do
+        if [ -d "$f" ] && [ ! -L "$f" ] && grep -qxF -- "$r/${f%/}" "$roots"; then continue; fi
+        if [ -e "$f" ] || [ -L "$f" ]; then printf "%s%s\0" "$x" "$f"; fi
+      done' sh "$1" "$2" "$t/roots" )
 }
+printf '.git\0' > "$t/list"
+root "$p" "" >> "$t/list"
+while IFS= read -r r; do
+  case $r in "$p"/*) x=${r#"$p"/}/ ;; *) x=$r/ ;; esac
+  printf '%s.git\0' "$x" >> "$t/list"
+  root "$r" "$x" >> "$t/list"
+done < "$t/roots"
+tar -czPf - --null -T "$t/list"
+s=$?
+while IFS= read -r d; do rm -f "$d/folio-deleted"; done < "$t/dirs"
+exit $s"#;
+
+/// Replaces `workspace` with the archive on stdin: a worktree elsewhere goes back to its path.
+pub fn workspace_in(workspace: &str) -> String {
+    format!("cd {workspace} && find . -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + && tar -xzPf -")
+}
+
+/// Gives back the files of the checkout at `workspace`, and of its worktrees, that its archive left
+/// to the index, once it's restored and repointed (the objects are the new bottle's), and deletes
+/// again the ones it had deleted. A root without its list is from before, and has every file.
+pub fn rebuild(workspace: &str) -> String {
+    format!("p={}\n{REBUILD}", q(workspace))
+}
+
+const REBUILD: &str = r#"cd "$p" 2>/dev/null && [ -e .git ] || exit 0
+rebuild() {
+  ( cd "$1" || exit 0
+    d=$(git rev-parse --absolute-git-dir) || exit 0
+    [ -f "$d/folio-deleted" ] || exit 0
+    git checkout-index -a -q 2>/dev/null
+    xargs -0 rm -f -- < "$d/folio-deleted"
+    rm -f "$d/folio-deleted"
+    git update-index -q --refresh >/dev/null 2>&1
+    exit 0 )
+}
+rebuild "$p"
+git worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r r; do
+  if [ "$r" != "$p" ] && [ -e "$r/.git" ]; then rebuild "$r"; fi
+done"#;
 
 /// Points the checkout at `path` at its bottle's objects and remotes' URLs, as bottle's status
 /// gives them.
@@ -135,8 +194,9 @@ mod tests {
     fn the_scripts_are_as_they_were() {
         assert_eq!(
             workspace_out("/workspace"),
-            "cd /workspace && { printf '.git\\0'; git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f do if [ -e \"$f\" ] || [ -L \"$f\" ]; then printf \"%s\\0\" \"$f\"; fi; done' sh; } | tar -czf - --null -T -"
+            format!("p=/workspace\n{WORKSPACE_OUT}")
         );
+        assert_eq!(rebuild("/my work"), format!("p='/my work'\n{REBUILD}"));
         assert_eq!(
             claude_out(),
             "mkdir -p \"$HOME/.claude\" && cd \"$HOME/.claude\" && tar -czf - --exclude='./CLAUDE.md' --exclude='./plugins' --exclude='./cache' --exclude='./telemetry' --exclude='./policy-limits*' --exclude='./remote-settings.json' --exclude='./backups' ."

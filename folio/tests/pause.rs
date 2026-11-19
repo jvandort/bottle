@@ -145,6 +145,135 @@ fn a_pause_and_resume_keep_everything_but_processes() {
     );
 }
 
+/// `git status --porcelain` in `dir`, unstripped: its first column counts.
+fn status(f: &Folio, dir: &std::path::Path) -> Vec<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain", "-uall"])
+        .envs(f.env.iter().cloned())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The names in the snapshot's workspace archive.
+fn archived(f: &Folio) -> Vec<String> {
+    let out = Command::new("tar")
+        .arg("-tzf")
+        .arg(slot(f).join(WORKSPACE_ARCHIVE))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_snapshot_carries_only_what_git_cant_give_back_worktrees_and_all() {
+    let f = Folio::new();
+    fs::write(f.repo.join("clean.txt"), "as committed\n").unwrap();
+    fs::write(f.repo.join(".gitignore"), "build/\n").unwrap();
+    let repo = f.repo.display().to_string();
+    f.git(&["-C", &repo, "add", "."]);
+    f.commit(&f.repo, "files");
+    f.ok(&["new", "fix-it"]);
+    let workspace = f.workspace("fix-it");
+    // A worktree in the checkout, and one out of it.
+    let inside = workspace.join(".worktrees/inside");
+    let elsewhere = f.there("fix-it").join("elsewhere");
+    for (tree, branch) in [(&inside, "inside"), (&elsewhere, "elsewhere")] {
+        let path = tree.display().to_string();
+        ws(&f, &["worktree", "add", "-q", "-b", branch, &path]);
+        fs::write(tree.join("clean.txt"), "changed\n").unwrap();
+        fs::write(tree.join("new.txt"), "untracked\n").unwrap();
+        fs::create_dir_all(tree.join("build")).unwrap();
+        fs::write(tree.join("build/out.bin"), "ignored").unwrap();
+    }
+    // Another's repo in the checkout: untracked files of the checkout's, its .git and all.
+    let other = workspace.join("vendor/other");
+    f.git(&["init", "-q", &other.display().to_string()]);
+    fs::write(other.join("theirs.txt"), "theirs\n").unwrap();
+    let roots = [workspace.clone(), inside.clone(), elsewhere.clone()];
+    let before: Vec<Vec<String>> = roots.iter().map(|r| status(&f, r)).collect();
+    f.ok(&["pause", "fix-it"]);
+
+    let names = archived(&f);
+    let has = |n: &str| names.iter().any(|m| m == n);
+    // The index has it as it is: the index gives it back.
+    assert!(!has("clean.txt"), "{names:?}");
+    for tree in [
+        ".worktrees/inside/".to_string(),
+        format!("{}/", elsewhere.display()),
+    ] {
+        assert!(has(&format!("{tree}.git")), "{names:?}");
+        assert!(has(&format!("{tree}clean.txt")), "{names:?}");
+        assert!(has(&format!("{tree}new.txt")), "{names:?}");
+    }
+    assert!(names.iter().all(|n| !n.contains("build/")), "{names:?}");
+    assert!(has("vendor/other/theirs.txt"), "{names:?}");
+    assert!(has("vendor/other/.git/HEAD"), "{names:?}");
+
+    let _ = fs::remove_dir_all(&elsewhere);
+    f.ok(&["shell", "fix-it"]);
+    let after: Vec<Vec<String>> = roots.iter().map(|r| status(&f, r)).collect();
+    assert_eq!(after, before);
+    assert_eq!(
+        fs::read_to_string(workspace.join("clean.txt")).unwrap(),
+        "as committed\n"
+    );
+    for tree in [&inside, &elsewhere] {
+        assert_eq!(
+            fs::read_to_string(tree.join("clean.txt")).unwrap(),
+            "changed\n"
+        );
+        assert!(tree.join(".gitignore").exists());
+        assert!(!tree.join("build").exists());
+    }
+    assert!(!workspace.join(".git/folio-deleted").exists());
+    assert!(
+        !workspace
+            .join(".git/worktrees/inside/folio-deleted")
+            .exists()
+    );
+}
+
+#[test]
+fn a_snapshot_from_before_resumes_as_it_was() {
+    // Every file in its archive, and no list of the deleted ones: none comes back.
+    let f = started();
+    make_a_mess(&f);
+    let workspace = f.workspace("fix-it");
+    let old = f.tmp.join("old.tar.gz");
+    let made = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            r#"{{ printf '.git\0'; git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh; }} | tar -czf {} --null -T -"#,
+            old.display()
+        ))
+        .current_dir(&workspace)
+        .envs(f.env.iter().cloned())
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let before = status(&f, &workspace);
+    f.ok(&["pause", "fix-it"]);
+    let archive = slot(&f).join(WORKSPACE_ARCHIVE);
+    fs::remove_file(&archive).unwrap();
+    fs::copy(&old, &archive).unwrap();
+    f.ok(&["shell", "fix-it"]);
+    assert_eq!(status(&f, &workspace), before);
+    assert!(!workspace.join("gone.txt").exists());
+}
+
 #[test]
 fn a_resumed_thread_has_no_snapshot_left_to_go_stale() {
     let f = started();
@@ -171,7 +300,10 @@ fn the_sessions_are_stopped_before_the_snapshot() {
         .unwrap();
     let archive = ran
         .iter()
-        .position(|r| r.last() == Some(&workspace_out("/workspace")))
+        .position(|r| {
+            r.last()
+                .is_some_and(|s| s.starts_with(&workspace_out("/workspace")))
+        })
         .unwrap();
     assert!(kill < archive);
 }

@@ -142,6 +142,13 @@ pub(super) fn resume(engine: &Engine, repo: &Repo, thread: &Thread) -> Result<()
                 .collect();
             let script = snapshots::repoint(&mount.path, &mount.objects, &urls);
             engine.run(&thread.bottle, &sh(script), None, true)?;
+            // Then what the archive left to the index, from those objects.
+            engine.run(
+                &thread.bottle,
+                &sh(snapshots::rebuild(&mount.path)),
+                None,
+                true,
+            )?;
         }
         engine.run_from_file(
             &thread.bottle,

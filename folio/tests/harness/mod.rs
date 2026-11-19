@@ -763,11 +763,9 @@ pub const CLAUDE_ARCHIVE: &str = "claude.tar.gz";
 pub const WORK: &str = "work.txt";
 pub const SNAPSHOT: [&str; 4] = [WORKSPACE_ARCHIVE, NOTES_ARCHIVE, CLAUDE_ARCHIVE, WORK];
 
-/// The script that writes a workspace's archive (snapshots.rs).
+/// The start of the script that writes a workspace's archive (snapshots.rs).
 pub fn workspace_out(workspace: &str) -> String {
-    format!(
-        r#"cd {workspace} && {{ printf '.git\0'; git ls-files -z -co --exclude-standard | xargs -0 sh -c 'for f do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh; }} | tar -czf - --null -T -"#
-    )
+    format!("p={workspace}\nt=$(mktemp -d)")
 }
 
 impl Folio {

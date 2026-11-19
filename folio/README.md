@@ -76,9 +76,12 @@ them, and a new thread of the same name finds them.
 ## Pausing
 
 `folio pause` snapshots a thread and deletes its bottle, so a thread you're
-not working on holds no VM. The snapshot is the workspace (every branch and
-stash, staged and unstaged changes, untracked files, though not ignored ones
-like build output) and Claude's conversation and memory. `folio claude` or
+not working on holds no VM. The snapshot is the workspace and its worktrees,
+wherever they are (every branch and stash, staged and unstaged changes,
+untracked files, though not ignored ones like build output), and Claude's
+conversation and memory. Of the files, it holds only what git can't give back:
+those the index has as they are come back from it, so a snapshot is the size
+of the work, not of the checkout. `folio claude` or
 `folio shell` resumes it, in a new bottle made from the repo's spec as it is
 then, so a resume is also how a thread gets features added since.
 
