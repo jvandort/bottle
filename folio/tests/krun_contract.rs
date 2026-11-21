@@ -373,6 +373,7 @@ fn bottle_cli_does_what_folio_relies_on() {
     decided_egress(&c);
     exec(&c);
     bytes(&c);
+    an_unread_stream_holds_up_nothing_else(&c);
     tty(&c);
     a_read_only_mount(&c);
     stop_and_start_keep_the_disk(&c);
@@ -598,6 +599,64 @@ fn bytes(c: &Contract) {
         String::from_utf8_lossy(&c.bytes(&["wc", "-c"], b"abc").stdout).trim(),
         "3"
     );
+}
+
+/// A command whose output nobody reads yet holds up its own exec, and nothing else: a second exec
+/// still answers (libkrun's unix proxy once waited on the full host socket, on the thread that
+/// serves every vsock connection, and the VM's agent and network stopped with it), and what was
+/// held up comes whole once it's read.
+fn an_unread_stream_holds_up_nothing_else(c: &Contract) {
+    let there = c
+        .exec(
+            &c.machine,
+            &[
+                "sh",
+                "-c",
+                "head -c 33554432 /dev/urandom > /tmp/held; sha256sum /tmp/held",
+            ],
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+    let there = there.split_whitespace().next().unwrap().to_string();
+    let spawn = |argv: &[&str]| {
+        Command::new(&c.cli)
+            .args(Contract::exec_args(
+                &c.machine,
+                argv,
+                None,
+                None,
+                &[],
+                false,
+            ))
+            .env("BOTTLE_HOME", &c.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut held = spawn(&["cat", "/tmp/held"]);
+    // Its pipe, and bottle-cli's reading of the agent behind it, full.
+    std::thread::sleep(Duration::from_secs(3));
+
+    let mut other = spawn(&["echo", "answered"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while other.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if other.try_wait().unwrap().is_none() {
+        let _ = other.kill();
+        let _ = held.kill();
+        panic!("an exec didn't answer in 20 s while another's output went unread");
+    }
+    let answered = other.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&answered.stdout), "answered\n");
+
+    let out = held.wait_with_output().unwrap();
+    assert_eq!((out.status.code(), out.stdout.len()), (Some(0), 33_554_432));
+    assert_eq!(sha2_hex(&out.stdout), there);
 }
 
 fn sha2_hex(bytes: &[u8]) -> String {
