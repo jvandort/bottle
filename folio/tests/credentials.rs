@@ -17,6 +17,8 @@ mod harness;
 use harness::{STANDIN, Serve, bind};
 
 const REAL: &str = "real-token";
+/// How much a host that answers as it's sent (duplex) answers.
+const ANSWER: usize = 4 << 20;
 /// Where the bottle thought it was connecting: an address anywhere.
 const CONNECTED_TO: [u8; 4] = [93, 184, 216, 34];
 
@@ -191,6 +193,9 @@ fn answer(
                 .map(|v| v.trim().parse::<usize>().unwrap())
         })
         .unwrap_or(0);
+    if head.starts_with("POST /duplex ") {
+        return duplex(tls, head, length, sent);
+    }
     if length > 64 * 1024 {
         // Taken slowly, as a far host might: what sends it has to wait for it.
         std::thread::sleep(Duration::from_millis(300));
@@ -221,6 +226,80 @@ fn answer(
     }
     tls.conn.send_close_notify();
     let _ = tls.flush();
+}
+
+/// The host's side of a request to /duplex, answered as it's sent, as a host that streams does: the
+/// answer (ANSWER bytes) written from the head on, the body read meanwhile, on a thread of its own,
+/// rustls's state shared between them (never held while reading or writing the connection).
+fn duplex(
+    tls: BufReader<rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>>,
+    head: String,
+    length: usize,
+    sent: &Mutex<std::sync::mpsc::Sender<String>>,
+) {
+    let early = tls.buffer().to_vec();
+    let rustls::StreamOwned { conn, sock } = tls.into_inner();
+    let conn = Arc::new(Mutex::new(conn));
+    let mut tcp = sock.try_clone().unwrap();
+    let reader = {
+        let (conn, mut tcp) = (conn.clone(), sock);
+        std::thread::spawn(move || {
+            let mut body = early;
+            let (mut buf, mut plain) = (vec![0; 64 * 1024], vec![0; 64 * 1024]);
+            // What rustls has decrypted, taken: it takes no more while it holds too much.
+            let take =
+                |conn: &mut rustls::ServerConnection, body: &mut Vec<u8>, plain: &mut [u8]| {
+                    while let Ok(n @ 1..) = conn.reader().read(plain) {
+                        body.extend_from_slice(&plain[..n]);
+                    }
+                };
+            take(&mut conn.lock().unwrap(), &mut body, &mut plain);
+            while body.len() < length {
+                let n = tcp.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let mut conn = conn.lock().unwrap();
+                let mut rest = &buf[..n];
+                while !rest.is_empty() {
+                    conn.read_tls(&mut rest).unwrap();
+                    conn.process_new_packets().unwrap();
+                    take(&mut conn, &mut body, &mut plain);
+                }
+            }
+            body
+        })
+    };
+    // What rustls has to send, written by this thread alone.
+    let flush = |tcp: &mut std::net::TcpStream| {
+        let mut out = Vec::new();
+        {
+            let mut conn = conn.lock().unwrap();
+            while conn.wants_write() {
+                conn.write_tls(&mut out).unwrap();
+            }
+        }
+        tcp.write_all(&out)
+    };
+    let mut answer =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {ANSWER}\r\nConnection: close\r\n\r\n")
+            .into_bytes();
+    answer.resize(answer.len() + ANSWER, b'a');
+    for chunk in answer.chunks(16 * 1024) {
+        conn.lock().unwrap().writer().write_all(chunk).unwrap();
+        if flush(&mut tcp).is_err() {
+            return;
+        }
+    }
+    let body = reader.join().unwrap();
+    let mut whole = head.into_bytes();
+    whole.extend(&body);
+    let _ = sent
+        .lock()
+        .unwrap()
+        .send(String::from_utf8_lossy(&whole).into_owned());
+    conn.lock().unwrap().send_close_notify();
+    let _ = flush(&mut tcp);
 }
 
 fn count(text: &str, header: &str) -> usize {
@@ -648,4 +727,43 @@ fn a_websocket_upgrade_keeps_its_connection() {
     // Anything else, the connection closes after it.
     let sent = host.sent_for(b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n");
     assert!(sent.contains("\r\nConnection: close\r\n"), "{sent}");
+}
+
+#[test]
+fn an_answer_that_comes_while_the_request_does_goes_both_ways() {
+    let host = Host::start("g", "tok", json!({}));
+    let mut s = host.serve.connect(
+        "credentials",
+        CONNECTED_TO,
+        host.port,
+        Some("upstream.test"),
+        true,
+        "m1",
+    );
+    // The bottle sends the whole request before it reads any of the answer, which the host starts
+    // on with the head: folio has to keep taking the request while the bottle has no room for the
+    // answer, as the host would, directly.
+    let body = vec![b'b'; 8 << 20];
+    let head = format!(
+        "POST /duplex HTTP/1.1\r\nAuthorization: Bearer {STANDIN}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    s.set_write_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(head.as_bytes()).unwrap();
+    if let Err(e) = s.write_all(&body) {
+        panic!("the request stopped going while its answer went unread: {e}");
+    }
+    let mut answer = Vec::new();
+    s.read_to_end(&mut answer).unwrap();
+    let head_end = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert!(
+        answer.starts_with(b"HTTP/1.1 200"),
+        "{:?}",
+        &answer[..head_end]
+    );
+    assert_eq!(answer.len() - head_end, ANSWER);
+    let sent = host.received.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (sent_head, sent_body) = sent.split_once("\r\n\r\n").unwrap();
+    assert!(sent_head.contains(REAL), "{sent_head}");
+    assert_eq!(sent_body.len(), body.len());
 }

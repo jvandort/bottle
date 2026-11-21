@@ -1,5 +1,6 @@
 //! The host a credential is for: reached (public addresses only), over TLS, and relayed to.
 
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -159,7 +160,14 @@ pub(super) fn open(
 /// Sends `head` (and `buffered`, what the bottle sent past it already read) to the host, then
 /// relays both ways until the host is done, in one thread (a TLS connection can't be split): the
 /// bottle finishing only says so to the host (it may still be answering); the host finishing ends
-/// it all. Keeps the start of the response in `peek`. The bytes each way.
+/// it all, once the bottle has what it sent. Keeps the start of the response in `peek`. The bytes
+/// each way.
+///
+/// Neither side waits on the other: what one hasn't room for yet waits here, and while it does,
+/// what would add to it isn't read, but the other way goes on. A host that answers while it's
+/// still being sent, to a bottle that reads the answer only once it's sent it all, gets all of it,
+/// as directly. What waits is bounded: rustls keeps at most 64 KiB unsent, and the bottle's side
+/// at most what one read of the host brings.
 pub(super) fn relay_tls(
     client: &UnixStream,
     mut conn: rustls::ClientConnection,
@@ -169,60 +177,108 @@ pub(super) fn relay_tls(
     peek: &mut Vec<u8>,
 ) -> io::Result<(u64, u64)> {
     let mut client = client.try_clone()?;
-    let (mut up, mut down) = (0u64, 0u64);
-    send_whole(&mut conn, &mut tcp, head)?;
-    send_whole(&mut conn, &mut tcp, buffered)?;
-    up += (head.len() + buffered.len()) as u64;
     client.set_nonblocking(true)?;
     tcp.set_nonblocking(true)?;
-    let mut client_open = true;
+    // For the host, not yet given to rustls; for the bottle, not yet taken.
+    let mut to_host: VecDeque<u8> = head.iter().chain(buffered).copied().collect();
+    let mut to_bottle: VecDeque<u8> = VecDeque::new();
+    let (mut up, mut down) = (to_host.len() as u64, 0u64);
+    let (mut client_open, mut closing, mut host_done) = (true, false, false);
     let mut buf = vec![0; 64 * 1024];
     loop {
-        // What's to send to the host, sent.
-        while conn.wants_write() {
-            match conn.write_tls(&mut tcp) {
-                Ok(_) => {}
+        // To the host: what rustls has, then more for it while it's sent all it had.
+        loop {
+            while conn.wants_write() {
+                match conn.write_tls(&mut tcp) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            if conn.wants_write() || to_host.is_empty() {
+                break;
+            }
+            let (front, _) = to_host.as_slices();
+            let n = conn.writer().write(front)?;
+            to_host.drain(..n);
+        }
+        if !client_open && !closing && to_host.is_empty() {
+            closing = true;
+            conn.send_close_notify();
+            continue;
+        }
+        // To the bottle: what it has room for.
+        while !to_bottle.is_empty() {
+            let (front, _) = to_bottle.as_slices();
+            match client.write(front) {
+                Ok(n) => {
+                    to_bottle.drain(..n);
+                    down += n as u64;
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
         }
-        // More from the bottle only once what it sent before is gone: rustls keeps at most 64 KiB
-        // unsent (taking nothing more past it), and the host may take its time.
-        let reading = client_open && !conn.wants_write();
-        let host_events = if conn.wants_write() {
-            PollFlags::IN | PollFlags::OUT
-        } else {
-            PollFlags::IN
-        };
-        // The bottle's side only while reading it: its hangup too is left for then.
-        let mut fds = vec![PollFd::new(&tcp, host_events)];
-        if reading {
-            fds.push(PollFd::new(&client, PollFlags::IN));
+        if host_done && to_bottle.is_empty() {
+            let _ = client.shutdown(std::net::Shutdown::Both);
+            return Ok((up, down));
+        }
+
+        // More from the bottle once what it sent before is with rustls, and rustls has sent it
+        // (the host may take its time); more from the host once the bottle's taken the last.
+        let reading_bottle = client_open && !host_done && to_host.is_empty() && !conn.wants_write();
+        let reading_host = !host_done && to_bottle.is_empty();
+        let mut host_events = PollFlags::empty();
+        if reading_host {
+            host_events |= PollFlags::IN;
+        }
+        if conn.wants_write() {
+            host_events |= PollFlags::OUT;
+        }
+        let mut bottle_events = PollFlags::empty();
+        if reading_bottle {
+            bottle_events |= PollFlags::IN;
+        }
+        if !to_bottle.is_empty() {
+            bottle_events |= PollFlags::OUT;
+        }
+        // Each side only for what's wanted of it: a hangup is left for then, or it'd be reported
+        // again and again.
+        let mut fds = Vec::with_capacity(2);
+        if !host_events.is_empty() {
+            fds.push(PollFd::new(&tcp, host_events));
+        }
+        if !bottle_events.is_empty() {
+            fds.push(PollFd::new(&client, bottle_events));
         }
         match poll(&mut fds, Some(&A_MINUTE)) {
             Ok(_) => {}
             Err(rustix::io::Errno::INTR) => continue,
             Err(e) => return Err(e.into()),
         }
-        let host = fds[0].revents();
-        let bottle = fds.get(1).map_or(PollFlags::empty(), PollFd::revents);
+        // The host's first, when it's there; the bottle's last.
+        let host = match host_events.is_empty() {
+            true => PollFlags::empty(),
+            false => fds[0].revents(),
+        };
+        let bottle = match bottle_events.is_empty() {
+            true => PollFlags::empty(),
+            false => fds[fds.len() - 1].revents(),
+        };
         drop(fds);
-        if !bottle.is_empty() {
-            // No more than rustls takes at once, its buffer empty.
+        let readable = PollFlags::IN | PollFlags::HUP | PollFlags::ERR;
+        if reading_bottle && bottle.intersects(readable) {
             match client.read(&mut buf[..16 * 1024]) {
-                Ok(0) => {
-                    client_open = false;
-                    conn.send_close_notify();
-                }
+                Ok(0) => client_open = false,
                 Ok(n) => {
-                    send_whole(&mut conn, &mut tcp, &buf[..n])?;
+                    to_host.extend(&buf[..n]);
                     up += n as u64;
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                 Err(_) => client_open = false,
             }
         }
-        if host.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR) {
+        if reading_host && host.intersects(readable) {
             let read = match conn.read_tls(&mut tcp) {
                 Ok(n) => n,
                 Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
@@ -231,11 +287,11 @@ pub(super) fn relay_tls(
             if read > 0 {
                 conn.process_new_packets().map_err(io::Error::other)?;
             }
-            let mut ended = read == 0;
+            host_done = read == 0;
             loop {
                 match conn.reader().read(&mut buf) {
                     Ok(0) => {
-                        ended = true;
+                        host_done = true;
                         break;
                     }
                     Ok(n) => {
@@ -243,51 +299,16 @@ pub(super) fn relay_tls(
                             let take = n.min(STATUS_PEEK - peek.len());
                             peek.extend_from_slice(&buf[..take]);
                         }
-                        client.set_nonblocking(false)?;
-                        client.write_all(&buf[..n])?;
-                        client.set_nonblocking(true)?;
-                        down += n as u64;
+                        to_bottle.extend(&buf[..n]);
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                     // The host closed without saying so (no close_notify): it's done all the same.
                     Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                        ended = true;
+                        host_done = true;
                         break;
                     }
                     Err(e) => return Err(e),
                 }
-            }
-            if ended {
-                let _ = client.shutdown(std::net::Shutdown::Both);
-                return Ok((up, down));
-            }
-        }
-    }
-}
-
-/// `data` given to rustls whole for the host: what rustls won't take yet waits for what it has to
-/// go to the host first, `tcp` blocking or not.
-pub(super) fn send_whole(
-    conn: &mut rustls::ClientConnection,
-    tcp: &mut TcpStream,
-    mut data: &[u8],
-) -> io::Result<()> {
-    loop {
-        let n = conn.writer().write(data)?;
-        data = &data[n..];
-        if data.is_empty() {
-            return Ok(());
-        }
-        while conn.wants_write() {
-            match conn.write_tls(tcp) {
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    let mut fds = [PollFd::new(&*tcp, PollFlags::OUT)];
-                    if poll(&mut fds, Some(&A_MINUTE)) == Ok(0) {
-                        return Err(ErrorKind::TimedOut.into());
-                    }
-                }
-                Err(e) => return Err(e),
             }
         }
     }
