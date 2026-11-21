@@ -27,5 +27,7 @@ if [ -f target/release/folio ] && [ "$(cat "$stamp" 2>/dev/null)" = "$sources" ]
 fi
 # rustup's cargo, if it isn't on PATH.
 cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
+# The workspace takes libkrun from .libkrun, which cargo can't load it without (xtask/src/libkrun.rs).
+"$cargo" xtask libkrun >&2
 "$cargo" build --release -p folio >&2
 printf '%s' "$sources" > "$stamp"

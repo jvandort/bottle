@@ -2,7 +2,8 @@
 //!
 //!     cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]
 //!
-//! `cargo test` alone runs the tests that need nothing but their own package. The others run another
+//! `cargo test` alone runs the tests that need nothing but their own package (once libkrun's made:
+//! see libkrun.rs; this makes it first). The others run another
 //! package's program, which cargo doesn't hand a test: they're the `integration` feature's (bottle-cli's,
 //! bottle-disk's and folio's), and this builds those programs, as whoever runs it, and gives them
 //! to the tests by their paths, in XTASK_* variables:
@@ -29,7 +30,7 @@ use std::env;
 use std::ffi::OsString;
 use std::process::Command;
 
-use crate::{Profile, Result, cargo, dist, root, step, target};
+use crate::{Profile, Result, cargo, dist, libkrun, root, step, target};
 
 /// The packages with an `integration` feature.
 const INTEGRATION: [&str; 3] = ["bottle-cli", "bottle-disk", "folio"];
@@ -58,6 +59,7 @@ pub fn test(args: &[String]) -> Result<()> {
         return Err("--vm is a Mac's: its bottle-cli runs the VMs".into());
     }
 
+    libkrun()?;
     step("what the tests run");
     cargo(
         &[
@@ -132,7 +134,15 @@ pub fn test(args: &[String]) -> Result<()> {
     command.extend(passed.iter().cloned());
     step(&format!("cargo {}", command.join(" ")));
     let command: Vec<&str> = command.iter().map(String::as_str).collect();
-    cargo(&command, &env)
+    cargo(&command, &env)?;
+    // xtask's own, a workspace of its own (see libkrun.rs), with the rest's.
+    if named.is_empty() {
+        let mut command = vec!["test", "--manifest-path", "xtask/Cargo.toml"];
+        command.extend(passed.iter().map(String::as_str));
+        step(&format!("cargo {}", command.join(" ")));
+        cargo(&command, &[])?;
+    }
+    Ok(())
 }
 
 /// Whether this runs as root.

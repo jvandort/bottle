@@ -196,9 +196,9 @@ CA for them, as for any cached host.
 ## Development
 
 The tests are Rust's. `cargo test` runs those that need nothing but their own
-package. The rest run another package's program (the agent, bottle-cli, folio,
-folio's stand-ins), which cargo doesn't hand a test; `cargo xtask test` builds
-those first and runs them all:
+package, once libkrun's made (below). The rest run another package's program
+(the agent, bottle-cli, folio, folio's stand-ins), which cargo doesn't hand a
+test; `cargo xtask test` builds those first and runs them all:
 
 ```sh
 cargo xtask test                  # everything that runs here
@@ -207,6 +207,17 @@ cargo xtask test --root           # Linux: and those that need root (they stack 
 cargo xtask test --vm             # a Mac: and folio's with real VMs (minutes, the first time)
 cargo xtask test -- -p folio      # cargo test's own arguments, after --
 ```
+
+libkrun is upstream's release, pinned in `xtask/src/libkrun.rs`, with this
+repo's patches, `xtask/libkrun/*.patch`, until upstream has them. The
+workspace takes it from `.libkrun`, which `cargo xtask libkrun` makes (a clone,
+the patches applied by `git am`), and makes again when the pin or a patch
+changes; cargo can't load the workspace before it's there. `cargo xtask dist`
+and `cargo xtask test` make it first, as do `bin/bottle` and `bin/folio`. A
+patch is worked on in `.libkrun`, a commit there, then written back with `git
+format-patch --zero-commit --no-signature -o ../xtask/libkrun v1.19.8`. Each
+patch is an upstream pull request's commit, ported to the release, its message
+naming the request: it goes when a release has it.
 
 `bin/bottle` and `bin/folio`, shell scripts, build bottle-cli from the
 checkout first when its sources have changed since it was (`bin/bottle-build`:

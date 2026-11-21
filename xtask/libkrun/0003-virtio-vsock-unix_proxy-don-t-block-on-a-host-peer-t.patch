@@ -1,0 +1,647 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Romeu Mello <romeumello@icloud.com>
+Date: Tue, 3 Nov 2026 14:53:43 -0300
+Subject: [PATCH 3/5] virtio/vsock/unix_proxy: don't block on a host peer that
+ stops reading
+
+Once connected, the unix proxy switched the host socket to blocking mode
+and wrote guest data with send(). The TX queue is processed on the thread
+that also serves every other vsock connection and the other devices, so a
+host peer that stopped reading blocked that thread on the full socket.
+On macOS this froze the whole guest: the virtio console waits for the
+host with interrupts masked, so a CPU writing to it stalled, and RCU
+reported stalls. A pipeline such as `docker export | docker run -i`
+through the proxy hung that way for an hour.
+
+Keep the socket non-blocking. Data the socket doesn't take waits in a
+per-connection buffer and the proxy polls for output; the credit given
+back to the guest only advances as bytes reach the host, so the guest
+stops sending and the buffer stays below the buffer size the proxy
+advertises. A guest that ignores its credit gets the connection reset
+instead of making the VMM buffer without bound. A shutdown of the
+guest's send side, or of both sides, waits until the buffer is written.
+
+Add a vsock-unix-slow-reader end-to-end test: the guest streams 16 MiB on
+one connection that the host leaves unread, the host expects an answer
+on a second connection meanwhile, then reads and checks the whole
+stream. Without this change it times out.
+
+Generated-by: Claude Code: claude-opus-5.5
+Assisted-by: Grok Bot:unknown
+Signed-off-by: Romeu Mello <romeumello@icloud.com>
+
+(cherry picked from commit 2b3ce5cd, libkrun/libkrun#978, onto v1.19.8: the proxy's changes made to vsock/unix.rs, from before main split it into unix_proxy/, as methods of UnixProxy; the Windows proxy's left out, as v1.19.8 has none)
+---
+ src/devices/src/virtio/vsock/unix.rs          | 260 ++++++++++++++----
+ tests/test_cases/src/lib.rs                   |   7 +
+ .../src/test_vsock_unix_slow_reader.rs        | 204 ++++++++++++++
+ 3 files changed, 414 insertions(+), 57 deletions(-)
+ create mode 100644 tests/test_cases/src/test_vsock_unix_slow_reader.rs
+
+diff --git a/src/devices/src/virtio/vsock/unix.rs b/src/devices/src/virtio/vsock/unix.rs
+index 868322e8..61ae1051 100644
+--- a/src/devices/src/virtio/vsock/unix.rs
++++ b/src/devices/src/virtio/vsock/unix.rs
+@@ -9,7 +9,7 @@ use nix::sys::socket::{
+     accept, bind, connect, listen, recv, send, shutdown, socket, AddressFamily, Backlog, MsgFlags,
+     Shutdown, SockFlag, SockType, UnixAddr,
+ };
+-use std::collections::HashMap;
++use std::collections::{HashMap, VecDeque};
+ use std::num::Wrapping;
+ use std::os::fd::{FromRawFd, OwnedFd};
+ use std::os::unix::io::{AsRawFd, RawFd};
+@@ -41,6 +41,15 @@ pub struct UnixProxy {
+     control_port: u32,
+     peer_shutdown: u32,
+     host_read_closed: bool,
++    /// Guest data the host socket did not take yet. The guest can't send more than
++    /// the credit we return as we write, so this stays below `CONN_TX_BUF_SIZE`;
++    /// the connection is reset if a guest ignoring its credit overflows it.
++    pending_tx: VecDeque<u8>,
++    /// The guest shut down its send side while `pending_tx` still had data.
++    shutdown_write_pending: bool,
++    /// The guest shut down both sides while `pending_tx` still had data: the
++    /// connection closes once that data is written.
++    close_after_flush: bool,
+     peer_fwd_cnt: Wrapping<u32>,
+     peer_buf_alloc: u32,
+     tx_cnt: Wrapping<u32>,
+@@ -93,6 +102,15 @@ fn set_nosigpipe(fd: &OwnedFd) {
+ }
+ 
+ impl UnixProxy {
++    /// Resets the guest side and lets the muxer remove this connection.
++    fn close(&mut self) -> ProxyUpdate {
++        self.push_reset();
++        let mut update = self.release();
++        update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
++        update.signal_queue = true;
++        update
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     pub fn new(
+         id: u64,
+@@ -114,6 +132,9 @@ impl UnixProxy {
+             control_port,
+             peer_shutdown: 0,
+             host_read_closed: false,
++            pending_tx: VecDeque::new(),
++            shutdown_write_pending: false,
++            close_after_flush: false,
+             fd,
+             status: ProxyStatus::Idle,
+             mem,
+@@ -149,6 +170,9 @@ impl UnixProxy {
+             control_port: 0,
+             peer_shutdown: 0,
+             host_read_closed: false,
++            pending_tx: VecDeque::new(),
++            shutdown_write_pending: false,
++            close_after_flush: false,
+             fd,
+             status: ProxyStatus::ReverseInit,
+             mem,
+@@ -166,11 +190,17 @@ impl UnixProxy {
+ 
+     fn switch_to_connected(&mut self) {
+         self.status = ProxyStatus::Connected;
++        // Stay non-blocking (accepted sockets start blocking): a host peer that stops
++        // reading must not block the thread that also runs the other vsock
++        // connections and devices. Data the socket doesn't take waits in `pending_tx`.
+         match fcntl(&self.fd, FcntlArg::F_GETFL) {
+             Ok(flags) => match OFlag::from_bits(flags) {
+                 Some(flags) => {
+-                    if let Err(e) = fcntl(&self.fd, FcntlArg::F_SETFL(flags & !OFlag::O_NONBLOCK)) {
+-                        warn!("error switching to blocking: id={}, err={}", self.id, e);
++                    if let Err(e) = fcntl(&self.fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)) {
++                        warn!(
++                            "error switching to non-blocking: id={}, err={}",
++                            self.id, e
++                        );
+                     }
+                 }
+                 None => error!("invalid fd flags id={}", self.id),
+@@ -179,6 +209,137 @@ impl UnixProxy {
+         };
+     }
+ 
++    /// The events to poll for: input while the guest has credit for it, and output
++    /// while guest data waits for room in the host socket.
++    fn interest(&self) -> EventSet {
++        let mut events = EventSet::empty();
++        if self.status == ProxyStatus::Connected && !self.host_read_closed {
++            events |= EventSet::IN;
++        }
++        if !self.pending_tx.is_empty() {
++            events |= EventSet::OUT;
++        }
++        events
++    }
++
++    /// Writes as much of `buf` as the host socket takes, counting it as forwarded.
++    fn send_host(&mut self, buf: &[u8]) -> Result<usize, Errno> {
++        #[cfg(target_os = "macos")]
++        let flags = MsgFlags::empty();
++
++        #[cfg(target_os = "linux")]
++        let flags = MsgFlags::MSG_NOSIGNAL;
++
++        let mut sent = 0;
++        while sent < buf.len() {
++            match send(self.fd.as_raw_fd(), &buf[sent..], flags) {
++                Ok(n) => sent += n,
++                Err(Errno::EINTR) => continue,
++                Err(Errno::EAGAIN) => break,
++                Err(e) => return Err(e),
++            }
++        }
++        self.tx_cnt += Wrapping(sent as u32);
++        Ok(sent)
++    }
++
++    /// Returns credit to the guest once enough data was forwarded to the host.
++    fn credit_update(&mut self, update: &mut ProxyUpdate) {
++        if (self.tx_cnt - self.last_tx_cnt_sent).0 < self.peer_buf_alloc / 2 {
++            return;
++        }
++        debug!(
++            "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
++            self.id, self.tx_cnt, self.last_tx_cnt_sent
++        );
++        self.last_tx_cnt_sent = self.tx_cnt;
++
++        let rx = MuxerRx::CreditUpdate {
++            local_port: self.local_port,
++            peer_port: self.peer_port,
++            fwd_cnt: self.tx_cnt.0,
++        };
++
++        push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem);
++        update.signal_queue = true;
++    }
++
++    /// The host side is gone (e.g. the peer fully closed): resets the connection
++    /// instead of silently dropping the guest's writes, or the guest blocks once
++    /// its send window fills.
++    fn reset_after_send_error(&mut self, update: &mut ProxyUpdate, err: Errno) {
++        warn!("unix proxy send error: id={}, err={}", self.id, err);
++        self.reset(update);
++    }
++
++    /// Drops the data waiting for the host and resets the connection.
++    fn reset(&mut self, update: &mut ProxyUpdate) {
++        self.pending_tx.clear();
++        self.push_reset();
++        self.status = ProxyStatus::Closed;
++        update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
++        update.remove_proxy = ProxyRemoval::Deferred;
++        update.signal_queue = true;
++    }
++
++    /// Queues guest data the host socket did not take. The guest can't have more
++    /// than the buffer we advertise in flight, so a connection whose queue would
++    /// grow past it is reset: a guest ignoring its credit must not make the VMM
++    /// buffer without bound. Returns false if the connection was reset.
++    fn queue_pending(&mut self, data: &[u8], update: &mut ProxyUpdate) -> bool {
++        if self.pending_tx.len() + data.len() > defs::CONN_TX_BUF_SIZE {
++            warn!(
++                "unix proxy: guest exceeded its send credit, resetting: id={}, pending={}, len={}",
++                self.id,
++                self.pending_tx.len(),
++                data.len()
++            );
++            self.reset(update);
++            return false;
++        }
++        self.pending_tx.extend(data);
++        true
++    }
++
++    /// Writes the guest data that was waiting for room in the host socket.
++    fn flush_pending(&mut self, update: &mut ProxyUpdate) {
++        while !self.pending_tx.is_empty() {
++            let mut pending = std::mem::take(&mut self.pending_tx);
++            let (front, _) = pending.as_slices();
++            let len = front.len();
++            let result = self.send_host(front);
++            match result {
++                Ok(sent) => {
++                    pending.drain(..sent);
++                    self.pending_tx = pending;
++                    if sent < len {
++                        break;
++                    }
++                }
++                Err(e) => {
++                    self.reset_after_send_error(update, e);
++                    return;
++                }
++            }
++        }
++        self.credit_update(update);
++        if self.pending_tx.is_empty() && self.shutdown_write_pending {
++            self.shutdown_write_pending = false;
++            if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Write) {
++                debug!("error sending shutdown(Write) to socket: {e}");
++            }
++        }
++        if self.pending_tx.is_empty() && self.close_after_flush {
++            self.close_after_flush = false;
++            let close = self.close();
++            update.polling = close.polling;
++            update.remove_proxy = close.remove_proxy;
++            update.signal_queue = true;
++            return;
++        }
++        update.polling = Some((self.id, self.fd.as_raw_fd(), self.interest()));
++    }
++
+     fn push_connect_rsp(&self, result: i32) {
+         debug!(
+             "push_connect_rsp: id: {}, control_port: {}, result: {}",
+@@ -332,14 +493,17 @@ impl UnixProxy {
+             .set_fwd_cnt(self.tx_cnt.0);
+     }
+ 
+-    fn do_shutdown(&self, pkt: &VsockPacket) {
++    fn do_shutdown(&mut self, pkt: &VsockPacket) {
+         let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
+         let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
+ 
+         // Shutdown each direction independently: on macOS, shutdown(SHUT_RDWR) on
+         // a socket whose peer already shut down its write side returns ENOTCONN,
+         // and the host never sees EOF until the proxy is reaped.
+-        if send_off {
++        // Data still waiting for the host goes out before the write side closes.
++        if send_off && !self.pending_tx.is_empty() {
++            self.shutdown_write_pending = true;
++        } else if send_off {
+             if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Write) {
+                 debug!("error sending shutdown(Write) to socket: {e}");
+             }
+@@ -431,57 +595,32 @@ impl Proxy for UnixProxy {
+     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
+         let mut update = ProxyUpdate::default();
+ 
+-        let ret = if let Some(buf) = pkt.buf() {
+-            #[cfg(target_os = "macos")]
+-            let flags = MsgFlags::empty();
++        let Some(buf) = pkt.buf() else {
++            debug!("sendmsg: pkt without buf");
++            return update;
++        };
+ 
+-            #[cfg(target_os = "linux")]
+-            let flags = MsgFlags::MSG_NOSIGNAL;
++        // Keep the order: while older data waits, newer data waits behind it.
++        if !self.pending_tx.is_empty() {
++            self.queue_pending(buf, &mut update);
++            return update;
++        }
+ 
+-            match send(self.fd.as_raw_fd(), buf, flags) {
+-                Ok(sent) => {
+-                    if sent != buf.len() {
+-                        error!("couldn't set everything: buf={}, sent={}", buf.len(), sent);
+-                    }
+-                    self.tx_cnt += Wrapping(sent as u32);
+-                    sent as i32
+-                }
+-                Err(Errno::EAGAIN | Errno::EINTR) => 0,
+-                Err(err) => {
+-                    // The host side is gone (e.g. the peer fully closed): reset the
+-                    // connection instead of silently dropping the guest's writes, or
+-                    // the guest blocks once its send window fills.
+-                    warn!("unix proxy send error: id={}, err={}", self.id, err);
+-                    self.push_reset();
+-                    self.status = ProxyStatus::Closed;
+-                    update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+-                    update.remove_proxy = ProxyRemoval::Deferred;
+-                    update.signal_queue = true;
++        match self.send_host(buf) {
++            Ok(sent) if sent < buf.len() => {
++                debug!("sendmsg: host socket full, id={} sent={sent}", self.id);
++                if !self.queue_pending(&buf[sent..], &mut update) {
+                     return update;
+                 }
++                update.polling = Some((self.id, self.fd.as_raw_fd(), self.interest()));
++            }
++            Ok(_) => {}
++            Err(e) => {
++                self.reset_after_send_error(&mut update, e);
++                return update;
+             }
+-        } else {
+-            -libc::EINVAL
+-        };
+-
+-        if ret > 0 && (self.tx_cnt - self.last_tx_cnt_sent).0 >= self.peer_buf_alloc / 2 {
+-            debug!(
+-                "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
+-                self.id, self.tx_cnt, self.last_tx_cnt_sent
+-            );
+-            self.last_tx_cnt_sent = self.tx_cnt;
+-
+-            let rx = MuxerRx::CreditUpdate {
+-                local_port: pkt.dst_port(),
+-                peer_port: pkt.src_port(),
+-                fwd_cnt: self.tx_cnt.0,
+-            };
+-
+-            push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem);
+-            update.signal_queue = true;
+         }
+-
+-        debug!("sendmsg ret={ret}");
++        self.credit_update(&mut update);
+ 
+         update
+     }
+@@ -523,7 +662,7 @@ impl Proxy for UnixProxy {
+         self.status = ProxyStatus::Connected;
+ 
+         ProxyUpdate {
+-            polling: Some((self.id, self.fd.as_raw_fd(), EventSet::IN)),
++            polling: Some((self.id, self.fd.as_raw_fd(), self.interest())),
+             ..Default::default()
+         }
+     }
+@@ -580,11 +719,16 @@ impl Proxy for UnixProxy {
+             return ProxyUpdate::default();
+         }
+ 
+-        self.push_reset();
+-        let mut update = self.release();
+         self.status = ProxyStatus::Closed;
+-        update.signal_queue = true;
+-        update
++        if !self.pending_tx.is_empty() {
++            // Data the guest already sent still has to reach the host.
++            self.close_after_flush = true;
++            return ProxyUpdate {
++                polling: Some((self.id, self.fd.as_raw_fd(), EventSet::OUT)),
++                ..Default::default()
++            };
++        }
++        self.close()
+     }
+ 
+     fn release(&mut self) -> ProxyUpdate {
+@@ -664,7 +808,7 @@ impl Proxy for UnixProxy {
+                     return update;
+                 } else if self.host_read_closed || self.status == ProxyStatus::WaitingCreditUpdate {
+                     debug!("process_event: disabling read polling");
+-                    update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
++                    update.polling = Some((self.id(), self.fd.as_raw_fd(), self.interest()));
+                 }
+             } else {
+                 debug!("EventSet::IN while not connected: {:?}", self.status);
+@@ -678,8 +822,10 @@ impl Proxy for UnixProxy {
+                 self.push_connect_rsp(0);
+                 update.signal_queue = true;
+                 update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::IN));
++            } else if !self.pending_tx.is_empty() {
++                self.flush_pending(&mut update);
+             } else {
+-                error!("EventSet::OUT while not connecting");
++                debug!("EventSet::OUT with nothing to send: {:?}", self.status);
+             }
+         }
+ 
+diff --git a/tests/test_cases/src/lib.rs b/tests/test_cases/src/lib.rs
+index 37842141..f6ce472d 100644
+--- a/tests/test_cases/src/lib.rs
++++ b/tests/test_cases/src/lib.rs
+@@ -19,6 +19,11 @@ mod test_vsock_unix_half_close;
+ #[cfg(any(feature = "host", target_os = "linux"))]
+ use test_vsock_unix_half_close::TestVsockUnixHalfClose;
+ 
++#[cfg(any(feature = "host", target_os = "linux"))]
++mod test_vsock_unix_slow_reader;
++#[cfg(any(feature = "host", target_os = "linux"))]
++use test_vsock_unix_slow_reader::TestVsockUnixSlowReader;
++
+ mod test_tsi_tcp_guest_connect;
+ use test_tsi_tcp_guest_connect::TestTsiTcpGuestConnect;
+ 
+@@ -108,6 +113,8 @@ pub fn test_cases() -> Vec<TestCase> {
+         ),
+         #[cfg(any(feature = "host", target_os = "linux"))]
+         TestCase::new("vsock-unix-half-close", Box::new(TestVsockUnixHalfClose)),
++        #[cfg(any(feature = "host", target_os = "linux"))]
++        TestCase::new("vsock-unix-slow-reader", Box::new(TestVsockUnixSlowReader)),
+         TestCase::new(
+             "tsi-tcp-guest-connect",
+             Box::new(TestTsiTcpGuestConnect::new()),
+diff --git a/tests/test_cases/src/test_vsock_unix_slow_reader.rs b/tests/test_cases/src/test_vsock_unix_slow_reader.rs
+new file mode 100644
+index 00000000..6eefc42c
+--- /dev/null
++++ b/tests/test_cases/src/test_vsock_unix_slow_reader.rs
+@@ -0,0 +1,204 @@
++#![cfg(any(feature = "host", target_os = "linux"))]
++
++//! A host peer that stops reading a unix socket proxy must not stall the other
++//! vsock connections. The guest streams `BULK_LEN` bytes on one connection while
++//! the host leaves it unread, and the host expects an answer on a second
++//! connection meanwhile; then it reads the whole stream and checks it.
++//! Writing to the host socket used to block the thread that serves every vsock
++//! connection (and the other devices), so the second connection never got its
++//! answer.
++
++use macros::{guest, host};
++use std::time::Duration;
++
++pub struct TestVsockUnixSlowReader;
++
++/// The guest connects out on this port once its listener is bound, and the
++/// host reports the outcome back on the same connection.
++const CONTROL_PORT: u32 = 1234;
++/// Registered with `listen=true`: the host connects, the guest accepts.
++const ACCEPT_PORT: u32 = 1235;
++
++const BULK_LEN: usize = 16 * 1024 * 1024;
++const IO_TIMEOUT: Duration = Duration::from_secs(5);
++
++fn byte_at(index: usize) -> u8 {
++    (index % 251) as u8
++}
++
++#[host]
++mod host {
++    use super::*;
++    #[cfg(feature = "dynamic-linking")]
++    use krun::DeviceManager;
++
++    use anyhow::{Context, ensure};
++    use std::io::{Read, Write};
++    use std::os::unix::net::{UnixListener, UnixStream};
++    use std::path::Path;
++    use std::thread;
++
++    use crate::common::{build_init_config, setup_standard_devices};
++    use crate::{Test, TestSetup};
++
++    fn run_client(accept_sock: &Path) -> anyhow::Result<()> {
++        let mut bulk = UnixStream::connect(accept_sock).context("connect bulk")?;
++        // Leave the bulk stream unread long enough for its socket buffer to fill.
++        thread::sleep(Duration::from_secs(1));
++
++        let mut ping = UnixStream::connect(accept_sock).context("connect ping")?;
++        ping.set_read_timeout(Some(IO_TIMEOUT))?;
++        ping.write_all(b"p").context("send ping")?;
++        let mut pong = [0; 4];
++        ping.read_exact(&mut pong)
++            .context("no answer on a second connection while the first is unread")?;
++        ensure!(&pong == b"pong", "wrong answer: {pong:?}");
++
++        bulk.set_read_timeout(Some(IO_TIMEOUT))?;
++        let mut data = Vec::new();
++        bulk.read_to_end(&mut data).context("read bulk stream")?;
++        ensure!(
++            data.len() == BULK_LEN,
++            "bulk stream has {} bytes",
++            data.len()
++        );
++        ensure!(
++            data.iter().enumerate().all(|(i, b)| *b == byte_at(i)),
++            "bulk stream is corrupted"
++        );
++        Ok(())
++    }
++
++    fn run(control_listener: UnixListener, accept_sock: &Path) {
++        // Returns once the guest has bound its listener.
++        let (mut control, _) = control_listener.accept().unwrap();
++
++        let status = match run_client(accept_sock) {
++            Ok(()) => 1,
++            Err(error) => {
++                eprintln!("slow reader client failed: {error:#}");
++                0
++            }
++        };
++        control.write_all(&[status]).unwrap();
++        // Keep the connection open until the guest has read the status.
++        let _ = control.read(&mut [0]);
++    }
++
++    impl Test for TestVsockUnixSlowReader {
++        fn timeout_secs(&self) -> u64 {
++            30
++        }
++
++        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
++            let control_sock = test_setup.tmp_dir.join("control.sock");
++            let accept_sock = test_setup.tmp_dir.join("accept.sock");
++
++            let control_listener = UnixListener::bind(&control_sock)?;
++            let accept_sock_clone = accept_sock.clone();
++            thread::spawn(move || run(control_listener, &accept_sock_clone));
++
++            let init_config = build_init_config(&test_setup.test_case, &[]);
++            let stdin = std::io::stdin();
++            let stdout = std::io::stdout();
++            let stderr = std::io::stderr();
++            let (mut devices, payload) =
++                setup_standard_devices(&test_setup, &init_config, &stdin, &stdout, &stderr)?;
++            let mut vsock = krun::VsockDevice::new(3, krun::TsiFlags::empty())
++                .map_err(|e| anyhow::anyhow!("VsockDevice: {e:?}"))?;
++            vsock.add_unix_port(CONTROL_PORT, control_sock.to_str().unwrap(), false);
++            vsock.add_unix_port(ACCEPT_PORT, accept_sock.to_str().unwrap(), true);
++            devices.add(vsock);
++
++            let vmm = krun::VmmBuilder::new()
++                .vcpus(1)
++                .map_err(|e| anyhow::anyhow!("vcpus: {e:?}"))?
++                .ram_mib(512)
++                .map_err(|e| anyhow::anyhow!("ram_mib: {e:?}"))?
++                .payload(payload)
++                .devices(devices)
++                .build()
++                .map_err(|e| anyhow::anyhow!("build: {e:?}"))?;
++
++            vmm.run();
++            unreachable!()
++        }
++    }
++}
++
++#[guest]
++mod guest {
++    use super::*;
++    use crate::Test;
++    use nix::libc::VMADDR_CID_HOST;
++    use nix::sys::socket::{
++        AddressFamily, Backlog, SockFlag, SockType, VsockAddr, accept, bind, connect, listen,
++        socket,
++    };
++    use std::io::{Read, Write};
++    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++    use std::os::unix::net::UnixStream;
++    use std::thread;
++
++    fn vsock_connect(port: u32) -> UnixStream {
++        let sock = socket(
++            AddressFamily::Vsock,
++            SockType::Stream,
++            SockFlag::empty(),
++            None,
++        )
++        .unwrap();
++        connect(sock.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, port)).unwrap();
++        UnixStream::from(sock)
++    }
++
++    fn accept_stream(listener: &OwnedFd) -> UnixStream {
++        let fd = accept(listener.as_raw_fd()).unwrap();
++        // Safe because we've just obtained the FD from the `accept` call above.
++        UnixStream::from(unsafe { OwnedFd::from_raw_fd(fd) })
++    }
++
++    impl Test for TestVsockUnixSlowReader {
++        fn in_guest(self: Box<Self>) {
++            let listener = socket(
++                AddressFamily::Vsock,
++                SockType::Stream,
++                SockFlag::empty(),
++                None,
++            )
++            .unwrap();
++            bind(
++                listener.as_raw_fd(),
++                &VsockAddr::new(nix::libc::VMADDR_CID_ANY, ACCEPT_PORT),
++            )
++            .unwrap();
++            listen(&listener, Backlog::new(4).unwrap()).unwrap();
++
++            let mut control = vsock_connect(CONTROL_PORT);
++
++            let mut bulk = accept_stream(&listener);
++            let writer = thread::spawn(move || {
++                let data: Vec<u8> = (0..BULK_LEN).map(byte_at).collect();
++                bulk.write_all(&data).unwrap();
++            });
++
++            let mut ping = accept_stream(&listener);
++            ping.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
++            let mut byte = [0];
++            ping.read_exact(&mut byte).unwrap();
++            ping.write_all(b"pong").unwrap();
++
++            writer.join().unwrap();
++
++            let mut status = [0];
++            control.read_exact(&mut status).unwrap();
++            control.write_all(&[1]).unwrap();
++            assert_eq!(
++                status,
++                [1],
++                "host got no answer on a second connection, or a corrupted stream"
++            );
++            println!("OK");
++        }
++    }
++}

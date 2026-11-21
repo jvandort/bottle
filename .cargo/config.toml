@@ -1,6 +1,7 @@
 [alias]
-# bottle's build steps past cargo's own (xtask/): `cargo xtask dist`.
-xtask = "run -q -p xtask --"
+# bottle's build steps past cargo's own (xtask/): `cargo xtask dist`. A workspace of its own, so
+# it runs before the workspace can be loaded (see xtask/src/libkrun.rs); from the checkout's root.
+xtask = "run -q --manifest-path xtask/Cargo.toml --"
 
 # The agent runs in bottles' VMs: a static Linux build, made on any host with Rust's own musl and
 # linker, nothing else installed (rustup target add aarch64-unknown-linux-musl, say).

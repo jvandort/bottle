@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Romeu Mello <romeumello@icloud.com>
+Date: Tue, 3 Nov 2026 14:53:42 -0300
+Subject: [PATCH 2/5] utils/macos/epoll: delete each kqueue filter in its own
+ call
+
+Removing an fd deletes both its EVFILT_READ and EVFILT_WRITE filters in
+one kevent() call with no event list. When the READ filter was not
+registered that call failed and the WRITE filter stayed in place, so the
+fd kept being reported as writable after its removal.
+
+No caller polled a connected socket for output until now, so this did
+not show. Apply each deletion on its own and ignore the ones for filters
+that were not registered.
+
+Generated-by: Claude Code: claude-opus-5.5
+Signed-off-by: Romeu Mello <romeumello@icloud.com>
+(cherry picked from commit 43e4ced6e09db6c74d9e927feded16ce93cb3131)
+---
+ src/utils/src/macos/epoll.rs | 25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/src/utils/src/macos/epoll.rs b/src/utils/src/macos/epoll.rs
+index e2f92445..10a8e714 100644
+--- a/src/utils/src/macos/epoll.rs
++++ b/src/utils/src/macos/epoll.rs
+@@ -243,16 +243,21 @@ impl Epoll {
+                         ));
+                     }
+                 }
+-                let _ = unsafe {
+-                    libc::kevent(
+-                        self.queue,
+-                        kevs.as_ptr() as *const libc::kevent,
+-                        kevs.len() as i32,
+-                        ptr::null_mut(),
+-                        0,
+-                        ptr::null(),
+-                    )
+-                };
++                // One call per filter: kevent() stops at the first change that fails,
++                // so deleting a READ filter that isn't registered would leave the
++                // WRITE filter in place, firing forever.
++                for kev in &kevs {
++                    let _ = unsafe {
++                        libc::kevent(
++                            self.queue,
++                            kev as *const Kevent as *const libc::kevent,
++                            1,
++                            ptr::null_mut(),
++                            0,
++                            ptr::null(),
++                        )
++                    };
++                }
+             }
+         }
+         Ok(())

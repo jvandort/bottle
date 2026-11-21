@@ -1,0 +1,298 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Morten=20Kr=C3=A5kvik?= <morten@krakvik.io>
+Date: Tue, 10 Nov 2026 20:42:11 +0000
+Subject: [PATCH 5/5] virtio/vsock: never deliver an older fwd_cnt than data
+ already carried
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A credit update or request parked in rxq carries the fwd_cnt from when it
+was made. Data for the same connection does not go through rxq: recv_pkt()
+writes it straight into the guest's RX ring, stamped with the current
+tx_cnt. So while a credit packet waits, the guest can be sent a newer
+fwd_cnt in a data packet's header, and the parked packet then delivers
+the older one. The guest keeps the last fwd_cnt it sees, so its view of
+our buffer moves backwards, just as with the reordering fixed earlier.
+
+Each step back is less than peer_buf_alloc / 2, but they add up. Once the
+guest is behind by its own buf_alloc it has no credit, blocks in send()
+with nothing unsent, and we send no further update because we believe it
+already has a recent one. Both sides wait.
+
+Keep the newest fwd_cnt given to the guest per connection in rxq, from
+data and credit packets alike, and raise a credit packet to it as it is
+delivered. Forget it when the connection starts or ends, since the ports
+may then name a different connection.
+
+Reproduced with libkrunfw 5.6.2 built on 6.12.115, echoing 1 MiB messages
+over a guest-initiated unix-proxy port: with only the reordering fix, 2
+of 10 runs stalled, and logging showed fwd_cnt going backwards 27 to 295
+times per run, 572 of 579 times from a parked credit update after a data
+packet. With this change, 40 of 40 runs completed (libkrunfw and a plain
+6.12.115 guest), plus 15 runs with 8 GiB of pipelined echo on top.
+
+Assisted-by: Claude Code: claude-opus-5-5
+Signed-off-by: Morten Kråkvik <morten@krakvik.io>
+
+(cherry picked from commit ae40748b, libkrun/libkrun#964, onto v1.19.8: the proxies' changes made to vsock/unix.rs and vsock/tsi_stream.rs, from before main split them into unix_proxy/ and tsi_stream/)
+---
+ src/devices/src/virtio/vsock/muxer.rs        |  15 +--
+ src/devices/src/virtio/vsock/muxer_rxq.rs    | 109 ++++++++++++++++++-
+ src/devices/src/virtio/vsock/muxer_thread.rs |   4 +-
+ src/devices/src/virtio/vsock/tsi_stream.rs   |   4 +
+ src/devices/src/virtio/vsock/unix.rs         |   4 +
+ 5 files changed, 122 insertions(+), 14 deletions(-)
+
+diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsock/muxer.rs
+index 7b5d173b..e7faace3 100644
+--- a/src/devices/src/virtio/vsock/muxer.rs
++++ b/src/devices/src/virtio/vsock/muxer.rs
+@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
+ use super::super::Queue as VirtQueue;
+ use super::defs;
+ use super::defs::uapi;
+-use super::muxer_rxq::{rx_to_pkt, MuxerRxQ};
++use super::muxer_rxq::MuxerRxQ;
+ use super::muxer_thread::MuxerThread;
+ use super::packet::{TsiConnectReq, TsiGetnameRsp, VsockPacket};
+ use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
+@@ -93,7 +93,7 @@ pub fn push_packet(
+     }
+     if let Some(head) = queue.pop(mem) {
+         if let Ok(mut pkt) = VsockPacket::from_rx_virtq_head(&head) {
+-            rx_to_pkt(cid, rx, &mut pkt);
++            rxq.deliver(cid, rx, &mut pkt);
+             if let Err(e) = queue.add_used(mem, head.index, pkt.hdr().len() as u32 + pkt.len()) {
+                 error!("failed to add used elements to the queue: {e:?}");
+             }
+@@ -185,14 +185,9 @@ impl VsockMuxer {
+ 
+     pub(crate) fn recv_pkt(&mut self, pkt: &mut VsockPacket) -> super::Result<()> {
+         debug!("recv_stream_pkt");
+-        if self.rxq.lock().unwrap().is_empty() {
+-            return Err(VsockError::NoData);
+-        }
+-
+-        if let Some(rx) = self.rxq.lock().unwrap().pop() {
+-            rx_to_pkt(self.cid, rx, pkt);
+-        }
+-
++        let mut rxq = self.rxq.lock().unwrap();
++        let rx = rxq.pop().ok_or(VsockError::NoData)?;
++        rxq.deliver(self.cid, rx, pkt);
+         Ok(())
+     }
+ 
+diff --git a/src/devices/src/virtio/vsock/muxer_rxq.rs b/src/devices/src/virtio/vsock/muxer_rxq.rs
+index bc33314b..c65d7e69 100644
+--- a/src/devices/src/virtio/vsock/muxer_rxq.rs
++++ b/src/devices/src/virtio/vsock/muxer_rxq.rs
+@@ -15,7 +15,7 @@
+ /// connection pool to find it.  This walk is performed here, as part of building an RX queue from
+ /// the connection pool. When an out-of-sync is drained, the muxer will discard it, and attempt to
+ /// rebuild a synced one.
+-use std::collections::VecDeque;
++use std::collections::{HashMap, VecDeque};
+ 
+ use super::defs;
+ use super::defs::uapi;
+@@ -28,6 +28,8 @@ pub struct MuxerRxQ {
+     q: VecDeque<MuxerRx>,
+     /// The RX queue sync status.
+     synced: bool,
++    /// The newest `fwd_cnt` given to the guest per connection, by any path.
++    delivered: HashMap<(u32, u32), u32>,
+ }
+ 
+ impl MuxerRxQ {
+@@ -38,6 +40,7 @@ impl MuxerRxQ {
+         Self {
+             q: VecDeque::with_capacity(Self::SIZE),
+             synced: true,
++            delivered: HashMap::new(),
+         }
+     }
+ 
+@@ -115,6 +118,37 @@ impl MuxerRxQ {
+         folded
+     }
+ 
++    /// Record the `fwd_cnt` of a data packet just given to the guest. Data is stamped with the
++    /// current count when it is written, so it is the newest the guest has.
++    pub fn note_data(&mut self, local_port: u32, peer_port: u32, fwd_cnt: u32) {
++        self.delivered.insert((local_port, peer_port), fwd_cnt);
++    }
++
++    /// Build the guest packet for `rx`, which is being given to the guest now.
++    ///
++    /// A credit update or request carries the `fwd_cnt` from when it was made. Data for the
++    /// connection does not wait here, so while it waited the guest may already have been sent a
++    /// newer count; delivering the older one would shrink the guest's view of our buffer just as
++    /// reordering would. Raise it to the newest count the guest has been sent.
++    pub fn deliver(&mut self, cid: u64, mut rx: MuxerRx, pkt: &mut VsockPacket) {
++        self.stamp(&mut rx);
++        rx_to_pkt(cid, rx, pkt);
++    }
++
++    fn stamp(&mut self, rx: &mut MuxerRx) {
++        let ports = ports_of(rx);
++        if let Some((_, _, fwd_cnt)) = credit_of(rx) {
++            let newest = match self.delivered.get(&ports) {
++                Some(&sent) if is_after(sent, fwd_cnt) => sent,
++                _ => fwd_cnt,
++            };
++            set_fwd_cnt(rx, newest);
++            self.delivered.insert(ports, newest);
++        } else if starts_or_ends_connection(rx) {
++            self.delivered.remove(&ports);
++        }
++    }
++
+     /// Pop an RX item from the front of the queue.
+     pub fn pop(&mut self) -> Option<MuxerRx> {
+         self.q.pop_front()
+@@ -204,6 +238,18 @@ fn ports_of(rx: &MuxerRx) -> (u32, u32) {
+     }
+ }
+ 
++/// After these the ports may name a different connection, whose `fwd_cnt` starts afresh.
++fn starts_or_ends_connection(rx: &MuxerRx) -> bool {
++    matches!(
++        rx,
++        MuxerRx::Reset { .. }
++            | MuxerRx::ConnResponse { .. }
++            | MuxerRx::OpRequest { .. }
++            | MuxerRx::OpResponse { .. }
++            | MuxerRx::AcceptResponse { .. }
++    )
++}
++
+ fn set_fwd_cnt(rx: &mut MuxerRx, value: u32) {
+     if let MuxerRx::CreditUpdate { fwd_cnt, .. } | MuxerRx::CreditRequest { fwd_cnt, .. } = rx {
+         *fwd_cnt = value;
+@@ -215,7 +261,7 @@ fn is_after(a: u32, b: u32) -> bool {
+     (a.wrapping_sub(b) as i32) > 0
+ }
+ 
+-pub fn rx_to_pkt(cid: u64, rx: MuxerRx, pkt: &mut VsockPacket) {
++fn rx_to_pkt(cid: u64, rx: MuxerRx, pkt: &mut VsockPacket) {
+     match rx {
+         MuxerRx::Reset {
+             local_port,
+@@ -478,4 +524,63 @@ mod tests {
+             ]
+         );
+     }
++
++    fn stamped(q: &mut MuxerRxQ, mut rx: MuxerRx) -> Option<(u32, u32, u32)> {
++        q.stamp(&mut rx);
++        credit_of(&rx)
++    }
++
++    #[test]
++    fn queued_update_is_raised_to_data_sent_meanwhile() {
++        let mut q = MuxerRxQ::new();
++        assert!(q.push(update(100)));
++        q.note_data(5600, 1234, 300);
++        let rx = q.pop().unwrap();
++        assert_eq!(stamped(&mut q, rx), Some((5600, 1234, 300)));
++    }
++
++    #[test]
++    fn queued_request_is_raised_to_an_update_sent_before_it() {
++        let mut q = MuxerRxQ::new();
++        assert_eq!(stamped(&mut q, update(300)), Some((5600, 1234, 300)));
++        assert_eq!(stamped(&mut q, request(100)), Some((5600, 1234, 300)));
++    }
++
++    #[test]
++    fn newer_credit_is_delivered_as_it_is() {
++        let mut q = MuxerRxQ::new();
++        q.note_data(5600, 1234, 100);
++        assert_eq!(stamped(&mut q, update(300)), Some((5600, 1234, 300)));
++    }
++
++    #[test]
++    fn raising_works_across_counter_wrap() {
++        let mut q = MuxerRxQ::new();
++        q.note_data(5600, 1234, 5);
++        assert_eq!(
++            stamped(&mut q, update(u32::MAX - 10)),
++            Some((5600, 1234, 5))
++        );
++    }
++
++    #[test]
++    fn a_new_connection_on_the_same_ports_starts_afresh() {
++        let mut q = MuxerRxQ::new();
++        q.note_data(5600, 1234, 500);
++        stamped(
++            &mut q,
++            MuxerRx::Reset {
++                local_port: 5600,
++                peer_port: 1234,
++            },
++        );
++        assert_eq!(stamped(&mut q, update(100)), Some((5600, 1234, 100)));
++    }
++
++    #[test]
++    fn data_on_another_connection_is_not_counted() {
++        let mut q = MuxerRxQ::new();
++        q.note_data(5601, 1234, 500);
++        assert_eq!(stamped(&mut q, update(100)), Some((5600, 1234, 100)));
++    }
+ }
+diff --git a/src/devices/src/virtio/vsock/muxer_thread.rs b/src/devices/src/virtio/vsock/muxer_thread.rs
+index 392839a7..d3ad069d 100644
+--- a/src/devices/src/virtio/vsock/muxer_thread.rs
++++ b/src/devices/src/virtio/vsock/muxer_thread.rs
+@@ -6,7 +6,7 @@ use std::thread;
+ 
+ use super::super::Queue as VirtQueue;
+ use super::muxer::{push_packet, MuxerRx, ProxyMap};
+-use super::muxer_rxq::{rx_to_pkt, MuxerRxQ};
++use super::muxer_rxq::MuxerRxQ;
+ use super::packet::VsockPacket;
+ use super::proxy::{NewProxyType, Proxy, ProxyRemoval, ProxyUpdate};
+ use super::tsi_stream::TsiStreamProxy;
+@@ -72,7 +72,7 @@ impl MuxerThread {
+         while let Some(rx) = rxq.pop() {
+             if let Some(head) = queue.pop(&self.mem) {
+                 if let Ok(mut pkt) = VsockPacket::from_rx_virtq_head(&head) {
+-                    rx_to_pkt(self.cid, rx, &mut pkt);
++                    rxq.deliver(self.cid, rx, &mut pkt);
+                     if let Err(e) =
+                         queue.add_used(&self.mem, head.index, pkt.hdr().len() as u32 + pkt.len())
+                     {
+diff --git a/src/devices/src/virtio/vsock/tsi_stream.rs b/src/devices/src/virtio/vsock/tsi_stream.rs
+index 5f18766f..85f73cf1 100644
+--- a/src/devices/src/virtio/vsock/tsi_stream.rs
++++ b/src/devices/src/virtio/vsock/tsi_stream.rs
+@@ -199,6 +199,10 @@ impl TsiStreamProxy {
+             .set_type(uapi::VSOCK_TYPE_STREAM)
+             .set_buf_alloc(defs::CONN_TX_BUF_SIZE as u32)
+             .set_fwd_cnt(self.tx_cnt.0);
++        self.rxq
++            .lock()
++            .unwrap()
++            .note_data(self.local_port, self.peer_port, self.tx_cnt.0);
+     }
+ 
+     fn try_listen(&mut self, req: &TsiListenReq, host_port_map: &Option<HashMap<u16, u16>>) -> i32 {
+diff --git a/src/devices/src/virtio/vsock/unix.rs b/src/devices/src/virtio/vsock/unix.rs
+index 61ae1051..8163d56e 100644
+--- a/src/devices/src/virtio/vsock/unix.rs
++++ b/src/devices/src/virtio/vsock/unix.rs
+@@ -491,6 +491,10 @@ impl UnixProxy {
+             .set_type(uapi::VSOCK_TYPE_STREAM)
+             .set_buf_alloc(defs::CONN_TX_BUF_SIZE as u32)
+             .set_fwd_cnt(self.tx_cnt.0);
++        self.rxq
++            .lock()
++            .unwrap()
++            .note_data(self.local_port, self.peer_port, self.tx_cnt.0);
+     }
+ 
+     fn do_shutdown(&mut self, pkt: &VsockPacket) {

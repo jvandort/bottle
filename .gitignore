@@ -3,3 +3,7 @@ __pycache__/
 .idea/
 .mypy_cache/
 /target/
+/xtask/target/
+# libkrun as bottle-cli links it, made by `cargo xtask libkrun`.
+/.libkrun/
+/.libkrun.*

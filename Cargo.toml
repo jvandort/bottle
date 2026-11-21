@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["agent-proto", "agent", "agent-client", "net", "cli", "disk", "formats", "xtask", "folio", "folio/standin"]
+members = ["agent-proto", "agent", "agent-client", "net", "cli", "disk", "formats", "folio", "folio/standin"]
+# xtask, a workspace of its own: it makes .libkrun, which loading this one takes (see
+# xtask/src/libkrun.rs). .libkrun's crates are libkrun's, not this workspace's (their tests and
+# dev-dependencies too), though they're in its directory.
+exclude = ["xtask", ".libkrun"]
 
 [workspace.package]
 edition = "2024"
@@ -28,7 +32,9 @@ rustls-native-certs = "0.8.5"
 time = { version = "0.3", default-features = false }
 # libkrun, linked: its C API, called directly. Its own init is ours instead (bottle-agent), so not
 # its init-blob; disks, not its network devices (bottle's network is the agent's, over vsock).
-libkrun = { git = "https://github.com/containers/libkrun", tag = "v1.19.8", default-features = false, features = ["blk"] }
+# Upstream's release with this repo's patches, which `cargo xtask libkrun` makes (xtask/src/libkrun.rs
+# pins the release; xtask/libkrun has the patches).
+libkrun = { path = ".libkrun/src/libkrun", default-features = false, features = ["blk"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

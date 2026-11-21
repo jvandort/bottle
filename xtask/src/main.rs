@@ -2,8 +2,11 @@
 //!
 //!     cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]
 //!     cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]
+//!     cargo xtask libkrun
 //!
 //! `test` is the workspace's tests, with the programs they run built for them (see test.rs).
+//! `libkrun` is libkrun as bottle-cli links it, upstream's with this repo's patches, which the
+//! workspace takes from .libkrun (see libkrun.rs): `dist` and `test` make it first.
 //!
 //! Builds a distribution for each TRIPLE (this machine's own, if none is given) into
 //! $CARGO_TARGET_DIR's dist for this machine's own, or dist-TRIPLE for another (target/, if it isn't
@@ -42,6 +45,7 @@
 //! sha256sum writes them, which is what a runner's copy is compared with (bottle-cli's runner.rs).
 
 use kernel::kernel;
+use libkrun::libkrun;
 use linux::{LinuxC, linux_dists};
 use mac::mac_dist;
 use mke2fs::mke2fs;
@@ -55,6 +59,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 mod kernel;
+mod libkrun;
 mod linux;
 mod mac;
 mod mke2fs;
@@ -67,9 +72,11 @@ fn main() -> ExitCode {
             parse_dist(&args[1..]).and_then(|(profile, targets, out)| dist(profile, targets, out))
         }
         Some("test") => test::test(&args[1..]),
+        Some("libkrun") if args.len() == 1 => libkrun(),
         _ => Err(
             "usage: cargo xtask dist [--release] [--target TRIPLE]... [--out DIR]\n       \
-                  cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]"
+                  cargo xtask test [--root] [--vm] [-- CARGO_TEST_ARGS...]\n       \
+                  cargo xtask libkrun"
                 .into(),
         ),
     };
@@ -215,6 +222,7 @@ fn dist(profile: Profile, mut targets: Vec<String>, out: Option<PathBuf>) -> Res
             TARGETS.join(", ")
         ));
     }
+    libkrun()?;
     let outs: Vec<(String, PathBuf)> = targets
         .iter()
         .map(|t| {
