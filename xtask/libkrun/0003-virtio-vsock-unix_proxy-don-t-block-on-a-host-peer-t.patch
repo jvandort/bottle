@@ -32,14 +32,14 @@ Signed-off-by: Romeu Mello <romeumello@icloud.com>
 
 (cherry picked from commit 2b3ce5cd, libkrun/libkrun#978, onto v1.19.8: the proxy's changes made to vsock/unix.rs, from before main split it into unix_proxy/, as methods of UnixProxy; the Windows proxy's left out, as v1.19.8 has none)
 ---
- src/devices/src/virtio/vsock/unix.rs          | 260 ++++++++++++++----
+ src/devices/src/virtio/vsock/unix.rs          | 257 ++++++++++++++----
  tests/test_cases/src/lib.rs                   |   7 +
  .../src/test_vsock_unix_slow_reader.rs        | 204 ++++++++++++++
- 3 files changed, 414 insertions(+), 57 deletions(-)
+ 3 files changed, 411 insertions(+), 57 deletions(-)
  create mode 100644 tests/test_cases/src/test_vsock_unix_slow_reader.rs
 
 diff --git a/src/devices/src/virtio/vsock/unix.rs b/src/devices/src/virtio/vsock/unix.rs
-index 868322e8..61ae1051 100644
+index 868322e8..4024cfb1 100644
 --- a/src/devices/src/virtio/vsock/unix.rs
 +++ b/src/devices/src/virtio/vsock/unix.rs
 @@ -9,7 +9,7 @@ use nix::sys::socket::{
@@ -103,7 +103,7 @@ index 868322e8..61ae1051 100644
              fd,
              status: ProxyStatus::ReverseInit,
              mem,
-@@ -166,11 +190,17 @@ impl UnixProxy {
+@@ -166,11 +190,14 @@ impl UnixProxy {
  
      fn switch_to_connected(&mut self) {
          self.status = ProxyStatus::Connected;
@@ -116,14 +116,11 @@ index 868322e8..61ae1051 100644
 -                    if let Err(e) = fcntl(&self.fd, FcntlArg::F_SETFL(flags & !OFlag::O_NONBLOCK)) {
 -                        warn!("error switching to blocking: id={}, err={}", self.id, e);
 +                    if let Err(e) = fcntl(&self.fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)) {
-+                        warn!(
-+                            "error switching to non-blocking: id={}, err={}",
-+                            self.id, e
-+                        );
++                        warn!("error switching to non-blocking: id={}, err={}", self.id, e);
                      }
                  }
                  None => error!("invalid fd flags id={}", self.id),
-@@ -179,6 +209,137 @@ impl UnixProxy {
+@@ -179,6 +206,137 @@ impl UnixProxy {
          };
      }
  
@@ -261,7 +258,7 @@ index 868322e8..61ae1051 100644
      fn push_connect_rsp(&self, result: i32) {
          debug!(
              "push_connect_rsp: id: {}, control_port: {}, result: {}",
-@@ -332,14 +493,17 @@ impl UnixProxy {
+@@ -332,14 +490,17 @@ impl UnixProxy {
              .set_fwd_cnt(self.tx_cnt.0);
      }
  
@@ -281,7 +278,7 @@ index 868322e8..61ae1051 100644
              if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Write) {
                  debug!("error sending shutdown(Write) to socket: {e}");
              }
-@@ -431,57 +595,32 @@ impl Proxy for UnixProxy {
+@@ -431,57 +592,32 @@ impl Proxy for UnixProxy {
      fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
          let mut update = ProxyUpdate::default();
  
@@ -359,7 +356,7 @@ index 868322e8..61ae1051 100644
  
          update
      }
-@@ -523,7 +662,7 @@ impl Proxy for UnixProxy {
+@@ -523,7 +659,7 @@ impl Proxy for UnixProxy {
          self.status = ProxyStatus::Connected;
  
          ProxyUpdate {
@@ -368,7 +365,7 @@ index 868322e8..61ae1051 100644
              ..Default::default()
          }
      }
-@@ -580,11 +719,16 @@ impl Proxy for UnixProxy {
+@@ -580,11 +716,16 @@ impl Proxy for UnixProxy {
              return ProxyUpdate::default();
          }
  
@@ -389,7 +386,7 @@ index 868322e8..61ae1051 100644
      }
  
      fn release(&mut self) -> ProxyUpdate {
-@@ -664,7 +808,7 @@ impl Proxy for UnixProxy {
+@@ -664,7 +805,7 @@ impl Proxy for UnixProxy {
                      return update;
                  } else if self.host_read_closed || self.status == ProxyStatus::WaitingCreditUpdate {
                      debug!("process_event: disabling read polling");
@@ -398,7 +395,7 @@ index 868322e8..61ae1051 100644
                  }
              } else {
                  debug!("EventSet::IN while not connected: {:?}", self.status);
-@@ -678,8 +822,10 @@ impl Proxy for UnixProxy {
+@@ -678,8 +819,10 @@ impl Proxy for UnixProxy {
                  self.push_connect_rsp(0);
                  update.signal_queue = true;
                  update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::IN));

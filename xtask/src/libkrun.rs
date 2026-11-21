@@ -53,7 +53,14 @@ pub fn libkrun() -> Result<()> {
     let partial = root().join(format!(".libkrun.partial-{}", std::process::id()));
     let _ = fs::remove_dir_all(&partial);
     run(Command::new("git")
-        .args(["-c", "advice.detachedHead=false", "clone", "--quiet", "--depth", "1"])
+        .args([
+            "-c",
+            "advice.detachedHead=false",
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+        ])
         .args(["--branch", TAG, UPSTREAM])
         .arg(&partial))?;
     let head = Command::new("git")
@@ -64,10 +71,7 @@ pub fn libkrun() -> Result<()> {
         .map_err(|e| format!("git rev-parse: {e}"))?;
     let head = String::from_utf8_lossy(&head.stdout);
     if head.trim() != COMMIT {
-        return Err(format!(
-            "libkrun's {TAG} is {}, not {COMMIT}",
-            head.trim()
-        ));
+        return Err(format!("libkrun's {TAG} is {}, not {COMMIT}", head.trim()));
     }
     let patches = patches()?;
     if !patches.is_empty() {

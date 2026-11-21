@@ -282,10 +282,10 @@ index 5f18766f..85f73cf1 100644
  
      fn try_listen(&mut self, req: &TsiListenReq, host_port_map: &Option<HashMap<u16, u16>>) -> i32 {
 diff --git a/src/devices/src/virtio/vsock/unix.rs b/src/devices/src/virtio/vsock/unix.rs
-index 61ae1051..8163d56e 100644
+index 4024cfb1..83fd4eac 100644
 --- a/src/devices/src/virtio/vsock/unix.rs
 +++ b/src/devices/src/virtio/vsock/unix.rs
-@@ -491,6 +491,10 @@ impl UnixProxy {
+@@ -488,6 +488,10 @@ impl UnixProxy {
              .set_type(uapi::VSOCK_TYPE_STREAM)
              .set_buf_alloc(defs::CONN_TX_BUF_SIZE as u32)
              .set_fwd_cnt(self.tx_cnt.0);
